@@ -35,7 +35,7 @@ def _ruleset_digest() -> str:
     digest.update(b"flocks-code-security-rules-v1\0")
     package_root = resources.files("flocks_code_security")
     prompt_root = package_root.joinpath("prompts")
-    for name in ("baseline.md", "coordinator.md", "investigator.md", "verifier.md"):
+    for name in ("baseline.md", "coordinator.md", "verifier.md"):
         digest.update(name.encode("utf-8") + b"\0")
         digest.update(prompt_root.joinpath(name).read_bytes())
         digest.update(b"\0")
@@ -47,12 +47,11 @@ def _ruleset_digest() -> str:
 
 RULESET_DIGEST = _ruleset_digest()
 COORDINATOR_ROLE = {"coordinator"}
-SOURCE_SUBMIT_ROLES = {"baseline", "investigator"}
+SOURCE_SUBMIT_ROLES = {"baseline"}
 VERIFIER_ROLE = {"verifier"}
 ROLE_AGENTS = {
     "coordinator": "code-security",
     "baseline": "code-security-baseline",
-    "investigator": "code-security-investigator",
     "verifier": "code-security-verifier",
 }
 STORE_ERRORS = (OSError, ValueError, sqlite3.Error)
@@ -62,6 +61,21 @@ REGISTERED_AUDIT_TOOLS: dict[
     str,
     tuple[Tool, Callable[..., Awaitable[ToolResult]]],
 ] = {}
+AUDIT_TOOL_NAMES = (
+    "audit_prepare",
+    "audit_inventory",
+    "audit_read",
+    "audit_search",
+    "audit_verification_subject",
+    "audit_submit_candidate",
+    "audit_submit_verdict",
+    "audit_submit_coverage",
+    "audit_status",
+    "audit_finalize",
+    "audit_cancel",
+    "audit_run_workers",
+    "audit_wait_workers",
+)
 
 
 def _error(error: Exception | str, *, title: str) -> ToolResult:
@@ -143,7 +157,7 @@ async def audit_inventory(
     limit: int = 500,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"baseline", "investigator", "verifier"})
+        _require_agent_execution(ctx, {"baseline", "verifier"})
         output = await asyncio.to_thread(
             get_runtime().source.inventory,
             ctx.session_id,
@@ -162,7 +176,7 @@ async def audit_read(
     end_line: int | None = None,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"baseline", "investigator", "verifier"})
+        _require_agent_execution(ctx, {"baseline", "verifier"})
         output = await asyncio.to_thread(
             get_runtime().source.read,
             ctx.session_id,
@@ -183,7 +197,7 @@ async def audit_search(
     max_results: int = 100,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"baseline", "investigator", "verifier"})
+        _require_agent_execution(ctx, {"baseline", "verifier"})
         output = await asyncio.to_thread(
             get_runtime().source.search,
             ctx.session_id,
@@ -195,6 +209,24 @@ async def audit_search(
         return ToolResult(success=True, output=output, title=f"Search snapshot for {query}")
     except STORE_ERRORS as exc:
         return _error(exc, title="Snapshot search failed")
+
+
+async def audit_verification_subject(ctx: ToolContext) -> ToolResult:
+    try:
+        _require_agent_execution(ctx, VERIFIER_ROLE)
+        runtime = get_runtime()
+        binding = runtime.store.require_binding(ctx.session_id, VERIFIER_ROLE)
+        output = await asyncio.to_thread(
+            runtime.store.get_verification_subject,
+            binding,
+        )
+        return ToolResult(
+            success=True,
+            output=output,
+            title=f"Verification subject {output['candidate_id']}",
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="Verification subject unavailable")
 
 
 async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) -> ToolResult:
@@ -335,6 +367,12 @@ async def audit_submit_coverage(
             binding,
             path_groups["failed_paths"],
             allow_omitted=True,
+        )
+        await asyncio.to_thread(
+            runtime.store.validate_coverage_access,
+            binding,
+            inventoried_paths=validated_inventoried,
+            analyzed_paths=validated_analyzed,
         )
         payload = {
             "inventoried_paths": validated_inventoried,
@@ -561,7 +599,10 @@ async def _launch_worker(
     if phase == "baseline":
         prompt = baseline_prompt(snapshot_id=snapshot_id, paths=unit["paths"])
     elif phase == "verification" and candidate is not None:
-        prompt = verification_prompt(snapshot_id=snapshot_id, candidate=candidate)
+        prompt = verification_prompt(
+            snapshot_id=snapshot_id,
+            candidate_id=candidate["candidate_id"],
+        )
     else:
         raise ValueError("Worker prompt data is incomplete")
     await Message.create(
@@ -577,6 +618,7 @@ async def _launch_worker(
     manager = _background_manager()
     task = await manager.run_existing_session(
         session_id=child.id,
+        parent_session_id=parent.id,
         description=f"Code security {phase} worker",
         agent=agent_name,
         allow_user_questions=False,
@@ -703,6 +745,12 @@ def _register(
     handler: Callable[..., Awaitable[ToolResult]],
     parameters: list[ToolParameter],
 ) -> None:
+    existing = ToolRegistry.get(name)
+    registered = REGISTERED_AUDIT_TOOLS.get(name)
+    if existing is not None:
+        if registered is not None and existing is registered[0]:
+            return
+        raise RuntimeError(f"Refusing to overwrite existing tool registration: {name}")
     tool = Tool(
         info=ToolInfo(
             name=name,
@@ -737,6 +785,15 @@ def is_registered_audit_tool(tool_info: Any) -> bool:
 
 
 def register_tools() -> None:
+    for name in AUDIT_TOOL_NAMES:
+        existing = ToolRegistry.get(name)
+        registered = REGISTERED_AUDIT_TOOLS.get(name)
+        if existing is not None and (
+            registered is None or existing is not registered[0]
+        ):
+            raise RuntimeError(
+                f"Refusing to overwrite existing tool registration: {name}"
+            )
     string_array = {"type": "array", "items": {"type": "string"}}
     object_array = {"type": "array", "items": {"type": "object", "additionalProperties": True}}
     _register(
@@ -744,7 +801,7 @@ def register_tools() -> None:
         "Create a reproducible read-only snapshot and initialize a standard static code audit. Never executes target code.",
         audit_prepare,
         [
-            _parameter("target_path", ParameterType.STRING, "Local target directory to snapshot."),
+            _parameter("target_path", ParameterType.STRING, "Absolute local target directory to snapshot."),
             _parameter("include_paths", ParameterType.ARRAY, "Optional relative files or directories to include.", required=False, json_schema=string_array),
             _parameter("exclude_patterns", ParameterType.ARRAY, "Optional relative glob patterns to exclude.", required=False, json_schema=string_array),
             _parameter("max_file_bytes", ParameterType.INTEGER, "Maximum bytes copied per file.", required=False, default=1_048_576),
@@ -780,6 +837,12 @@ def register_tools() -> None:
             _parameter("case_sensitive", ParameterType.BOOLEAN, "Whether matching is case-sensitive.", required=False, default=False),
             _parameter("max_results", ParameterType.INTEGER, "Maximum matches, capped at 200.", required=False, default=100),
         ],
+    )
+    _register(
+        "audit_verification_subject",
+        "Return the candidate and digest-bound evidence assigned to this verifier work unit.",
+        audit_verification_subject,
+        [],
     )
     _register(
         "audit_submit_candidate",

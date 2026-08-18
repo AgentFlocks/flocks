@@ -24,6 +24,10 @@ def runtime_dir() -> Path:
     return Path.home() / ".flocks" / "workspace" / "code-security" / "runtime"
 
 
+def outputs_root() -> Path:
+    return Path.home() / ".flocks" / "workspace" / "outputs"
+
+
 def output_dir(scan_id: str) -> Path:
     today = datetime.now().astimezone().strftime("%Y-%m-%d")
     return (

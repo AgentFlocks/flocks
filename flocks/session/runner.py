@@ -3188,6 +3188,14 @@ class SessionRunner:
         if turn_plan_file is None:
             turn_plan_file = session_plan_file(self.session)
         allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
+        # The projected tool schema is a hard capability ceiling for this turn.
+        # Hooks may hide tools, but must not add a capability or replace the
+        # trusted schema for an existing tool name.
+        tool_schema_ceiling: dict[str, Dict[str, Any]] = {}
+        for tool_schema in tools:
+            names = self._get_prompt_tool_names_from_schema([tool_schema])
+            if len(names) == 1 and names[0] not in tool_schema_ceiling:
+                tool_schema_ceiling[names[0]] = copy.deepcopy(tool_schema)
         processor = StreamProcessor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
@@ -3344,7 +3352,21 @@ class SessionRunner:
                     )
                     updated_tools = updated_request.get("tools")
                     if isinstance(updated_tools, list):
-                        tools = copy.deepcopy(updated_tools)
+                        projected_tools: list[Dict[str, Any]] = []
+                        projected_names: set[str] = set()
+                        for requested_schema in updated_tools:
+                            requested_names = self._get_prompt_tool_names_from_schema(
+                                [requested_schema]
+                            )
+                            if len(requested_names) != 1:
+                                continue
+                            requested_name = requested_names[0]
+                            trusted_schema = tool_schema_ceiling.get(requested_name)
+                            if trusted_schema is None or requested_name in projected_names:
+                                continue
+                            projected_tools.append(copy.deepcopy(trusted_schema))
+                            projected_names.add(requested_name)
+                        tools = projected_tools
                         provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
                         updated_allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
                         if updated_allowed_tool_names != allowed_tool_names:

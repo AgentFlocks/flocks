@@ -47,6 +47,17 @@ class AuditSourceRepository:
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 500))
         page = files[offset : offset + limit]
+        self.store.record_source_accesses(
+            binding,
+            [
+                {
+                    "operation": "inventory",
+                    "relative_path": item.relative_path,
+                    "blob_digest": getattr(item, "blob_digest", None),
+                }
+                for item in [*page, *omissions]
+            ],
+        )
         languages = Counter(item.language for item in files)
         return {
             "snapshot_id": binding.snapshot_id,
@@ -143,6 +154,14 @@ class AuditSourceRepository:
         selected = lines[start_line - 1 : final_line]
         text = "\n".join(selected)
         actual_end = start_line + len(selected) - 1 if selected else start_line - 1
+        self.store.record_source_access(
+            binding,
+            operation="read",
+            relative_path=normalized,
+            blob_digest=record.blob_digest,
+            start_line=start_line,
+            end_line=actual_end,
+        )
         return {
             "snapshot_id": binding.snapshot_id,
             "relative_path": normalized,
@@ -169,6 +188,8 @@ class AuditSourceRepository:
         limit = max(1, min(int(max_results or 100), 200))
         comparable_needle = needle if case_sensitive else needle.casefold()
         matches: list[dict[str, Any]] = []
+        accesses: list[dict[str, Any]] = []
+        truncated = False
         assigned = self._assigned_paths(binding)
         for record in self.store.list_snapshot_files(binding.snapshot_id):
             if not self._in_assigned_scope(record.relative_path, assigned):
@@ -178,6 +199,15 @@ class AuditSourceRepository:
             if path_glob and not fnmatch.fnmatch(record.relative_path, path_glob):
                 continue
             data = self._verified_bytes(binding.snapshot_id, record)
+            accesses.append(
+                {
+                    "operation": "search",
+                    "relative_path": record.relative_path,
+                    "blob_digest": record.blob_digest,
+                    "start_line": 1,
+                    "end_line": record.line_count,
+                }
+            )
             for line_number, line in enumerate(
                 data.decode("utf-8", errors="replace").splitlines(), start=1
             ):
@@ -193,17 +223,16 @@ class AuditSourceRepository:
                     }
                 )
                 if len(matches) >= limit:
-                    return {
-                        "snapshot_id": binding.snapshot_id,
-                        "query": needle,
-                        "matches": matches,
-                        "truncated": True,
-                    }
+                    truncated = True
+                    break
+            if truncated:
+                break
+        self.store.record_source_accesses(binding, accesses)
         return {
             "snapshot_id": binding.snapshot_id,
             "query": needle,
             "matches": matches,
-            "truncated": False,
+            "truncated": truncated,
         }
 
     def validate_evidence(

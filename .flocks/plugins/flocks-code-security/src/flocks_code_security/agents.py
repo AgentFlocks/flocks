@@ -27,20 +27,16 @@ AGENT_TOOLS = {
         "audit_submit_candidate",
         "audit_submit_coverage",
     ],
-    "code-security-investigator": [
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
-        "audit_submit_candidate",
-        "audit_submit_coverage",
-    ],
     "code-security-verifier": [
+        "audit_verification_subject",
         "audit_inventory",
         "audit_read",
         "audit_search",
         "audit_submit_verdict",
     ],
 }
+
+REGISTERED_CODE_SECURITY_AGENTS: dict[str, AgentInfo] = {}
 
 
 def _prompt(name: str) -> str:
@@ -87,21 +83,6 @@ def register_agents() -> None:
             require_dedicated_session=True,
         ),
         AgentInfo(
-            name="code-security-investigator",
-            description="Hidden focused code-security investigator.",
-            mode="subagent",
-            hidden=True,
-            delegatable=False,
-            tools=AGENT_TOOLS["code-security-investigator"],
-            prompt=_prompt("investigator"),
-            temperature=0.1,
-            steps=64,
-            tags=["security", "code-security", "internal"],
-            session_directory=str(runtime_dir()),
-            memory_enabled=False,
-            require_dedicated_session=True,
-        ),
-        AgentInfo(
             name="code-security-verifier",
             description="Hidden independent verifier for code-security candidates.",
             mode="subagent",
@@ -118,5 +99,18 @@ def register_agents() -> None:
         ),
     )
     for agent in definitions:
+        existing = Agent._custom_agents.get(agent.name)
+        registered = REGISTERED_CODE_SECURITY_AGENTS.get(agent.name)
+        if existing is not None and registered is not existing:
+            raise RuntimeError(
+                f"Refusing to overwrite existing agent registration: {agent.name}"
+            )
+    for agent in definitions:
+        existing = Agent._custom_agents.get(agent.name)
+        registered = REGISTERED_CODE_SECURITY_AGENTS.get(agent.name)
+        if existing is not None:
+            if registered is existing:
+                continue
         Agent.register(agent.name, agent)
+        REGISTERED_CODE_SECURITY_AGENTS[agent.name] = agent
     Agent.invalidate_cache()

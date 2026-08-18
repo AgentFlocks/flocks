@@ -1,10 +1,17 @@
 from io import StringIO
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from rich.console import Console
 
 from flocks.cli.session_runner import CLISessionRunner
+import flocks.cli.session_runner as cli_runner_module
+from flocks.agent.agent import AgentInfo
+from flocks.agent.registry import Agent
+from flocks.provider.provider import Provider
+from flocks.project.project import Project
+from flocks.tool.registry import ToolRegistry
 from flocks.session.session import Session, SessionInfo, SessionTime
 
 
@@ -46,3 +53,50 @@ async def test_continue_uses_latest_session_from_current_worktree(
     )
 
     assert resumed.id == session_b.id
+
+
+@pytest.mark.asyncio
+async def test_dedicated_cli_isolates_before_env_provider_and_project_bootstrap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "hostile-target"
+    target.mkdir()
+    (target / ".env").write_text("UNTRUSTED_VALUE=1\n", encoding="utf-8")
+    runtime_directory = tmp_path / "private-runtime"
+    agent = AgentInfo(
+        name="isolated-security",
+        mode="primary",
+        tools=["audit_prepare"],
+        session_directory=str(runtime_directory),
+        memory_enabled=False,
+        require_dedicated_session=True,
+    )
+    session = _session("ses-security", runtime_directory, updated=1)
+    monkeypatch.setattr(ToolRegistry, "init", MagicMock())
+    monkeypatch.setattr(Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(Provider, "init", AsyncMock())
+    project_from_directory = AsyncMock(
+        return_value={"project": MagicMock(id="security-project")}
+    )
+    monkeypatch.setattr(Project, "from_directory", project_from_directory)
+    load_dotenv = MagicMock()
+    monkeypatch.setattr(cli_runner_module, "load_dotenv", load_dotenv)
+    prepare = AsyncMock(return_value=session)
+    monkeypatch.setattr(
+        "flocks.session.agent_policy.prepare_session_for_agent",
+        prepare,
+    )
+    runner = CLISessionRunner(
+        console=Console(file=StringIO()),
+        directory=target,
+        agent=agent.name,
+    )
+    monkeypatch.setattr(runner, "_get_or_create_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(runner, "_interactive_loop", AsyncMock())
+
+    await runner.start()
+
+    load_dotenv.assert_not_called()
+    project_from_directory.assert_awaited_once_with(str(runtime_directory.resolve()))
+    prepare.assert_awaited_once_with(session, agent)

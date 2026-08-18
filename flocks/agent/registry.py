@@ -211,6 +211,18 @@ def _apply_delegatable_overrides(agents: Dict[str, AgentInfo]) -> None:
             agent.delegatable = delegatable
 
 
+def _apply_enabled_agents(
+    agents: Dict[str, AgentInfo],
+    enabled_agents: Optional[List[str]],
+) -> None:
+    """Apply the configured allowlist after any registry merge stage."""
+    if enabled_agents is None:
+        return
+    allowed = set(enabled_agents)
+    for name in [key for key in agents if key not in allowed]:
+        del agents[name]
+
+
 # ---------------------------------------------------------------------------
 # Agent registry
 # ---------------------------------------------------------------------------
@@ -405,10 +417,7 @@ class Agent:
         _apply_delegatable_overrides(result)
 
         # enabled_agents whitelist filter
-        if cfg.enabled_agents is not None:
-            allowed = set(cfg.enabled_agents)
-            for n in [k for k in result if k not in allowed]:
-                del result[n]
+        _apply_enabled_agents(result, cfg.enabled_agents)
 
         # ── ④ Phase-2 dynamic prompts ──────────────────────────────────────
         available_agents = _build_available_agents(result)
@@ -422,6 +431,11 @@ class Agent:
 
         # Merge runtime-registered custom agents
         result.update(Agent._custom_agents)
+
+        # Runtime registration is not an escape hatch around the configured
+        # agent allowlist. Apply the same policy after every registry source
+        # has been merged.
+        _apply_enabled_agents(result, cfg.enabled_agents)
 
         # Share reference with metadata query functions
         _set_agents_ref(result)

@@ -14,6 +14,7 @@ from flocks_code_security.runtime import build_runtime
 from flocks_code_security.tools import (
     audit_cancel,
     audit_finalize,
+    audit_inventory,
     audit_prepare,
     audit_read,
     audit_run_workers,
@@ -37,8 +38,10 @@ def _agent_context(session_id: str, message_id: str, agent: str) -> ToolContext:
 class _FakeBackgroundManager:
     def __init__(self) -> None:
         self.tasks: dict[str, SimpleNamespace] = {}
+        self.calls: list[dict] = []
 
-    async def run_existing_session(self, **_kwargs):
+    async def run_existing_session(self, **kwargs):
+        self.calls.append(kwargs)
         task_id = f"task-{len(self.tasks) + 1}"
         task = SimpleNamespace(id=task_id, status="running")
         self.tasks[task_id] = task
@@ -66,6 +69,7 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         "def handler(user):\n    return eval(user)\n",
         encoding="utf-8",
     )
+    (target / "aaa_helper.py").write_text("def helper():\n    return True\n", encoding="utf-8")
     runtime = build_runtime(tmp_path / "plugin-data")
     monkeypatch.setattr(runtime_module, "_runtime", runtime)
     monkeypatch.setattr(
@@ -94,7 +98,29 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         work_unit_id=baseline_unit,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    unbacked_coverage = await audit_submit_coverage(
+        baseline,
+        inventoried_paths=["app.py"],
+        analyzed_paths=["app.py"],
+    )
+    assert unbacked_coverage.success is False
+    assert "not backed" in str(unbacked_coverage.error)
+    assert (await audit_inventory(baseline)).success
+    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+    partial_read_coverage = await audit_submit_coverage(
+        baseline,
+        inventoried_paths=["app.py"],
+        analyzed_paths=["app.py"],
+    )
+    assert partial_read_coverage.success is False
+    assert "complete snapshot source reads" in str(partial_read_coverage.error)
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
+    auxiliary = await audit_read(
+        baseline,
+        "aaa_helper.py",
+        start_line=1,
+        end_line=2,
+    )
     candidate = await audit_submit_candidate(
         baseline,
         {
@@ -111,6 +137,12 @@ async def test_prepare_candidate_verify_finalize_pipeline(
                     "blob_digest": source.output["blob_digest"],
                     "start_line": 1,
                     "end_line": 2,
+                },
+                {
+                    "relative_path": "aaa_helper.py",
+                    "blob_digest": auxiliary.output["blob_digest"],
+                    "start_line": 1,
+                    "end_line": 2,
                 }
             ],
         },
@@ -118,8 +150,8 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert candidate.success is True
     coverage = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["app.py"],
-        analyzed_paths=["app.py"],
+        inventoried_paths=["."],
+        analyzed_paths=["."],
     )
     assert coverage.success is True
     runtime.store.update_work_unit_status(baseline_unit, "completed")
@@ -138,6 +170,18 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         work_unit_id=verifier_unit,
     )
     verifier = _agent_context("verifier", "message-3", "code-security-verifier")
+    unbacked_verdict = await audit_submit_verdict(
+        verifier,
+        candidate.output["candidate_id"],
+        "confirmed",
+        "Untrusted self-assertion without reading source.",
+    )
+    assert unbacked_verdict.success is False
+    assert "independently read" in str(unbacked_verdict.error)
+    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
+    assert (
+        await audit_read(verifier, "aaa_helper.py", start_line=1, end_line=2)
+    ).success
     verdict = await audit_submit_verdict(
         verifier,
         candidate.output["candidate_id"],
@@ -154,12 +198,21 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert (output_path / "report.md").is_file()
     assert (output_path / "findings.json").read_text(encoding="utf-8").count("PY-EVAL-001") == 1
     assert (output_path / "report.sarif").is_file()
+    findings = json.loads(
+        (output_path / "findings.json").read_text(encoding="utf-8")
+    )["findings"]
+    assert findings[0]["primary_evidence"]["relative_path"] == "app.py"
+    sarif = json.loads((output_path / "report.sarif").read_text(encoding="utf-8"))
+    assert sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"][
+        "artifactLocation"
+    ]["uri"] == "app.py"
     assert output_path.stat().st_mode & 0o777 == 0o700
     assert (output_path / "report.md").stat().st_mode & 0o777 == 0o600
     manifest = json.loads(
         (output_path / "scan-manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["status"] == "completed"
+    assert (output_path / "threat-model.json").exists() is False
     assert "result_status" not in manifest
     assert (output_path / ".scan-manifest.final").exists() is False
 
@@ -204,6 +257,8 @@ async def test_invalid_or_failed_coverage_never_completes_scan(
         analyzed_paths=["does-not-exist.py"],
     )
     assert invalid.success is False
+    assert (await audit_inventory(baseline)).success
+    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
     failed = await audit_submit_coverage(
         baseline,
         inventoried_paths=["app.py"],
@@ -216,13 +271,93 @@ async def test_invalid_or_failed_coverage_never_completes_scan(
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
     assert finalized.output["status"] == "partial"
-    manifest = (Path(finalized.output["output_dir"]) / "scan-manifest.json").read_text(
-        encoding="utf-8"
+    manifest = json.loads(
+        (Path(finalized.output["output_dir"]) / "scan-manifest.json").read_text(
+            encoding="utf-8"
+        )
     )
-    assert "failed_paths" in manifest
+    assert manifest["incomplete_details"]["failed_paths"] == ["app.py"]
     assert (await audit_submit_coverage(baseline, analyzed_paths=["app.py"])).success is False
     assert (await audit_finalize(coordinator, scan_id)).success is False
     assert (await audit_cancel(coordinator, scan_id)).success is False
+
+
+@pytest.mark.asyncio
+async def test_partial_report_preserves_pending_candidate_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("value = eval(user)\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    monkeypatch.setattr(
+        reporting_module,
+        "output_dir",
+        lambda scan_id: tmp_path / "outputs" / scan_id,
+    )
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=unit_id,
+    )
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_inventory(baseline)).success
+    source = await audit_read(baseline, "app.py", start_line=1, end_line=1)
+    candidate = await audit_submit_candidate(
+        baseline,
+        {
+            "rule_id": "PY-EVAL-001",
+            "title": "Pending eval candidate",
+            "severity": "high",
+            "confidence": 0.8,
+            "attack_path": "user reaches eval",
+            "dangerous_operation": "eval(user)",
+            "remediation": "Use a strict parser.",
+            "evidence": [
+                {
+                    "relative_path": "app.py",
+                    "blob_digest": source.output["blob_digest"],
+                    "start_line": 1,
+                    "end_line": 1,
+                }
+            ],
+        },
+    )
+    assert candidate.success
+    assert (
+        await audit_submit_coverage(
+            baseline,
+            inventoried_paths=["app.py"],
+            analyzed_paths=["app.py"],
+        )
+    ).success
+    runtime.store.update_work_unit_status(unit_id, "completed")
+
+    finalized = await audit_finalize(coordinator, scan_id)
+
+    assert finalized.output["status"] == "partial"
+    output_path = Path(finalized.output["output_dir"])
+    manifest = json.loads((output_path / "scan-manifest.json").read_text())
+    findings = json.loads((output_path / "findings.json").read_text())
+    assert manifest["incomplete_details"]["pending_candidate_ids"] == [
+        candidate.output["candidate_id"]
+    ]
+    assert findings["pending_candidates"][0]["payload"]["rule_id"] == "PY-EVAL-001"
+    assert findings["pending_candidates"][0]["evidence"][0]["relative_path"] == "app.py"
 
 
 @pytest.mark.asyncio
@@ -259,6 +394,8 @@ async def test_report_write_failure_does_not_publish_partial_bundle(
         work_unit_id=unit_id,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_inventory(baseline)).success
+    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
     assert (
         await audit_submit_coverage(
             baseline,
@@ -270,7 +407,7 @@ async def test_report_write_failure_does_not_publish_partial_bundle(
     original_write_json = reporting_module.ReportWriter._write_json
 
     def fail_after_manifest(path: Path, payload) -> None:
-        if path.name == "threat-model.json":
+        if path.name == "coverage.json":
             raise OSError("simulated report write failure")
         original_write_json(path, payload)
 
@@ -320,6 +457,7 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
         work_unit_id=baseline_unit,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_inventory(baseline)).success
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
     candidate_payload = {
         "rule_id": "PY-EVAL-001",
@@ -364,6 +502,7 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
         work_unit_id=verifier_unit,
     )
     verifier = _agent_context("verifier", "message-3", "code-security-verifier")
+    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
     for candidate_id in (first.output["candidate_id"], second.output["candidate_id"]):
         assert (
             await audit_submit_verdict(
@@ -445,6 +584,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     baseline_batch = await audit_run_workers(coordinator, scan_id, "baseline")
     assert baseline_batch.success is True
     assert baseline_batch.output["launched_workers"] == 1
+    assert manager.calls[0]["parent_session_id"] == "coordinator"
     running_wait = await audit_wait_workers(
         coordinator,
         baseline_batch.output["batch_id"],
@@ -459,6 +599,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "code-security-baseline",
     )
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
+    assert (await audit_inventory(baseline)).success
     candidate = await audit_submit_candidate(
         baseline,
         {
@@ -520,6 +661,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "verifier-message",
         "code-security-verifier",
     )
+    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
     assert (
         await audit_submit_verdict(
             verifier,

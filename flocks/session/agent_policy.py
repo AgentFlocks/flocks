@@ -23,16 +23,36 @@ async def prepare_session_for_agent(
     session: SessionInfo,
     agent: AgentInfo,
 ) -> SessionInfo:
-    """Claim an empty session for an isolated agent and enforce its policy."""
-    if not agent.require_dedicated_session:
-        return session
-
+    """Claim or validate an agent session without weakening prior isolation."""
     async with Session.lifecycle_lock(session.id):
-        current = await Session.get(session.project_id, session.id)
-        if current is None or current.status != "active":
+        current = await Session.get_by_id_unfiltered(session.id)
+        if current is None:
+            if not agent.require_dedicated_session:
+                # Internal unit-style dispatchers may supply an ephemeral
+                # ordinary session object. Dedicated agents always fail closed.
+                return session
+            raise AgentSessionPolicyError("Dedicated agent session is not active")
+        if getattr(current, "status", "active") != "active":
             raise AgentSessionPolicyError("Dedicated agent session is not active")
 
-        policy = current.metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+        current_metadata = getattr(current, "metadata", None)
+        policy = (
+            current_metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+            if isinstance(current_metadata, dict)
+            else None
+        )
+        claimed_agent = (
+            policy.get("agent")
+            if isinstance(policy, dict) and policy.get("version") == 1
+            else None
+        )
+        if claimed_agent is not None and claimed_agent != agent.name:
+            raise AgentSessionPolicyError(
+                f"Session {current.id} is dedicated to agent {claimed_agent!r}"
+            )
+        if not agent.require_dedicated_session:
+            return current
+
         policy_is_current = (
             isinstance(policy, dict)
             and policy.get("agent") == agent.name

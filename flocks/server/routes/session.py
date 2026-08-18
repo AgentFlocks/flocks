@@ -33,6 +33,7 @@ from flocks.session.background_tasks import (
     track_background_task,
 )
 from flocks.session.session import (
+    DEDICATED_AGENT_POLICY_METADATA_KEY,
     Session,
     SessionAgentMismatchError,
     SessionInactiveError,
@@ -617,6 +618,54 @@ async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f'Agent "{agent_name}" is disabled',
         )
+
+
+async def _prepare_session_agent_before_bootstrap(
+    session: SessionModel,
+    requested_agent: Optional[str],
+) -> tuple[SessionModel, str]:
+    """Apply agent isolation before any project-scoped runtime is initialized."""
+    from flocks.agent.registry import Agent
+    from flocks.session.agent_policy import (
+        AgentSessionPolicyError,
+        prepare_session_for_agent,
+    )
+
+    await _require_agent_usable_for_chat(requested_agent)
+    metadata = getattr(session, "metadata", None)
+    policy = (
+        metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
+    claimed_agent = (
+        policy.get("agent")
+        if isinstance(policy, dict) and policy.get("version") == 1
+        else None
+    )
+    stored_agent = getattr(session, "agent", None)
+    if not requested_agent and not claimed_agent and not stored_agent:
+        return session, DEFAULT_AGENT
+    agent_name = (
+        requested_agent
+        or claimed_agent
+        or stored_agent
+        or await Agent.default_agent()
+    )
+    agent = await Agent.get(agent_name)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available',
+        )
+    try:
+        prepared = await prepare_session_for_agent(session, agent)
+    except AgentSessionPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return prepared, agent_name
 
 
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
@@ -1959,6 +2008,10 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
             current_agent = msg.agent or DEFAULT_AGENT
             break
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        current_agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
     
     async def _run_in_background():
@@ -2952,6 +3005,10 @@ async def resend_session_message(
             detail=str(exc),
         ) from exc
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        getattr(message, "agent", None),
+    )
     working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_resend() -> None:
@@ -3055,6 +3112,10 @@ async def regenerate_session_message(
             detail=str(exc),
         ) from exc
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        getattr(parent_message, "agent", None),
+    )
     working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_regenerate() -> None:
@@ -3121,6 +3182,10 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
     _require_session_write_access(session, current_user)
     lifecycle_generation = Session.lifecycle_generation(sessionID)
     
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        request.agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
     _validate_execution_mode_request(request)
     if request.execution_mode == SessionExecutionMode.GOAL:
@@ -3517,7 +3582,6 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     # 2. Resolve agent and model (5-level priority)
     # ------------------------------------------------------------------
-    await _require_agent_usable_for_chat(request.agent)
     agent_name = request.agent or session.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     try:
@@ -4245,6 +4309,12 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
             continue
 
         event = _event_from_queued_prompt(item, working_directory)
+        session, _ = await _prepare_session_agent_before_bootstrap(
+            session,
+            event.agent,
+        )
+        item_working_directory = await _resolve_session_working_directory(session)
+        event.working_directory = item_working_directory
         log.info("session.prompt_queue.dispatch", {
             "sessionID": session_id,
             "queueID": item.id,
@@ -4254,10 +4324,10 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
         # trusted identity transfer) and never inherit unrelated worker state.
         with execution_context_scope(item.execution_context or {}, inherit=False):
             await Instance.provide(
-                directory=working_directory,
+                directory=item_working_directory,
                 init=instance_bootstrap,
                 fn=lambda: _dispatch_sse_input(
-                    session_id, session, event, working_directory
+                    session_id, session, event, item_working_directory
                 ),
             )
 
@@ -4775,9 +4845,12 @@ async def send_session_message_async(
         _require_session_write_access(session, current_user)
     lifecycle_generation = Session.lifecycle_generation(sessionID)
     
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        request.agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
     _validate_execution_mode_request(request)
-    await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
         "sessionID": sessionID,
@@ -4891,8 +4964,11 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         _require_session_write_access(session, current_user)
     lifecycle_generation = Session.lifecycle_generation(sessionID)
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        request.agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
-    await _require_agent_usable_for_chat(request.agent)
     raw_arguments = request.arguments
     if not raw_arguments and request.arguments_json is not None:
         raw_arguments = json.dumps(request.arguments_json, ensure_ascii=False)

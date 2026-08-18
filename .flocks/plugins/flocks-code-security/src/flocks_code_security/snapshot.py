@@ -69,15 +69,19 @@ MAX_SNAPSHOT_TOTAL_BYTES = 512 * 1024 * 1024
 
 
 def normalize_relative_path(value: str, *, allow_root: bool = False) -> str:
-    raw = str(value or "").strip().replace("\\", "/")
+    raw = "" if value is None else str(value)
+    if os.name == "nt":
+        raw = raw.replace("\\", "/")
     if len(raw) > 1024:
         raise ValueError("Snapshot-relative paths may contain at most 1024 characters")
-    if not raw and allow_root:
-        return "."
+    if "\x00" in raw:
+        raise ValueError("Snapshot-relative paths cannot contain NUL bytes")
     path = PurePosixPath(raw)
     if not raw or path.is_absolute() or ".." in path.parts:
         raise ValueError("Path must be a snapshot-relative path without '..'")
     normalized = path.as_posix()
+    if normalized != raw:
+        raise ValueError("Path must use canonical snapshot-relative syntax")
     if normalized in {"", "."} and not allow_root:
         raise ValueError("A file path is required")
     return normalized
@@ -96,9 +100,16 @@ def _language(path: Path) -> str:
 
 
 class TargetSnapshotService:
-    def __init__(self, snapshots_root: Path, store: ScanStore):
+    def __init__(
+        self,
+        snapshots_root: Path,
+        store: ScanStore,
+        *,
+        protected_roots: Iterable[Path] = (),
+    ):
         self.snapshots_root = snapshots_root
         self.store = store
+        self.protected_roots = tuple(Path(path).expanduser() for path in protected_roots)
 
     def create(
         self,
@@ -109,11 +120,19 @@ class TargetSnapshotService:
         max_file_bytes: int = 1_048_576,
     ) -> SnapshotRef:
         raw_target = Path(target_path).expanduser()
+        if not raw_target.is_absolute():
+            raise ValueError("target_path must be an absolute directory path")
         if raw_target.is_symlink():
             raise ValueError("The target root cannot be a symbolic link")
         target = raw_target.resolve(strict=True)
         if not target.is_dir():
             raise ValueError("Target must be a local directory")
+        for protected_root in self.protected_roots:
+            protected = protected_root.resolve(strict=False)
+            if target.is_relative_to(protected) or protected.is_relative_to(target):
+                raise ValueError(
+                    "The audit target overlaps code-security runtime storage"
+                )
         if max_file_bytes < 1 or max_file_bytes > 20 * 1024 * 1024:
             raise ValueError("max_file_bytes must be between 1 and 20971520")
         if len(include_paths or ["."]) > 256:
@@ -129,28 +148,40 @@ class TargetSnapshotService:
             normalize_relative_path(item, allow_root=True)
             for item in (exclude_patterns or [])
         )
-        files = self._enumerate(target, includes, patterns)
-        if len(files) > MAX_SNAPSHOT_FILES:
-            raise ValueError(
-                f"Snapshot contains more than {MAX_SNAPSHOT_FILES} files"
-            )
-
-        self.snapshots_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.snapshots_root.chmod(0o700)
-        temporary = Path(tempfile.mkdtemp(prefix=".snapshot-", dir=self.snapshots_root))
+        root_descriptor: int | None = self._open_directory(target)
+        root_identity = self._stat_signature(os.fstat(root_descriptor))
+        temporary: Path | None = None
         snapshot_id = f"snap_{uuid.uuid4().hex}"
         final_root = self.snapshots_root / snapshot_id
         records: list[SnapshotFile] = []
         omissions: list[SnapshotOmission] = []
         total_bytes = 0
-        root_descriptor: int | None = None
         try:
-            root_descriptor = self._open_directory(target)
+            files = self._enumerate(target, includes, patterns)
+            self._assert_root_identity(target, root_identity)
+            if len(files) > MAX_SNAPSHOT_FILES:
+                raise ValueError(
+                    f"Snapshot contains more than {MAX_SNAPSHOT_FILES} files"
+                )
+            initial_states = {
+                relative_path: self._source_file_signature(
+                    root_descriptor,
+                    relative_path,
+                )
+                for relative_path, _source_path in files
+            }
+
+            self.snapshots_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.snapshots_root.chmod(0o700)
+            temporary = Path(
+                tempfile.mkdtemp(prefix=".snapshot-", dir=self.snapshots_root)
+            )
             for relative_path, source_path in files:
                 data, observed_size = self._read_regular_file(
                     root_descriptor,
                     relative_path,
                     max_file_bytes,
+                    expected_signature=initial_states[relative_path],
                 )
                 if data is None:
                     omissions.append(
@@ -183,6 +214,20 @@ class TargetSnapshotService:
                 )
                 total_bytes += len(data)
 
+            final_files = self._enumerate(target, includes, patterns)
+            self._assert_root_identity(target, root_identity)
+            if [item[0] for item in final_files] != [item[0] for item in files]:
+                raise ValueError("Audit target file set changed during snapshot creation")
+            final_states = {
+                relative_path: self._source_file_signature(
+                    root_descriptor,
+                    relative_path,
+                )
+                for relative_path, _source_path in final_files
+            }
+            if final_states != initial_states:
+                raise ValueError("Audit target content changed during snapshot creation")
+
             records.sort(key=lambda item: item.relative_path)
             omissions.sort(key=lambda item: item.relative_path)
             tree_digest = hashlib.sha256(
@@ -210,8 +255,13 @@ class TargetSnapshotService:
                     sort_keys=True,
                 ).encode("utf-8")
             ).hexdigest()
-            repository_identity = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
+            repository_identity = hashlib.sha256(
+                (
+                    f"{target}\0{root_identity[0]}\0{root_identity[1]}"
+                ).encode("utf-8")
+            ).hexdigest()
 
+            assert temporary is not None
             os.replace(temporary, final_root)
             for path in sorted(final_root.rglob("*"), reverse=True):
                 path.chmod(0o500 if path.is_dir() else 0o400)
@@ -232,7 +282,11 @@ class TargetSnapshotService:
             self.store.save_snapshot(snapshot, records, omissions)
             return snapshot
         except Exception:
-            cleanup_root = temporary if temporary.exists() else final_root
+            cleanup_root = (
+                temporary
+                if temporary is not None and temporary.exists()
+                else final_root
+            )
             if cleanup_root.exists():
                 cleanup_root.chmod(0o700)
                 for path in cleanup_root.rglob("*"):
@@ -346,15 +400,23 @@ class TargetSnapshotService:
         root_descriptor: int,
         relative_path: str,
         max_file_bytes: int,
+        *,
+        expected_signature: tuple[int, int, int, int, int, int],
     ) -> tuple[bytes | None, int]:
         descriptor = cls._open_snapshot_file(root_descriptor, relative_path)
         try:
             file_stat = os.fstat(descriptor)
+            if cls._stat_signature(file_stat) != expected_signature:
+                raise ValueError(
+                    f"Snapshot input changed before it could be read: {relative_path}"
+                )
             if not stat.S_ISREG(file_stat.st_mode):
                 raise ValueError(
                     f"Snapshot input is not a regular file: {relative_path}"
                 )
             if file_stat.st_size > max_file_bytes:
+                if cls._stat_signature(os.fstat(descriptor)) != expected_signature:
+                    raise ValueError(f"Snapshot input changed while reading: {relative_path}")
                 return None, file_stat.st_size
             chunks: list[bytes] = []
             total = 0
@@ -366,6 +428,46 @@ class TargetSnapshotService:
                 total += len(chunk)
                 if total > max_file_bytes:
                     return None, total
+            if cls._stat_signature(os.fstat(descriptor)) != expected_signature:
+                raise ValueError(f"Snapshot input changed while reading: {relative_path}")
             return b"".join(chunks), total
         finally:
             os.close(descriptor)
+
+    @staticmethod
+    def _stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    @classmethod
+    def _source_file_signature(
+        cls,
+        root_descriptor: int,
+        relative_path: str,
+    ) -> tuple[int, int, int, int, int, int]:
+        descriptor = cls._open_snapshot_file(root_descriptor, relative_path)
+        try:
+            value = os.fstat(descriptor)
+            if not stat.S_ISREG(value.st_mode):
+                raise ValueError(
+                    f"Snapshot input is not a regular file: {relative_path}"
+                )
+            return cls._stat_signature(value)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _assert_root_identity(
+        cls,
+        target: Path,
+        expected: tuple[int, int, int, int, int, int],
+    ) -> None:
+        current = os.stat(target, follow_symlinks=False)
+        if not stat.S_ISDIR(current.st_mode) or cls._stat_signature(current)[:2] != expected[:2]:
+            raise ValueError("Audit target root changed during snapshot creation")

@@ -633,6 +633,17 @@ class TestAgentConfigOverrides:
         # All 13 built-ins should be present without a whitelist
         assert len(result) >= 10
 
+    def test_enabled_agents_whitelist_applies_after_runtime_merge(self):
+        from flocks.agent.registry import _apply_enabled_agents
+
+        agents = {
+            "rex": AgentInfo(name="rex"),
+            "runtime-security": AgentInfo(name="runtime-security"),
+        }
+        _apply_enabled_agents(agents, ["rex"])
+
+        assert set(agents) == {"rex"}
+
 
 # ===========================================================================
 # Available agent list builder

@@ -41,6 +41,15 @@ def _isolated_agent(runtime_directory: Path) -> AgentInfo:
     )
 
 
+def _ordinary_agent() -> AgentInfo:
+    return AgentInfo(
+        name="rex",
+        mode="primary",
+        tools=["bash", "question"],
+        require_dedicated_session=False,
+    )
+
+
 async def _store_session(session: SessionInfo) -> None:
     key = f"session:{session.project_id}:{session.id}"
     await Storage.set(key, session, "session")
@@ -200,6 +209,58 @@ async def test_dedicated_claim_blocks_concurrent_foreign_first_message(
 
 
 @pytest.mark.asyncio
+async def test_dedicated_session_cannot_be_reused_by_ordinary_agent(
+    policy_storage,
+    tmp_path: Path,
+) -> None:
+    session = SessionInfo(
+        projectID="policy-project",
+        directory=str(tmp_path / "workspace"),
+        title="Policy",
+        agent="rex",
+    )
+    await _store_session(session)
+    claimed = await prepare_session_for_agent(
+        session,
+        _isolated_agent(tmp_path / "runtime"),
+    )
+
+    with pytest.raises(AgentSessionPolicyError, match="dedicated to agent"):
+        await prepare_session_for_agent(claimed, _ordinary_agent())
+
+
+@pytest.mark.asyncio
+async def test_session_loop_rejects_switching_away_from_dedicated_agent(
+    policy_storage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SessionInfo(
+        projectID="policy-project",
+        directory=str(tmp_path / "workspace"),
+        title="Policy",
+        agent="rex",
+    )
+    await _store_session(session)
+    claimed = await prepare_session_for_agent(
+        session,
+        _isolated_agent(tmp_path / "runtime"),
+    )
+    monkeypatch.setattr(Agent, "get", AsyncMock(return_value=_ordinary_agent()))
+
+    result = await SessionLoop.run(
+        claimed.id,
+        provider_id="provider",
+        model_id="model",
+        agent_name="rex",
+        working_directory=str(tmp_path / "hostile"),
+    )
+
+    assert result.action == "error"
+    assert "dedicated to agent" in str(result.error)
+
+
+@pytest.mark.asyncio
 async def test_session_loop_ignores_working_directory_for_dedicated_agent(
     policy_storage,
     tmp_path: Path,
@@ -262,7 +323,7 @@ async def test_session_create_applies_agent_directory_and_memory_policy(
 
 
 @pytest.mark.asyncio
-async def test_isolated_agent_rejects_history_after_switching_away_and_back(
+async def test_isolated_agent_binding_cannot_be_switched_away(
     policy_storage,
     tmp_path: Path,
 ) -> None:
@@ -275,14 +336,9 @@ async def test_isolated_agent_rejects_history_after_switching_away_and_back(
     )
     await _store_session(session)
     claimed = await prepare_session_for_agent(session, agent)
-    await Session.update(claimed.project_id, claimed.id, agent="rex")
-    await Message.create(claimed.id, MessageRole.USER, "ordinary-agent history")
-    switched_back = await Session.update(
-        claimed.project_id,
-        claimed.id,
-        agent=agent.name,
-    )
-    assert switched_back is not None
 
-    with pytest.raises(AgentSessionPolicyError, match="new, empty session"):
-        await prepare_session_for_agent(switched_back, agent)
+    with pytest.raises(SessionAgentMismatchError, match="dedicated to agent"):
+        await Session.update(claimed.project_id, claimed.id, agent="rex")
+
+    with pytest.raises(SessionAgentMismatchError, match="cannot be removed"):
+        await Session.update(claimed.project_id, claimed.id, metadata={})

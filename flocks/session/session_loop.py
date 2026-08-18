@@ -23,6 +23,7 @@ from datetime import datetime
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import (
+    DEDICATED_AGENT_POLICY_METADATA_KEY,
     Session,
     SessionInfo,
     is_model_auto_session_category,
@@ -652,11 +653,12 @@ class SessionLoop:
             from flocks.agent.registry import Agent
 
             runtime_agent = await Agent.get(effective_agent_name)
-            if (
-                runtime_agent is not None
-                and runtime_agent.require_dedicated_session is True
-            ):
-                session = await prepare_session_for_agent(session, runtime_agent)
+            if runtime_agent is None:
+                return LoopResult(
+                    action="error",
+                    error=f"Agent {effective_agent_name!r} is not available",
+                )
+            session = await prepare_session_for_agent(session, runtime_agent)
         except AgentSessionPolicyError as exc:
             log.warning("loop.agent_session_policy_rejected", {
                 "session_id": session_id,
@@ -665,8 +667,11 @@ class SessionLoop:
             })
             return LoopResult(action="error", error=str(exc))
         if working_directory and not (
-            runtime_agent is not None
-            and runtime_agent.require_dedicated_session is True
+            isinstance(getattr(session, "metadata", None), dict)
+            and isinstance(
+                session.metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY),
+                dict,
+            )
         ):
             session = session.model_copy(update={"directory": working_directory})
         

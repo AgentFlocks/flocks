@@ -59,6 +59,61 @@ def test_snapshot_rejects_symbolic_links(tmp_path: Path) -> None:
         runtime.snapshots.create(str(target))
 
 
+def test_snapshot_requires_absolute_target_and_rejects_runtime_overlap(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "plugin-data"
+    runtime = build_runtime(runtime_root)
+
+    with pytest.raises(ValueError, match="absolute"):
+        runtime.snapshots.create(".")
+    with pytest.raises(ValueError, match="runtime storage"):
+        runtime.snapshots.create(str(runtime_root))
+
+
+def test_snapshot_preserves_posix_whitespace_and_backslash_names(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / " ").write_text("space = True\n", encoding="utf-8")
+    (target / "back\\slash.py").write_text("slash = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+
+    snapshot = runtime.snapshots.create(
+        str(target),
+        include_paths=[" ", "back\\slash.py"],
+    )
+
+    assert [
+        item.relative_path
+        for item in runtime.store.list_snapshot_files(snapshot.snapshot_id)
+    ] == [" ", "back\\slash.py"]
+
+
+def test_snapshot_rejects_source_mutation_during_copy(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (target / "b.py").write_text("b = 1\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    original_read = runtime.snapshots._read_regular_file
+    mutated = False
+
+    def mutating_read(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal mutated
+        result = original_read(*args, **kwargs)
+        if not mutated:
+            mutated = True
+            (target / "b.py").write_text("b = 2\n", encoding="utf-8")
+        return result
+
+    runtime.snapshots._read_regular_file = mutating_read
+
+    with pytest.raises(ValueError, match="changed"):
+        runtime.snapshots.create(str(target))
+
+
 def test_snapshot_rejects_symlink_root_and_skips_oversized_files(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()

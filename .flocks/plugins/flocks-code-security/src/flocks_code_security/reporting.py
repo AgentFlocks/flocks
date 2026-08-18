@@ -90,8 +90,22 @@ class ReportWriter:
             snapshot = self.store.get_snapshot(scan["snapshot_id"])
             if snapshot is None:
                 raise ValueError("Scan snapshot not found")
-            incomplete_reasons = self._incomplete_reasons(data, pending)
+            incomplete_reasons, incomplete_details = self._incomplete_state(
+                data,
+                pending,
+            )
             status = "partial" if incomplete_reasons else "completed"
+            candidates_by_id = {
+                item["candidate_id"]: item for item in data["candidates"]
+            }
+            pending_candidates = [
+                {
+                    **candidates_by_id[candidate_id],
+                    "evidence": evidence_by_candidate.get(candidate_id, []),
+                    "verifications": verdicts_by_candidate.get(candidate_id, []),
+                }
+                for candidate_id in sorted(pending)
+            ]
             target = output_dir(scan_id)
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             target.parent.chmod(0o700)
@@ -113,28 +127,29 @@ class ReportWriter:
                 "status": status,
                 "snapshot": snapshot.public_dict(),
                 "ruleset_digest": scan["ruleset_digest"],
+                "threat_model_status": "not_implemented",
                 "finding_count": len(findings),
                 "pending_candidate_ids": sorted(pending),
                 "rejected_candidate_ids": sorted(rejected),
                 "incomplete_reasons": incomplete_reasons,
+                "incomplete_details": incomplete_details,
             }
             publishing_manifest = {
                 **manifest,
                 "status": "publishing",
                 "result_status": status,
             }
-            threat_model = {
-                "scan_id": scan_id,
-                "status": "not_submitted",
-                "trust_boundaries": [],
-                "entry_points": [],
-                "sensitive_assets": [],
-            }
             sarif = self._sarif(findings)
             self._write_json(staging / "scan-manifest.json", publishing_manifest)
             self._write_json(staging / ".scan-manifest.final", manifest)
-            self._write_json(staging / "threat-model.json", threat_model)
-            self._write_json(staging / "findings.json", {"findings": findings})
+            self._write_json(
+                staging / "findings.json",
+                {
+                    "findings": findings,
+                    "pending_candidates": pending_candidates,
+                    "rejected_candidate_ids": sorted(rejected),
+                },
+            )
             self._write_json(
                 staging / "coverage.json",
                 {"coverage": coverage, "omissions": data["omissions"]},
@@ -142,7 +157,7 @@ class ReportWriter:
             self._write_json(staging / "report.sarif", sarif)
             staging_markdown_path = staging / "report.md"
             staging_markdown_path.write_text(
-                self._markdown(manifest, findings, pending, coverage),
+                self._markdown(manifest, findings, pending_candidates, coverage),
                 encoding="utf-8",
             )
             staging_markdown_path.chmod(0o600)
@@ -233,26 +248,41 @@ class ReportWriter:
             "dangerous_operation": payload["dangerous_operation"],
             "remediation": payload["remediation"],
             "verification_rationale": selected["verification"]["rationale"],
+            "primary_evidence": selected["evidence"][0],
             "evidence": evidence,
         }
 
-    def _incomplete_reasons(
+    def _incomplete_state(
         self,
         data: dict[str, Any],
         pending: list[str],
-    ) -> list[str]:
+    ) -> tuple[list[str], dict[str, Any]]:
         reasons: list[str] = []
+        details: dict[str, Any] = {}
         if pending:
             reasons.append("pending_candidates")
+            details["pending_candidate_ids"] = sorted(pending)
         if data["omissions"]:
             reasons.append("snapshot_omissions")
+            details["snapshot_omissions"] = data["omissions"]
         if data["verification_conflicts"]:
             reasons.append("verification_conflicts")
+            details["verification_conflicts"] = data["verification_conflicts"]
         work_units = data["work_units"]
         if not work_units:
             reasons.append("no_work_units")
         elif any(item["status"] != "completed" for item in work_units):
             reasons.append("incomplete_work_units")
+            details["incomplete_work_units"] = [
+                {
+                    "work_unit_id": item["work_unit_id"],
+                    "role": item["role"],
+                    "status": item["status"],
+                    "paths": item["paths"],
+                }
+                for item in work_units
+                if item["status"] != "completed"
+            ]
 
         coverage_by_unit = {
             item["work_unit_id"]: item["payload"] for item in data["coverage"]
@@ -262,14 +292,36 @@ class ReportWriter:
         ]
         if not analysis_units:
             reasons.append("no_analysis_work_units")
-        if any(item["work_unit_id"] not in coverage_by_unit for item in analysis_units):
+        missing_coverage = sorted(
+            item["work_unit_id"]
+            for item in analysis_units
+            if item["work_unit_id"] not in coverage_by_unit
+        )
+        if missing_coverage:
             reasons.append("missing_coverage")
+            details["missing_coverage_work_unit_ids"] = missing_coverage
 
         coverage = [coverage_by_unit[item["work_unit_id"]] for item in analysis_units if item["work_unit_id"] in coverage_by_unit]
-        if any(item["failed_paths"] for item in coverage):
+        failed_paths = sorted(
+            {
+                path
+                for item in coverage
+                for path in item["failed_paths"]
+            }
+        )
+        if failed_paths:
             reasons.append("failed_paths")
-        if any(item["open_questions"] for item in coverage):
+            details["failed_paths"] = failed_paths
+        open_questions = sorted(
+            {
+                question
+                for item in coverage
+                for question in item["open_questions"]
+            }
+        )
+        if open_questions:
             reasons.append("open_questions")
+            details["open_questions"] = open_questions
 
         analyzed_paths = {
             path
@@ -290,7 +342,8 @@ class ReportWriter:
         }
         if uncovered:
             reasons.append("uncovered_snapshot_paths")
-        return sorted(set(reasons))
+            details["uncovered_snapshot_paths"] = sorted(uncovered)
+        return sorted(set(reasons)), details
 
     @staticmethod
     def _write_json(path: Path, payload: Any) -> None:
@@ -314,7 +367,7 @@ class ReportWriter:
     def _markdown(
         manifest: dict[str, Any],
         findings: list[dict[str, Any]],
-        pending: list[str],
+        pending: list[dict[str, Any]],
         coverage: list[dict[str, Any]],
     ) -> str:
         lines = [
@@ -338,6 +391,22 @@ class ReportWriter:
             )
         else:
             lines.append("All required work units and snapshot paths were completed.")
+        for detail_name, detail_value in sorted(
+            manifest.get("incomplete_details", {}).items()
+        ):
+            lines.extend(
+                [
+                    "",
+                    f"### {ReportWriter._markdown_text(detail_name)}",
+                    "",
+                ]
+            )
+            values = detail_value if isinstance(detail_value, list) else [detail_value]
+            for value in values[:100]:
+                serialized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+                lines.append(f"- {ReportWriter._markdown_text(serialized)}")
+            if len(values) > 100:
+                lines.append(f"- … {len(values) - 100} additional entries in scan-manifest.json")
         lines.extend([
             "",
             "## Findings",
@@ -399,7 +468,7 @@ class ReportWriter:
                     "shortDescription": {"text": finding["title"]},
                 },
             )
-            primary = finding["evidence"][0]
+            primary = finding["primary_evidence"]
             results.append(
                 {
                     "ruleId": finding["rule_id"],

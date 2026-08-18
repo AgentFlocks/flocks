@@ -832,8 +832,35 @@ class Session:
         }
 
         update_data = session.model_dump(by_alias=True)
+        current_policy = (update_data.get("metadata") or {}).get(
+            DEDICATED_AGENT_POLICY_METADATA_KEY
+        )
+        if (
+            isinstance(current_policy, dict)
+            and current_policy.get("version") == 1
+            and "metadata" in updates
+        ):
+            supplied_metadata = updates.get("metadata")
+            supplied_policy = (
+                supplied_metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+                if isinstance(supplied_metadata, dict)
+                else None
+            )
+            if supplied_policy != current_policy:
+                raise SessionAgentMismatchError(
+                    f"Session {session_id} dedicated-agent policy cannot be removed"
+                )
         requested_agent = updates.get("agent")
         if requested_agent is not None and requested_agent != session.agent:
+            if (
+                isinstance(current_policy, dict)
+                and current_policy.get("version") == 1
+                and current_policy.get("agent") != requested_agent
+            ):
+                raise SessionAgentMismatchError(
+                    f"Session {session_id} is dedicated to agent "
+                    f"{current_policy.get('agent')!r}"
+                )
             supplied_metadata = updates.get("metadata")
             supplied_policy = (
                 supplied_metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)

@@ -86,6 +86,7 @@ class CLISessionRunner:
     ):
         self.console = console
         self.directory = directory
+        self._execution_directory = directory
         self.model = model
         self.agent_name = agent
         self.auto_confirm = auto_confirm
@@ -199,32 +200,58 @@ class CLISessionRunner:
         from flocks.tool.system.question import set_question_handler
         set_question_handler(self._create_cli_question_handler())
 
-        # Initialize
+        # Register tools first so plugin-provided agent metadata is available,
+        # then establish the agent's execution directory before loading any
+        # project environment, providers, or MCP configuration.
         ToolRegistry.init()
+        agent_name = self.agent_name or await Agent.default_agent()
+        runtime_agent = await Agent.get(agent_name)
+        if runtime_agent is None:
+            raise ValueError(f"Agent {agent_name!r} is not available")
+        is_dedicated = runtime_agent.require_dedicated_session is True
+        if is_dedicated:
+            if not runtime_agent.session_directory:
+                raise ValueError(
+                    f"Dedicated agent {runtime_agent.name!r} has no session directory"
+                )
+            runtime_directory = Path(runtime_agent.session_directory).expanduser()
+            runtime_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            runtime_directory.chmod(0o700)
+            self._execution_directory = runtime_directory.resolve()
+        else:
+            dotenv_path = self.directory / ".env"
+            load_dotenv(dotenv_path=dotenv_path)
+            if dotenv_path.exists() and not os.environ.get("THREATBOOK_API_KEY"):
+                self.console.print(
+                    "Warning: .env found but THREATBOOK_API_KEY is not loaded."
+                )
+
         try:
             await Provider.init()
         except Exception as e:
             raise
 
         # Load custom providers from flocks.json (same as server mode)
-        try:
-            from flocks.server.routes.custom_provider import load_custom_providers_on_startup
-            await load_custom_providers_on_startup()
-        except Exception as e:
-            log.debug("cli.custom_providers.load.failed", {"error": str(e)})
+        if not is_dedicated:
+            try:
+                from flocks.server.routes.custom_provider import load_custom_providers_on_startup
+                await load_custom_providers_on_startup()
+            except Exception as e:
+                log.debug("cli.custom_providers.load.failed", {"error": str(e)})
 
         # Initialize MCP subsystem — registers MCP tools into ToolRegistry so that
         # the CLI sees the same tool set as the web server (same underlying API).
-        try:
-            from flocks.mcp import MCP
-            await MCP.init()
-            log.info("cli.mcp.initialized")
-        except Exception as e:
-            log.warn("cli.mcp.init.failed", {"error": str(e)})
+        if not is_dedicated:
+            try:
+                from flocks.mcp import MCP
+                await MCP.init()
+                log.info("cli.mcp.initialized")
+            except Exception as e:
+                log.warn("cli.mcp.init.failed", {"error": str(e)})
         
         # Get project
         try:
-            result = await Project.from_directory(str(self.directory))
+            result = await Project.from_directory(str(self._execution_directory))
             project = result["project"]
         except Exception as e:
             raise
@@ -235,6 +262,12 @@ class CLISessionRunner:
                 project_id=project.id,
                 session_id=session_id,
                 continue_session=continue_session,
+            )
+            from flocks.session.agent_policy import prepare_session_for_agent
+
+            self._session = await prepare_session_for_agent(
+                self._session,
+                runtime_agent,
             )
             Session.set_current(self._session)
         except Exception as e:
@@ -255,7 +288,7 @@ class CLISessionRunner:
     ) -> SessionInfo:
         """Get or create session."""
         resolve_worktree = cache(Project.worktree_for_directory)
-        current_worktree = resolve_worktree(str(self.directory))
+        current_worktree = resolve_worktree(str(self._execution_directory))
 
         def belongs_to_current_worktree(session: SessionInfo) -> bool:
             return bool(
@@ -278,7 +311,7 @@ class CLISessionRunner:
         
         create_kwargs: Dict[str, Any] = {
             "project_id": project_id,
-            "directory": str(self.directory),
+            "directory": str(self._execution_directory),
         }
         if self.agent_name:
             create_kwargs["agent"] = self.agent_name
@@ -346,11 +379,10 @@ class CLISessionRunner:
         # Resolve agent
         agent_name = self.agent_name or await Agent.default_agent()
         agent = await Agent.get(agent_name) or await Agent.get("rex")
-        if getattr(agent, "require_dedicated_session", False) is True:
-            from flocks.session.agent_policy import prepare_session_for_agent
+        from flocks.session.agent_policy import prepare_session_for_agent
 
-            self._session = await prepare_session_for_agent(self._session, agent)
-            Session.set_current(self._session)
+        self._session = await prepare_session_for_agent(self._session, agent)
+        Session.set_current(self._session)
 
         if dispatch_commands and stripped.startswith("/"):
             from flocks.input.dispatcher import dispatch_user_input
@@ -842,12 +874,6 @@ async def run_session(
         auto_confirm: Auto-confirm all permission requests
     """
     console = console or Console()
-    # Ensure project-specific .env is loaded even when cwd differs.
-    dotenv_path = directory / ".env"
-    load_dotenv(dotenv_path=dotenv_path)
-    if dotenv_path.exists() and not os.environ.get("THREATBOOK_API_KEY"):
-        console.print("Warning: .env found but THREATBOOK_API_KEY is not loaded.")
-    
     runner = CLISessionRunner(
         console=console,
         directory=directory,

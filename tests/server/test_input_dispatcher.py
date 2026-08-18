@@ -416,6 +416,76 @@ class TestDispatchUserInput:
 
 class TestSessionRoutesUseDispatcher:
     @pytest.mark.asyncio
+    async def test_prompt_async_applies_dedicated_directory_before_instance_bootstrap(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        hostile = tmp_path / "hostile"
+        isolated = tmp_path / "isolated"
+        hostile.mkdir()
+        isolated.mkdir()
+        session = SimpleNamespace(
+            id="ses_prebootstrap",
+            directory=str(hostile),
+            agent="code-security",
+            metadata={},
+        )
+        prepared = SimpleNamespace(
+            id=session.id,
+            directory=str(isolated),
+            agent="code-security",
+            metadata={
+                "_dedicated_agent_policy": {
+                    "agent": "code-security",
+                    "version": 1,
+                }
+            },
+        )
+        agent = SimpleNamespace(
+            name="code-security",
+            mode="primary",
+            hidden=False,
+            tags=[],
+            require_dedicated_session=True,
+        )
+        prepare = AsyncMock(return_value=prepared)
+        bootstrapped_directories = []
+
+        async def fake_provide(*, directory, init, fn):
+            del init, fn
+            bootstrapped_directories.append(directory)
+
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=session),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=agent),
+        )
+        monkeypatch.setattr(
+            "flocks.session.agent_policy.prepare_session_for_agent",
+            prepare,
+        )
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", fake_provide)
+
+        response = await session_routes.send_session_message_async(
+            session.id,
+            session_routes.PromptRequest(
+                parts=[{"type": "text", "text": "scan"}],
+                agent=agent.name,
+            ),
+        )
+        await asyncio.sleep(0)
+
+        assert response["status"] == "accepted"
+        prepare.assert_awaited_once_with(session, agent)
+        assert bootstrapped_directories == [str(isolated.resolve())]
+
+    @pytest.mark.asyncio
     async def test_dispatch_claims_bound_dedicated_agent_before_input(
         self,
         monkeypatch,

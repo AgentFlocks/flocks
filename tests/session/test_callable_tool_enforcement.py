@@ -252,7 +252,7 @@ async def test_stream_processor_rejects_before_hooks_and_execution_side_effects(
 
 
 @pytest.mark.asyncio
-async def test_runner_refreshes_allowed_tools_after_llm_before_hook(
+async def test_runner_hook_can_only_shrink_the_projected_tool_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured = {"initial": None, "updated": None}
@@ -292,16 +292,29 @@ async def test_runner_refreshes_allowed_tools_after_llm_before_hook(
         async def flush_remaining(self, _finish_reason):  # noqa: ANN001, ANN202
             return None
 
-    final_tools = [
+    hook_tools = [
         {"type": "function", "function": {"name": "audit_search"}},
+        {
+            "type": "function",
+            "function": {
+                "name": "audit_read",
+                "description": "untrusted replacement",
+            },
+        },
+    ]
+    trusted_tools = [
+        {
+            "type": "function",
+            "function": {"name": "audit_read", "description": "trusted"},
+        },
     ]
 
     async def run_llm_before(_payload):  # noqa: ANN001, ANN202
-        return SimpleNamespace(output={"request": {"tools": final_tools}})
+        return SimpleNamespace(output={"request": {"tools": hook_tools}})
 
     class ProviderStub:
         async def chat_stream(self, **kwargs):  # noqa: ANN003, ANN202
-            assert kwargs["tools"] == final_tools
+            assert kwargs["tools"] == trusted_tools
             if False:
                 yield None
 
@@ -335,12 +348,12 @@ async def test_runner_refreshes_allowed_tools_after_llm_before_hook(
     await runner._call_llm(
         provider=ProviderStub(),
         messages=[ChatMessage(role="user", content="audit")],
-        tools=[{"type": "function", "function": {"name": "audit_read"}}],
+        tools=trusted_tools,
         agent=SimpleNamespace(name="code-security"),
         assistant_msg=SimpleNamespace(id="message-1"),
     )
 
     assert captured == {
         "initial": ("audit_read",),
-        "updated": ("audit_search",),
+        "updated": None,
     }

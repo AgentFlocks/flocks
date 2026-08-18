@@ -1278,6 +1278,7 @@ class InboundDispatcher:
                 model,
                 agent,
             ),
+            expected_agent=agent,
         )
 
     @staticmethod

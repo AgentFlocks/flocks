@@ -9,6 +9,7 @@ from threading import RLock
 from flocks_code_security.paths import (
     data_dir,
     ensure_private_directory,
+    outputs_root,
     runtime_dir,
     snapshots_dir,
 )
@@ -31,7 +32,11 @@ _lock = RLock()
 def build_runtime(root: Path) -> PluginRuntime:
     store = ScanStore(root / "code-security.db")
     store.initialize()
-    snapshot_service = TargetSnapshotService(root / "snapshots", store)
+    snapshot_service = TargetSnapshotService(
+        root / "snapshots",
+        store,
+        protected_roots=(root, runtime_dir(), outputs_root()),
+    )
     return PluginRuntime(
         store=store,
         snapshots=snapshot_service,

@@ -135,7 +135,8 @@ class ScanStore:
                     blob_digest TEXT NOT NULL,
                     start_line INTEGER NOT NULL,
                     end_line INTEGER NOT NULL,
-                    excerpt_hash TEXT NOT NULL
+                    excerpt_hash TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS verifications (
                     verification_id TEXT PRIMARY KEY,
@@ -159,6 +160,18 @@ class ScanStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (scan_id, work_unit_id)
                 );
+                CREATE TABLE IF NOT EXISTS source_access (
+                    access_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    operation TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    blob_digest TEXT,
+                    start_line INTEGER,
+                    end_line INTEGER,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             snapshot_columns = {
@@ -170,6 +183,15 @@ class ScanStore:
                     "ALTER TABLE snapshots ADD COLUMN omitted_file_count "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
+            evidence_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(evidence)").fetchall()
+            }
+            if "ordinal" not in evidence_columns:
+                connection.execute(
+                    "ALTER TABLE evidence ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute("UPDATE evidence SET ordinal = rowid")
             duplicate_candidates = connection.execute(
                 "SELECT candidate_id FROM verifications GROUP BY candidate_id "
                 "HAVING COUNT(*) > 1"
@@ -625,9 +647,10 @@ class ScanStore:
                 item = dict(row)
                 item["payload"] = json.loads(item.pop("payload_json"))
                 evidence = connection.execute(
-                    "SELECT relative_path, blob_digest, start_line, end_line, excerpt_hash "
+                    "SELECT relative_path, blob_digest, start_line, end_line, "
+                    "excerpt_hash, ordinal "
                     "FROM evidence WHERE candidate_id = ? "
-                    "ORDER BY relative_path, start_line, end_line",
+                    "ORDER BY ordinal, rowid",
                     (item["candidate_id"],),
                 ).fetchall()
                 item["evidence"] = [dict(record) for record in evidence]
@@ -864,7 +887,10 @@ class ScanStore:
                 ),
             )
             connection.executemany(
-                "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO evidence ("
+                "evidence_id, candidate_id, relative_path, blob_digest, "
+                "start_line, end_line, excerpt_hash, ordinal"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         f"evidence_{uuid.uuid4().hex}",
@@ -874,11 +900,207 @@ class ScanStore:
                         item["start_line"],
                         item["end_line"],
                         item["excerpt_hash"],
+                        ordinal,
                     )
-                    for item in evidence
+                    for ordinal, item in enumerate(evidence)
                 ],
             )
         return candidate_id
+
+    def record_source_access(
+        self,
+        binding: SessionBinding,
+        *,
+        operation: str,
+        relative_path: str,
+        blob_digest: str | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> None:
+        self.record_source_accesses(
+            binding,
+            [
+                {
+                    "operation": operation,
+                    "relative_path": relative_path,
+                    "blob_digest": blob_digest,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                }
+            ],
+        )
+
+    def record_source_accesses(
+        self,
+        binding: SessionBinding,
+        accesses: list[dict[str, Any]],
+    ) -> None:
+        if not accesses:
+            return
+        operations = {str(item.get("operation") or "") for item in accesses}
+        if not operations <= {"inventory", "read", "search"}:
+            raise ValueError("Unsupported source access operation")
+        with self._lock, self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            now = _now()
+            connection.executemany(
+                "INSERT INTO source_access VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        f"access_{uuid.uuid4().hex}",
+                        binding.session_id,
+                        binding.scan_id,
+                        binding.work_unit_id,
+                        item["operation"],
+                        item["relative_path"],
+                        item.get("blob_digest"),
+                        item.get("start_line"),
+                        item.get("end_line"),
+                        now,
+                    )
+                    for item in accesses
+                ],
+            )
+
+    def validate_coverage_access(
+        self,
+        binding: SessionBinding,
+        *,
+        inventoried_paths: list[str],
+        analyzed_paths: list[str],
+    ) -> None:
+        if binding.work_unit_id is None:
+            raise ValueError("Coverage requires a bound work unit")
+        with self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            file_rows = connection.execute(
+                "SELECT relative_path, blob_digest, line_count, is_binary "
+                "FROM snapshot_files "
+                "WHERE snapshot_id = ?",
+                (binding.snapshot_id,),
+            ).fetchall()
+            omission_rows = connection.execute(
+                "SELECT relative_path FROM snapshot_omissions WHERE snapshot_id = ?",
+                (binding.snapshot_id,),
+            ).fetchall()
+            access_rows = connection.execute(
+                "SELECT operation, relative_path, blob_digest, start_line, end_line "
+                "FROM source_access "
+                "WHERE work_unit_id = ? AND session_id = ?",
+                (binding.work_unit_id, binding.session_id),
+            ).fetchall()
+
+        def covered(relative_path: str, claims: list[str]) -> bool:
+            return any(
+                claim == "."
+                or relative_path == claim
+                or relative_path.startswith(f"{claim}/")
+                for claim in claims
+            )
+
+        inventoried_access = {
+            row["relative_path"]
+            for row in access_rows
+            if row["operation"] == "inventory"
+        }
+        expected_inventory = {
+            row["relative_path"]
+            for row in [*file_rows, *omission_rows]
+            if covered(row["relative_path"], inventoried_paths)
+        }
+        missing_inventory = sorted(expected_inventory - inventoried_access)
+        if missing_inventory:
+            raise ValueError(
+                "Inventory coverage is not backed by audit_inventory access: "
+                + ", ".join(missing_inventory[:20])
+            )
+
+        search_access = {
+            (row["relative_path"], row["blob_digest"])
+            for row in access_rows
+            if row["operation"] == "search"
+        }
+        reads_by_file: dict[tuple[str, str], list[tuple[int, int]]] = {}
+        for row in access_rows:
+            if (
+                row["operation"] == "read"
+                and row["blob_digest"]
+                and row["start_line"] is not None
+                and row["end_line"] is not None
+            ):
+                reads_by_file.setdefault(
+                    (row["relative_path"], row["blob_digest"]),
+                    [],
+                ).append((row["start_line"], row["end_line"]))
+
+        def fully_read(path: str, digest: str, line_count: int) -> bool:
+            key = (path, digest)
+            if key in search_access:
+                return True
+            intervals = sorted(reads_by_file.get(key, []))
+            if line_count == 0:
+                return bool(intervals)
+            covered_until = 0
+            for start_line, end_line in intervals:
+                if start_line > covered_until + 1:
+                    return False
+                covered_until = max(covered_until, end_line)
+                if covered_until >= line_count:
+                    return True
+            return False
+
+        missing_analysis = sorted(
+            row["relative_path"]
+            for row in file_rows
+            if covered(row["relative_path"], analyzed_paths)
+            and not fully_read(
+                row["relative_path"],
+                row["blob_digest"],
+                row["line_count"],
+            )
+        )
+        if missing_analysis:
+            raise ValueError(
+                "Analysis coverage is not backed by complete snapshot source reads: "
+                + ", ".join(missing_analysis[:20])
+            )
+
+    def require_verifier_source_access(
+        self,
+        connection: sqlite3.Connection,
+        binding: SessionBinding,
+        candidate_id: str,
+    ) -> None:
+        evidence = connection.execute(
+            "SELECT relative_path, blob_digest, start_line, end_line FROM evidence "
+            "WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchall()
+        if not evidence:
+            raise ValueError("Candidate has no evidence to verify")
+        reads = connection.execute(
+            "SELECT relative_path, blob_digest, start_line, end_line "
+            "FROM source_access WHERE work_unit_id = ? AND session_id = ? "
+            "AND operation = 'read'",
+            (binding.work_unit_id, binding.session_id),
+        ).fetchall()
+        for item in evidence:
+            independently_read = any(
+                read["relative_path"] == item["relative_path"]
+                and read["blob_digest"] == item["blob_digest"]
+                and read["start_line"] is not None
+                and read["end_line"] is not None
+                and read["start_line"] <= item["start_line"]
+                and read["end_line"] >= item["end_line"]
+                for read in reads
+            )
+            if not independently_read:
+                raise ValueError(
+                    "Verifier must independently read every candidate evidence range: "
+                    f"{item['relative_path']}:{item['start_line']}-{item['end_line']}"
+                )
 
     def get_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -890,6 +1112,35 @@ class ScanStore:
         data = dict(row)
         data["payload"] = json.loads(data.pop("payload_json"))
         return data
+
+    def get_verification_subject(self, binding: SessionBinding) -> dict[str, Any]:
+        if binding.role != "verifier" or binding.work_unit_id is None:
+            raise ValueError("Verification subject requires a verifier work unit")
+        with self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            assignment = connection.execute(
+                "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
+                (binding.work_unit_id,),
+            ).fetchone()
+            if assignment is None or not assignment["subject_id"]:
+                raise ValueError("Verifier work unit has no assigned candidate")
+            candidate = connection.execute(
+                "SELECT * FROM candidates WHERE candidate_id = ? AND scan_id = ?",
+                (assignment["subject_id"], binding.scan_id),
+            ).fetchone()
+            if candidate is None:
+                raise ValueError("Assigned verification candidate was not found")
+            evidence = connection.execute(
+                "SELECT relative_path, blob_digest, start_line, end_line, "
+                "excerpt_hash, ordinal FROM evidence WHERE candidate_id = ? "
+                "ORDER BY ordinal, rowid",
+                (assignment["subject_id"],),
+            ).fetchall()
+        output = dict(candidate)
+        output["payload"] = json.loads(output.pop("payload_json"))
+        output["evidence"] = [dict(item) for item in evidence]
+        return output
 
     def save_verification(
         self,
@@ -926,6 +1177,7 @@ class ScanStore:
             ).fetchone()
             if existing is not None:
                 raise ValueError("Candidate already has a verification verdict")
+            self.require_verifier_source_access(connection, binding, candidate_id)
             connection.execute(
                 "INSERT INTO verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -1045,7 +1297,7 @@ class ScanStore:
                 """
                 SELECT e.* FROM evidence e
                 JOIN candidates c ON c.candidate_id = e.candidate_id
-                WHERE c.scan_id = ? ORDER BY e.candidate_id, e.relative_path, e.start_line
+                WHERE c.scan_id = ? ORDER BY e.candidate_id, e.ordinal, e.rowid
                 """,
                 (scan_id,),
             ).fetchall()
