@@ -702,6 +702,17 @@ async def _launch_worker(
     if parent is None:
         raise ValueError("Coordinator session not found")
     agent_name = ROLE_AGENTS[unit["role"]]
+    model = ctx.extra.get("model")
+    model = model if isinstance(model, dict) else {}
+    provider_id = model.get("providerID") or parent.provider
+    model_id = model.get("modelID") or parent.model
+    child_kwargs: dict[str, Any] = {}
+    if provider_id and model_id:
+        child_kwargs.update(
+            provider=provider_id,
+            model=model_id,
+            model_pinned=True,
+        )
     child = await Session.create(
         project_id=parent.project_id,
         directory=parent.directory,
@@ -709,6 +720,7 @@ async def _launch_worker(
         parent_id=parent.id,
         agent=agent_name,
         category="task",
+        **child_kwargs,
     )
     await asyncio.to_thread(
         runtime.store.bind_session,
@@ -735,14 +747,14 @@ async def _launch_worker(
         content=prompt,
         agent=agent_name,
     )
-    model = ctx.extra.get("model")
-    model = model if isinstance(model, dict) else {}
-    provider_id = model.get("providerID") or parent.provider
-    model_id = model.get("modelID") or parent.model
     manager = _background_manager()
     task = await manager.run_existing_session(
         session_id=child.id,
-        parent_session_id=parent.id,
+        parent_session_id=(
+            None
+            if ctx.extra.get("suppress_parent_completion") is True
+            else parent.id
+        ),
         description=f"Code security {phase} worker",
         agent=agent_name,
         allow_user_questions=False,
@@ -890,7 +902,6 @@ def _register(
             description=description,
             category=ToolCategory.CUSTOM,
             parameters=parameters,
-            provider="flocks-code-security",
             source="plugin_py",
             native=False,
             always_load=False,

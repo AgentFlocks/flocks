@@ -30,11 +30,23 @@ def test_cli_help_lists_service_commands(monkeypatch, tmp_path) -> None:
     result = runner.invoke(cli_main.app, ["--help"])
 
     assert result.exit_code == 0
-    for command in ("start", "stop", "restart", "status", "logs", "session", "mcp", "task", "skills"):
+    for command in (
+        "start",
+        "stop",
+        "restart",
+        "status",
+        "logs",
+        "session",
+        "security",
+        "mcp",
+        "task",
+        "skills",
+    ):
         assert _help_contains_command(result.stdout, command)
     assert "Agents must use `flocks restart" in result.stdout
     assert "--server-only`;" in result.stdout
-    assert "bare restart stops the supervisor and terminates the running agent" in result.stdout
+    normalized_help = " ".join(result.stdout.replace("│", " ").split())
+    assert "bare restart stops the supervisor and terminates the running agent" in normalized_help
     for command in ("agent", "acp", "debug", "run", "serve", "service-watchdog", "service-daemon", "auth", "models"):
         assert not _help_contains_command(result.stdout, command)
 

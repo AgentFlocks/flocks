@@ -10,6 +10,7 @@ from flocks.cli.commands.mcp import mcp_app
 from flocks.cli.commands.browser import BROWSER_CONTEXT_SETTINGS, browser_command
 from flocks.cli.commands.doctor import doctor_command
 from flocks.cli.commands.session import session_app
+from flocks.cli.commands.security import security_app
 from flocks.cli.commands.skill import skill_app
 from flocks.cli.commands.stats import stats_app
 from flocks.cli.commands.task import task_app
@@ -17,6 +18,7 @@ from flocks.cli.commands.admin import admin_app
 
 __all__ = [
     "session_app",
+    "security_app",
     "mcp_app",
     "browser_command",
     "BROWSER_CONTEXT_SETTINGS",

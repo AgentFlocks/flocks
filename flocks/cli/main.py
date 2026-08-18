@@ -25,6 +25,7 @@ from flocks.cli.commands import (
     export_app,
     import_app,
     mcp_app,
+    security_app,
     session_app,
     skill_app,
     stats_app,
@@ -65,6 +66,7 @@ app = typer.Typer(
 
 # Register command groups
 app.add_typer(session_app, name="session")
+app.add_typer(security_app, name="security")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(export_app, name="export")
 app.add_typer(import_app, name="import")

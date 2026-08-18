@@ -6,6 +6,7 @@ import pytest
 
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
+from flocks.session.callable_schema import resolve_callable_tool_infos
 from flocks.tool.registry import Tool, ToolRegistry, ToolResult
 
 from flocks_code_security.agents import (
@@ -134,10 +135,13 @@ def test_all_audit_tools_register() -> None:
     assert expected
     assert all(ToolRegistry.get(name) is not None for name in expected)
     for name in expected:
-        parameter_names = [
-            parameter.name for parameter in ToolRegistry.get(name).info.parameters
-        ]
+        info = ToolRegistry.get(name).info
+        assert info.provider is None
+        assert info.enabled is True
+        parameter_names = [parameter.name for parameter in info.parameters]
         assert len(parameter_names) == len(set(parameter_names))
+    callable_infos, _enabled_count = resolve_callable_tool_infos(expected)
+    assert {info.name for info in callable_infos} == expected
     run_workers = ToolRegistry.get("audit_run_workers")
     phase = next(
         parameter

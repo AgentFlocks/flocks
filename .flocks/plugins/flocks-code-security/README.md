@@ -16,6 +16,20 @@ Current implementation provides:
 
 Target code is copied into the plugin snapshot store. The plugin never runs target code, build scripts, tests, or Git hooks.
 
+Run a complete audit with one command:
+
+```bash
+flocks security audit /absolute/path/to/source
+```
+
+The command prints the `scan_id` as soon as the immutable snapshot is ready, then follows threat modeling, baseline scanning, independent verification, and report generation. To inspect the same persisted progress from another terminal without changing the scan:
+
+```bash
+flocks security status <scan_id>
+```
+
+Both commands accept `--json`; `audit` emits newline-delimited progress events suitable for automation. Use `--model provider/model` to pin a model instead of the configured default.
+
 Standard static audits now support the full threat modeling → baseline → verification → reduction workflow through Flocks' existing background-session manager. Baseline workers must consume the persisted threat model before they can submit candidates or coverage. Finalization writes the canonical model to `threat-model.json` and projects it into `scan-manifest.json` and `report.md`.
 
 The threat-model semantics are adapted from the Apache-2.0-licensed OpenAI Codex Security bundled plugin, specifically `skills/threat-model/SKILL.md` and `references/threat-model.md`. This implementation retains Flocks' immutable snapshot, dedicated-session, tool-projection, and persistence boundaries; it does not embed or launch the Codex Security MCP server. Focused investigation, change audits, shared threat-model caching, supplied-model overrides, and dynamic execution remain outside the current version.
