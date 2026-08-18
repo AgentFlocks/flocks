@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -339,9 +339,14 @@ async def test_system_prompt_estimate_uses_resolved_turn_context(monkeypatch):
         "flocks.config.Config.get",
         AsyncMock(return_value=config),
     )
+    worktree_for_directory = MagicMock(return_value="/workspace")
+    monkeypatch.setattr(
+        "flocks.project.project.Project.worktree_for_directory",
+        worktree_for_directory,
+    )
     monkeypatch.setattr(
         "flocks.project.instance.Instance.get_worktree",
-        lambda: "/workspace",
+        lambda: "/ambient-worktree",
     )
     monkeypatch.setattr(
         "flocks.tool.registry.ToolRegistry.revision",
@@ -362,3 +367,4 @@ async def test_system_prompt_estimate_uses_resolved_turn_context(monkeypatch):
         config_instructions=("rules.md",),
         tool_revision=7,
     )
+    worktree_for_directory.assert_called_once_with("/workspace/project")

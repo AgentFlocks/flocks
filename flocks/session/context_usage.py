@@ -310,7 +310,7 @@ async def _estimate_system_prompt_tokens(
             agent = await Agent.get("rex")
 
         from flocks.config import Config
-        from flocks.project.instance import Instance
+        from flocks.project.project import Project
 
         try:
             config = await Config.get()
@@ -318,16 +318,24 @@ async def _estimate_system_prompt_tokens(
         except Exception:
             config_instructions = ()
 
+        session_directory = (
+            getattr(session, "directory", None) if session is not None else None
+        )
+        worktree = (
+            Project.worktree_for_directory(session_directory)
+            if session_directory
+            else None
+        )
         prompt_blocks = await SessionPrompt.build_system_prompt_blocks(
             session_id=session_id,
-            session_directory=getattr(session, "directory", None) if session is not None else None,
+            session_directory=session_directory,
             agent_name=getattr(agent, "name", agent_name) if agent is not None else agent_name,
             agent_prompt=getattr(agent, "prompt", None) if agent is not None else None,
             provider_id=provider_id,
             model_id=model_id,
             prompt_tool_names=prompt_tool_names,
             turn_context=TurnPromptContext(
-                worktree=Instance.get_worktree(),
+                worktree=worktree,
                 config_instructions=config_instructions,
                 tool_revision=ToolRegistry.revision(),
             ),

@@ -38,6 +38,7 @@ def build_dynamic_rex_prompt(
     available_tools: List["AvailableTool"],
     available_skills: List["AvailableSkill"],
     available_workflows: Optional[List["AvailableWorkflow"]] = None,
+    use_task_system: bool = False,
 ) -> str:
     from flocks.agent.prompt_utils import (
         build_agent_selection_table,
@@ -47,6 +48,7 @@ def build_dynamic_rex_prompt(
     )
 
     _ = available_tools
+    del use_task_system
 
     key_triggers = build_key_triggers_section(available_agents, available_skills)
     agent_selection = build_agent_selection_table(available_agents)

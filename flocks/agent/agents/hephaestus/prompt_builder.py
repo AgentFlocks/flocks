@@ -36,7 +36,10 @@ def build_hephaestus_prompt(
     available_agents: List["AvailableAgent"],
     available_tools: List["AvailableTool"],
     available_skills: List["AvailableSkill"],
+    use_task_system: bool = False,
 ) -> str:
+    del use_task_system
+
     from flocks.agent.prompt_utils import (
         build_agent_selection_table,
         build_key_triggers_section,

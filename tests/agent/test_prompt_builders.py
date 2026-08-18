@@ -1,6 +1,6 @@
 """Direct tests for Rex and Hephaestus prompt builders."""
 
-import inspect
+import pytest
 
 from flocks.agent.agents.hephaestus.prompt_builder import build_hephaestus_prompt
 from flocks.agent.agents.rex.prompt_builder import build_dynamic_rex_prompt
@@ -31,6 +31,23 @@ def test_hephaestus_prompt_uses_existing_todo_discipline():
     assert "TaskUpdate" not in prompt
 
 
-def test_prompt_builder_signatures_exclude_task_system_flag():
-    assert "use_task_system" not in inspect.signature(build_dynamic_rex_prompt).parameters
-    assert "use_task_system" not in inspect.signature(build_hephaestus_prompt).parameters
+@pytest.mark.parametrize("use_task_system", [False, True])
+def test_prompt_builders_ignore_task_system_flag(use_task_system):
+    rex_prompt = build_dynamic_rex_prompt(
+        [],
+        [],
+        [],
+        [],
+        use_task_system=use_task_system,
+    )
+    hephaestus_prompt = build_hephaestus_prompt(
+        [],
+        [],
+        [],
+        use_task_system=use_task_system,
+    )
+
+    assert "## Todo Management" in rex_prompt
+    assert "## Todo Discipline (NON-NEGOTIABLE)" in hephaestus_prompt
+    assert "TaskCreate" not in rex_prompt
+    assert "TaskCreate" not in hephaestus_prompt
