@@ -78,12 +78,8 @@ def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
         assert name in TOOL_TAGS
 
 
-def test_task_tool_tags_reflect_agent_delegation() -> None:
-    metadata = get_tool_catalog_metadata("task")
-
-    assert "agent" in metadata.tags
-    assert "delegation" in metadata.tags
-    assert "planning" not in metadata.tags
+def test_task_compatibility_alias_has_no_catalog_tags() -> None:
+    assert "task" not in TOOL_TAGS
 
 
 def test_schedule_task_and_todo_use_distinct_management_tags() -> None:

@@ -259,21 +259,6 @@ class AgentPart(BaseModel):
     source: Optional[Dict[str, Any]] = Field(None, description="Source information")
 
 
-class SubtaskPart(BaseModel):
-    """Subtask/subagent part - Flocks compatible"""
-    model_config = ConfigDict(populate_by_name=True, by_alias=True)
-    
-    id: str = Field(default_factory=lambda: Identifier.ascending("part"))
-    sessionID: str = Field(..., description="Session ID")
-    messageID: str = Field(..., description="Message ID")
-    type: Literal["subtask"] = "subtask"
-    prompt: str = Field(..., description="Task prompt")
-    description: str = Field(..., description="Task description")
-    agent: str = Field(..., description="Agent name")
-    model: Optional[Dict[str, str]] = Field(None, description="Model configuration")
-    command: Optional[str] = Field(None, description="Command to execute")
-
-
 class RetryPart(BaseModel):
     """Retry part - Flocks compatible"""
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
@@ -301,7 +286,6 @@ class CompactionPart(BaseModel):
 # Union type for all parts - matches Flocks MessageV2.Part
 PartType = Union[
     TextPart,
-    SubtaskPart,
     ReasoningPart,
     FilePart,
     ToolPart,
@@ -1122,6 +1106,18 @@ class Message:
         metadata = normalized.get("metadata")
         metadata_dict = metadata if isinstance(metadata, dict) else {}
 
+        if part_type == "subtask":
+            normalized["type"] = "text"
+            normalized["text"] = ""
+            normalized["ignored"] = True
+            normalized["metadata"] = {
+                **metadata_dict,
+                "legacyPartType": "subtask",
+            }
+            part_type = "text"
+            metadata = normalized["metadata"]
+            metadata_dict = metadata
+
         if "content" in normalized and "text" not in normalized:
             normalized["text"] = normalized.get("content", "")
 
@@ -1174,10 +1170,6 @@ class Message:
             normalized.setdefault("tokens", metadata_dict.get("tokens") or cls._default_token_usage())
         elif part_type == "agent":
             normalized.setdefault("name", metadata_dict.get("name") or normalized.get("content") or "agent")
-        elif part_type == "subtask":
-            normalized.setdefault("prompt", metadata_dict.get("prompt") or normalized.get("content", ""))
-            normalized.setdefault("description", metadata_dict.get("description") or "")
-            normalized.setdefault("agent", metadata_dict.get("agent") or "agent")
         elif part_type == "retry":
             normalized.setdefault("attempt", metadata_dict.get("attempt") or 1)
             normalized.setdefault("error", metadata_dict.get("error") or {})
@@ -1255,7 +1247,6 @@ class Message:
             'step-start': StepStartPart,
             'step-finish': StepFinishPart,
             'agent': AgentPart,
-            'subtask': SubtaskPart,
             'retry': RetryPart,
             'compaction': CompactionPart,
         }

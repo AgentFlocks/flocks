@@ -41,9 +41,9 @@ export namespace Truncate {
     }
   }
 
-  function hasTaskTool(agent?: Agent.Info): boolean {
+  function hasDelegateTaskTool(agent?: Agent.Info): boolean {
     if (!agent?.permission) return false
-    const rule = PermissionNext.evaluate("task", "*", agent.permission)
+    const rule = PermissionNext.evaluate("delegate_task", "*", agent.permission)
     return rule.action !== "deny"
   }
 
@@ -93,8 +93,8 @@ export namespace Truncate {
     const filepath = path.join(DIR, id)
     await Bun.write(Bun.file(filepath), text)
 
-    const hint = hasTaskTool(agent)
-      ? `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
+    const hint = hasDelegateTaskTool(agent)
+      ? `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse delegate_task to have an explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
       : `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
     const message =
       direction === "head"

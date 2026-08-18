@@ -26,11 +26,11 @@ export namespace Command {
       description: z.string().optional(),
       agent: z.string().optional(),
       model: z.string().optional(),
+      subtask: z.boolean().optional(),
       mcp: z.boolean().optional(),
       // workaround for zod not supporting async functions natively so we use getters
       // https://zod.dev/v4/changelog?id=zfunction
       template: z.promise(z.string()).or(z.string()),
-      subtask: z.boolean().optional(),
       hints: z.array(z.string()),
     })
     .meta({
@@ -39,6 +39,10 @@ export namespace Command {
 
   // for some reason zod is inferring `string` for z.promise(z.string()).or(z.string()) so we have to manually override it
   export type Info = Omit<z.infer<typeof Info>, "template"> & { template: Promise<string> | string }
+
+  export function shouldDelegate(command: Pick<Info, "subtask">, agentMode: string | undefined) {
+    return (agentMode === "subagent" && command.subtask !== false) || command.subtask === true
+  }
 
   export function hints(template: string): string[] {
     const result: string[] = []
@@ -84,10 +88,10 @@ export namespace Command {
         agent: command.agent,
         model: command.model,
         description: command.description,
+        subtask: command.subtask,
         get template() {
           return command.template
         },
-        subtask: command.subtask,
         hints: hints(command.template),
       }
     }

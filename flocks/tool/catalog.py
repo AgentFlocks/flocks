@@ -37,7 +37,6 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "webfetch": ["web", "http-fetch"],
     "websearch": ["web", "research"],
     "delegate_task": ["agent", "delegation"],
-    "task": ["agent", "delegation"],
     "schedule_task": ["scheduled-task", "scheduler-management"],
     "todo": ["task-management", "progress-tracking"],
     "run_workflow": ["workflow", "execution"],

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from flocks.config.config import Config, GlobalConfig, ConfigInfo, PermissionAction, PermissionConfig
+from flocks.permission.helpers import from_config
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +152,82 @@ def test_legacy_todo_permission_names_migrate_to_todo():
     assert "todowrite" not in dumped
     assert "todoread" not in dumped
     assert dumped["bash"] == PermissionAction.ASK
+
+
+def test_legacy_task_permission_name_migrates_to_delegate_task():
+    permission = PermissionConfig.model_validate({
+        "delegate_task": "allow",
+        "task": {"explore": "deny"},
+    })
+
+    dumped = permission.model_dump(exclude_none=True)
+    assert dumped["delegate_task"] == {
+        "*": PermissionAction.ALLOW,
+        "explore": PermissionAction.DENY,
+    }
+    assert "task" not in dumped
+
+
+@pytest.mark.parametrize(
+    "raw_permission",
+    [
+        {
+            "task": {"explore": "allow", "legacy-only": "ask"},
+            "delegate_task": {"explore": "ask", "canonical-only": "allow"},
+        },
+        {
+            "delegate_task": {"explore": "ask", "canonical-only": "allow"},
+            "task": {"explore": "allow", "legacy-only": "ask"},
+        },
+    ],
+)
+def test_legacy_task_permission_merge_is_order_independent(raw_permission):
+    direct_rules = from_config(raw_permission)
+    model_rules = from_config(PermissionConfig.model_validate(raw_permission))
+
+    expected = {
+        ("delegate_task", "explore", "ask"),
+        ("delegate_task", "legacy-only", "ask"),
+        ("delegate_task", "canonical-only", "allow"),
+    }
+    assert {
+        (rule.permission, rule.pattern, rule.level.value)
+        for rule in direct_rules
+    } == expected
+    assert {
+        (rule.permission, rule.pattern, rule.level.value)
+        for rule in model_rules
+    } == expected
+
+
+def test_config_layers_preserve_legacy_permission_override_priority():
+    low_priority = ConfigInfo.model_validate({
+        "permission": {"delegate_task": "allow"},
+    })
+    high_priority = ConfigInfo.model_validate({
+        "permission": {"task": "ask"},
+    })
+
+    merged = Config.merge_config_concat_arrays(low_priority, high_priority)
+
+    assert merged.model_dump(exclude_none=True)["permission"] == {
+        "delegate_task": "ask",
+    }
+
+
+def test_config_layers_merge_scalar_and_pattern_permission_overrides():
+    low_priority = ConfigInfo.model_validate({
+        "permission": {"delegate_task": "allow"},
+    })
+    high_priority = ConfigInfo.model_validate({
+        "permission": {"task": {"explore": "ask"}},
+    })
+
+    merged = Config.merge_config_concat_arrays(low_priority, high_priority)
+
+    assert merged.model_dump(exclude_none=True)["permission"] == {
+        "delegate_task": {"*": "allow", "explore": "ask"},
+    }
 
 
 def test_legacy_todo_tool_flags_migrate_to_todo_permission():

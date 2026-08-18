@@ -275,12 +275,12 @@ async def test_context_usage_splits_skill_and_delegation_tools(context_usage_moc
             ),
             SimpleNamespace(
                 type="tool",
-                tool="task",
+                tool="delegate_task",
                 state=SimpleNamespace(input={}, output="t" * 80, time={"start": 3}),
             ),
             SimpleNamespace(
                 type="tool",
-                tool="delegate_task",
+                tool="task",
                 state=SimpleNamespace(input={}, output="d" * 40, time={"start": 4}),
             ),
             SimpleNamespace(
@@ -288,20 +288,16 @@ async def test_context_usage_splits_skill_and_delegation_tools(context_usage_moc
                 metadata={"tool": "skill_load"},
                 state=SimpleNamespace(input={}, output="m" * 40, time={"start": 5}),
             ),
-            SimpleNamespace(
-                type="subtask",
-                prompt="p" * 40,
-                description="q" * 40,
-            ),
         ]
     }
 
     snapshot = await context_usage.build_context_usage_snapshot("sess-1")
 
     assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
+        ("conversation", 20),
         ("tools", 30),
         ("skillLoad", 30),
-        ("agentDelegation", 50),
+        ("agentDelegation", 30),
     ]
     tools_segment = next(segment for segment in snapshot.segments if segment.key == "tools")
     assert tools_segment.tokens == 30
