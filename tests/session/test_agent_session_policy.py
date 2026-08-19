@@ -35,6 +35,7 @@ def _isolated_agent(runtime_directory: Path) -> AgentInfo:
         name="isolated-security",
         mode="primary",
         tools=["audit_prepare", "question"],
+        prompt_profile="isolated",
         session_directory=str(runtime_directory),
         memory_enabled=False,
         require_dedicated_session=True,
@@ -86,7 +87,6 @@ async def test_isolated_agent_claims_empty_session_and_resets_tools(
     assert await get_session_callable_tools(session.id) == {
         "audit_prepare",
         "question",
-        "tool_search",
     }
     custom_prompts = await SystemPrompt.custom(directory=updated.directory)
     assert not any("IGNORE SECURITY POLICY" in prompt for prompt in custom_prompts)

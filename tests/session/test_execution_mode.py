@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -406,6 +407,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     agent = SimpleNamespace(
+        name="rex",
         tools=[
             "read",
             "bash",
@@ -479,3 +481,46 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         "task",
         "write",
     ]
+
+
+@pytest.mark.asyncio
+async def test_isolated_agent_keeps_runtime_plan_exit(monkeypatch) -> None:
+    from flocks.session.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-isolated-plan")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(event_publish_callback=None)
+    agent = SimpleNamespace(
+        name="isolated-reviewer",
+        tools=["read"],
+        prompt_profile="isolated",
+    )
+    list_tools = AsyncMock(return_value=SimpleNamespace(
+        tool_infos=[SimpleNamespace(name="read")],
+        metadata={},
+    ))
+    monkeypatch.setattr(
+        "flocks.session.runner.list_session_callable_tool_infos",
+        list_tools,
+    )
+    monkeypatch.setattr(
+        ToolRegistry,
+        "get",
+        classmethod(
+            lambda _cls, name: (
+                SimpleNamespace(info=SimpleNamespace(name="plan_exit", enabled=True))
+                if name == "plan_exit"
+                else None
+            )
+        ),
+    )
+    messages = [SimpleNamespace(
+        role="user",
+        executionMode=SessionExecutionMode.PLAN,
+    )]
+
+    tools, _metadata = await runner._list_callable_tool_infos_for_turn(agent, messages)
+
+    assert [tool.name for tool in tools] == ["read", "plan_exit"]
+    assert list_tools.await_args.kwargs["strict_declared_tools"] is True

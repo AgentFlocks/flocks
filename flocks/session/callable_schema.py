@@ -112,15 +112,22 @@ async def list_session_callable_tool_infos(
     session_id: str,
     declared_tool_names: Optional[Iterable[str]] = None,
     *,
+    strict_declared_tools: bool = False,
     agent: str | None = None,
     step: int = 0,
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> CallableSchemaResult:
     callable_tool_names = await get_session_callable_tools(session_id)
-    always_load_names = get_always_load_tool_names() | await _resolve_dynamic_always_load_tool_names()
+    declared_names = set(declared_tool_names or [])
+    always_load_names = set()
+    if not strict_declared_tools:
+        always_load_names = (
+            get_always_load_tool_names()
+            | await _resolve_dynamic_always_load_tool_names()
+        )
 
     if not callable_tool_names:
-        base_tools = list(declared_tool_names) if declared_tool_names is not None else []
+        base_tools = list(declared_names)
         callable_tool_names = await initialize_session_callable_tools(
             session_id,
             base_tools,
@@ -128,6 +135,8 @@ async def list_session_callable_tool_infos(
         )
 
     effective_callable_names = set(callable_tool_names) | always_load_names
+    if strict_declared_tools:
+        effective_callable_names.intersection_update(declared_names)
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)
 
     projection_payload: Dict[str, Any] = {
@@ -160,11 +169,14 @@ async def list_session_callable_tool_infos(
         projection_payload["subject"] = subject.model_dump()
     tool_infos = await _apply_callable_tool_resolvers(tool_infos, projection_payload)
 
+    reported_callable_names = (
+        effective_callable_names if strict_declared_tools else set(callable_tool_names)
+    )
     metadata = {
         "enabledToolCount": enabled_count,
-        "callableToolCount": len(callable_tool_names),
+        "callableToolCount": len(reported_callable_names),
         "alwaysLoadToolCount": len(always_load_names),
-        "callableToolNames": sorted(callable_tool_names),
+        "callableToolNames": sorted(reported_callable_names),
         "alwaysLoadToolNames": sorted(always_load_names),
     }
 

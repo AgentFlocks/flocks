@@ -121,6 +121,11 @@ class AgentConfig(BaseModel):
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be called via delegate_task")
     strategy: Optional[Literal["react", "plan_and_execute", "read_only", "explore"]] = None
     tools: Optional[Dict[str, bool]] = Field(None, description="@deprecated Use 'permission'")
+    skills: Optional[List[str]] = Field(None, description="Trusted skills loaded for this agent")
+    prompt_profile: Optional[Literal["standard", "isolated"]] = Field(
+        None,
+        alias="promptProfile",
+    )
     
     @model_validator(mode='after')
     def process_agent(self):

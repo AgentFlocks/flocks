@@ -306,6 +306,109 @@ class TestBuildSystemPrompts:
         assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
 
     @pytest.mark.asyncio
+    async def test_isolated_profile_loads_only_control_agent_skill_and_environment_prompts(
+        self,
+        tmp_path: Path,
+    ):
+        skill_file = tmp_path / "SKILL.md"
+        skill_file.write_text("Always trace findings to source lines.", encoding="utf-8")
+        skill = SimpleNamespace(name="secure-review", location=str(skill_file))
+        tool_catalog_factory = MagicMock(return_value="HOST TOOL CATALOG")
+
+        with (
+            patch("flocks.skill.skill.Skill.get", AsyncMock(return_value=skill)),
+            patch("flocks.skill.skill.Skill.is_disabled", return_value=False),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-isolated",
+                session_directory=str(tmp_path),
+                agent_name="isolated-reviewer",
+                agent_prompt="Review source code only.",
+                agent_skill_names=["secure-review"],
+                prompt_profile="isolated",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+                execution_mode_prompt="PLAN CONTROL",
+                memory_bootstrap_data={"instructions": "HOST MEMORY"},
+                tool_catalog_prompt_factory=tool_catalog_factory,
+            )
+
+        combined = "\n\n".join(prompts)
+        assert get_prompt_flocks_config_guard().strip() in prompts
+        assert prompt_strings._build_tool_instructions() not in prompts
+        assert "Use only tools whose callable schemas are provided" in combined
+        assert "`tool_search`" not in combined
+        assert "PLAN CONTROL" in prompts
+        assert "Review source code only." in prompts
+        assert "## Trusted Agent Skill: secure-review" in combined
+        assert "Always trace findings to source lines." in combined
+        assert "## Environment" in combined
+        assert PROMPT_DEFAULT.strip() not in combined
+        assert "HOST MEMORY" not in combined
+        assert "HOST TOOL CATALOG" not in combined
+        assert "## Runtime Metadata" not in combined
+        tool_catalog_factory.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_configured_agent_skill_fails_closed_when_unavailable(self):
+        with patch("flocks.skill.skill.Skill.get", AsyncMock(return_value=None)):
+            with pytest.raises(ValueError, match="unavailable: missing-skill"):
+                await SessionPrompt.build_system_prompts(
+                    session_id="ses-missing-skill",
+                    session_directory="/tmp/project",
+                    agent_name="reviewer",
+                    agent_prompt="Review source code.",
+                    agent_skill_names=["missing-skill"],
+                    provider_id="anthropic",
+                    model_id="claude-sonnet",
+                )
+
+    @pytest.mark.asyncio
+    async def test_agent_skills_do_not_leak_between_agents(self, tmp_path: Path):
+        skill_files = {}
+        for name in ("skill-a", "skill-b"):
+            path = tmp_path / name / "SKILL.md"
+            path.parent.mkdir()
+            path.write_text(f"Instructions for {name} only.", encoding="utf-8")
+            skill_files[name] = SimpleNamespace(name=name, location=str(path))
+
+        async def get_skill(name: str):
+            return skill_files.get(name)
+
+        with (
+            patch("flocks.skill.skill.Skill.get", side_effect=get_skill),
+            patch("flocks.skill.skill.Skill.is_disabled", return_value=False),
+            patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=None)),
+        ):
+            prompts_a = await SessionPrompt.build_system_prompts(
+                session_id="ses-a",
+                session_directory=str(tmp_path),
+                agent_name="agent-a",
+                agent_prompt="Agent A",
+                agent_skill_names=["skill-a"],
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+            prompts_b = await SessionPrompt.build_system_prompts(
+                session_id="ses-b",
+                session_directory=str(tmp_path),
+                agent_name="agent-b",
+                agent_prompt="Agent B",
+                agent_skill_names=["skill-b"],
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        combined_a = "\n".join(prompts_a)
+        combined_b = "\n".join(prompts_b)
+        assert "Instructions for skill-a only." in combined_a
+        assert "Instructions for skill-b only." not in combined_a
+        assert "Instructions for skill-b only." in combined_b
+        assert "Instructions for skill-a only." not in combined_b
+        assert PROMPT_DEFAULT.strip() in combined_a
+        assert PROMPT_DEFAULT.strip() in combined_b
+
+    @pytest.mark.asyncio
     async def test_evolution_subagent_child_uses_full_prompt(self):
         agent = AgentInfo(
             name="self-improve",

@@ -127,6 +127,7 @@ def test_agents_are_static_hidden_and_non_delegatable() -> None:
     coordinator = Agent._custom_agents["code-security"]
     threat_modeler = Agent._custom_agents["code-security-threat-modeler"]
     baseline = Agent._custom_agents["code-security-baseline"]
+    verifier = Agent._custom_agents["code-security-verifier"]
 
     assert coordinator.mode == "primary"
     assert coordinator.hidden is False
@@ -134,11 +135,13 @@ def test_agents_are_static_hidden_and_non_delegatable() -> None:
     assert coordinator.prompt_builder is None
     assert coordinator.memory_enabled is False
     assert coordinator.require_dedicated_session is True
+    assert coordinator.prompt_profile == "isolated"
     assert coordinator.session_directory
     assert coordinator.tools == AGENT_TOOLS["code-security"]
     assert threat_modeler.hidden is True
     assert threat_modeler.delegatable is False
     assert threat_modeler.require_dedicated_session is True
+    assert threat_modeler.prompt_profile == "isolated"
     assert threat_modeler.tools == AGENT_TOOLS["code-security-threat-modeler"]
     assert "audit_submit_threat_model" in threat_modeler.tools
     assert baseline.hidden is True
@@ -148,6 +151,8 @@ def test_agents_are_static_hidden_and_non_delegatable() -> None:
     assert "delegate_task" not in baseline.tools
     assert "audit_threat_model_context" in baseline.tools
     assert baseline.memory_enabled is False
+    assert baseline.prompt_profile == "isolated"
+    assert verifier.prompt_profile == "isolated"
     assert "code-security-investigator" not in Agent._custom_agents
 
 

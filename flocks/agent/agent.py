@@ -136,6 +136,17 @@ class AgentInfo(BaseModel):
     # Concrete callable tool names resolved from agent.yaml.
     tools: Optional[List[str]] = Field(default=None)
 
+    # Trusted skills loaded into this agent's system prompt at runtime.
+    skills: List[str] = Field(default_factory=list)
+
+    # "isolated" omits host identity/workspace/memory context and exposes only
+    # explicitly declared tools. Session history isolation remains controlled
+    # separately by require_dedicated_session.
+    prompt_profile: Literal["standard", "isolated"] = Field(
+        default="standard",
+        alias="promptProfile",
+    )
+
     model: Optional[AgentModel] = None
     prompt: Optional[str] = None
     options: Dict[str, Any] = Field(default_factory=dict)

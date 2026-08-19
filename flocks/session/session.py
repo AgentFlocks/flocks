@@ -578,10 +578,15 @@ class Session:
             agent_info = await Agent.get(session.agent or "")
             declared_tools = getattr(agent_info, "tools", None) if agent_info is not None else None
             base_tools = list(declared_tools) if isinstance(declared_tools, (list, tuple, set)) else []
+            isolated_profile = (
+                getattr(agent_info, "prompt_profile", "standard") == "isolated"
+            )
             await initialize_session_callable_tools(
                 session.id,
                 base_tools,
-                always_load_tool_names=get_always_load_tool_names(),
+                always_load_tool_names=(
+                    set() if isolated_profile else get_always_load_tool_names()
+                ),
             )
         except Exception as e:
             log.warn("session.callable_tools.init_error", {"id": session.id, "error": str(e)})

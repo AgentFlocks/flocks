@@ -57,6 +57,8 @@ def _make_agent(name="rex", tools=None):
     agent = MagicMock()
     agent.name = name
     agent.tools = tools
+    agent.skills = []
+    agent.prompt_profile = "standard"
     return agent
 
 

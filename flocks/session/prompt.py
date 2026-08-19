@@ -952,6 +952,21 @@ class SessionPrompt:
         )
 
     @classmethod
+    def _build_isolated_tool_guidance_prompt(
+        cls,
+        use_text_tool_call_mode: bool = False,
+    ) -> str:
+        """Build tool guidance that never references undeclared helper tools."""
+        if use_text_tool_call_mode:
+            return prompt_strings._build_minimax_tool_instructions()
+        return """## Tool Calling Rules
+
+Use only tools whose callable schemas are provided for this turn.
+Treat every schema as strict: copy tool and parameter names exactly, omit unknown parameters, and never call an unavailable tool.
+Invoke tools only through the native API tool-calling mechanism; never print tool-call JSON or XML as response text.
+Do not repeat an identical tool call in the same response."""
+
+    @classmethod
     def _build_memory_guidance_prompt(
         cls,
         prompt_tool_names: Iterable[str],
@@ -1100,6 +1115,34 @@ class SessionPrompt:
         ])
 
     @classmethod
+    async def _build_agent_skills_prompt(
+        cls,
+        skill_names: Iterable[str],
+    ) -> str:
+        """Load host-selected Agent skills as trusted system instructions."""
+        from flocks.skill.skill import Skill
+
+        names = list(dict.fromkeys(
+            str(name).strip() for name in skill_names if str(name).strip()
+        ))
+        sections: List[str] = []
+        for name in names:
+            skill = await Skill.get(name)
+            if skill is None or Skill.is_disabled(name):
+                raise ValueError(f"Configured Agent skill is unavailable: {name}")
+            try:
+                content = Path(skill.location).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ValueError(f"Failed to load configured Agent skill {name}: {exc}") from exc
+            if content:
+                sections.append("\n".join([
+                    f"## Trusted Agent Skill: {name}",
+                    f"Base directory: {Path(skill.location).parent}",
+                    content,
+                ]))
+        return cls._join_prompt_parts(sections)
+
+    @classmethod
     async def _is_builtin_system_subagent_session(
         cls,
         *,
@@ -1146,11 +1189,36 @@ class SessionPrompt:
         *,
         session_directory: Optional[str],
         agent_prompt: Optional[str],
+        agent_skills_prompt: str = "",
     ) -> List[str]:
         """Build minimal system prompts for built-in system subagents."""
         prompts = [
             get_prompt_flocks_config_guard().strip(),
             cls._normalize_prompt_text(agent_prompt),
+            agent_skills_prompt,
+            cls._build_minimal_environment(session_directory),
+        ]
+        return [prompt for prompt in prompts if prompt]
+
+    @classmethod
+    async def _build_isolated_prompts(
+        cls,
+        *,
+        session_directory: Optional[str],
+        agent_prompt: Optional[str],
+        agent_skills_prompt: str,
+        execution_mode_prompt: Optional[str],
+        use_text_tool_call_mode: bool,
+    ) -> List[str]:
+        """Build prompts without host identity, workspace, memory, or runtime context."""
+        prompts = [
+            get_prompt_flocks_config_guard().strip(),
+            cls._build_isolated_tool_guidance_prompt(
+                use_text_tool_call_mode=use_text_tool_call_mode,
+            ),
+            cls._normalize_prompt_text(agent_prompt),
+            agent_skills_prompt,
+            cls._normalize_prompt_text(execution_mode_prompt),
             cls._build_minimal_environment(session_directory),
         ]
         return [prompt for prompt in prompts if prompt]
@@ -1163,6 +1231,8 @@ class SessionPrompt:
         session_directory: Optional[str],
         agent_name: str,
         agent_prompt: Optional[str],
+        agent_skill_names: Iterable[str] = (),
+        prompt_profile: str = "standard",
         provider_id: str,
         model_id: str,
         execution_mode_prompt: Optional[str] = None,
@@ -1186,6 +1256,30 @@ class SessionPrompt:
         layers.
         """
         vcs = "git" if session_directory else None
+        normalized_agent_skill_names = tuple(dict.fromkeys(
+            str(name).strip()
+            for name in agent_skill_names
+            if str(name).strip()
+        ))
+        agent_skills_prompt = await cls._build_agent_skills_prompt(
+            normalized_agent_skill_names,
+        )
+        if prompt_profile == "isolated":
+            prompts = await cls._build_isolated_prompts(
+                session_directory=session_directory,
+                agent_prompt=agent_prompt,
+                agent_skills_prompt=agent_skills_prompt,
+                execution_mode_prompt=execution_mode_prompt,
+                use_text_tool_call_mode=use_text_tool_call_mode,
+            )
+            cls._print_system_prompts_for_debug(
+                session_id=session_id,
+                agent_name=agent_name,
+                provider_id=provider_id,
+                model_id=model_id,
+                prompts=prompts,
+            )
+            return prompts
         if await cls._is_builtin_system_subagent_session(
             session_id=session_id,
             agent_name=agent_name,
@@ -1193,6 +1287,7 @@ class SessionPrompt:
             prompts = await cls._build_subagent_minimal_prompts(
                 session_directory=session_directory,
                 agent_prompt=agent_prompt,
+                agent_skills_prompt=agent_skills_prompt,
             )
             cls._print_system_prompts_for_debug(
                 session_id=session_id,
@@ -1260,6 +1355,17 @@ class SessionPrompt:
                 cache_scope="agent",
                 digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
                 builder=lambda: cls._normalize_prompt_text(agent_prompt),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="agent_skills",
+                cache_scope="agent",
+                digest_inputs={
+                    "agent_name": agent_name,
+                    "skill_names": normalized_agent_skill_names,
+                    "skill_prompt": agent_skills_prompt,
+                },
+                builder=lambda: agent_skills_prompt,
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

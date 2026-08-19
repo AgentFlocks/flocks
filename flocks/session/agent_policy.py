@@ -98,6 +98,10 @@ async def prepare_session_for_agent(
     await initialize_session_callable_tools(
         updated.id,
         agent.tools or [],
-        always_load_tool_names=get_always_load_tool_names(),
+        always_load_tool_names=(
+            set()
+            if agent.prompt_profile == "isolated"
+            else get_always_load_tool_names()
+        ),
     )
     return updated

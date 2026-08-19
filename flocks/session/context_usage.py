@@ -314,6 +314,12 @@ async def _estimate_system_prompt_tokens(
             session_directory=getattr(session, "directory", None) if session is not None else None,
             agent_name=getattr(agent, "name", agent_name) if agent is not None else agent_name,
             agent_prompt=getattr(agent, "prompt", None) if agent is not None else None,
+            agent_skill_names=getattr(agent, "skills", ()) if agent is not None else (),
+            prompt_profile=(
+                getattr(agent, "prompt_profile", "standard")
+                if agent is not None
+                else "standard"
+            ),
             provider_id=provider_id,
             model_id=model_id,
             prompt_tool_names=prompt_tool_names,

@@ -130,7 +130,7 @@ def agent_to_response(
         options=agent.options,
         delegatable=delegatable,
         steps=agent.steps,
-        skills=skills or [],
+        skills=list(agent.skills if skills is None else skills),
         tools=tools or [],
         tags=agent.tags,
     )
@@ -162,6 +162,8 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         native=False,
         hidden=False,
         delegatable=delegatable,
+        skills=agent_data.get("skills", []),
+        tools=agent_data.get("tools", []),
     )
 
 
@@ -208,22 +210,6 @@ def _load_delegatable_overrides() -> Dict[str, bool]:
     return delegatable_settings.load_overrides()
 
 
-async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str]]:
-    """Load skills/tools list for an agent from storage.
-
-    Works for both full Storage-based custom agents and YAML agents with
-    a skills/tools overlay (written by the YAML update path).
-    """
-    from flocks.storage.storage import Storage
-    try:
-        data = await Storage.read(f"agent/custom/{name}")
-        if not isinstance(data, dict):
-            return [], []
-        return data.get("skills", []), data.get("tools", [])
-    except Exception:
-        return [], []
-
-
 def _get_all_tool_names() -> List[str]:
     """Return all registered tool names, initialising ToolRegistry if needed."""
     from flocks.tool.registry import ToolRegistry
@@ -256,9 +242,8 @@ async def _build_single_agent_response(
     """Build AgentResponse for one agent, resolving model overrides and tools/skills."""
     if agent.native:
         tools = _compute_native_agent_tools(agent, all_tool_names)
-        skills: List[str] = []
     else:
-        skills, tools = await _load_custom_agent_extras(agent.name)
+        tools = list(agent.tools or [])
     override = overrides.get(agent.name, {})
     model_override = {k: override[k] for k in ("modelID", "providerID") if k in override} or None
     temperature_override = override.get("temperature")
@@ -267,7 +252,7 @@ async def _build_single_agent_response(
         model_override=model_override,
         temperature_override=temperature_override,
         delegatable_override=delegatable_overrides.get(agent.name),
-        skills=skills,
+        skills=list(agent.skills),
         tools=tools,
     )
 
@@ -501,20 +486,13 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 updates["model"] = req.model.model_dump()
             if req.delegatable is not None:
                 updates["delegatable"] = req.delegatable
+            if req.skills is not None:
+                updates["skills"] = req.skills
+            if req.tools is not None:
+                updates["tools"] = req.tools
 
             if not update_yaml_agent(name, updates):
                 raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
-
-            # Persist skills/tools overlay for YAML agents in Storage.
-            # The entry intentionally omits "name" so it is not mistaken
-            # for a full Storage-based custom agent on subsequent updates.
-            if req.skills is not None or req.tools is not None:
-                extras: Dict[str, Any] = agent_data if isinstance(agent_data, dict) else {}
-                if req.skills is not None:
-                    extras["skills"] = req.skills
-                if req.tools is not None:
-                    extras["tools"] = req.tools
-                await Storage.write(agent_key, extras)
 
             # Sync: apply updates to the in-memory AgentInfo cache
             agent = await Agent.get(name)
@@ -538,6 +516,10 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                     )
                 if req.delegatable is not None:
                     agent.delegatable = req.delegatable
+                if req.skills is not None:
+                    agent.skills = list(req.skills)
+                if req.tools is not None:
+                    agent.tools = list(req.tools)
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
                 all_tool_names = await _get_all_tool_names_async()

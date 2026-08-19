@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import status
@@ -155,6 +156,21 @@ class TestAgentCreate:
         assert get_resp.json()["name"] == "test-agent"
 
     @pytest.mark.asyncio
+    async def test_created_agent_skills_are_available_to_runtime(self, client: AsyncClient):
+        from flocks.agent.registry import Agent
+
+        resp = await client.post(
+            "/api/agent",
+            json={**_AGENT_PAYLOAD, "skills": ["secure-review"]},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["skills"] == ["secure-review"]
+        agent = await Agent.get("test-agent")
+        assert agent is not None
+        assert agent.skills == ["secure-review"]
+
+    @pytest.mark.asyncio
     async def test_created_agent_survives_registry_reload(self, client: AsyncClient):
         """Storage-backed custom agents remain visible after process cache reload."""
         from flocks.agent.registry import Agent
@@ -197,6 +213,49 @@ class TestAgentUpdate:
         resp = await client.put("/api/agent/test-agent", json=updated)
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["description"] == "Updated description"
+
+    @pytest.mark.asyncio
+    async def test_yaml_agent_writes_skills_and_tools_to_yaml(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        from flocks.agent.agent import AgentInfo
+        from flocks.agent.registry import Agent
+        from flocks.server.routes import agent as agent_routes
+        from flocks.storage.storage import Storage
+
+        runtime_agent = AgentInfo(
+            name="yaml-agent",
+            native=False,
+            skills=["old-skill"],
+            tools=["old-tool"],
+        )
+        update_yaml = MagicMock(return_value=True)
+        storage_write = AsyncMock()
+        monkeypatch.setattr(Storage, "read", AsyncMock(return_value=None))
+        monkeypatch.setattr(Storage, "write", storage_write)
+        monkeypatch.setattr(agent_routes, "find_yaml_agent", lambda _name: tmp_path / "agent.yaml")
+        monkeypatch.setattr(agent_routes, "update_yaml_agent", update_yaml)
+        monkeypatch.setattr(Agent, "get", AsyncMock(return_value=runtime_agent))
+        monkeypatch.setattr(agent_routes, "_load_model_overrides", AsyncMock(return_value={}))
+        monkeypatch.setattr(agent_routes, "_load_delegatable_overrides", lambda: {})
+        monkeypatch.setattr(agent_routes, "_get_all_tool_names_async", AsyncMock(return_value=[]))
+
+        response = await agent_routes.update_agent(
+            "yaml-agent",
+            agent_routes.AgentUpdateRequest(skills=[], tools=[]),
+        )
+
+        update_yaml.assert_called_once_with(
+            "yaml-agent",
+            {"skills": [], "tools": []},
+        )
+        storage_write.assert_not_awaited()
+        assert runtime_agent.skills == []
+        assert runtime_agent.tools == []
+        assert response.skills == []
+        assert response.tools == []
 
     @pytest.mark.asyncio
     async def test_update_nonexistent_agent_returns_404(self, client: AsyncClient):

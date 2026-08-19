@@ -595,9 +595,11 @@ class SessionRunner:
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
         execution_mode = self._execution_mode_from_messages(messages)
+        isolated_profile = getattr(agent, "prompt_profile", "standard") == "isolated"
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=getattr(agent, "tools", None),
+            strict_declared_tools=isolated_profile,
             agent=agent.name,
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
@@ -1536,6 +1538,8 @@ class SessionRunner:
             session_directory=self.session.directory,
             agent_name=agent.name,
             agent_prompt=getattr(agent, "prompt", None),
+            agent_skill_names=getattr(agent, "skills", ()) or (),
+            prompt_profile=getattr(agent, "prompt_profile", "standard"),
             provider_id=self.provider_id,
             model_id=self.model_id,
             execution_mode_prompt=execution_mode_prompt(
@@ -1558,7 +1562,13 @@ class SessionRunner:
 
         await self._run_session_start_hook(agent)
 
-        if self._turn_additional_context:
+        # UserPromptBefore context is optional host context and is excluded by
+        # isolated prompt assembly. LLM_BEFORE/AFTER hooks remain trusted host
+        # controls for request policy and redaction.
+        if (
+            self._turn_additional_context
+            and getattr(agent, "prompt_profile", "standard") != "isolated"
+        ):
             system_prompts.append(self._turn_additional_context)
 
         if self._should_use_text_tool_call_mode() and tools:

@@ -173,6 +173,11 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
         hidden=agent_data.get("hidden", False),
         delegatable=agent_data.get("delegatable"),
         tools=agent_data.get("tools", []),
+        skills=agent_data.get("skills", []),
+        prompt_profile=agent_data.get(
+            "prompt_profile",
+            agent_data.get("promptProfile", "standard"),
+        ),
         tags=agent_data.get("tags", []),
     )
 
@@ -406,6 +411,10 @@ class Agent:
                     item.steps = value.steps
                 if value.delegatable is not None:
                     item.delegatable = value.delegatable
+                if value.skills is not None:
+                    item.skills = list(value.skills)
+                if value.prompt_profile is not None:
+                    item.prompt_profile = value.prompt_profile
                 item.options.update(value.options)
                 if value.permission:
                     item.permission = merge(item.permission, from_config(value.permission), cli_overrides)

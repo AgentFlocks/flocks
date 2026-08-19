@@ -195,6 +195,21 @@ class TestLoadAgent:
         assert agent is not None
         assert agent.tools == []
 
+    def test_loads_agent_skills_and_isolated_prompt_profile(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: isolated
+            skills:
+              - secure-review
+              - framework-guide
+            prompt_profile: isolated
+        """)
+
+        agent = load_agent(agent_dir)
+
+        assert agent is not None
+        assert agent.skills == ["secure-review", "framework-guide"]
+        assert agent.prompt_profile == "isolated"
+
     def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
