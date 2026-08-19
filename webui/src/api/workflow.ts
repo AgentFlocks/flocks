@@ -389,6 +389,8 @@ export interface KafkaConfig {
   inputGroupId?: string;
   inputKey?: string;
   autoOffsetReset?: string;
+  batchMaxRecords?: number;
+  batchWaitMs?: number;
   inputs?: Record<string, any>;
   updatedAt?: number;
 }
@@ -403,6 +405,10 @@ export interface KafkaConsumerStatus {
   queueSize?: number;
   queueCapacity?: number;
   workerCount?: number;
+  batchMaxRecords?: number;
+  batchWaitMs?: number;
+  lastBatchSize?: number;
+  processedRecords?: number;
 }
 
 export interface WorkflowPollerConfig {
@@ -578,6 +584,8 @@ export const workflowAPI = {
     inputGroupId?: string;
     inputKey?: string;
     autoOffsetReset?: string;
+    batchMaxRecords?: number;
+    batchWaitMs?: number;
     inputs?: Record<string, any>;
   }) =>
     client.post<{ ok: boolean; consumer?: KafkaConsumerStatus }>(

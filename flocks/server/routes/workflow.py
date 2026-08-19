@@ -2703,6 +2703,8 @@ class KafkaConfigRequest(BaseModel):
     inputGroupId: Optional[str] = None
     inputKey: str = "kafka_message"
     autoOffsetReset: str = "latest"
+    batchMaxRecords: int = Field(1, ge=1, le=1000)
+    batchWaitMs: int = Field(0, ge=0, le=60_000)
     inputs: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -3401,6 +3403,8 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
             "inputGroupId": req.inputGroupId,
             "inputKey": req.inputKey,
             "autoOffsetReset": req.autoOffsetReset,
+            "batchMaxRecords": req.batchMaxRecords,
+            "batchWaitMs": req.batchWaitMs,
             "inputs": _strip_execution_only_comments(req.inputs),
             "updatedAt": int(time.time() * 1000),
         }
@@ -3415,6 +3419,8 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
                     "inputTopic": req.inputTopic or "",
                     "inputGroupId": req.inputGroupId or "",
                     "autoOffsetReset": req.autoOffsetReset,
+                    "batchMaxRecords": req.batchMaxRecords,
+                    "batchWaitMs": req.batchWaitMs,
                 },
                 "mapping": {
                     req.inputKey or "kafka_message": "$.body",

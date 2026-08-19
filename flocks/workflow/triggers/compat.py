@@ -70,6 +70,8 @@ def legacy_kafka_trigger_from_config(config: Optional[Dict[str, Any]]) -> Option
                 "inputTopic": config.get("inputTopic") or "",
                 "inputGroupId": config.get("inputGroupId") or "",
                 "autoOffsetReset": config.get("autoOffsetReset") or "latest",
+                "batchMaxRecords": config.get("batchMaxRecords") or 1,
+                "batchWaitMs": config.get("batchWaitMs") or 0,
             },
             "mapping": {
                 str(config.get("inputKey") or "kafka_message"): "$.body",
@@ -124,6 +126,8 @@ def kafka_trigger_to_legacy_config(workflow_id: str, trigger: TriggerDefinition)
         "inputGroupId": source.get("inputGroupId") or "",
         "inputKey": input_key,
         "autoOffsetReset": source.get("autoOffsetReset") or "latest",
+        "batchMaxRecords": source.get("batchMaxRecords") or 1,
+        "batchWaitMs": source.get("batchWaitMs") or 0,
         "inputs": dict(trigger.inputs or {}),
         "updatedAt": trigger.updatedAt,
     }

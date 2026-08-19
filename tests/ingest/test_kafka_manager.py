@@ -25,6 +25,10 @@ import pytest
 
 from flocks.ingest.kafka import manager as kafka_manager
 from flocks.workflow import execution_store
+from flocks.workflow.triggers.compat import (
+    kafka_trigger_to_legacy_config,
+    legacy_kafka_trigger_from_config,
+)
 from flocks.workflow.triggers.models import TriggerDefinition
 
 
@@ -221,6 +225,275 @@ async def test_worker_decodes_queued_raw_message(monkeypatch: pytest.MonkeyPatch
     await asyncio.wait_for(worker, timeout=1.0)
 
     assert captured == [{"ok": True}]
+
+
+@pytest.mark.asyncio
+async def test_worker_decodes_batch_as_plain_payload_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch delivery must stay invisible to a batch-aware workflow."""
+
+    manager = kafka_manager.KafkaManager()
+    workflow_id = "test-wf-batch-queue"
+    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+    abort = asyncio.Event()
+    completed = asyncio.get_running_loop().create_future()
+    captured: list[list[dict]] = []
+    trigger = TriggerDefinition.model_validate(
+        {"id": "kafka-default", "type": "kafka", "mapping": {"kafka_message": "$.body"}}
+    )
+
+    async def _fake_trigger(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        captured.append(args[2])
+        abort.set()
+        return True
+
+    monkeypatch.setattr(manager, "_trigger_workflow", _fake_trigger)
+    queue.put_nowait(
+        kafka_manager._QueuedKafkaBatch(  # noqa: SLF001
+            records=(
+                kafka_manager._QueuedKafkaRecord(  # noqa: SLF001
+                    topic="topic-a",
+                    partition=0,
+                    offset=4,
+                    timestamp=1000,
+                    key=None,
+                    raw_value=b'{"id": 1}',
+                    size_bytes=len(b'{"id": 1}'),
+                ),
+                kafka_manager._QueuedKafkaRecord(  # noqa: SLF001
+                    topic="topic-a",
+                    partition=0,
+                    offset=5,
+                    timestamp=1001,
+                    key=None,
+                    raw_value=b'{"id": 2}',
+                    size_bytes=len(b'{"id": 2}'),
+                ),
+            ),
+            completed=completed,
+        )
+    )
+
+    worker = asyncio.create_task(
+        manager._worker_loop(workflow_id, {}, trigger, {}, queue, abort, "topic-a"),
+        name="test-worker-batch-queue",
+    )
+    await asyncio.wait_for(worker, timeout=1.0)
+
+    assert captured == [[{"id": 1}, {"id": 2}]]
+    assert completed.result() is True
+
+
+@pytest.mark.asyncio
+async def test_consumer_batch_commits_offsets_only_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An enabled micro-batch must commit each partition after workflow success."""
+
+    manager = kafka_manager.KafkaManager()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    abort = asyncio.Event()
+    ready = asyncio.Event()
+    topic_partition = ("topic-a", 0)
+    consumer_instances = []
+
+    class _Consumer:
+        def __init__(self, *topics, **kwargs):  # noqa: ANN002, ANN003
+            self.kwargs = kwargs
+            self.commits = []
+            self.getmany_calls = []
+            self.stopped = False
+            consumer_instances.append(self)
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        async def getmany(self, *, timeout_ms: int, max_records: int):
+            self.getmany_calls.append((timeout_ms, max_records))
+            if len(self.getmany_calls) == 1:
+                return {
+                    topic_partition: [
+                        SimpleNamespace(
+                            topic="topic-a",
+                            partition=0,
+                            offset=10,
+                            timestamp=1000,
+                            key=None,
+                            value=b'{"id": 1}',
+                        ),
+                    ]
+                }
+            if len(self.getmany_calls) == 2:
+                return {
+                    topic_partition: [
+                        SimpleNamespace(
+                            topic="topic-a",
+                            partition=0,
+                            offset=11,
+                            timestamp=1001,
+                            key=None,
+                            value=b'{"id": 2}',
+                        ),
+                    ]
+                }
+            return {}
+
+        async def commit(self, offsets) -> None:  # noqa: ANN001
+            self.commits.append(offsets)
+
+    monkeypatch.setitem(sys.modules, "aiokafka", SimpleNamespace(AIOKafkaConsumer=_Consumer))
+
+    consumer_task = asyncio.create_task(
+        manager._consumer_loop(  # noqa: SLF001
+            "wf-batch",
+            "localhost:9092",
+            "topic-a",
+            "group-a",
+            "latest",
+            queue,
+            abort,
+            ready,
+            batch_max_records=16,
+            batch_wait_ms=100,
+        )
+    )
+
+    await asyncio.wait_for(ready.wait(), timeout=1.0)
+    batch = await asyncio.wait_for(queue.get(), timeout=1.0)
+    assert isinstance(batch, kafka_manager._QueuedKafkaBatch)  # noqa: SLF001
+    assert consumer_instances[0].commits == []
+
+    batch.completed.set_result(True)
+    abort.set()
+    await asyncio.wait_for(consumer_task, timeout=1.0)
+
+    consumer = consumer_instances[0]
+    assert consumer.kwargs["enable_auto_commit"] is False
+    assert 0 < consumer.getmany_calls[0][0] <= 100
+    assert consumer.getmany_calls[0][1] == 16
+    assert consumer.getmany_calls[1][1] == 15
+    assert consumer.getmany_calls[2][1] == 14
+    assert consumer.commits == [{topic_partition: 12}]
+    assert consumer.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_consumer_batch_failure_does_not_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed micro-batch must stop without advancing committed offsets."""
+
+    manager = kafka_manager.KafkaManager()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    abort = asyncio.Event()
+    ready = asyncio.Event()
+    consumer_instances = []
+
+    class _Consumer:
+        def __init__(self, *topics, **kwargs):  # noqa: ANN002, ANN003
+            self.commits = []
+            consumer_instances.append(self)
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        async def getmany(self, *, timeout_ms: int, max_records: int):
+            return {
+                ("topic-a", 0): [
+                    SimpleNamespace(
+                        topic="topic-a",
+                        partition=0,
+                        offset=20,
+                        timestamp=None,
+                        key=None,
+                        value=b'{"id": 1}',
+                    )
+                ]
+            }
+
+        async def commit(self, offsets) -> None:  # noqa: ANN001
+            self.commits.append(offsets)
+
+    monkeypatch.setitem(sys.modules, "aiokafka", SimpleNamespace(AIOKafkaConsumer=_Consumer))
+
+    consumer_task = asyncio.create_task(
+        manager._consumer_loop(  # noqa: SLF001
+            "wf-batch-failure",
+            "localhost:9092",
+            "topic-a",
+            "group-a",
+            "latest",
+            queue,
+            abort,
+            ready,
+            batch_max_records=8,
+            batch_wait_ms=50,
+        )
+    )
+
+    await asyncio.wait_for(ready.wait(), timeout=1.0)
+    batch = await asyncio.wait_for(queue.get(), timeout=1.0)
+    batch.completed.set_result(False)
+    await asyncio.wait_for(consumer_task, timeout=1.0)
+
+    assert consumer_instances[0].commits == []
+    assert manager.get_consumer_status("wf-batch-failure")["state"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_consumer_without_batch_config_keeps_legacy_auto_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing batch settings must retain the existing single-record path."""
+
+    manager = kafka_manager.KafkaManager()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    abort = asyncio.Event()
+    ready = asyncio.Event()
+    consumer_instances = []
+
+    class _Consumer:
+        def __init__(self, *topics, **kwargs):  # noqa: ANN002, ANN003
+            self.kwargs = kwargs
+            self.stopped = False
+            consumer_instances.append(self)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setitem(sys.modules, "aiokafka", SimpleNamespace(AIOKafkaConsumer=_Consumer))
+
+    await manager._consumer_loop(  # noqa: SLF001
+        "wf-single",
+        "localhost:9092",
+        "topic-a",
+        "group-a",
+        "latest",
+        queue,
+        abort,
+        ready,
+    )
+
+    consumer = consumer_instances[0]
+    assert consumer.kwargs["enable_auto_commit"] is True
+    assert consumer.kwargs["max_poll_records"] == kafka_manager._MAX_POLL_RECORDS  # noqa: SLF001
+    assert consumer.stopped is True
 
 
 def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
@@ -538,6 +811,29 @@ def test_decode_message_variants() -> None:
     assert kafka_manager._decode_message(b"\xff\xfe") == "fffe"
 
 
+def test_kafka_batch_config_survives_legacy_trigger_round_trip() -> None:
+    config = {
+        "workflowId": "wf-batch",
+        "enabled": True,
+        "inputBroker": "broker:9092",
+        "inputTopic": "alerts",
+        "inputGroupId": "flocks-alerts",
+        "inputKey": "kafka_message",
+        "autoOffsetReset": "earliest",
+        "batchMaxRecords": 64,
+        "batchWaitMs": 250,
+    }
+
+    trigger = legacy_kafka_trigger_from_config(config)
+
+    assert trigger is not None
+    assert trigger.source["batchMaxRecords"] == 64
+    assert trigger.source["batchWaitMs"] == 250
+    restored = kafka_trigger_to_legacy_config("wf-batch", trigger)
+    assert restored["batchMaxRecords"] == 64
+    assert restored["batchWaitMs"] == 250
+
+
 @pytest.mark.asyncio
 async def test_trigger_workflow_compacts_kafka_execution_record(
     monkeypatch: pytest.MonkeyPatch,
@@ -599,13 +895,14 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
     monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
 
-    await manager._trigger_workflow(
+    succeeded = await manager._trigger_workflow(
         "wf-compact",
         {"start": "receive_alert", "nodes": [], "edges": []},
         {"alarmData": "x" * 50_000},
         "kafka_message",
     )
 
+    assert succeeded is True
     assert captured_input_params["kafka_message"]["alarmData"]["_type"] == "string"
     assert captured_input_params["kafka_message"]["alarmData"]["chars"] == 50_000
     assert captured_run_kwargs["run_id"] == "exec-compact"
@@ -657,7 +954,7 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
     monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
 
-    await manager._trigger_workflow(
+    succeeded = await manager._trigger_workflow(
         "wf-merge",
         {"start": "receive_alert", "nodes": [], "edges": []},
         {"alarmData": {"id": 1}},
@@ -670,6 +967,7 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
         },
     )
 
+    assert succeeded is True
     assert captured_run_kwargs["inputs"]["kafka_message"] == {"alarmData": {"id": 1}}
     assert captured_run_kwargs["inputs"]["kafka_output_enabled"] is True
     assert captured_run_kwargs["inputs"]["kafka_output_topic"] == "topic_soc_flocks_result_log"
@@ -725,7 +1023,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         }
     )
 
-    await manager._trigger_workflow(
+    succeeded = await manager._trigger_workflow(
         "wf-orders",
         {"start": "receive_alert", "nodes": [], "edges": []},
         {"order": {"id": 7, "region": "cn"}},
@@ -734,6 +1032,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         source="orders-topic",
     )
 
+    assert succeeded is True
     assert captured_run_kwargs["inputs"]["order_id"] == 7
     assert captured_run_kwargs["inputs"]["region"] == "cn"
     assert captured_run_kwargs["inputs"]["pipeline"] == "orders"
@@ -747,7 +1046,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert recorded_exec_data["triggerSource"] == "orders-topic"
 
     captured_run_kwargs.clear()
-    await manager._trigger_workflow(
+    filtered = await manager._trigger_workflow(
         "wf-orders",
         {"start": "receive_alert", "nodes": [], "edges": []},
         {"order": {"id": 8, "region": "us"}},
@@ -755,4 +1054,41 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         trigger=trigger,
         source="orders-topic",
     )
+    assert filtered is True
     assert captured_run_kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_trigger_workflow_reports_failed_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = kafka_manager.KafkaManager()
+
+    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
+        return {"id": "exec-failed", "workflowId": workflow_id, "inputParams": input_params}
+
+    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
+        return None
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        return SimpleNamespace(
+            status="FAILED",
+            error="workflow failed",
+            outputs={},
+            history=[],
+            last_node_id="receive_alert",
+            steps=1,
+        )
+
+    monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+
+    succeeded = await manager._trigger_workflow(
+        "wf-failed",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        [{"id": 1}],
+        "kafka_message",
+    )
+
+    assert succeeded is False

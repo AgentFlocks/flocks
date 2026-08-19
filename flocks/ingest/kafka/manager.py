@@ -12,9 +12,9 @@ Differences from the syslog manager:
   is surfaced the same way a bind failure is.
 * Backpressure uses a *blocking* ``queue.put`` instead of ``put_nowait``+drop:
   this avoids local drops while the worker pool falls behind and lets the
-  consumer pause naturally. Because ``aiokafka`` auto-commits fetched offsets,
-  the current crash semantics are still best-effort / at-most-once rather than
-  fully durable at-least-once delivery.
+  consumer pause naturally. Legacy single-record mode keeps auto-commit for
+  compatibility; opt-in micro-batch mode commits offsets only after a successful
+  workflow run and therefore provides at-least-once batch delivery.
 """
 
 from __future__ import annotations
@@ -82,6 +82,10 @@ _REQUEST_TIMEOUT_MS = 5000
 _FETCH_MAX_BYTES = 8 * 1024 * 1024
 _MAX_PARTITION_FETCH_BYTES = 4 * 1024 * 1024
 _MAX_POLL_RECORDS = 16
+_DEFAULT_BATCH_MAX_RECORDS = 1
+_DEFAULT_BATCH_WAIT_MS = 100
+_MAX_BATCH_RECORDS = 1000
+_MAX_BATCH_WAIT_MS = 60_000
 
 
 def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
@@ -109,6 +113,52 @@ class _QueuedKafkaMessage:
 
     raw_value: Optional[bytes]
     size_bytes: int
+
+
+@dataclass(frozen=True)
+class _QueuedKafkaRecord:
+    """Kafka record metadata retained until its workflow batch is complete."""
+
+    topic: str
+    partition: int
+    offset: int
+    timestamp: Optional[int]
+    key: Optional[bytes]
+    raw_value: Optional[bytes]
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class _QueuedKafkaBatch:
+    """Opt-in micro-batch acknowledged by a worker after workflow execution."""
+
+    records: tuple[_QueuedKafkaRecord, ...]
+    completed: asyncio.Future
+
+
+def _batch_settings(data: Dict[str, Any], trigger: TriggerDefinition) -> tuple[int, int]:
+    """Resolve opt-in micro-batch settings while preserving legacy defaults."""
+
+    source = trigger.source if isinstance(trigger.source, dict) else {}
+    raw_max_records = data.get("batchMaxRecords")
+    if raw_max_records is None:
+        raw_max_records = source.get("batchMaxRecords")
+    try:
+        max_records = int(raw_max_records or _DEFAULT_BATCH_MAX_RECORDS)
+    except (TypeError, ValueError):
+        max_records = _DEFAULT_BATCH_MAX_RECORDS
+    max_records = min(_MAX_BATCH_RECORDS, max(_DEFAULT_BATCH_MAX_RECORDS, max_records))
+    if max_records <= 1:
+        return _DEFAULT_BATCH_MAX_RECORDS, 0
+
+    raw_wait_ms = data.get("batchWaitMs")
+    if raw_wait_ms is None:
+        raw_wait_ms = source.get("batchWaitMs")
+    try:
+        wait_ms = int(raw_wait_ms or _DEFAULT_BATCH_WAIT_MS)
+    except (TypeError, ValueError):
+        wait_ms = _DEFAULT_BATCH_WAIT_MS
+    return max_records, min(_MAX_BATCH_WAIT_MS, max(1, wait_ms))
 
 
 def _strip_execution_only_comments(value: Any) -> Any:
@@ -284,6 +334,8 @@ class KafkaManager:
                         "inputTopic": data.get("inputTopic") or "",
                         "inputGroupId": data.get("inputGroupId") or "",
                         "autoOffsetReset": data.get("autoOffsetReset") or "latest",
+                        "batchMaxRecords": data.get("batchMaxRecords") or 1,
+                        "batchWaitMs": data.get("batchWaitMs") or 0,
                     },
                     "mapping": {
                         str(data.get("inputKey") or "kafka_message"): "$.body",
@@ -479,6 +531,7 @@ class KafkaManager:
             log.warning("kafka.workflow_plan_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return self.get_consumer_status(workflow_id)
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
+        batch_max_records, batch_wait_ms = _batch_settings(data, trigger)
         configured_inputs = _strip_execution_only_comments(trigger.inputs if isinstance(trigger.inputs, dict) else {})
 
         queue_capacity = _queue_size_for_trigger(trigger)
@@ -500,6 +553,8 @@ class KafkaManager:
             "broker": input_broker,
             "topic": input_topic,
             "groupId": group_id,
+            "batchMaxRecords": batch_max_records,
+            "batchWaitMs": batch_wait_ms,
         }
 
         # Trigger-configured worker pool, bounded by service safety caps.
@@ -532,6 +587,8 @@ class KafkaManager:
                 queue,
                 abort,
                 ready,
+                batch_max_records=batch_max_records,
+                batch_wait_ms=batch_wait_ms,
             ),
             name=f"kafka-{workflow_id}",
         )
@@ -576,6 +633,9 @@ class KafkaManager:
         queue: asyncio.Queue,
         abort: asyncio.Event,
         ready: asyncio.Event,
+        *,
+        batch_max_records: int = _DEFAULT_BATCH_MAX_RECORDS,
+        batch_wait_ms: int = 0,
     ) -> None:
         try:
             from aiokafka import AIOKafkaConsumer
@@ -592,19 +652,19 @@ class KafkaManager:
             await self._cleanup_runtime_resources(workflow_id)
             return
 
+        batch_enabled = batch_max_records > 1
         consumer = AIOKafkaConsumer(
             topic,
             bootstrap_servers=broker,
             group_id=group_id,
-            # Auto-commit advances based on fetched progress, not worker
-            # completion. Backpressure narrows the crash window but current
-            # semantics remain best-effort / at-most-once.
-            enable_auto_commit=True,
+            # Preserve legacy auto-commit in single-record mode. Batch mode
+            # commits explicitly only after the workflow reports success.
+            enable_auto_commit=not batch_enabled,
             auto_offset_reset=auto_offset_reset if auto_offset_reset in ("latest", "earliest") else "latest",
             request_timeout_ms=_REQUEST_TIMEOUT_MS,
             fetch_max_bytes=_FETCH_MAX_BYTES,
             max_partition_fetch_bytes=_MAX_PARTITION_FETCH_BYTES,
-            max_poll_records=_MAX_POLL_RECORDS,
+            max_poll_records=batch_max_records if batch_enabled else _MAX_POLL_RECORDS,
         )
 
         try:
@@ -641,21 +701,85 @@ class KafkaManager:
             "broker": broker,
             "topic": topic,
             "groupId": group_id,
+            "batchMaxRecords": batch_max_records,
+            "batchWaitMs": batch_wait_ms if batch_enabled else 0,
         }
         ready.set()
         log.info("kafka.consumer_running", {"workflow_id": workflow_id, "topic": topic})
 
         try:
-            async for msg in consumer:
-                if abort.is_set():
-                    break
-                raw_value = msg.value
-                queued = _QueuedKafkaMessage(
-                    raw_value=raw_value,
-                    size_bytes=len(raw_value) if raw_value is not None else 0,
-                )
-                # Blocking put applies backpressure instead of dropping messages.
-                await queue.put(queued)
+            if batch_enabled:
+                while not abort.is_set():
+                    records_by_partition: Dict[Any, List[Any]] = {}
+                    record_count = 0
+                    deadline = asyncio.get_running_loop().time() + (batch_wait_ms / 1000)
+                    while record_count < batch_max_records:
+                        remaining_ms = max(
+                            0,
+                            int((deadline - asyncio.get_running_loop().time()) * 1000),
+                        )
+                        fetched = await consumer.getmany(
+                            timeout_ms=remaining_ms,
+                            max_records=batch_max_records - record_count,
+                        )
+                        if not fetched:
+                            break
+                        for topic_partition, partition_records in fetched.items():
+                            if not partition_records:
+                                continue
+                            records_by_partition.setdefault(topic_partition, []).extend(
+                                partition_records
+                            )
+                            record_count += len(partition_records)
+                        if asyncio.get_running_loop().time() >= deadline:
+                            break
+                    records = tuple(
+                        _QueuedKafkaRecord(
+                            topic=str(msg.topic),
+                            partition=int(msg.partition),
+                            offset=int(msg.offset),
+                            timestamp=msg.timestamp,
+                            key=msg.key,
+                            raw_value=msg.value,
+                            size_bytes=len(msg.value) if msg.value is not None else 0,
+                        )
+                        for partition_records in records_by_partition.values()
+                        for msg in partition_records
+                    )
+                    if not records:
+                        continue
+
+                    completed = asyncio.get_running_loop().create_future()
+                    await queue.put(_QueuedKafkaBatch(records=records, completed=completed))
+                    succeeded = bool(await completed)
+                    if not succeeded:
+                        raise RuntimeError("kafka_batch_workflow_failed")
+
+                    commit_offsets = {
+                        topic_partition: partition_records[-1].offset + 1
+                        for topic_partition, partition_records in records_by_partition.items()
+                        if partition_records
+                    }
+                    if commit_offsets:
+                        await consumer.commit(commit_offsets)
+                    current_status = self._status.get(workflow_id) or {}
+                    self._status[workflow_id] = {
+                        **current_status,
+                        "lastBatchSize": len(records),
+                        "processedRecords": int(current_status.get("processedRecords") or 0)
+                        + len(records),
+                    }
+            else:
+                async for msg in consumer:
+                    if abort.is_set():
+                        break
+                    raw_value = msg.value
+                    queued = _QueuedKafkaMessage(
+                        raw_value=raw_value,
+                        size_bytes=len(raw_value) if raw_value is not None else 0,
+                    )
+                    # Blocking put applies backpressure instead of dropping messages.
+                    await queue.put(queued)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -700,10 +824,13 @@ class KafkaManager:
                 continue
             except asyncio.CancelledError:
                 return
+            batch = msg if isinstance(msg, _QueuedKafkaBatch) else None
             try:
                 if isinstance(msg, _QueuedKafkaMessage):
                     msg = _decode_message(msg.raw_value)
-                await self._trigger_workflow(
+                elif batch is not None:
+                    msg = [_decode_message(record.raw_value) for record in batch.records]
+                succeeded = await self._trigger_workflow(
                     workflow_id,
                     workflow_plan,
                     msg,
@@ -713,9 +840,15 @@ class KafkaManager:
                     source=source,
                     generation_cancel_event=run_cancel_event,
                 )
+                if batch is not None and not batch.completed.done():
+                    batch.completed.set_result(bool(succeeded))
             except asyncio.CancelledError:
+                if batch is not None and not batch.completed.done():
+                    batch.completed.set_result(False)
                 return
             except Exception as exc:
+                if batch is not None and not batch.completed.done():
+                    batch.completed.set_result(False)
                 log.warning(
                     "kafka.worker_dispatch_failed",
                     {"workflow_id": workflow_id, "error": str(exc)},
@@ -732,7 +865,7 @@ class KafkaManager:
         trigger: Optional[TriggerDefinition] = None,
         source: Optional[str] = None,
         generation_cancel_event: Optional[threading.Event] = None,
-    ) -> None:
+    ) -> bool:
         run_cancel_event = generation_cancel_event or threading.Event()
         trigger = trigger or TriggerDefinition.model_validate(
             {
@@ -864,7 +997,7 @@ class KafkaManager:
                     "trigger_type": "kafka",
                 },
             }
-            await execute_with_hooks(
+            dispatch_result = await execute_with_hooks(
                 action_payload,
                 lambda: self._dispatcher.dispatch(
                     trigger=trigger,
@@ -874,11 +1007,18 @@ class KafkaManager:
                 before=HookPipeline.run_ingress_before,
                 after=HookPipeline.run_ingress_after,
             )
+            if not isinstance(dispatch_result, dict):
+                return False
+            if not dispatch_result.get("executed"):
+                return True
+            execution = dispatch_result.get("result")
+            return isinstance(execution, dict) and execution.get("status") == "success"
         except TriggerDispatchError as exc:
             log.warning(
                 "kafka.trigger_dispatch_failed",
                 {"workflow_id": workflow_id, "trigger_id": trigger.id, "error": str(exc)},
             )
+            return False
 
 
 default_manager = KafkaManager()

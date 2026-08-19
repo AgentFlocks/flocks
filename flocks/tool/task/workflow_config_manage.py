@@ -291,6 +291,8 @@ def _normalize_runtime_config(
                 "inputGroupId": req.inputGroupId,
                 "inputKey": req.inputKey,
                 "autoOffsetReset": req.autoOffsetReset,
+                "batchMaxRecords": req.batchMaxRecords,
+                "batchWaitMs": req.batchWaitMs,
                 "inputs": routes._strip_execution_only_comments(req.inputs),
             },
             current,

@@ -670,6 +670,26 @@ function KafkaTriggerFields({
           <option value="earliest">earliest</option>
         </Select>
       </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Batch Max Records" hint="设为 1 时保持原有单条消费模式">
+          <Input
+            type="number"
+            min={1}
+            max={1000}
+            value={String(source.batchMaxRecords ?? 1)}
+            onChange={(e) => onSourceChange({ batchMaxRecords: Math.max(1, Number(e.target.value) || 1) })}
+          />
+        </Field>
+        <Field label="Batch Wait (ms)" hint="启用微批后，0 使用默认值 100ms">
+          <Input
+            type="number"
+            min={0}
+            max={60000}
+            value={String(source.batchWaitMs ?? 0)}
+            onChange={(e) => onSourceChange({ batchWaitMs: Math.max(0, Number(e.target.value) || 0) })}
+          />
+        </Field>
+      </div>
     </div>
   );
 }
@@ -883,6 +903,8 @@ function createTriggerDraft(
         inputTopic: `${workflowId}.events`,
         inputGroupId: `${workflowId}-group`,
         autoOffsetReset: 'latest',
+        batchMaxRecords: 1,
+        batchWaitMs: 0,
       },
       mapping: { kafka_message: '$.body' },
       inputs: workflowSampleInputs,
