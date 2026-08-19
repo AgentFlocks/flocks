@@ -179,10 +179,56 @@
             "type": "string",
             "minLength": 1
           },
+          "category": {
+            "enum": [
+              "coverage_blocking",
+              "validation_limitation",
+              "security_hypothesis"
+            ]
+          },
+          "blocking": {
+            "type": "boolean"
+          },
+          "relatedPaths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
           "followUpPrompt": {
             "type": "string",
             "minLength": 1
           }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/properties/openQuestions/items"
+      }
+    },
+    "files": {
+      "type": "object",
+      "required": [
+        "total",
+        "inventoried",
+        "analyzed",
+        "notApplicable",
+        "failed",
+        "effectiveCoveragePercent"
+      ],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "inventoried": {"type": "integer", "minimum": 0},
+        "analyzed": {"type": "integer", "minimum": 0},
+        "notApplicable": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "effectiveCoveragePercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
         }
       }
     }

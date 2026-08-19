@@ -13,6 +13,7 @@ import flocks_code_security.reporting as reporting_module
 import flocks_code_security.runtime as runtime_module
 import flocks_code_security.tools as tools_module
 from flocks_code_security.contract import validate_document
+from flocks_code_security.coverage import normalize_open_questions
 from flocks_code_security.runtime import build_runtime
 from flocks_code_security.tools import (
     audit_adjudication_context,
@@ -180,6 +181,17 @@ def _submit_final_adjudication(runtime, scan_id: str) -> dict:
             "rejected_candidates": rejected,
         },
     )
+
+
+def test_legacy_open_questions_remain_coverage_blocking() -> None:
+    assert normalize_open_questions(["Legacy unresolved coverage question."]) == [
+        {
+            "question": "Legacy unresolved coverage question.",
+            "category": "coverage_blocking",
+            "blocking": True,
+            "related_paths": [],
+        }
+    ]
 
 
 class _FakeBackgroundManager:
@@ -595,6 +607,107 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     }
     assert "result_status" not in manifest["scan"]
     assert (output_path / ".scan-manifest.final").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    (target / "empty.py").write_text("", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    monkeypatch.setattr(
+        reporting_module,
+        "output_dir",
+        lambda scan_id: tmp_path / "outputs" / scan_id,
+    )
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
+
+    unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=unit_id,
+    )
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+
+    invalid = await audit_submit_coverage(
+        baseline,
+        inventoried_paths=["."],
+        analyzed_paths=["app.py"],
+        open_questions=[
+            {
+                "question": "Deployment controls are outside the source snapshot.",
+                "category": "validation_limitation",
+                "blocking": True,
+            }
+        ],
+    )
+    assert invalid.success is False
+    assert "coverage_blocking" in str(invalid.error)
+
+    submitted = await audit_submit_coverage(
+        baseline,
+        inventoried_paths=["."],
+        analyzed_paths=["app.py"],
+        open_questions=[
+            {
+                "question": "Deployment controls are outside the source snapshot.",
+                "category": "validation_limitation",
+                "blocking": False,
+                "follow_up": "Provide the production gateway configuration.",
+            }
+        ],
+    )
+    assert submitted.success is True
+    runtime.store.update_work_unit_status(unit_id, "completed")
+    _submit_final_adjudication(runtime, scan_id)
+
+    finalized = await audit_finalize(coordinator, scan_id)
+    assert finalized.success is True
+    output_path = Path(finalized.output["output_dir"])
+    coverage = json.loads(
+        (output_path / "coverage.json").read_text(encoding="utf-8")
+    )
+    assert coverage["completeness"] == "complete"
+    assert coverage["deferred"] == []
+    assert coverage["files"] == {
+        "total": 2,
+        "inventoried": 2,
+        "analyzed": 1,
+        "notApplicable": 1,
+        "failed": 0,
+        "effectiveCoveragePercent": 100,
+    }
+    assert coverage["limitations"][0]["category"] == "validation_limitation"
+    receipt_path = coverage["surfaces"][0]["receiptRefs"][0]
+    receipt = json.loads((output_path / receipt_path).read_text(encoding="utf-8"))
+    assert receipt["notApplicable"] == ["empty.py"]
+    report = (output_path / "report.md").read_text(encoding="utf-8")
+    assert "Effective source coverage: **100%**" in report
+    assert "Static Validation Limitations" in report
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,10 @@ from flocks.tool.registry import (
 )
 
 from flocks_code_security.contract import SLUG_RE
+from flocks_code_security.coverage import (
+    normalize_open_questions,
+    public_open_question,
+)
 from flocks_code_security.orchestration import (
     baseline_prompt,
     plan_baseline_units,
@@ -57,6 +61,7 @@ def _ruleset_digest() -> str:
             digest.update(b"\0")
     for name in (
         "contract.py",
+        "coverage.py",
         "orchestration.py",
         "reporting.py",
         "schemas/coverage.schema.json",
@@ -579,7 +584,7 @@ async def audit_submit_coverage(
     inventoried_paths: list[str] | None = None,
     analyzed_paths: list[str] | None = None,
     failed_paths: list[str] | None = None,
-    open_questions: list[str] | None = None,
+    open_questions: list[dict[str, Any] | str] | None = None,
 ) -> ToolResult:
     runtime = get_runtime()
     try:
@@ -596,9 +601,7 @@ async def audit_submit_coverage(
         }
         if any(len(items) > 2_000 for items in path_groups.values()):
             raise ValueError("Each coverage path list may contain at most 2000 entries")
-        questions = [str(item)[:1000] for item in (open_questions or [])]
-        if len(questions) > 100:
-            raise ValueError("At most 100 open questions are allowed")
+        questions = normalize_open_questions(open_questions)
 
         validated_inventoried = await asyncio.to_thread(
             runtime.source.validate_coverage_paths,
@@ -618,6 +621,13 @@ async def audit_submit_coverage(
             path_groups["failed_paths"],
             allow_omitted=True,
         )
+        for question in questions:
+            question["related_paths"] = await asyncio.to_thread(
+                runtime.source.validate_coverage_paths,
+                binding,
+                question["related_paths"],
+                allow_omitted=True,
+            )
         await asyncio.to_thread(
             runtime.store.validate_coverage_access,
             binding,
@@ -694,13 +704,27 @@ async def audit_adjudication_context(
         }
         if candidate_id is None:
             failed_paths: list[str] = []
-            open_questions: list[str] = []
+            open_questions: list[dict[str, Any]] = []
             for item in context["coverage"]:
                 payload = item.get("payload", {})
                 failed_paths.extend(payload.get("failed_paths", []))
                 open_questions.extend(payload.get("open_questions", []))
             failed_paths = list(dict.fromkeys(failed_paths))
-            open_questions = list(dict.fromkeys(open_questions))
+            questions_by_key = {
+                json.dumps(question, sort_keys=True): question
+                for question in open_questions
+            }
+            open_questions = list(questions_by_key.values())
+            blocking_questions = [
+                public_open_question(question)
+                for question in open_questions
+                if question["blocking"]
+            ]
+            limitations = [
+                public_open_question(question)
+                for question in open_questions
+                if not question["blocking"]
+            ]
             omissions = context["omissions"]
             output = {
                 **base,
@@ -728,13 +752,14 @@ async def audit_adjudication_context(
                 ],
                 "coverage_gaps": {
                     "failed_paths": failed_paths[:100],
-                    "open_questions": open_questions[:100],
+                    "blocking_questions": blocking_questions[:100],
                     "omissions": omissions[:100],
                     "truncated": any(
                         len(items) > 100
-                        for items in (failed_paths, open_questions, omissions)
+                        for items in (failed_paths, blocking_questions, omissions)
                     ),
                 },
+                "validation_limitations": limitations[:100],
             }
         else:
             candidate = next(
@@ -1323,6 +1348,53 @@ def register_tools() -> None:
                 f"Refusing to overwrite existing tool registration: {name}"
             )
     string_array = {"type": "array", "items": {"type": "string"}}
+    open_questions_schema = {
+        "type": "array",
+        "maxItems": 100,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["question", "category", "blocking"],
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1_000,
+                },
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "coverage_blocking",
+                        "validation_limitation",
+                        "security_hypothesis",
+                    ],
+                },
+                "blocking": {"type": "boolean"},
+                "related_paths": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "follow_up": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1_000,
+                },
+            },
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "category": {"const": "coverage_blocking"}
+                        }
+                    },
+                    "then": {"properties": {"blocking": {"const": True}}},
+                    "else": {"properties": {"blocking": {"const": False}}},
+                }
+            ],
+        },
+    }
     digest_bound_evidence_item = {
         "type": "object",
         "additionalProperties": False,
@@ -1660,7 +1732,13 @@ def register_tools() -> None:
             _parameter("inventoried_paths", ParameterType.ARRAY, "Exact snapshot paths returned by audit_inventory whose inventory page was consumed.", required=False, json_schema=string_array),
             _parameter("analyzed_paths", ParameterType.ARRAY, "Exact existing snapshot paths fully covered by this worker's audit_read or audit_search accesses.", required=False, json_schema=string_array),
             _parameter("failed_paths", ParameterType.ARRAY, "Exact inventory or omission paths that could not be analyzed; never invent paths.", required=False, json_schema=string_array),
-            _parameter("open_questions", ParameterType.ARRAY, "Unresolved audit questions.", required=False, json_schema=string_array),
+            _parameter(
+                "open_questions",
+                ParameterType.ARRAY,
+                "Structured unresolved questions. Use coverage_blocking/true only for incomplete assigned-source analysis; validation limitations and security hypotheses must use false.",
+                required=False,
+                json_schema=open_questions_schema,
+            ),
         ],
     )
     _register(

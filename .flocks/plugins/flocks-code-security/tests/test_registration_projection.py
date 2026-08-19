@@ -227,6 +227,30 @@ def test_all_audit_tools_register() -> None:
     assert counter_evidence["maxItems"] == 50
     assert counter_evidence["items"] == evidence_schema["items"]
 
+    coverage_tool = ToolRegistry.get("audit_submit_coverage").info
+    open_questions = next(
+        parameter
+        for parameter in coverage_tool.parameters
+        if parameter.name == "open_questions"
+    ).json_schema
+    assert open_questions["items"]["additionalProperties"] is False
+    assert open_questions["items"]["required"] == [
+        "question",
+        "category",
+        "blocking",
+    ]
+    assert open_questions["items"]["properties"]["category"]["enum"] == [
+        "coverage_blocking",
+        "validation_limitation",
+        "security_hypothesis",
+    ]
+    category_rule = open_questions["items"]["allOf"][0]
+    assert category_rule["if"]["properties"]["category"]["const"] == (
+        "coverage_blocking"
+    )
+    assert category_rule["then"]["properties"]["blocking"]["const"] is True
+    assert category_rule["else"]["properties"]["blocking"]["const"] is False
+
     context_tool = ToolRegistry.get("audit_adjudication_context").info
     assert [parameter.name for parameter in context_tool.parameters] == [
         "scan_id",

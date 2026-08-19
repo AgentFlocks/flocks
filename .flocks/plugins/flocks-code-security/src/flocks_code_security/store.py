@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
+from flocks_code_security.coverage import normalize_open_questions
 from flocks_code_security.models import (
     SessionBinding,
     SnapshotFile,
@@ -1653,7 +1654,7 @@ class ScanStore:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
             file_rows = connection.execute(
-                "SELECT relative_path, blob_digest, line_count, is_binary "
+                "SELECT relative_path, blob_digest, size_bytes, line_count, is_binary "
                 "FROM snapshot_files "
                 "WHERE snapshot_id = ?",
                 (binding.snapshot_id,),
@@ -1712,13 +1713,18 @@ class ScanStore:
                     [],
                 ).append((row["start_line"], row["end_line"]))
 
-        def fully_read(path: str, digest: str, line_count: int) -> bool:
+        def fully_read(
+            path: str,
+            digest: str,
+            size_bytes: int,
+            line_count: int,
+        ) -> bool:
+            if size_bytes == 0:
+                return True
             key = (path, digest)
             if key in search_access:
                 return True
             intervals = sorted(reads_by_file.get(key, []))
-            if line_count == 0:
-                return bool(intervals)
             covered_until = 0
             for start_line, end_line in intervals:
                 if start_line > covered_until + 1:
@@ -1735,6 +1741,7 @@ class ScanStore:
             and not fully_read(
                 row["relative_path"],
                 row["blob_digest"],
+                row["size_bytes"],
                 row["line_count"],
             )
         )
@@ -1874,6 +1881,10 @@ class ScanStore:
         if binding.work_unit_id is None:
             raise ValueError("Coverage requires a bound work unit")
         work_unit_id = binding.work_unit_id
+        payload = dict(payload)
+        payload["open_questions"] = normalize_open_questions(
+            payload.get("open_questions")
+        )
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
@@ -2082,6 +2093,9 @@ class ScanStore:
         for row in coverage_rows:
             item = dict(row)
             item["payload"] = json.loads(item.pop("payload_json"))
+            item["payload"]["open_questions"] = normalize_open_questions(
+                item["payload"].get("open_questions")
+            )
             coverage.append(item)
         work_units = []
         for row in work_unit_rows:

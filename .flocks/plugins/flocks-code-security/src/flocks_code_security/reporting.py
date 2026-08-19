@@ -26,6 +26,7 @@ from flocks_code_security.contract import (
     stable_id,
     validate_bundle,
 )
+from flocks_code_security.coverage import public_open_question
 from flocks_code_security.paths import output_dir
 from flocks_code_security.snapshot import DEFAULT_EXCLUDES, TargetSnapshotService
 from flocks_code_security.store import ScanStore
@@ -442,6 +443,17 @@ class ReportWriter:
         coverage_by_unit = {
             item["work_unit_id"]: item["payload"] for item in data["coverage"]
         }
+        snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
+        snapshot_paths = {item.relative_path for item in snapshot_files}
+
+        def covered(path: str, claims: list[str] | set[str]) -> bool:
+            return any(
+                claim == "."
+                or path == claim
+                or path.startswith(f"{claim}/")
+                for claim in claims
+            )
+
         candidates_by_unit: dict[str, list[dict[str, Any]]] = {}
         candidates_by_id: dict[str, dict[str, Any]] = {}
         for candidate in data["candidates"]:
@@ -454,7 +466,8 @@ class ReportWriter:
         surfaces: list[dict[str, Any]] = []
         receipts: dict[str, bytes] = {}
         deferred: list[dict[str, Any]] = []
-        open_questions: list[dict[str, str]] = []
+        open_questions: list[dict[str, Any]] = []
+        limitations: list[dict[str, Any]] = []
         surface_by_unit: dict[str, str] = {}
         analysis_units = [
             item
@@ -472,8 +485,13 @@ class ReportWriter:
             unit_outcomes = [outcomes[item["candidate_id"]] for item in candidates]
             needs_follow_up = unit["status"] != "completed" or coverage is None
             if coverage is not None:
+                blocking_questions = [
+                    question
+                    for question in coverage["open_questions"]
+                    if question["blocking"]
+                ]
                 needs_follow_up = needs_follow_up or bool(
-                    coverage["failed_paths"] or coverage["open_questions"]
+                    coverage["failed_paths"] or blocking_questions
                 )
             if "reported" in unit_outcomes:
                 disposition = "reported"
@@ -484,6 +502,14 @@ class ReportWriter:
             else:
                 disposition = "no_issue_found"
 
+            unit_not_applicable = []
+            if coverage is not None:
+                unit_not_applicable = sorted(
+                    item.relative_path
+                    for item in snapshot_files
+                    if item.size_bytes == 0
+                    and covered(item.relative_path, coverage["inventoried_paths"])
+                )
             receipt_path = f"artifacts/03_coverage/{surface_id}.json"
             receipt = {
                 "documentType": "flocks-code-security.coverage-receipt",
@@ -495,8 +521,16 @@ class ReportWriter:
                 "assignedPaths": paths,
                 "inventory": [] if coverage is None else coverage["inventoried_paths"],
                 "analyzed": [] if coverage is None else coverage["analyzed_paths"],
+                "notApplicable": unit_not_applicable,
                 "failed": [] if coverage is None else coverage["failed_paths"],
-                "openQuestions": [] if coverage is None else coverage["open_questions"],
+                "openQuestions": (
+                    []
+                    if coverage is None
+                    else [
+                        public_open_question(question)
+                        for question in coverage["open_questions"]
+                    ]
+                ),
                 "candidateOutcomes": [
                     {
                         "candidateId": item["candidate_id"],
@@ -551,16 +585,24 @@ class ReportWriter:
                     }
                 )
             for question in coverage["open_questions"]:
-                deferred.append(
-                    {
+                public_question = public_open_question(question)
+                open_questions.append(public_question)
+                if question["blocking"]:
+                    row: dict[str, Any] = {
                         "id": stable_id(
-                            "deferred", unit["work_unit_id"], "question", question
+                            "deferred",
+                            unit["work_unit_id"],
+                            "question",
+                            question["question"],
                         ),
-                        "reason": question,
+                        "reason": question["question"],
                         "surfaceIds": [surface_id],
                     }
-                )
-                open_questions.append({"question": question})
+                    if question["related_paths"]:
+                        row["paths"] = question["related_paths"]
+                    deferred.append(row)
+                else:
+                    limitations.append(public_question)
 
         for candidate_id in deferred_candidate_ids:
             candidate = candidates_by_id[candidate_id]
@@ -591,22 +633,47 @@ class ReportWriter:
                 }
             )
 
+        inventoried_paths = {
+            path
+            for coverage in coverage_by_unit.values()
+            for path in coverage["inventoried_paths"]
+        }
         analyzed_paths = {
             path
             for coverage in coverage_by_unit.values()
             for path in coverage["analyzed_paths"]
         }
-        snapshot_paths = {
+        failed_paths = {
+            path
+            for coverage in coverage_by_unit.values()
+            for path in coverage["failed_paths"]
+        }
+        inventoried_files = {
             item.relative_path
-            for item in self.store.list_snapshot_files(snapshot.snapshot_id)
+            for item in snapshot_files
+            if covered(item.relative_path, inventoried_paths)
+        }
+        not_applicable_paths = {
+            item.relative_path
+            for item in snapshot_files
+            if item.size_bytes == 0 and item.relative_path in inventoried_files
+        }
+        analyzed_files = {
+            item.relative_path
+            for item in snapshot_files
+            if item.size_bytes > 0 and covered(item.relative_path, analyzed_paths)
+        }
+        failed_files = {
+            item.relative_path
+            for item in snapshot_files
+            if covered(item.relative_path, failed_paths)
         }
         uncovered = sorted(
             path
             for path in snapshot_paths
-            if not any(
-                scope == "." or path == scope or path.startswith(f"{scope}/")
-                for scope in analyzed_paths
-            )
+            if path not in analyzed_files
+            and path not in not_applicable_paths
+            and path not in failed_files
         )
         if uncovered:
             deferred.append(
@@ -626,6 +693,21 @@ class ReportWriter:
 
         deferred_by_id = {item["id"]: item for item in deferred}
         deferred = [deferred_by_id[key] for key in sorted(deferred_by_id)]
+        def question_key(item: dict[str, Any]) -> tuple[Any, ...]:
+            return (
+                item["category"],
+                item["question"],
+                tuple(item.get("relatedPaths", [])),
+                item.get("followUpPrompt", ""),
+            )
+        open_questions = sorted(
+            {question_key(item): item for item in open_questions}.values(),
+            key=question_key,
+        )
+        limitations = sorted(
+            {question_key(item): item for item in limitations}.values(),
+            key=question_key,
+        )
         explicit_exclusions = [
             {
                 "pattern": pattern,
@@ -653,6 +735,8 @@ class ReportWriter:
             and all(item["disposition"] != "needs_follow_up" for item in surfaces)
             else "partial"
         )
+        total_files = len(snapshot_files)
+        effectively_covered = len(analyzed_files | not_applicable_paths)
         document: dict[str, Any] = {
             "documentType": "codex-security.coverage",
             "schemaVersion": SCHEMA_VERSION,
@@ -671,9 +755,23 @@ class ReportWriter:
             "surfaces": sorted(surfaces, key=lambda item: item["id"]),
             "explicitExclusions": explicit_exclusions,
             "deferred": deferred,
+            "files": {
+                "total": total_files,
+                "inventoried": len(inventoried_files),
+                "analyzed": len(analyzed_files),
+                "notApplicable": len(not_applicable_paths),
+                "failed": len(failed_files),
+                "effectiveCoveragePercent": (
+                    100
+                    if total_files == 0
+                    else round(effectively_covered * 100 / total_files, 2)
+                ),
+            },
         }
         if open_questions:
             document["openQuestions"] = open_questions
+        if limitations:
+            document["limitations"] = limitations
         return document, receipts
 
     @staticmethod
@@ -694,7 +792,15 @@ class ReportWriter:
             target["revision"] = snapshot.source_revision
         if snapshot.target_kind != "git_revision":
             target["snapshotDigest"] = snapshot_digest(snapshot.tree_digest)
-        limitations = [item["reason"] for item in coverage["deferred"][:100]]
+        limitations = list(
+            dict.fromkeys(
+                [
+                    item["question"]
+                    for item in coverage.get("limitations", [])
+                ]
+                + [item["reason"] for item in coverage["deferred"]]
+            )
+        )[:100]
         scope: dict[str, Any] = {
             "includePaths": coverage["includePaths"],
             "excludePaths": coverage["excludePaths"],
@@ -819,6 +925,8 @@ class ReportWriter:
         scan = manifest["scan"]
         target = scan["target"]
         findings = findings_document["findings"]
+        files = coverage.get("files", {})
+        limitations = coverage.get("limitations", [])
         lines = [
             "# Code Security Audit Report",
             "",
@@ -829,7 +937,15 @@ class ReportWriter:
             f"- Revision: `{ReportWriter._markdown_text(target.get('revision', 'not recorded'))}`",
             f"- Findings: **{len(findings)}**",
             f"- Coverage completeness: `{coverage['completeness']}`",
+            (
+                "- Effective source coverage: "
+                f"**{files.get('effectiveCoveragePercent', 0):g}%** "
+                f"({files.get('analyzed', 0)} analyzed, "
+                f"{files.get('notApplicable', 0)} not applicable, "
+                f"{files.get('failed', 0)} failed)"
+            ),
             f"- Deferred work: **{len(coverage['deferred'])}**",
+            f"- Static validation limitations: **{len(limitations)}**",
             "",
             "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those sealed files.",
             "",
@@ -974,7 +1090,22 @@ class ReportWriter:
                 )
                 lines.append("")
 
-        lines.extend(["## Deferred Work", ""])
+        lines.extend(["## Static Validation Limitations", ""])
+        if limitations:
+            for item in limitations:
+                follow_up = item.get("followUpPrompt")
+                suffix = (
+                    f" Follow-up: {ReportWriter._markdown_text(follow_up)}"
+                    if follow_up
+                    else ""
+                )
+                lines.append(
+                    f"- `{item['category']}`: "
+                    f"{ReportWriter._markdown_text(item['question'])}{suffix}"
+                )
+        else:
+            lines.append("No static validation limitations were recorded.")
+        lines.extend(["", "## Deferred Work", ""])
         if coverage["deferred"]:
             for item in coverage["deferred"]:
                 paths = ", ".join(item.get("paths", []))

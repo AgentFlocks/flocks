@@ -67,9 +67,11 @@ def baseline_prompt(*, snapshot_id: str, paths: list[str]) -> str:
         "assigned scope using audit_search and audit_read, submit each supported "
         "candidate through the single top-level candidate argument, then call "
         "audit_submit_coverage exactly once. Use only exact inventory paths and claim "
-        "analyzed paths only after complete audit_read or audit_search access. Report "
-        "omitted or unreadable paths as failed_paths and unresolved analysis as "
-        "open_questions."
+        "non-empty analyzed paths only after complete audit_read or audit_search access; "
+        "zero-byte inventory files need no read. Report omitted or unreadable paths as "
+        "failed_paths. Classify structured open_questions as coverage_blocking/true only "
+        "for incomplete assigned-source analysis, otherwise use validation_limitation or "
+        "security_hypothesis with blocking false."
     )
 
 
