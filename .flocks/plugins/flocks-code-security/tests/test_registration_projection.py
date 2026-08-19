@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from flocks.agent.agent_factory import load_agent
+from flocks.agent.registry import Agent
 from flocks.session.callable_schema import resolve_callable_tool_infos
 from flocks.tool.registry import Tool, ToolRegistry, ToolResult
 
+from flocks_code_security.agents import AGENTS_ROOT, register_agents
 from flocks_code_security.orchestration import (
     baseline_prompt,
     targeted_rescan_prompt,
@@ -25,17 +25,10 @@ from flocks_code_security.tools import (
 )
 
 
-AGENTS_ROOT = Path(__file__).resolve().parents[2] / "agents"
-
-
 def _load_code_security_agents():
-    register_tools()
-    agents = {}
-    for name in AGENT_TOOLS:
-        agent = load_agent(AGENTS_ROOT / name, native=True)
-        assert agent is not None
-        agents[name] = agent
-    return agents
+    ToolRegistry.init()
+    register_agents()
+    return {name: Agent._custom_agents[name] for name in AGENT_TOOLS}
 
 
 async def _replacement_handler(_ctx, **_kwargs) -> ToolResult:
@@ -146,7 +139,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
 
     assert set(agents) == set(AGENT_TOOLS)
     for name, agent in agents.items():
-        assert agent.native is True
+        assert agent.native is False
         assert agent.prompt
         assert agent.prompt_builder is None
         assert agent.delegatable is False

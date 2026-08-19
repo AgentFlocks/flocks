@@ -42,7 +42,7 @@ ROLE_AGENTS = {
     "baseline": "code-security-baseline",
     "verifier": "code-security-verifier",
 }
-_AGENT_DEFINITIONS_ROOT = Path(__file__).resolve().parents[3] / "agents"
+_AGENT_DEFINITIONS_ROOT = Path(__file__).resolve().parent / "agents"
 
 
 def _ruleset_digest() -> str:
