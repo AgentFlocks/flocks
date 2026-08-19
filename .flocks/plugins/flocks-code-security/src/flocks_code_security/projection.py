@@ -4,12 +4,48 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from flocks_code_security.agents import AGENT_TOOLS
 from flocks_code_security.tools import is_registered_audit_tool
 from flocks.tool.registry import ToolRegistry
 
 
 RESOLVER_NAME = "flocks-code-security"
+
+# Security ceiling for callable tools. Agent YAML declares the intended tools;
+# tests require those declarations to match this independent runtime boundary.
+AGENT_TOOLS = {
+    "code-security": [
+        "audit_prepare",
+        "audit_run_workers",
+        "audit_wait_workers",
+        "audit_status",
+        "audit_adjudication_context",
+        "audit_submit_adjudication",
+        "audit_finalize",
+        "audit_cancel",
+        "question",
+    ],
+    "code-security-threat-modeler": [
+        "audit_inventory",
+        "audit_read",
+        "audit_search",
+        "audit_submit_threat_model",
+    ],
+    "code-security-baseline": [
+        "audit_threat_model_context",
+        "audit_inventory",
+        "audit_read",
+        "audit_search",
+        "audit_submit_candidate",
+        "audit_submit_coverage",
+    ],
+    "code-security-verifier": [
+        "audit_verification_subject",
+        "audit_inventory",
+        "audit_read",
+        "audit_search",
+        "audit_submit_verdict",
+    ],
+}
 
 
 def _is_canonical_question(tool_info: Any) -> bool:

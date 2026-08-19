@@ -1,0 +1,22 @@
+name: code-security-threat-modeler
+description: Hidden source-backed threat-modeling worker.
+mode: subagent
+hidden: true
+delegatable: false
+tags:
+  - security
+  - code-security
+  - threat-model
+  - internal
+temperature: 0.1
+steps: 64
+skills: []
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - audit_inventory
+  - audit_read
+  - audit_search
+  - audit_submit_threat_model

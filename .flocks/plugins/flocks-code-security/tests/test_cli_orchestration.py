@@ -6,13 +6,27 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from flocks.tool.registry import ToolContext, ToolResult
+from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 
 import flocks_code_security.cli as audit_cli
+from flocks_code_security.tools import register_tools
 
 
 def _result(output: dict) -> ToolResult:
     return ToolResult(success=True, output=output)
+
+
+def test_cli_preflight_rejects_disabled_required_tool() -> None:
+    register_tools()
+    audit_read = ToolRegistry.get("audit_read")
+    original_enabled = audit_read.info.enabled
+    audit_read.info.enabled = False
+
+    try:
+        with pytest.raises(RuntimeError, match="audit_read"):
+            audit_cli._require_enabled_audit_tools()
+    finally:
+        audit_read.info.enabled = original_enabled
 
 
 async def _final_adjudication(

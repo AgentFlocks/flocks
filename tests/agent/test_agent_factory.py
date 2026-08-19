@@ -202,6 +202,9 @@ class TestLoadAgent:
               - secure-review
               - framework-guide
             prompt_profile: isolated
+            session_directory: ~/.flocks/workspace/code-security/runtime
+            memory_enabled: false
+            require_dedicated_session: true
         """)
 
         agent = load_agent(agent_dir)
@@ -209,6 +212,9 @@ class TestLoadAgent:
         assert agent is not None
         assert agent.skills == ["secure-review", "framework-guide"]
         assert agent.prompt_profile == "isolated"
+        assert agent.session_directory == "~/.flocks/workspace/code-security/runtime"
+        assert agent.memory_enabled is False
+        assert agent.require_dedicated_session is True
 
     def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -597,6 +603,23 @@ class TestYamlToAgentInfo:
         agent = yaml_to_agent_info(raw, yaml_path)
         assert agent.model is not None
         assert agent.model.model_id == "claude-3"
+
+    def test_isolation_policy_parsed(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {
+            "name": "isolated_plugin",
+            "prompt_profile": "isolated",
+            "session_directory": "~/.flocks/workspace/runtime",
+            "memory_enabled": False,
+            "require_dedicated_session": True,
+        }
+
+        agent = yaml_to_agent_info(raw, yaml_path)
+
+        assert agent.prompt_profile == "isolated"
+        assert agent.session_directory == "~/.flocks/workspace/runtime"
+        assert agent.memory_enabled is False
+        assert agent.require_dedicated_session is True
 
     def test_description_cn_snake_and_camel(self, tmp_path):
         yaml_path = self._make_yaml_path(tmp_path)

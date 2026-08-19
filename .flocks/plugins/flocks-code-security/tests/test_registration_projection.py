@@ -1,28 +1,41 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
-from flocks.agent.registry import Agent
-from flocks.agent.agent import AgentInfo
+from flocks.agent.agent_factory import load_agent
 from flocks.session.callable_schema import resolve_callable_tool_infos
 from flocks.tool.registry import Tool, ToolRegistry, ToolResult
 
-from flocks_code_security.agents import (
-    AGENT_TOOLS,
-    REGISTERED_CODE_SECURITY_AGENTS,
-    register_agents,
-)
 from flocks_code_security.orchestration import (
     baseline_prompt,
     targeted_rescan_prompt,
     threat_model_prompt,
     verification_prompt,
 )
-from flocks_code_security.projection import code_security_tool_projection
-from flocks_code_security.tools import register_tools
-from flocks_code_security.tools import RULESET_DIGEST, _ruleset_digest
+from flocks_code_security.projection import AGENT_TOOLS, code_security_tool_projection
+from flocks_code_security.tools import (
+    ROLE_AGENTS,
+    RULESET_DIGEST,
+    _ruleset_digest,
+    register_tools,
+)
+
+
+AGENTS_ROOT = Path(__file__).resolve().parents[2] / "agents"
+
+
+def _load_code_security_agents():
+    register_tools()
+    agents = {}
+    for name in AGENT_TOOLS:
+        agent = load_agent(AGENTS_ROOT / name, native=True)
+        assert agent is not None
+        agents[name] = agent
+    return agents
 
 
 async def _replacement_handler(_ctx, **_kwargs) -> ToolResult:
@@ -81,6 +94,8 @@ def test_projection_narrows_session_scoped_parent_adjudication_tools() -> None:
         "audit_adjudication_context",
         "audit_submit_adjudication",
     ]
+
+
 def test_projection_rejects_same_name_replacement_tool() -> None:
     register_tools()
     original = ToolRegistry.get("audit_prepare")
@@ -121,39 +136,43 @@ def test_projection_rejects_replaced_question_handler() -> None:
     assert coordinator == []
 
 
-def test_agents_are_static_hidden_and_non_delegatable() -> None:
-    register_agents()
+def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
+    agents = _load_code_security_agents()
 
-    coordinator = Agent._custom_agents["code-security"]
-    threat_modeler = Agent._custom_agents["code-security-threat-modeler"]
-    baseline = Agent._custom_agents["code-security-baseline"]
-    verifier = Agent._custom_agents["code-security-verifier"]
+    coordinator = agents["code-security"]
+    threat_modeler = agents["code-security-threat-modeler"]
+    baseline = agents["code-security-baseline"]
+    verifier = agents["code-security-verifier"]
+
+    assert set(agents) == set(AGENT_TOOLS)
+    for name, agent in agents.items():
+        assert agent.native is True
+        assert agent.prompt
+        assert agent.prompt_builder is None
+        assert agent.delegatable is False
+        assert agent.skills == []
+        assert agent.prompt_profile == "isolated"
+        assert agent.session_directory == "~/.flocks/workspace/code-security/runtime"
+        assert agent.memory_enabled is False
+        assert agent.require_dedicated_session is True
+        raw = yaml.safe_load(
+            (AGENTS_ROOT / name / "agent.yaml").read_text(encoding="utf-8")
+        )
+        assert raw["tools"] == AGENT_TOOLS[name]
+        assert set(agent.tools).issubset(AGENT_TOOLS[name])
 
     assert coordinator.mode == "primary"
     assert coordinator.hidden is False
-    assert coordinator.delegatable is False
-    assert coordinator.prompt_builder is None
-    assert coordinator.memory_enabled is False
-    assert coordinator.require_dedicated_session is True
-    assert coordinator.prompt_profile == "isolated"
-    assert coordinator.session_directory
-    assert coordinator.tools == AGENT_TOOLS["code-security"]
+    assert "Host-orchestrated CLI adjudication" in coordinator.prompt
     assert threat_modeler.hidden is True
-    assert threat_modeler.delegatable is False
-    assert threat_modeler.require_dedicated_session is True
-    assert threat_modeler.prompt_profile == "isolated"
-    assert threat_modeler.tools == AGENT_TOOLS["code-security-threat-modeler"]
-    assert "audit_submit_threat_model" in threat_modeler.tools
+    assert "audit_submit_threat_model" in AGENT_TOOLS[threat_modeler.name]
     assert baseline.hidden is True
-    assert baseline.delegatable is False
-    assert "skill_load" not in baseline.tools
-    assert "tool_search" not in baseline.tools
-    assert "delegate_task" not in baseline.tools
-    assert "audit_threat_model_context" in baseline.tools
-    assert baseline.memory_enabled is False
-    assert baseline.prompt_profile == "isolated"
-    assert verifier.prompt_profile == "isolated"
-    assert "code-security-investigator" not in Agent._custom_agents
+    assert "skill_load" not in AGENT_TOOLS[baseline.name]
+    assert "tool_search" not in AGENT_TOOLS[baseline.name]
+    assert "delegate_task" not in AGENT_TOOLS[baseline.name]
+    assert "audit_threat_model_context" in AGENT_TOOLS[baseline.name]
+    assert verifier.hidden is True
+    assert "code-security-investigator" not in agents
 
 
 def test_all_audit_tools_register() -> None:
@@ -233,7 +252,8 @@ def test_all_audit_tools_register() -> None:
     )
 
 
-def test_ruleset_digest_is_derived_from_packaged_rules() -> None:
+def test_ruleset_digest_is_derived_from_declarative_rules() -> None:
+    assert set(ROLE_AGENTS.values()) == set(AGENT_TOOLS)
     assert RULESET_DIGEST == _ruleset_digest()
     assert len(RULESET_DIGEST) == 64
 
@@ -250,20 +270,6 @@ def test_tool_registration_refuses_name_collision() -> None:
         assert ToolRegistry.get("audit_prepare") is replacement
     finally:
         ToolRegistry.register(original)
-
-
-def test_agent_registration_refuses_name_collision() -> None:
-    register_agents()
-    original = REGISTERED_CODE_SECURITY_AGENTS["code-security"]
-    replacement = AgentInfo(name="code-security", mode="primary")
-    Agent.register("code-security", replacement)
-
-    try:
-        with pytest.raises(RuntimeError, match="Refusing to overwrite"):
-            register_agents()
-        assert Agent._custom_agents["code-security"] is replacement
-    finally:
-        Agent.register("code-security", original)
 
 
 def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:

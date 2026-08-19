@@ -16,7 +16,7 @@ from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.session.session_loop import SessionLoop
 from flocks.storage.storage import Storage
-from flocks.tool.registry import ToolContext, ToolResult
+from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 from flocks.utils.langfuse import (
     is_active as langfuse_is_active,
     observation_trace_context,
@@ -27,6 +27,7 @@ from flocks.utils.langfuse import (
 from flocks_code_security.paths import outputs_root, runtime_dir
 from flocks_code_security.runtime import get_runtime
 from flocks_code_security.tools import (
+    AUDIT_TOOL_NAMES,
     audit_cancel,
     audit_finalize,
     audit_prepare,
@@ -38,6 +39,20 @@ from flocks_code_security.tools import (
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 TERMINAL_BATCH_STATUSES = {"completed", "partial", "failed", "cancelled"}
+
+
+def _require_enabled_audit_tools() -> None:
+    ToolRegistry.init()
+    unavailable = [
+        name
+        for name in AUDIT_TOOL_NAMES
+        if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled
+    ]
+    if unavailable:
+        raise RuntimeError(
+            "Code-security audit requires enabled tools: "
+            f"{', '.join(unavailable)}. Enable them in tool_settings before retrying."
+        )
 
 
 def _emit(
@@ -463,6 +478,7 @@ async def run_standard_audit(
     if not target.is_dir():
         raise ValueError(f"Audit target is not a directory: {target}")
 
+    _require_enabled_audit_tools()
     await Storage.init()
     provider_id, model_id = await _resolve_model(model)
     model_ref = {"providerID": provider_id, "modelID": model_id}

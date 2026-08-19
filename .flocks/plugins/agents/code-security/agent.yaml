@@ -1,0 +1,28 @@
+name: code-security
+name_cn: 代码安全审计
+description: Interactive static-audit entry point and final semantic adjudicator.
+description_cn: 交互式静态审计入口与最终语义裁决 Agent。
+mode: primary
+hidden: false
+delegatable: false
+tags:
+  - security
+  - code-security
+  - static-analysis
+temperature: 0.1
+steps: 64
+skills: []
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - audit_prepare
+  - audit_run_workers
+  - audit_wait_workers
+  - audit_status
+  - audit_adjudication_context
+  - audit_submit_adjudication
+  - audit_finalize
+  - audit_cancel
+  - question

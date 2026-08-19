@@ -184,6 +184,15 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
             tools=tools_list,
             skills=raw.get("skills", []),
             prompt_profile=raw.get("prompt_profile", raw.get("promptProfile", "standard")),
+            session_directory=raw.get(
+                "session_directory",
+                raw.get("sessionDirectory"),
+            ),
+            memory_enabled=raw.get("memory_enabled", raw.get("memoryEnabled")),
+            require_dedicated_session=raw.get(
+                "require_dedicated_session",
+                raw.get("requireDedicatedSession", False),
+            ),
             options=raw.get("options", {}),
             steps=raw.get("steps"),
             delegatable=raw.get("delegatable"),
@@ -448,6 +457,15 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
         tools=tools_list,
         skills=raw.get("skills", []),
         prompt_profile=raw.get("prompt_profile", raw.get("promptProfile", "standard")),
+        session_directory=raw.get(
+            "session_directory",
+            raw.get("sessionDirectory"),
+        ),
+        memory_enabled=raw.get("memory_enabled", raw.get("memoryEnabled")),
+        require_dedicated_session=raw.get(
+            "require_dedicated_session",
+            raw.get("requireDedicatedSession", False),
+        ),
         model=model,
         prompt=prompt,
         prompt_builder=raw.get("prompt_builder"),

@@ -1,0 +1,22 @@
+name: code-security-verifier
+description: Hidden independent verifier for code-security candidates.
+mode: subagent
+hidden: true
+delegatable: false
+tags:
+  - security
+  - code-security
+  - internal
+temperature: 0.0
+steps: 32
+skills: []
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - audit_verification_subject
+  - audit_inventory
+  - audit_read
+  - audit_search
+  - audit_submit_verdict

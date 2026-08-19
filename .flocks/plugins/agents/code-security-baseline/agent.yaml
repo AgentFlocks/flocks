@@ -1,0 +1,23 @@
+name: code-security-baseline
+description: Hidden baseline static-audit worker.
+mode: subagent
+hidden: true
+delegatable: false
+tags:
+  - security
+  - code-security
+  - internal
+temperature: 0.1
+steps: 64
+skills: []
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - audit_threat_model_context
+  - audit_inventory
+  - audit_read
+  - audit_search
+  - audit_submit_candidate
+  - audit_submit_coverage

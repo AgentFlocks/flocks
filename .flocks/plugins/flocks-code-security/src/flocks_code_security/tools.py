@@ -8,6 +8,7 @@ import json
 import sqlite3
 from collections import Counter
 from importlib import resources
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from flocks.tool.registry import (
@@ -35,15 +36,25 @@ from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
 
 
+ROLE_AGENTS = {
+    "coordinator": "code-security",
+    "threat_modeler": "code-security-threat-modeler",
+    "baseline": "code-security-baseline",
+    "verifier": "code-security-verifier",
+}
+_AGENT_DEFINITIONS_ROOT = Path(__file__).resolve().parents[3] / "agents"
+
+
 def _ruleset_digest() -> str:
     digest = hashlib.sha256()
     digest.update(b"flocks-code-security-rules-v1\0")
     package_root = resources.files("flocks_code_security")
-    prompt_root = package_root.joinpath("prompts")
-    for name in ("baseline.md", "coordinator.md", "threat_modeler.md", "verifier.md"):
-        digest.update(name.encode("utf-8") + b"\0")
-        digest.update(prompt_root.joinpath(name).read_bytes())
-        digest.update(b"\0")
+    for agent_name in ROLE_AGENTS.values():
+        for name in ("agent.yaml", "prompt.md"):
+            relative_name = f"{agent_name}/{name}"
+            digest.update(relative_name.encode("utf-8") + b"\0")
+            digest.update((_AGENT_DEFINITIONS_ROOT / relative_name).read_bytes())
+            digest.update(b"\0")
     for name in (
         "contract.py",
         "orchestration.py",
@@ -72,12 +83,6 @@ EVIDENCE_ROLES = {
     "sink",
     "outcome",
     "expected_control",
-}
-ROLE_AGENTS = {
-    "coordinator": "code-security",
-    "threat_modeler": "code-security-threat-modeler",
-    "baseline": "code-security-baseline",
-    "verifier": "code-security-verifier",
 }
 STORE_ERRORS = (OSError, ValueError, sqlite3.Error)
 WORKER_TERMINAL_STATUSES = {"completed", "partial", "failed", "cancelled"}
