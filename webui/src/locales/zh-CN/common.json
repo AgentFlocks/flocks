@@ -181,6 +181,7 @@
       "primaryThreatBookGlobalLink": "国际区用户领取API Key",
       "providerThreatBookCn": "ThreatBook 中国区免费模型",
       "providerThreatBookGlobal": "ThreatBook 国际区免费模型",
+      "providerFlocksRouterTest": "Flocks Router 测试环境",
       "savePrimary": "保存并验证模型",
       "saveOptionalThreatBook": "保存并验证微步服务",
       "primaryThreatBookCnHint": "验证成功后，将同时配置 ThreatBook 中国区模型、API 和 MCP。",

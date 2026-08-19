@@ -262,7 +262,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       || provider.models.length > 0
     );
 
-    const preferredOrder = ['threatbook-cn-llm', 'threatbook-io-llm'];
+    const preferredOrder = ['threatbook-cn-llm', 'threatbook-io-llm', 'flocks-router-test'];
     return filtered.sort((a, b) => {
       const aIndex = preferredOrder.indexOf(a.id);
       const bIndex = preferredOrder.indexOf(b.id);
@@ -355,6 +355,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const getProviderLabel = (provider: CatalogProvider) => {
     if (provider.id === 'threatbook-cn-llm') return t('onboarding.bootstrap.providerThreatBookCn');
     if (provider.id === 'threatbook-io-llm') return t('onboarding.bootstrap.providerThreatBookGlobal');
+    if (provider.id === 'flocks-router-test') return t('onboarding.bootstrap.providerFlocksRouterTest');
     return provider.name;
   };
 

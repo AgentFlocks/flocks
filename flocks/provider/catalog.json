@@ -29,6 +29,58 @@
     "env_vars": [],
     "models": {}
   },
+  "flocks-router-test": {
+    "name": "Flocks Router Test",
+    "description": "OpenAI-compatible Flocks Router test environment",
+    "npm": "@ai-sdk/openai-compatible",
+    "default_base_url": "https://flocks-router-test.threatbook-inc.cn/v1",
+    "credential_schemas": [
+      {
+        "auth_method": "api_key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "secret",
+            "required": true,
+            "placeholder": "Paste your Flocks Router test API Key"
+          }
+        ]
+      }
+    ],
+    "env_vars": [
+      "FLOCKS_ROUTER_TEST_API_KEY"
+    ],
+    "models": {
+      "deepseek-v4-flash-0731": {
+        "name": "deepseek-v4-flash-0731",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_input_tokens": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 1.0,
+          "output": 2.0,
+          "cache_read": 0.2,
+          "currency": "CNY"
+        }
+      }
+    }
+  },
   "threatbook-cn-llm": {
     "name": "ThreatBook-cn-llm",
     "description": "ThreatBook China LLM Service (OpenAI-compatible)",

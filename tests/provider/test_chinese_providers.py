@@ -17,6 +17,7 @@ class TestCuratedCatalogProviders:
     def test_provider_ids_match_curated_list(self):
         assert set(list_catalog_provider_ids()) == {
             "openai-compatible",
+            "flocks-router-test",
             "threatbook-cn-llm",
             "threatbook-io-llm",
             "google",

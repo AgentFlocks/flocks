@@ -334,6 +334,11 @@ class Provider:
                 ("siliconflow", "flocks.provider.sdk.siliconflow", "SiliconFlowProvider"),
                 ("threatbook-cn-llm", "flocks.provider.sdk.threatbook", "ThreatBookCnLLMProvider"),
                 ("threatbook-io-llm", "flocks.provider.sdk.threatbook", "ThreatBookIoLLMProvider"),
+                (
+                    "flocks-router-test",
+                    "flocks.provider.sdk.flocks_router",
+                    "FlocksRouterTestLLMProvider",
+                ),
                 ("ollama", "flocks.provider.sdk.ollama", "OllamaProvider"),
                 # Client-side tool calling (for backends without --enable-auto-tool-choice)
                 ("cherry", "flocks.provider.sdk.cherry", "CherryProvider"),
