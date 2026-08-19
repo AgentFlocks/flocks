@@ -37,11 +37,12 @@ _CONFIG_PATTERNS = (
         ),
     ),
 )
-_REGENERATE = re.compile(r"重新(?:生成|写|撰写)|从头(?:生成|写)|regenerate|rewrite\s+from\s+scratch", re.I)
 _MODIFY_SIGNAL = re.compile(
     r"报告|章节|段落|标题|正文|内容|措辞|表格|建议|结论|摘要|事件|漏洞|IOC|ATT&CK|"
     r"修改|改写|润色|删除|删掉|增加|补充|调整|精简|扩写|纠正|"
-    r"report|section|paragraph|title|revise|modify|edit|shorten|expand|correct",
+    r"重新(?:生成|写|撰写)|从头(?:生成|写)|"
+    r"report|section|paragraph|title|revise|modify|edit|shorten|expand|correct|"
+    r"regenerate|rewrite\s+from\s+scratch",
     re.I,
 )
 
@@ -93,11 +94,11 @@ def decide_report_prompt(parts: list[dict[str, Any]], *, session_id: str) -> Rep
         if pattern.search(text):
             return _ui_action(reason, session_id)
 
-    if prompt.action.operation == "modify":
-        if _REGENERATE.search(text):
-            return _reject()
-        if not _MODIFY_SIGNAL.search(text):
-            return _reject()
-    elif prompt.action.operation == "regenerate" and not _REGENERATE.search(text):
+    # The trusted business backend selects the operation from the product
+    # entry point: first-generation button -> generate, dedicated regenerate
+    # button -> regenerate, and every conversation turn -> modify.  User text
+    # may describe a broad rewrite, but it must not override or invalidate the
+    # explicit action selected by that entry point.
+    if prompt.action.operation == "modify" and not _MODIFY_SIGNAL.search(text):
         return _reject()
     return ReportPolicyDecision(kind="execute", prompt=prompt)

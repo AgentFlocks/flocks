@@ -25,7 +25,8 @@
    用户原始指令
    ```
 
-6. prompt 不携带模板或素材引用。generate、modify、regenerate 每轮统一调用：
+6. operation 由业务入口确定：首次生成按钮发送 `generate`，专用的“应用并重新生成”按钮发送 `regenerate`，所有报告对话均发送 `modify`。对话文字即使包含“重新生成”也不改变、不阻断 `modify`。
+7. prompt 不携带模板或素材引用。generate、modify、regenerate 每轮统一调用：
 
    ```text
    GET /internal/flocks/v1/report-sessions/{sessionID}/state/latest
@@ -34,12 +35,12 @@
        &knownMaterialVersion=...
    ```
 
-7. changed 资源并行下载；全部格式与哈希校验通过后才切换 `index.json` 当前指针。失败保持旧状态。
-8. modify 使用同步后的后端报告并校验基线版本；regenerate 检查报告版本但不下载、不读取报告正文。
-9. A1 单 Agent 只通过受限工具读取本轮上下文和分页素材、写候选、执行校验。
-10. 输出先写不可变版本，再发布 `situation.report.status`。Event 返回原下载接口可接受的绝对输出路径。
-11. 后端调用原始 `/api/file/download?path=...`。没有 `sessionID` 下载参数、报告分支、专用 ETag 或版本响应头。
-12. 模板/素材在配置页只保存时不触发 Flocks；下一次可执行对话自动同步。
+8. changed 资源并行下载；全部格式与哈希校验通过后才切换 `index.json` 当前指针。失败保持旧状态。
+9. modify 使用同步后的后端报告并校验基线版本；regenerate 检查报告版本但不下载、不读取报告正文。
+10. A1 单 Agent 只通过受限工具读取本轮上下文和分页素材、写候选、执行校验。
+11. 输出先写不可变版本，再持久化一条不进入后续模型上下文的终态结果消息，最后发布 `situation.report.status`。终态 Event 返回结果消息的 `messageID/messagePartID` 以及原下载接口可接受的绝对输出路径；失败和取消也写对应终态消息。
+12. 后端调用原始 `/api/file/download?path=...`。没有 `sessionID` 下载参数、报告分支、专用 ETag 或版本响应头。
+13. 模板/素材在配置页只保存时不触发 Flocks；下一次可执行对话自动同步。
 
 ## 目录
 
@@ -80,7 +81,7 @@
 | `workspace.py` | Agent 受限读取、分页素材、候选写入与校验 |
 | `output.py` | 不可变输出版本、current 指针和状态文件 |
 | `events.py` | `situation.report.status` 序号与发布 |
-| `orchestrator.py` | A1 前置同步、Agent 调用、有界恢复、发布和状态事件 |
+| `orchestrator.py` | A1 前置同步、Agent 调用、有界恢复、不可变发布、终态结果消息和状态事件 |
 | `dispatch.py` | 原始 prompt 路由与产品运行时之间的窄适配 |
 
 已删除：`bindings.py`、`copy.py`、业务用户/Project/Session 绑定和 Flocks 内共享复制。保留的是 Flocks 原生 Session -> Project 内部映射。
@@ -155,7 +156,9 @@ SITUATION_REPORT_BACKEND_TOKEN=<与 Mock 相同的开发凭据>
 `situation.report.status: succeeded` 后，后端按 Event 的 `output.path` 调原始
 `/api/file/download` 保存报告版本。开发联调时再通过上述 `__mock__` PUT 导入该报告，
 即可继续验证 modify、regenerate 以及只保存模板/素材后的下一轮同步。Mock 不伪造模型
-输出，也不代替后端 Event 消费逻辑。
+输出，也不代替后端 Event 消费逻辑。终态 Event 的 `messageID/messagePartID` 可关联
+`GET /api/session/{sessionID}/message` 中 `metadata.situationReport.kind=terminal_status`
+的持久化结果 Part，用于页面刷新后的终态恢复。
 
 ## 测试边界
 
@@ -163,4 +166,4 @@ SITUATION_REPORT_BACKEND_TOKEN=<与 Mock 相同的开发凭据>
 - MockTransport 只模拟后端 HTTP 边界，不使用随意构造的素材冒充真实输入。
 - 确定性候选报告只用于校验发布流程，不代表模型效果。
 - 线上模型只用于验证真实流程、工具调用、结构校验与发布闭环；当前不做主观效果评价或模型横评。
-- 需要覆盖：普通 Session/API 鉴权；报告 Session 内部 Project 1:1；普通 Session 不能误入产品 Agent；单 text 信封；每轮 latest；changed/unchanged；部分失败不切换；regenerate 不下载报告；Event 无用户/Project；原 download 可读取输出；普通 prompt 回归。
+- 需要覆盖：普通 Session/API 鉴权；报告 Session 内部 Project 1:1；普通 Session 不能误入产品 Agent；单 text 信封；每轮 latest；changed/unchanged；部分失败不切换；regenerate 不下载报告；成功/失败/取消终态消息与 Event 关联；Message API 可恢复终态；Event 无用户/Project；原 download 可读取输出；普通 prompt 回归。
