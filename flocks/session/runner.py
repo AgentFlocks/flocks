@@ -3420,6 +3420,8 @@ class SessionRunner:
                     name=persisted_trace_context.get(
                         "trace_name", "SessionRunner.step"
                     ),
+                    trace_name=persisted_trace_context.get("root_trace_name"),
+                    trace_context=persisted_trace_context.get("trace_context"),
                     session_id=correlation_session_id,
                     tags=trace_tags,
                     input=request_payload,

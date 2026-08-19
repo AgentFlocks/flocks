@@ -17,6 +17,7 @@ from flocks.storage.storage import Storage
 from flocks.tool.registry import ToolContext, ToolResult
 from flocks.utils.langfuse import (
     is_active as langfuse_is_active,
+    observation_trace_context,
     span_scope,
     trace_scope,
 )
@@ -130,16 +131,31 @@ async def _wait_for_batch(
     progress: ProgressCallback | None,
     observation_parent: Any = None,
 ) -> dict[str, Any]:
+    last_observed_status: tuple[str, tuple[tuple[str, int], ...]] | None = None
     while True:
         output = _require_success(
             await audit_wait_workers(ctx, batch_id, timeout_seconds=10)
         )
+        status_counts = output.get("status_counts", {})
+        current_status = (
+            str(output.get("status") or ""),
+            tuple(
+                sorted(
+                    (str(name), int(count))
+                    for name, count in status_counts.items()
+                )
+            )
+            if isinstance(status_counts, dict)
+            else (),
+        )
+        changed = current_status != last_observed_status
         _emit(
             progress,
             "batch.status",
             output,
-            observation_parent=observation_parent,
+            observation_parent=observation_parent if changed else None,
         )
+        last_observed_status = current_status
         if output.get("status") in TERMINAL_BATCH_STATUSES:
             return output
 
@@ -153,6 +169,10 @@ async def _run_phase(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     phase_scope = _start_phase_observation(scan_observation, phase)
     phase_parent = None if phase_scope is None else phase_scope.observation
+    previous_trace_context = ctx.extra.get("langfuse_trace_context")
+    phase_trace_context = observation_trace_context(phase_parent)
+    if phase_trace_context:
+        ctx.extra["langfuse_trace_context"] = phase_trace_context
     try:
         batch = _require_success(await audit_run_workers(ctx, scan_id, phase))
         _emit(
@@ -187,6 +207,11 @@ async def _run_phase(
             status_message=str(exc),
         )
         raise
+    finally:
+        if previous_trace_context is None:
+            ctx.extra.pop("langfuse_trace_context", None)
+        else:
+            ctx.extra["langfuse_trace_context"] = previous_trace_context
 
 
 async def _run_pipeline(

@@ -935,6 +935,10 @@ async def test_background_worker_orchestration_retries_failed_verification(
     monkeypatch.setattr(tools_module, "_background_manager", lambda: manager)
 
     coordinator = _agent_context("coordinator", "message-1", "code-security")
+    coordinator.extra["langfuse_trace_context"] = {
+        "trace_id": "a" * 32,
+        "parent_span_id": "b" * 16,
+    }
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
 
@@ -948,6 +952,14 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "threat_modeling",
     )
     assert threat_model_batch.success is True
+    assert children[0].creation_kwargs["metadata"]["langfuse"]["trace_context"] == {
+        "trace_id": "a" * 32,
+        "parent_span_id": "b" * 16,
+    }
+    assert (
+        children[0].creation_kwargs["metadata"]["langfuse"]["root_trace_name"]
+        == "code-security.scan"
+    )
     assert runtime.store.scan_status(scan_id)["threat_model_status"] == "running"
     threat_model_session = children[0].id
     modeler = _agent_context(

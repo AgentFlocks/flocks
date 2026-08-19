@@ -20,6 +20,7 @@ def test_security_help_is_registered_on_main_cli() -> None:
 
 
 def test_security_audit_streams_json_progress(monkeypatch, tmp_path) -> None:
+    shutdowns: list[bool] = []
     async def run_audit(target, *, model, progress):
         assert target == tmp_path
         assert model == "openai/gpt-test"
@@ -39,6 +40,9 @@ def test_security_audit_streams_json_progress(monkeypatch, tmp_path) -> None:
         "_load_plugin_cli",
         lambda: (run_audit, lambda _scan_id: {}),
     )
+    monkeypatch.setattr(
+        security_cmd, "shutdown_langfuse", lambda: shutdowns.append(True)
+    )
 
     result = runner.invoke(
         security_cmd.security_app,
@@ -54,6 +58,7 @@ def test_security_audit_streams_json_progress(monkeypatch, tmp_path) -> None:
         "scan.result",
     ]
     assert events[0]["scan_id"] == "scan_test"
+    assert shutdowns == [True]
 
 
 def test_security_status_reads_persisted_progress(monkeypatch) -> None:
@@ -82,6 +87,7 @@ def test_security_status_reads_persisted_progress(monkeypatch) -> None:
 
 
 def test_security_audit_reports_failures(monkeypatch, tmp_path) -> None:
+    shutdowns: list[bool] = []
     async def fail_audit(_target, *, model, progress):
         raise RuntimeError("worker launch failed")
 
@@ -89,6 +95,9 @@ def test_security_audit_reports_failures(monkeypatch, tmp_path) -> None:
         security_cmd,
         "_load_plugin_cli",
         lambda: (fail_audit, lambda _scan_id: {}),
+    )
+    monkeypatch.setattr(
+        security_cmd, "shutdown_langfuse", lambda: shutdowns.append(True)
     )
 
     result = runner.invoke(
@@ -98,3 +107,4 @@ def test_security_audit_reports_failures(monkeypatch, tmp_path) -> None:
 
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"] == "worker launch failed"
+    assert shutdowns == [True]

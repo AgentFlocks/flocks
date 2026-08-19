@@ -170,6 +170,16 @@ def test_all_audit_tools_register() -> None:
         == "^[a-f0-9]{64}$"
     )
 
+    verdict_tool = ToolRegistry.get("audit_submit_verdict").info
+    counter_evidence = next(
+        parameter
+        for parameter in verdict_tool.parameters
+        if parameter.name == "counter_evidence"
+    ).json_schema
+    assert counter_evidence["minItems"] == 1
+    assert counter_evidence["maxItems"] == 50
+    assert counter_evidence["items"] == evidence_schema["items"]
+
 
 def test_ruleset_digest_is_derived_from_packaged_rules() -> None:
     assert RULESET_DIGEST == _ruleset_digest()
@@ -218,3 +228,6 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     assert hostile not in baseline
     assert "<assigned_paths>" not in baseline
     assert "<candidate_json>" not in verifier
+    assert "single top-level candidate argument" in baseline
+    assert "exact inventory paths" in baseline
+    assert "relative_path, blob_digest, start_line, and end_line" in verifier

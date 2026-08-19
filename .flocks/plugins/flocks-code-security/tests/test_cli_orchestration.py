@@ -179,6 +179,14 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
     spans: list[tuple[dict, object]] = []
     ended: list[tuple[object, dict]] = []
 
+    class _Observed:
+        next_id = 1
+
+        def __init__(self):
+            self.trace_id = "a" * 32
+            self.id = f"{_Observed.next_id:016x}"
+            _Observed.next_id += 1
+
     class _Scope:
         def __init__(self, observation: object):
             self.observation = observation
@@ -187,12 +195,12 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
             ended.append((self.observation, kwargs))
 
     def start_trace(**kwargs):
-        observation = object()
+        observation = _Observed()
         traces.append((kwargs, observation))
         return _Scope(observation)
 
     def start_span(**kwargs):
-        observation = object()
+        observation = _Observed()
         spans.append((kwargs, observation))
         return _Scope(observation)
 
@@ -205,6 +213,12 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
         )
 
     async def run_workers(_ctx, scan_id: str, phase: str) -> ToolResult:
+        assert _ctx.extra["langfuse_trace_context"] == {
+            "trace_id": "a" * 32,
+            "parent_span_id": _ctx.extra["langfuse_trace_context"][
+                "parent_span_id"
+            ],
+        }
         return _result(
             {
                 "scan_id": scan_id,
@@ -263,13 +277,15 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
     monkeypatch.setattr(audit_cli, "audit_status", status)
     monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
 
+    ctx = ToolContext("session", "message", agent="code-security")
     result = await audit_cli._run_pipeline(
-        ToolContext("session", "message", agent="code-security"),
+        ctx,
         Path("/target"),
         None,
     )
 
     assert result["finding_count"] == 1
+    assert "langfuse_trace_context" not in ctx.extra
     assert traces[0][0]["name"] == "code-security.scan"
     assert traces[0][0]["session_id"] == "scan_observed"
     span_names = [kwargs["name"] for kwargs, _observation in spans]
@@ -283,3 +299,46 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
         and output["output"]["status"] == "completed"
         for observation, output in ended
     )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_batch_only_observes_status_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = iter(
+        [
+            {"status": "running", "status_counts": {"running": 1}},
+            {"status": "running", "status_counts": {"running": 1}},
+            {"status": "completed", "status_counts": {"completed": 1}},
+        ]
+    )
+    observed: list[dict] = []
+    progress_events: list[dict] = []
+
+    async def wait_workers(_ctx, _batch_id, timeout_seconds):
+        assert timeout_seconds == 10
+        return _result(next(outputs))
+
+    class _Scope:
+        observation = object()
+
+        def end(self, **_kwargs):
+            return None
+
+    def start_span(**kwargs):
+        observed.append(kwargs)
+        return _Scope()
+
+    monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
+    monkeypatch.setattr(audit_cli, "span_scope", start_span)
+
+    result = await audit_cli._wait_for_batch(
+        ToolContext("session", "message"),
+        "batch_test",
+        lambda _event, payload: progress_events.append(payload),
+        object(),
+    )
+
+    assert result["status"] == "completed"
+    assert len(progress_events) == 3
+    assert len(observed) == 2

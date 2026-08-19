@@ -848,6 +848,25 @@ async def _launch_worker(
     }
     if candidate is not None:
         correlation_metadata["candidate_id"] = candidate["candidate_id"]
+    trace_context = ctx.extra.get("langfuse_trace_context")
+    trace_context = trace_context if isinstance(trace_context, dict) else None
+    langfuse_metadata = {
+        "session_id": scan_id,
+        "trace_name": f"code-security.{phase}.model-step",
+        "tags": [
+            "feature:code-security",
+            f"scan:{scan_id}",
+            f"phase:{phase}",
+            f"role:{unit['role']}",
+            f"work-unit:{unit['work_unit_id']}",
+        ],
+        "metadata": correlation_metadata,
+    }
+    if trace_context:
+        langfuse_metadata.update(
+            root_trace_name="code-security.scan",
+            trace_context=trace_context,
+        )
     child = await Session.create(
         project_id=parent.project_id,
         directory=parent.directory,
@@ -855,20 +874,7 @@ async def _launch_worker(
         parent_id=parent.id,
         agent=agent_name,
         category="task",
-        metadata={
-            "langfuse": {
-                "session_id": scan_id,
-                "trace_name": f"code-security.{phase}.model-step",
-                "tags": [
-                    "feature:code-security",
-                    f"scan:{scan_id}",
-                    f"phase:{phase}",
-                    f"role:{unit['role']}",
-                    f"work-unit:{unit['work_unit_id']}",
-                ],
-                "metadata": correlation_metadata,
-            }
-        },
+        metadata={"langfuse": langfuse_metadata},
         **child_kwargs,
     )
     await asyncio.to_thread(
@@ -1099,7 +1105,29 @@ def register_tools() -> None:
                 f"Refusing to overwrite existing tool registration: {name}"
             )
     string_array = {"type": "array", "items": {"type": "string"}}
-    object_array = {"type": "array", "items": {"type": "object", "additionalProperties": True}}
+    digest_bound_evidence_item = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "relative_path",
+            "blob_digest",
+            "start_line",
+            "end_line",
+        ],
+        "properties": {
+            "relative_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1_024,
+            },
+            "blob_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+            },
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+        },
+    }
     threat_model_item = {
         "type": "string",
         "minLength": 1,
@@ -1121,29 +1149,13 @@ def register_tools() -> None:
         "type": "array",
         "minItems": 1,
         "maxItems": 100,
-        "items": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "relative_path",
-                "blob_digest",
-                "start_line",
-                "end_line",
-            ],
-            "properties": {
-                "relative_path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1_024,
-                },
-                "blob_digest": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$",
-                },
-                "start_line": {"type": "integer", "minimum": 1},
-                "end_line": {"type": "integer", "minimum": 1},
-            },
-        },
+        "items": digest_bound_evidence_item,
+    }
+    counter_evidence_schema = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 50,
+        "items": digest_bound_evidence_item,
     }
     evidence_schema = {
         "type": "array",
@@ -1348,7 +1360,13 @@ def register_tools() -> None:
             _parameter("candidate_id", ParameterType.STRING, "Candidate identifier from the bound scan."),
             _parameter("verdict", ParameterType.STRING, "Independent verdict.", enum=["confirmed", "rejected", "insufficient_evidence"]),
             _parameter("rationale", ParameterType.STRING, "Evidence-based rationale."),
-            _parameter("counter_evidence", ParameterType.ARRAY, "Optional digest-bound counter-evidence.", required=False, json_schema=object_array),
+            _parameter(
+                "counter_evidence",
+                ParameterType.ARRAY,
+                "Optional digest-bound counter-evidence using exact relative_path, blob_digest, start_line, and end_line fields.",
+                required=False,
+                json_schema=counter_evidence_schema,
+            ),
         ],
     )
     _register(
@@ -1356,9 +1374,9 @@ def register_tools() -> None:
         "Submit analyzed, failed, and unresolved scope facts for the bound work unit.",
         audit_submit_coverage,
         [
-            _parameter("inventoried_paths", ParameterType.ARRAY, "Inventoried snapshot paths.", required=False, json_schema=string_array),
-            _parameter("analyzed_paths", ParameterType.ARRAY, "Analyzed snapshot paths.", required=False, json_schema=string_array),
-            _parameter("failed_paths", ParameterType.ARRAY, "Paths that could not be analyzed.", required=False, json_schema=string_array),
+            _parameter("inventoried_paths", ParameterType.ARRAY, "Exact snapshot paths returned by audit_inventory whose inventory page was consumed.", required=False, json_schema=string_array),
+            _parameter("analyzed_paths", ParameterType.ARRAY, "Exact existing snapshot paths fully covered by this worker's audit_read or audit_search accesses.", required=False, json_schema=string_array),
+            _parameter("failed_paths", ParameterType.ARRAY, "Exact inventory or omission paths that could not be analyzed; never invent paths.", required=False, json_schema=string_array),
             _parameter("open_questions", ParameterType.ARRAY, "Unresolved audit questions.", required=False, json_schema=string_array),
         ],
     )

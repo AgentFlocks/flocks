@@ -67,10 +67,19 @@ def resolve_session_trace_context(session_metadata: Any) -> Dict[str, Any]:
         return {}
 
     context: Dict[str, Any] = {}
-    for key in ("session_id", "trace_name"):
+    for key in ("session_id", "trace_name", "root_trace_name"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
             context[key] = value.strip()
+
+    trace_context = raw.get("trace_context")
+    if isinstance(trace_context, dict):
+        trace_id = trace_context.get("trace_id")
+        parent_span_id = trace_context.get("parent_span_id")
+        if _is_hex_identifier(trace_id, 32):
+            context["trace_context"] = {"trace_id": trace_id}
+            if _is_hex_identifier(parent_span_id, 16):
+                context["trace_context"]["parent_span_id"] = parent_span_id
 
     tags = raw.get("tags")
     if isinstance(tags, list):
@@ -86,6 +95,25 @@ def resolve_session_trace_context(session_metadata: Any) -> Dict[str, Any]:
     if isinstance(metadata, dict):
         context["metadata"] = dict(metadata)
     return context
+
+
+def _is_hex_identifier(value: Any, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def observation_trace_context(observation: Any) -> Dict[str, str]:
+    """Return the portable Langfuse trace context for an open observation."""
+    trace_id = getattr(observation, "trace_id", None)
+    parent_span_id = getattr(observation, "id", None)
+    if not _is_hex_identifier(trace_id, 32) or not _is_hex_identifier(
+        parent_span_id, 16
+    ):
+        return {}
+    return {"trace_id": trace_id, "parent_span_id": parent_span_id}
 
 
 def _get_capture_mode() -> str:
@@ -236,6 +264,8 @@ def create_trace(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    trace_name: Optional[str] = None,
+    trace_context: Optional[Dict[str, str]] = None,
 ) -> Any:
     client = _get_client()
     if not client:
@@ -264,15 +294,24 @@ def create_trace(
                 trace_metadata.setdefault("user_id", user_id)
             if tags is not None:
                 trace_metadata.setdefault("tags", tags)
-            trace_obs = client.start_observation(
-                name=name,
-                as_type="span",
-                input=payload.get("input"),
-                metadata=trace_metadata or None,
-            )
+            observation_payload = {
+                "name": name,
+                "as_type": "span",
+                "input": payload.get("input"),
+                "metadata": trace_metadata or None,
+            }
+            if trace_context:
+                observation_payload["trace_context"] = trace_context
+            try:
+                trace_obs = client.start_observation(**observation_payload)
+            except TypeError:
+                # Langfuse SDKs before portable OTEL parenting do not accept
+                # trace_context. Preserve tracing without cross-session parenting.
+                observation_payload.pop("trace_context", None)
+                trace_obs = client.start_observation(**observation_payload)
             return _propagate_trace_dimensions(
                 trace_obs,
-                trace_name=name,
+                trace_name=trace_name or name,
                 session_id=session_id,
                 user_id=user_id,
                 tags=tags,
@@ -422,7 +461,8 @@ def end_observation(
         if hasattr(observation, "update"):
             update_payload = dict(payload)
             if usage:
-                update_payload["usage_details"] = usage
+                update_payload.pop("usage", None)
+                update_payload["usage_details"] = _normalize_usage_details(usage)
             try:
                 observation.update(**update_payload)
             except TypeError:
@@ -439,6 +479,42 @@ def end_observation(
             observation.end()
     except Exception as exc:
         log.debug("langfuse.end_fallback_end_failed", {"error": str(exc)})
+
+
+def _normalize_usage_details(usage: Dict[str, Any]) -> Dict[str, int]:
+    """Map provider token counters to Langfuse's non-overlapping usage keys."""
+
+    def first_counter(*names: str) -> int:
+        for name in names:
+            value = usage.get(name)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and value >= 0:
+                return int(value)
+        return 0
+
+    input_tokens = first_counter("prompt_tokens", "input_tokens", "input")
+    output_tokens = first_counter(
+        "completion_tokens", "output_tokens", "output"
+    )
+    total_tokens = first_counter("total_tokens", "total")
+    if total_tokens == 0:
+        total_tokens = input_tokens + output_tokens
+
+    normalized = {
+        "input": input_tokens,
+        "output": output_tokens,
+        "total": total_tokens,
+    }
+    for target, aliases in (
+        ("reasoning", ("reasoning_tokens",)),
+        ("cache_read", ("cache_read_input_tokens", "cached_input_tokens")),
+        ("cache_write", ("cache_creation_input_tokens",)),
+    ):
+        value = first_counter(*aliases)
+        if value:
+            normalized[target] = value
+    return normalized
 
 
 def is_active() -> bool:
@@ -521,6 +597,8 @@ def trace_scope(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    trace_name: Optional[str] = None,
+    trace_context: Optional[Dict[str, str]] = None,
 ) -> ObservationScope:
     obs = create_trace(
         name=name,
@@ -529,6 +607,8 @@ def trace_scope(
         session_id=session_id,
         user_id=user_id,
         tags=tags,
+        trace_name=trace_name,
+        trace_context=trace_context,
     )
     return ObservationScope(obs)
 

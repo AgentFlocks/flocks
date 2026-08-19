@@ -89,6 +89,18 @@ class _NewSdkLikeObservation:
         self.end_calls += 1
 
 
+class _ShutdownClient:
+    def __init__(self) -> None:
+        self.flush_calls = 0
+        self.shutdown_calls = 0
+
+    def flush(self):
+        self.flush_calls += 1
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+
 def test_create_span_uses_current_observation(monkeypatch):
     monkeypatch.setattr(lf, "_get_client", lambda: object())
     parent = _FakeParent()
@@ -142,6 +154,11 @@ def test_resolve_session_trace_context_validates_persisted_values():
             "langfuse": {
                 "session_id": " scan_123 ",
                 "trace_name": "code-security.baseline.model-step",
+                "root_trace_name": "code-security.scan",
+                "trace_context": {
+                    "trace_id": "a" * 32,
+                    "parent_span_id": "b" * 16,
+                },
                 "tags": ["phase:baseline", "phase:baseline", "", 42],
                 "metadata": {"assigned_paths": ["src/"]},
             }
@@ -151,6 +168,11 @@ def test_resolve_session_trace_context_validates_persisted_values():
     assert context == {
         "session_id": "scan_123",
         "trace_name": "code-security.baseline.model-step",
+        "root_trace_name": "code-security.scan",
+        "trace_context": {
+            "trace_id": "a" * 32,
+            "parent_span_id": "b" * 16,
+        },
         "tags": ["phase:baseline"],
         "metadata": {"assigned_paths": ["src/"]},
     }
@@ -166,6 +188,8 @@ def test_create_trace_uses_start_observation_for_new_sdk(monkeypatch):
         session_id="s1",
         user_id="u1",
         tags=["session:s1", "step:2"],
+        trace_name="code-security.scan",
+        trace_context={"trace_id": "a" * 32, "parent_span_id": "b" * 16},
         input={"step": 2},
         metadata={"provider_id": "openai"},
     )
@@ -178,7 +202,11 @@ def test_create_trace_uses_start_observation_for_new_sdk(monkeypatch):
     assert client.start_observation_payload["metadata"]["session_id"] == "s1"
     assert client.start_observation_payload["metadata"]["user_id"] == "u1"
     assert client.start_observation_payload["metadata"]["tags"] == ["session:s1", "step:2"]
-    assert obs._otel_span.attributes["langfuse.trace.name"] == "SessionRunner.step"
+    assert client.start_observation_payload["trace_context"] == {
+        "trace_id": "a" * 32,
+        "parent_span_id": "b" * 16,
+    }
+    assert obs._otel_span.attributes["langfuse.trace.name"] == "code-security.scan"
     assert obs._otel_span.attributes["session.id"] == "s1"
     assert obs._otel_span.attributes["user.id"] == "u1"
     assert obs._otel_span.attributes["langfuse.trace.tags"] == ["session:s1", "step:2"]
@@ -288,10 +316,42 @@ def test_end_observation_updates_before_end_for_new_sdk():
     assert obs.update_payload is not None
     assert obs.update_payload["output"] == {"content": "result"}
     assert obs.update_payload["metadata"] == {"status": "ok"}
-    assert obs.update_payload["usage_details"] == usage
+    assert obs.update_payload["usage_details"] == {
+        "input": 100,
+        "output": 50,
+        "total": 150,
+    }
+    assert "usage" not in obs.update_payload
     assert obs.update_payload["level"] == "ERROR"
     assert obs.update_payload["status_message"] == "done"
     assert obs.end_calls == 1
+
+
+def test_normalize_usage_uses_explicit_total_without_double_counting():
+    usage = {
+        "prompt_tokens": 4_159,
+        "completion_tokens": 62,
+        "reasoning_tokens": 16,
+        "total_tokens": 4_237,
+    }
+
+    assert lf._normalize_usage_details(usage) == {
+        "input": 4_159,
+        "output": 62,
+        "reasoning": 16,
+        "total": 4_237,
+    }
+
+
+def test_observation_trace_context_requires_portable_otel_ids():
+    valid = types.SimpleNamespace(trace_id="a" * 32, id="b" * 16)
+    invalid = types.SimpleNamespace(trace_id="not-a-trace", id="not-a-span")
+
+    assert lf.observation_trace_context(valid) == {
+        "trace_id": "a" * 32,
+        "parent_span_id": "b" * 16,
+    }
+    assert lf.observation_trace_context(invalid) == {}
 
 
 def test_scope_end_is_idempotent():
@@ -300,6 +360,16 @@ def test_scope_end_is_idempotent():
     scope = lf.ObservationScope(noop)
     scope.end(output="first")
     scope.end(output="second")
+
+
+def test_shutdown_flushes_and_stops_client(monkeypatch):
+    client = _ShutdownClient()
+    monkeypatch.setattr(lf, "_get_client", lambda: client)
+
+    lf.shutdown()
+
+    assert client.flush_calls == 1
+    assert client.shutdown_calls == 1
 
 
 def test_sanitize_keeps_full_strings_in_full_mode(monkeypatch):

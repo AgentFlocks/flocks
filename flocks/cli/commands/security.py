@@ -13,7 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from flocks.utils.langfuse import flush as flush_langfuse
+from flocks.utils.langfuse import shutdown as shutdown_langfuse
 
 
 security_app = typer.Typer(
@@ -209,7 +209,7 @@ def security_audit(
             console.print(f"[red]Audit failed:[/red] {exc}")
         raise typer.Exit(1) from None
     finally:
-        flush_langfuse()
+        shutdown_langfuse()
 
     if json_output:
         _json_line("scan.result", result)
