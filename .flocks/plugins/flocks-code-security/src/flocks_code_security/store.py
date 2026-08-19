@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from flocks_code_security.models import (
@@ -196,6 +196,16 @@ class ScanStore:
                     start_line INTEGER,
                     end_line INTEGER,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS adjudications (
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    adjudication_round INTEGER NOT NULL CHECK (adjudication_round IN (1, 2)),
+                    action TEXT NOT NULL CHECK (action IN ('finalize', 'targeted_rescan')),
+                    accepted_candidate_ids_json TEXT NOT NULL,
+                    rejected_candidates_json TEXT NOT NULL,
+                    rescan_json TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (scan_id, adjudication_round)
                 );
                 """
             )
@@ -404,7 +414,10 @@ class ScanStore:
         now = _now()
         with self._lock, self._connect() as connection:
             connection.execute(
-                "INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO scans ("
+                "scan_id, parent_session_id, snapshot_id, mode, "
+                "status, ruleset_digest, created_at, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     parent_session_id,
@@ -461,7 +474,13 @@ class ScanStore:
         phase: str,
         units: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if phase not in {"threat_modeling", "baseline", "investigation", "verification"}:
+        if phase not in {
+            "threat_modeling",
+            "baseline",
+            "investigation",
+            "verification",
+            "targeted_rescan",
+        }:
             raise ValueError("Unsupported worker phase")
         if not units or len(units) > 32:
             raise ValueError("A worker batch must contain between 1 and 32 units")
@@ -492,6 +511,23 @@ class ScanStore:
                 ).fetchone()
                 if prior is not None:
                     raise ValueError("Baseline workers have already been created")
+            if phase == "targeted_rescan":
+                self._require_threat_model_ready(connection, scan_id)
+                directive = self._require_targeted_rescan_directive(
+                    connection,
+                    scan_id,
+                )
+                prior = connection.execute(
+                    "SELECT 1 FROM worker_batches WHERE scan_id = ? "
+                    "AND phase = 'targeted_rescan'",
+                    (scan_id,),
+                ).fetchone()
+                if prior is not None:
+                    raise ValueError("A targeted rescan has already been created")
+                if len(units) != 1 or units[0].get("paths") != directive["paths"]:
+                    raise ValueError(
+                        "Targeted-rescan scope must exactly match the adjudication"
+                    )
             connection.execute(
                 "INSERT INTO worker_batches VALUES (?, ?, ?, ?, ?, ?)",
                 (batch_id, scan_id, phase, "pending", now, now),
@@ -507,6 +543,7 @@ class ScanStore:
                     "baseline": "baseline",
                     "investigation": "investigator",
                     "verification": "verifier",
+                    "targeted_rescan": "baseline",
                 }[phase]
                 if role != expected_role:
                     raise ValueError("Work-unit role does not match its phase")
@@ -751,40 +788,378 @@ class ScanStore:
             )
         return [row["background_task_id"] for row in task_rows]
 
+    @staticmethod
+    def _require_analysis_ready(
+        connection: sqlite3.Connection,
+        scan_id: str,
+    ) -> None:
+        active = connection.execute(
+            "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
+            "AND status IN ('pending', 'running')",
+            (scan_id,),
+        ).fetchone()[0]
+        analysis_units = connection.execute(
+            "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
+            "AND role IN ('baseline', 'investigator')",
+            (scan_id,),
+        ).fetchone()[0]
+        unverified = connection.execute(
+            "SELECT COUNT(*) FROM candidates c "
+            "LEFT JOIN verifications v ON v.candidate_id = c.candidate_id "
+            "WHERE c.scan_id = ? AND v.candidate_id IS NULL",
+            (scan_id,),
+        ).fetchone()[0]
+        conflicts = connection.execute(
+            "SELECT COUNT(*) FROM verification_conflicts vc "
+            "JOIN candidates c ON c.candidate_id = vc.candidate_id "
+            "WHERE c.scan_id = ?",
+            (scan_id,),
+        ).fetchone()[0]
+        if active:
+            raise ValueError("Audit workers are still active")
+        if not analysis_units:
+            raise ValueError("At least one baseline analysis work unit is required")
+        if unverified:
+            raise ValueError(
+                "Every candidate requires an independent verification verdict"
+            )
+        if conflicts:
+            raise ValueError(
+                "Verification conflicts must be resolved before adjudication"
+            )
+
+    @staticmethod
+    def _next_adjudication_round(
+        connection: sqlite3.Connection,
+        scan_id: str,
+    ) -> int:
+        latest = connection.execute(
+            "SELECT adjudication_round, action FROM adjudications "
+            "WHERE scan_id = ? ORDER BY adjudication_round DESC LIMIT 1",
+            (scan_id,),
+        ).fetchone()
+        if latest is None:
+            return 1
+        if latest["action"] == "finalize":
+            raise ValueError("A final adjudication has already been submitted")
+        if latest["adjudication_round"] != 1:
+            raise ValueError("The maximum adjudication round has been reached")
+        rescan = connection.execute(
+            "SELECT status FROM worker_batches WHERE scan_id = ? "
+            "AND phase = 'targeted_rescan' ORDER BY created_at DESC LIMIT 1",
+            (scan_id,),
+        ).fetchone()
+        if rescan is None:
+            raise ValueError("The directed targeted rescan has not been started")
+        if rescan["status"] in {"pending", "running"}:
+            raise ValueError("The directed targeted rescan is still active")
+        return 2
+
+    @staticmethod
+    def _decode_adjudication(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["accepted_candidate_ids"] = json.loads(
+            item.pop("accepted_candidate_ids_json")
+        )
+        item["rejected_candidates"] = json.loads(
+            item.pop("rejected_candidates_json")
+        )
+        raw_rescan = item.pop("rescan_json")
+        item["rescan"] = json.loads(raw_rescan) if raw_rescan else None
+        return item
+
+    def get_latest_adjudication(self, scan_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM adjudications WHERE scan_id = ? "
+                "ORDER BY adjudication_round DESC LIMIT 1",
+                (scan_id,),
+            ).fetchone()
+        return self._decode_adjudication(row) if row is not None else None
+
+    def _require_targeted_rescan_directive(
+        self,
+        connection: sqlite3.Connection,
+        scan_id: str,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT * FROM adjudications WHERE scan_id = ? "
+            "AND adjudication_round = 1 AND action = 'targeted_rescan'",
+            (scan_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Targeted rescan requires a round-one direction")
+        directive = self._decode_adjudication(row).get("rescan")
+        if not isinstance(directive, dict):
+            raise ValueError("Targeted-rescan direction is missing")
+        return directive
+
+    def get_targeted_rescan_directive(self, scan_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            self._require_scan_status(connection, scan_id, {"running"})
+            return self._require_targeted_rescan_directive(connection, scan_id)
+
+    def get_adjudication_context(self, scan_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            self._require_scan_status(connection, scan_id, {"running"})
+            self._require_threat_model_ready(connection, scan_id)
+            self._require_analysis_ready(connection, scan_id)
+            adjudication_round = self._next_adjudication_round(
+                connection,
+                scan_id,
+            )
+        data = self.report_data(scan_id)
+        evidence_by_candidate: dict[str, list[dict[str, Any]]] = {}
+        for evidence in data["evidence"]:
+            evidence_by_candidate.setdefault(
+                evidence["candidate_id"],
+                [],
+            ).append(evidence)
+        verification_by_candidate = {
+            item["candidate_id"]: item for item in data["verifications"]
+        }
+        candidates: list[dict[str, Any]] = []
+        for candidate in data["candidates"]:
+            item = dict(candidate)
+            item["evidence"] = evidence_by_candidate.get(
+                candidate["candidate_id"],
+                [],
+            )
+            item["verification"] = verification_by_candidate.get(
+                candidate["candidate_id"]
+            )
+            candidates.append(item)
+        return {
+            "scan_id": scan_id,
+            "adjudication_round": adjudication_round,
+            "threat_model": data["threat_model"],
+            "candidates": candidates,
+            "coverage": data["coverage"],
+            "omissions": data["omissions"],
+        }
+
+    @staticmethod
+    def _normalize_rescan_path(raw_path: Any) -> str:
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError("Targeted-rescan paths must be non-empty strings")
+        if len(raw_path) > 1_024 or "\x00" in raw_path or "\\" in raw_path:
+            raise ValueError("Targeted-rescan path is not canonical")
+        path = PurePosixPath(raw_path)
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != raw_path:
+            raise ValueError("Targeted-rescan path is not snapshot-relative")
+        normalized = path.as_posix()
+        if normalized == ".":
+            raise ValueError("Targeted rescan requires a narrower path than '.'")
+        return normalized
+
+    def save_adjudication(
+        self,
+        scan_id: str,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(decision, dict):
+            raise ValueError("decision must be an object")
+        action = decision.get("action")
+        if action not in {"finalize", "targeted_rescan"}:
+            raise ValueError("Adjudication action must be finalize or targeted_rescan")
+        accepted: list[str] = []
+        normalized_rejected: list[dict[str, str]] = []
+        normalized_rescan: dict[str, Any] | None = None
+        if action == "finalize":
+            if set(decision) != {
+                "action",
+                "accepted_candidate_ids",
+                "rejected_candidates",
+            }:
+                raise ValueError(
+                    "Final adjudication requires only accepted_candidate_ids "
+                    "and rejected_candidates"
+                )
+            raw_accepted = decision["accepted_candidate_ids"]
+            rejected = decision["rejected_candidates"]
+            if not isinstance(raw_accepted, list) or not all(
+                isinstance(item, str) and item for item in raw_accepted
+            ):
+                raise ValueError(
+                    "accepted_candidate_ids must be an array of identifiers"
+                )
+            if len(raw_accepted) != len(set(raw_accepted)):
+                raise ValueError("accepted_candidate_ids contains duplicates")
+            accepted = sorted(raw_accepted)
+            if not isinstance(rejected, list):
+                raise ValueError("rejected_candidates must be an array")
+            for item in rejected:
+                if (
+                    not isinstance(item, dict)
+                    or set(item) != {"candidate_id", "reason"}
+                ):
+                    raise ValueError(
+                        "Each rejected candidate requires only candidate_id and reason"
+                    )
+                candidate_id = item["candidate_id"]
+                reason = item["reason"]
+                if not isinstance(candidate_id, str) or not candidate_id:
+                    raise ValueError("Rejected candidate_id must be non-empty")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("Every rejected candidate requires a reason")
+                if len(reason.strip()) > 4_000:
+                    raise ValueError("Rejected-candidate reason is too long")
+                normalized_rejected.append(
+                    {"candidate_id": candidate_id, "reason": reason.strip()}
+                )
+            rejected_ids = [
+                item["candidate_id"] for item in normalized_rejected
+            ]
+            if len(rejected_ids) != len(set(rejected_ids)):
+                raise ValueError("rejected_candidates contains duplicates")
+            if set(accepted) & set(rejected_ids):
+                raise ValueError("A candidate cannot be both accepted and rejected")
+            normalized_rejected.sort(key=lambda item: item["candidate_id"])
+        else:
+            if set(decision) != {"action", "rescan"}:
+                raise ValueError(
+                    "Targeted rescan requires only the rescan direction"
+                )
+            raw_rescan = decision["rescan"]
+            if not isinstance(raw_rescan, dict) or set(raw_rescan) != {
+                "reason",
+                "paths",
+                "questions",
+            }:
+                raise ValueError(
+                    "Targeted rescan requires only reason, paths, and questions"
+                )
+            reason = raw_rescan["reason"]
+            paths = raw_rescan["paths"]
+            questions = raw_rescan["questions"]
+            if not isinstance(reason, str) or not reason.strip() or len(reason) > 4_000:
+                raise ValueError("Targeted-rescan reason must contain 1 to 4000 characters")
+            if (
+                not isinstance(paths, list)
+                or not 1 <= len(paths) <= 32
+                or not isinstance(questions, list)
+                or not 1 <= len(questions) <= 32
+            ):
+                raise ValueError(
+                    "Targeted rescan requires between 1 and 32 paths and questions"
+                )
+            normalized_paths = sorted(
+                self._normalize_rescan_path(item) for item in paths
+            )
+            if len(normalized_paths) != len(set(normalized_paths)):
+                raise ValueError("Targeted-rescan paths contain duplicates")
+            normalized_questions = []
+            for question in questions:
+                if (
+                    not isinstance(question, str)
+                    or not question.strip()
+                    or len(question.strip()) > 1_000
+                ):
+                    raise ValueError(
+                        "Each targeted-rescan question must contain 1 to 1000 characters"
+                    )
+                normalized_questions.append(question.strip())
+            normalized_rescan = {
+                "reason": reason.strip(),
+                "paths": normalized_paths,
+                "questions": normalized_questions,
+            }
+
+        with self._lock, self._connect() as connection:
+            scan = self._require_scan_status(connection, scan_id, {"running"})
+            self._require_threat_model_ready(connection, scan_id)
+            self._require_analysis_ready(connection, scan_id)
+            adjudication_round = self._next_adjudication_round(connection, scan_id)
+            if adjudication_round == 2 and action != "finalize":
+                raise ValueError("The second adjudication must finalize the scan")
+            if action == "finalize":
+                candidate_rows = connection.execute(
+                    "SELECT c.candidate_id, v.verdict FROM candidates c "
+                    "JOIN verifications v ON v.candidate_id = c.candidate_id "
+                    "WHERE c.scan_id = ? ORDER BY c.created_at, c.candidate_id",
+                    (scan_id,),
+                ).fetchall()
+                candidate_ids = {
+                    row["candidate_id"] for row in candidate_rows
+                }
+                rejected_ids = [
+                    item["candidate_id"] for item in normalized_rejected
+                ]
+                if set(accepted) | set(rejected_ids) != candidate_ids:
+                    raise ValueError(
+                        "Every scan candidate must be classified exactly once"
+                    )
+                verdict_by_candidate = {
+                    row["candidate_id"]: row["verdict"]
+                    for row in candidate_rows
+                }
+                invalid_accepts = [
+                    candidate_id
+                    for candidate_id in accepted
+                    if verdict_by_candidate.get(candidate_id) != "confirmed"
+                ]
+                if invalid_accepts:
+                    raise ValueError(
+                        "Only independently confirmed candidates may be accepted"
+                    )
+            if normalized_rescan is not None:
+                snapshot_paths = {
+                    row["relative_path"]
+                    for row in connection.execute(
+                        "SELECT relative_path FROM snapshot_files "
+                        "WHERE snapshot_id = ?",
+                        (scan["snapshot_id"],),
+                    ).fetchall()
+                }
+                snapshot_paths.update(
+                    row["relative_path"]
+                    for row in connection.execute(
+                        "SELECT relative_path FROM snapshot_omissions "
+                        "WHERE snapshot_id = ?",
+                        (scan["snapshot_id"],),
+                    ).fetchall()
+                )
+                for path in normalized_rescan["paths"]:
+                    if not any(
+                        item == path or item.startswith(f"{path}/")
+                        for item in snapshot_paths
+                    ):
+                        raise ValueError(
+                            f"Targeted-rescan path is outside the snapshot: {path}"
+                        )
+            connection.execute(
+                "INSERT INTO adjudications VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scan_id,
+                    adjudication_round,
+                    action,
+                    json.dumps(accepted, ensure_ascii=False),
+                    json.dumps(normalized_rejected, ensure_ascii=False),
+                    (
+                        json.dumps(normalized_rescan, ensure_ascii=False)
+                        if normalized_rescan is not None
+                        else None
+                    ),
+                    _now(),
+                ),
+            )
+        saved = self.get_latest_adjudication(scan_id)
+        if saved is None:
+            raise ValueError("Adjudication was not persisted")
+        return saved
+
     def ensure_ready_to_finalize(self, scan_id: str) -> None:
         with self._connect() as connection:
             self._require_scan_status(connection, scan_id, {"running"})
             self._require_threat_model_ready(connection, scan_id)
-            active = connection.execute(
-                "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
-                "AND status IN ('pending', 'running')",
+            self._require_analysis_ready(connection, scan_id)
+            latest = connection.execute(
+                "SELECT action FROM adjudications WHERE scan_id = ? "
+                "ORDER BY adjudication_round DESC LIMIT 1",
                 (scan_id,),
-            ).fetchone()[0]
-            unverified = connection.execute(
-                "SELECT COUNT(*) FROM candidates c "
-                "LEFT JOIN verifications v ON v.candidate_id = c.candidate_id "
-                "WHERE c.scan_id = ? AND v.candidate_id IS NULL",
-                (scan_id,),
-            ).fetchone()[0]
-            conflicts = connection.execute(
-                "SELECT COUNT(*) FROM verification_conflicts vc "
-                "JOIN candidates c ON c.candidate_id = vc.candidate_id "
-                "WHERE c.scan_id = ?",
-                (scan_id,),
-            ).fetchone()[0]
-            analysis_units = connection.execute(
-                "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
-                "AND role IN ('baseline', 'investigator')",
-                (scan_id,),
-            ).fetchone()[0]
-        if active:
-            raise ValueError("Cannot finalize while audit workers are still active")
-        if not analysis_units:
-            raise ValueError("At least one baseline analysis work unit is required")
-        if unverified:
-            raise ValueError("Every candidate requires an independent verification verdict")
-        if conflicts:
-            raise ValueError("Verification conflicts must be resolved before finalization")
+            ).fetchone()
+        if latest is None or latest["action"] != "finalize":
+            raise ValueError("A final parent-agent adjudication is required")
 
     def get_work_unit(self, work_unit_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1038,17 +1413,33 @@ class ScanStore:
             row = self._require_threat_model_ready(connection, binding.scan_id)
             threat_model = json.loads(row["payload_json"])
             evidence = json.loads(row["evidence_json"])
+            work_unit = connection.execute(
+                "SELECT phase FROM work_units WHERE work_unit_id = ?",
+                (binding.work_unit_id,),
+            ).fetchone()
+            rescan = (
+                self._require_targeted_rescan_directive(
+                    connection,
+                    binding.scan_id,
+                )
+                if work_unit is not None
+                and work_unit["phase"] == "targeted_rescan"
+                else None
+            )
             connection.execute(
                 "INSERT INTO threat_model_access VALUES (?, ?, ?) "
                 "ON CONFLICT(scan_id, work_unit_id) DO UPDATE SET "
                 "accessed_at = excluded.accessed_at",
                 (binding.scan_id, binding.work_unit_id, _now()),
             )
-        return {
+        output = {
             "scan_id": binding.scan_id,
             "threat_model": threat_model,
             "evidence": evidence,
         }
+        if rescan is not None:
+            output["targeted_rescan"] = rescan
+        return output
 
     def require_threat_model_ready(self, scan_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1547,6 +1938,10 @@ class ScanStore:
                     "AND status IN ('pending', 'running')",
                     (scan_id,),
                 ).fetchone()[0],
+                "adjudications": connection.execute(
+                    "SELECT COUNT(*) FROM adjudications WHERE scan_id = ?",
+                    (scan_id,),
+                ).fetchone()[0],
             }
             batch_rows = connection.execute(
                 "SELECT batch_id, phase, status FROM worker_batches "
@@ -1565,6 +1960,11 @@ class ScanStore:
                 "SELECT status FROM worker_batches "
                 "WHERE scan_id = ? AND phase = 'threat_modeling' "
                 "ORDER BY created_at DESC, batch_id DESC LIMIT 1",
+                (scan_id,),
+            ).fetchone()
+            adjudication_row = connection.execute(
+                "SELECT adjudication_round, action FROM adjudications "
+                "WHERE scan_id = ? ORDER BY adjudication_round DESC LIMIT 1",
                 (scan_id,),
             ).fetchone()
         threat_model_validation_error: str | None = None
@@ -1611,6 +2011,9 @@ class ScanStore:
             "threat_model_status": threat_model_status,
             "integrity_status": integrity_status,
             "integrity_errors": integrity_errors,
+            "adjudication": (
+                dict(adjudication_row) if adjudication_row is not None else None
+            ),
             "worker_batches": [dict(row) for row in batch_rows],
         }
 
@@ -1660,6 +2063,11 @@ class ScanStore:
                 "SELECT * FROM threat_models WHERE scan_id = ?",
                 (scan_id,),
             ).fetchone()
+            adjudication_rows = connection.execute(
+                "SELECT * FROM adjudications WHERE scan_id = ? "
+                "ORDER BY adjudication_round",
+                (scan_id,),
+            ).fetchall()
         candidates = []
         for row in candidate_rows:
             item = dict(row)
@@ -1705,6 +2113,9 @@ class ScanStore:
                     "detected_at": row["detected_at"],
                 }
                 for row in verification_conflict_rows
+            ],
+            "adjudications": [
+                self._decode_adjudication(row) for row in adjudication_rows
             ],
         }
 

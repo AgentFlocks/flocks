@@ -27,6 +27,7 @@ from flocks_code_security.orchestration import (
     plan_baseline_units,
     plan_threat_model_units,
     plan_verification_units,
+    targeted_rescan_prompt,
     threat_model_prompt,
     verification_prompt,
 )
@@ -96,6 +97,8 @@ AUDIT_TOOL_NAMES = (
     "audit_submit_candidate",
     "audit_submit_verdict",
     "audit_submit_coverage",
+    "audit_adjudication_context",
+    "audit_submit_adjudication",
     "audit_status",
     "audit_finalize",
     "audit_cancel",
@@ -628,6 +631,201 @@ async def audit_submit_coverage(
         return _error(exc, title="Coverage submission failed")
 
 
+async def audit_adjudication_context(
+    ctx: ToolContext,
+    scan_id: str,
+    candidate_id: str | None = None,
+) -> ToolResult:
+    runtime = get_runtime()
+    try:
+        binding = _coordinator_binding(ctx, scan_id)
+        context = await asyncio.to_thread(
+            runtime.store.get_adjudication_context,
+            scan_id,
+        )
+        all_candidates = context.pop("candidates")
+
+        def compact(value: Any, *, text_limit: int, list_limit: int = 20) -> Any:
+            if isinstance(value, dict):
+                return {
+                    str(key): compact(
+                        item,
+                        text_limit=text_limit,
+                        list_limit=list_limit,
+                    )
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [
+                    compact(
+                        item,
+                        text_limit=text_limit,
+                        list_limit=list_limit,
+                    )
+                    for item in value[:list_limit]
+                ]
+            if isinstance(value, str):
+                return value[:text_limit]
+            return value
+
+        async def enrich(
+            evidence: dict[str, Any],
+            metadata: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            excerpt = await asyncio.to_thread(
+                runtime.source.evidence_excerpt,
+                binding.snapshot_id,
+                evidence,
+                max_characters=500,
+            )
+            output = {**evidence, **excerpt}
+            if metadata is not None:
+                output.update(compact(metadata, text_limit=300))
+            return output
+
+        base = {
+            "scan_id": scan_id,
+            "adjudication_round": context["adjudication_round"],
+        }
+        if candidate_id is None:
+            failed_paths: list[str] = []
+            open_questions: list[str] = []
+            for item in context["coverage"]:
+                payload = item.get("payload", {})
+                failed_paths.extend(payload.get("failed_paths", []))
+                open_questions.extend(payload.get("open_questions", []))
+            failed_paths = list(dict.fromkeys(failed_paths))
+            open_questions = list(dict.fromkeys(open_questions))
+            omissions = context["omissions"]
+            output = {
+                **base,
+                "view": "overview",
+                "threat_model": compact(
+                    context["threat_model"]["threat_model"],
+                    text_limit=500,
+                ),
+                "candidate_count": len(all_candidates),
+                "candidates": [
+                    {
+                        "candidate_id": item["candidate_id"],
+                        "title": compact(
+                            item["payload"].get("title"),
+                            text_limit=300,
+                        ),
+                        "severity": item["payload"].get("severity"),
+                        "verdict": (
+                            item["verification"].get("verdict")
+                            if isinstance(item.get("verification"), dict)
+                            else None
+                        ),
+                    }
+                    for item in all_candidates
+                ],
+                "coverage_gaps": {
+                    "failed_paths": failed_paths[:100],
+                    "open_questions": open_questions[:100],
+                    "omissions": omissions[:100],
+                    "truncated": any(
+                        len(items) > 100
+                        for items in (failed_paths, open_questions, omissions)
+                    ),
+                },
+            }
+        else:
+            candidate = next(
+                (
+                    item
+                    for item in all_candidates
+                    if item["candidate_id"] == candidate_id
+                ),
+                None,
+            )
+            if candidate is None:
+                raise ValueError("Candidate does not belong to this scan")
+            payload = candidate["payload"]
+            metadata_rows = payload.get("evidence_metadata", [])
+            evidence = [
+                await enrich(
+                    item,
+                    (
+                        metadata_rows[int(item.get("ordinal", 0))]
+                        if int(item.get("ordinal", 0)) < len(metadata_rows)
+                        else None
+                    ),
+                )
+                for item in candidate.get("evidence", [])
+            ]
+            verification = candidate.get("verification")
+            compact_verification = None
+            if isinstance(verification, dict):
+                compact_verification = {
+                    "verdict": verification.get("verdict"),
+                    "rationale": compact(
+                        verification.get("rationale"),
+                        text_limit=4_000,
+                    ),
+                    "counter_evidence": [
+                        await enrich(item)
+                        for item in verification.get("counter_evidence", [])
+                    ],
+                }
+            decision_payload = {
+                key: value
+                for key, value in payload.items()
+                if key
+                not in {
+                    "evidence_metadata",
+                    "remediation",
+                    "remediation_tests",
+                    "preventive_controls",
+                }
+            }
+            decision_payload = compact(decision_payload, text_limit=4_000)
+            decision_payload.update(
+                {
+                    "candidate_id": candidate["candidate_id"],
+                    "evidence": evidence,
+                    "verification": compact_verification,
+                }
+            )
+            output = {
+                **base,
+                "view": "candidate",
+                "candidate": decision_payload,
+            }
+        return ToolResult(
+            success=True,
+            output=output,
+            title=f"Parent adjudication context for {scan_id}",
+        )
+    except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
+        return _error(exc, title="Adjudication context unavailable")
+
+
+async def audit_submit_adjudication(
+    ctx: ToolContext,
+    scan_id: str,
+    decision: dict[str, Any],
+) -> ToolResult:
+    try:
+        _coordinator_binding(ctx, scan_id)
+        saved = await asyncio.to_thread(
+            get_runtime().store.save_adjudication,
+            scan_id,
+            decision,
+        )
+        return ToolResult(
+            success=True,
+            output=saved,
+            title=(
+                f"Submitted round {saved['adjudication_round']} "
+                f"{saved['action']} adjudication"
+            ),
+        )
+    except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
+        return _error(exc, title="Adjudication submission failed")
+
+
 async def audit_status(ctx: ToolContext, scan_id: str) -> ToolResult:
     try:
         _coordinator_binding(ctx, scan_id)
@@ -709,6 +907,19 @@ async def audit_run_workers(
             candidates_by_id = {
                 item["candidate_id"]: item for item in candidates
             }
+        elif phase == "targeted_rescan":
+            directive = await asyncio.to_thread(
+                runtime.store.get_targeted_rescan_directive,
+                scan_id,
+            )
+            units = [
+                {
+                    "role": "baseline",
+                    "paths": list(directive["paths"]),
+                    "subject_id": None,
+                }
+            ]
+            candidates_by_id = {}
         else:
             raise ValueError("Unsupported standard-audit worker phase")
         batch = await asyncio.to_thread(
@@ -889,6 +1100,8 @@ async def _launch_worker(
         prompt = threat_model_prompt(snapshot_id=snapshot_id)
     elif phase == "baseline":
         prompt = baseline_prompt(snapshot_id=snapshot_id, paths=unit["paths"])
+    elif phase == "targeted_rescan":
+        prompt = targeted_rescan_prompt(snapshot_id=snapshot_id)
     elif phase == "verification" and candidate is not None:
         prompt = verification_prompt(
             snapshot_id=snapshot_id,
@@ -1253,6 +1466,71 @@ def register_tools() -> None:
             "evidence": evidence_schema,
         },
     }
+    rejected_candidate_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["candidate_id", "reason"],
+        "properties": {
+            "candidate_id": {"type": "string", "minLength": 1},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 4_000},
+        },
+    }
+    adjudication_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["action"],
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["finalize", "targeted_rescan"],
+            },
+            "accepted_candidate_ids": {
+                "type": "array",
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+                "description": "Required only when action is finalize.",
+            },
+            "rejected_candidates": {
+                "type": "array",
+                "items": rejected_candidate_schema,
+                "description": "Required only when action is finalize.",
+            },
+            "rescan": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["reason", "paths", "questions"],
+                "description": "Required only when action is targeted_rescan.",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4_000,
+                    },
+                    "paths": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "pattern": "^(?!\\.$)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+",
+                        },
+                    },
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1_000,
+                        },
+                    },
+                },
+            },
+        },
+    }
     _register(
         "audit_prepare",
         "Create a reproducible read-only snapshot and initialize a standard static code audit. Never executes target code.",
@@ -1380,6 +1658,34 @@ def register_tools() -> None:
             _parameter("open_questions", ParameterType.ARRAY, "Unresolved audit questions.", required=False, json_schema=string_array),
         ],
     )
+    _register(
+        "audit_adjudication_context",
+        "Return a compact overview or one evidence-backed candidate for parent adjudication.",
+        audit_adjudication_context,
+        [
+            _parameter("scan_id", ParameterType.STRING, "Bound scan identifier."),
+            _parameter(
+                "candidate_id",
+                ParameterType.STRING,
+                "Optional candidate identifier. Omit for the overview; provide it to inspect exactly one candidate.",
+                required=False,
+            ),
+        ],
+    )
+    _register(
+        "audit_submit_adjudication",
+        "Either classify every candidate and finalize, or direct the single allowed targeted rescan without classification.",
+        audit_submit_adjudication,
+        [
+            _parameter("scan_id", ParameterType.STRING, "Bound scan identifier."),
+            _parameter(
+                "decision",
+                ParameterType.OBJECT,
+                "Final parent decision or one bounded targeted-rescan direction.",
+                json_schema=adjudication_schema,
+            ),
+        ],
+    )
     for name, description, handler in (
         ("audit_status", "Return trusted status and fact counts for this coordinator session's scan.", audit_status),
         ("audit_finalize", "Deterministically reduce verified candidates and write JSON, Markdown, and SARIF reports.", audit_finalize),
@@ -1388,7 +1694,7 @@ def register_tools() -> None:
         _register(name, description, handler, [_parameter("scan_id", ParameterType.STRING, "Bound scan identifier.")])
     _register(
         "audit_run_workers",
-        "Create and launch isolated threat-modeling, baseline, or verification worker sessions for the bound scan.",
+        "Create and launch isolated standard-audit workers, including the one allowed parent-directed targeted rescan.",
         audit_run_workers,
         [
             _parameter("scan_id", ParameterType.STRING, "Bound scan identifier."),
@@ -1398,7 +1704,12 @@ def register_tools() -> None:
                 "Worker phase.",
                 required=False,
                 default="threat_modeling",
-                enum=["threat_modeling", "baseline", "verification"],
+                enum=[
+                    "threat_modeling",
+                    "baseline",
+                    "verification",
+                    "targeted_rescan",
+                ],
             ),
         ],
     )

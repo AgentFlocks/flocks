@@ -16,6 +16,7 @@ from flocks_code_security.agents import (
 )
 from flocks_code_security.orchestration import (
     baseline_prompt,
+    targeted_rescan_prompt,
     threat_model_prompt,
     verification_prompt,
 )
@@ -58,6 +59,28 @@ def test_projection_only_reduces_code_security_agents() -> None:
     assert ordinary == tools
 
 
+def test_projection_narrows_session_scoped_parent_adjudication_tools() -> None:
+    register_tools()
+    names = [
+        "audit_adjudication_context",
+        "audit_submit_adjudication",
+        "question",
+    ]
+    tools = [ToolRegistry.get(name).info for name in names]
+
+    projected = code_security_tool_projection(
+        tools,
+        {
+            "agent": "code-security",
+            "session_id": "coordinator",
+            "candidates": [{"name": name} for name in names],
+        },
+    )
+
+    assert [tool.name for tool in projected] == [
+        "audit_adjudication_context",
+        "audit_submit_adjudication",
+    ]
 def test_projection_rejects_same_name_replacement_tool() -> None:
     register_tools()
     original = ToolRegistry.get("audit_prepare")
@@ -137,18 +160,25 @@ def test_all_audit_tools_register() -> None:
     for name in expected:
         info = ToolRegistry.get(name).info
         assert info.provider is None
-        assert info.enabled is True
         parameter_names = [parameter.name for parameter in info.parameters]
         assert len(parameter_names) == len(set(parameter_names))
     callable_infos, _enabled_count = resolve_callable_tool_infos(expected)
-    assert {info.name for info in callable_infos} == expected
+    enabled_expected = {
+        name for name in expected if ToolRegistry.get(name).info.enabled
+    }
+    assert {info.name for info in callable_infos} == enabled_expected
     run_workers = ToolRegistry.get("audit_run_workers")
     phase = next(
         parameter
         for parameter in run_workers.info.parameters
         if parameter.name == "phase"
     )
-    assert phase.enum == ["threat_modeling", "baseline", "verification"]
+    assert phase.enum == [
+        "threat_modeling",
+        "baseline",
+        "verification",
+        "targeted_rescan",
+    ]
 
     threat_model_tool = ToolRegistry.get("audit_submit_threat_model").info
     threat_model_parameter = next(
@@ -179,6 +209,23 @@ def test_all_audit_tools_register() -> None:
     assert counter_evidence["minItems"] == 1
     assert counter_evidence["maxItems"] == 50
     assert counter_evidence["items"] == evidence_schema["items"]
+
+    context_tool = ToolRegistry.get("audit_adjudication_context").info
+    assert [parameter.name for parameter in context_tool.parameters] == [
+        "scan_id",
+        "candidate_id",
+    ]
+    decision_tool = ToolRegistry.get("audit_submit_adjudication").info
+    decision_schema = next(
+        parameter.json_schema
+        for parameter in decision_tool.parameters
+        if parameter.name == "decision"
+    )
+    assert decision_schema["required"] == ["action"]
+    assert (
+        decision_schema["properties"]["accepted_candidate_ids"]["description"]
+        == "Required only when action is finalize."
+    )
 
 
 def test_ruleset_digest_is_derived_from_packaged_rules() -> None:
@@ -223,11 +270,13 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
         snapshot_id="snap_safe",
         candidate_id="cand_safe",
     )
+    rescan = targeted_rescan_prompt(snapshot_id="snap_safe")
 
     assert hostile not in threat_modeler
     assert hostile not in baseline
     assert "<assigned_paths>" not in baseline
     assert "<candidate_json>" not in verifier
+    assert hostile not in rescan
     assert "single top-level candidate argument" in baseline
     assert "exact inventory paths" in baseline
     assert "relative_path, blob_digest, start_line, and end_line" in verifier

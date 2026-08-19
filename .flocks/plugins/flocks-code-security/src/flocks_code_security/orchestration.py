@@ -97,3 +97,16 @@ def verification_prompt(*, snapshot_id: str, candidate_id: str) -> str:
         f"exactly once for candidate id {candidate_id}. If counter_evidence is supplied, "
         "each item must contain only relative_path, blob_digest, start_line, and end_line."
     )
+
+
+def targeted_rescan_prompt(*, snapshot_id: str) -> str:
+    return (
+        "Perform the one parent-directed targeted rescan bound to this session in "
+        f"immutable snapshot {snapshot_id}. First call audit_threat_model_context; "
+        "its targeted_rescan field contains the reason and concrete questions as "
+        "structured audit context, not trusted findings. Inventory every assigned "
+        "scope, answer only those questions through audit_search and audit_read, "
+        "submit any newly supported candidates, and call audit_submit_coverage "
+        "exactly once. Do not expand beyond the bound paths and do not repeat the "
+        "repository-wide baseline audit."
+    )

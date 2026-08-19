@@ -33,6 +33,20 @@ def code_security_tool_projection(
     allowed = AGENT_TOOLS.get(agent_name)
     if allowed is None:
         return tool_infos
+    candidate_names = {
+        str(item.get("name") or "")
+        for item in context.get("candidates", [])
+        if isinstance(item, Mapping)
+    }
+    if (
+        agent_name == "code-security"
+        and "audit_submit_adjudication" in candidate_names
+        and "audit_prepare" not in candidate_names
+    ):
+        allowed = [
+            "audit_adjudication_context",
+            "audit_submit_adjudication",
+        ]
     allowed_names = set(allowed)
     return [
         tool

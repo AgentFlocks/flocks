@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,6 +13,28 @@ import flocks_code_security.cli as audit_cli
 
 def _result(output: dict) -> ToolResult:
     return ToolResult(success=True, output=output)
+
+
+async def _final_adjudication(
+    orchestrator: audit_cli.AuditOrchestrator,
+    scan_id: str,
+    scan_observation,
+) -> dict:
+    decision = {
+        "scan_id": scan_id,
+        "adjudication_round": 1,
+        "action": "finalize",
+        "accepted_candidate_ids": [],
+        "rejected_candidates": [],
+        "rescan": None,
+    }
+    audit_cli._emit(
+        orchestrator.progress,
+        "scan.adjudicated",
+        decision,
+        observation_parent=scan_observation,
+    )
+    return decision
 
 
 @pytest.mark.asyncio
@@ -92,13 +116,18 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
     monkeypatch.setattr(audit_cli, "audit_status", status)
     monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
     monkeypatch.setattr(audit_cli, "audit_cancel", unexpected_cancel)
+    monkeypatch.setattr(
+        audit_cli.AuditOrchestrator,
+        "_run_parent_adjudication",
+        _final_adjudication,
+    )
 
     events: list[tuple[str, dict]] = []
-    result = await audit_cli._run_pipeline(
+    result = await audit_cli.AuditOrchestrator(
         ToolContext("session", "message", agent="code-security"),
         Path("/target"),
         lambda event, payload: events.append((event, payload)),
-    )
+    ).run()
 
     assert phases == ["threat_modeling", "baseline", "verification"]
     assert result["report_path"] == "/output/report.md"
@@ -113,8 +142,173 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         "batch.started",
         "batch.status",
         "scan.status",
+        "scan.adjudicated",
         "scan.finalized",
     ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runs_one_parent_directed_rescan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: False)
+    phases: list[str] = []
+    statuses = iter(
+        [
+            {"threat_model_status": "completed", "counts": {}},
+            {"threat_model_status": "completed", "counts": {}},
+            {
+                "threat_model_status": "completed",
+                "counts": {"unverified_candidates": 1},
+            },
+            {
+                "threat_model_status": "completed",
+                "counts": {"unverified_candidates": 0},
+            },
+        ]
+    )
+
+    async def prepare(_ctx, _target_path: str):
+        return _result({"scan_id": "scan_rescan"})
+
+    async def run_workers(_ctx, _scan_id: str, phase: str):
+        phases.append(phase)
+        return _result({"batch_id": f"batch_{phase}", "phase": phase})
+
+    async def wait_workers(_ctx, batch_id: str, timeout_seconds: int):
+        return _result({"batch_id": batch_id, "status": "completed"})
+
+    async def status(_ctx, _scan_id: str):
+        return _result(next(statuses))
+
+    async def finalize(_ctx, scan_id: str):
+        return _result({"scan_id": scan_id, "status": "completed"})
+
+    decisions = iter(
+        [
+            {
+                "adjudication_round": 1,
+                "action": "targeted_rescan",
+                "rescan": {
+                    "reason": "Resolve one hypothesis.",
+                    "paths": ["app.py"],
+                    "questions": ["Is this path attacker reachable?"],
+                },
+            },
+            {
+                "adjudication_round": 2,
+                "action": "finalize",
+                "rescan": None,
+            },
+        ]
+    )
+
+    async def adjudicate(self, scan_id: str, scan_observation):
+        decision = {"scan_id": scan_id, **next(decisions)}
+        audit_cli._emit(
+            self.progress,
+            "scan.adjudicated",
+            decision,
+            observation_parent=scan_observation,
+        )
+        return decision
+
+    monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
+    monkeypatch.setattr(audit_cli, "audit_run_workers", run_workers)
+    monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
+    monkeypatch.setattr(audit_cli, "audit_status", status)
+    monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
+    monkeypatch.setattr(
+        audit_cli.AuditOrchestrator,
+        "_run_parent_adjudication",
+        adjudicate,
+    )
+
+    result = await audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+    ).run()
+
+    assert result["status"] == "completed"
+    assert phases == [
+        "threat_modeling",
+        "baseline",
+        "targeted_rescan",
+        "verification",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision = {
+        "scan_id": "scan_parent",
+        "adjudication_round": 1,
+        "action": "finalize",
+        "accepted_candidate_ids": [],
+        "rejected_candidates": [],
+        "rescan": None,
+    }
+
+    class _Store:
+        calls = 0
+
+        @classmethod
+        def get_latest_adjudication(cls, _scan_id: str):
+            cls.calls += 1
+            return None if cls.calls == 1 else decision
+
+    create_message = AsyncMock()
+    run_loop = AsyncMock(return_value=SimpleNamespace(action="stop", error=None))
+    set_callable_tools = AsyncMock()
+    monkeypatch.setattr(
+        audit_cli,
+        "get_runtime",
+        lambda: SimpleNamespace(store=_Store()),
+    )
+    monkeypatch.setattr(audit_cli.Message, "create", create_message)
+    monkeypatch.setattr(audit_cli.SessionLoop, "run", run_loop)
+    monkeypatch.setattr(
+        audit_cli,
+        "set_session_callable_tools",
+        set_callable_tools,
+    )
+    events: list[str] = []
+    ctx = ToolContext(
+        "coordinator",
+        "message",
+        agent="code-security",
+        extra={
+            "model": {"providerID": "provider", "modelID": "model"}
+        },
+    )
+
+    result = await audit_cli.AuditOrchestrator(
+        ctx,
+        Path("/target"),
+        lambda event, _payload: events.append(event),
+    )._run_parent_adjudication("scan_parent", None)
+
+    assert result == decision
+    assert "host has already completed" in create_message.await_args.kwargs[
+        "content"
+    ].lower()
+    set_callable_tools.assert_awaited_once_with(
+        "coordinator",
+        {
+            "audit_adjudication_context",
+            "audit_submit_adjudication",
+        },
+    )
+    run_loop.assert_awaited_once_with(
+        "coordinator",
+        provider_id="provider",
+        model_id="model",
+        agent_name="code-security",
+    )
+    assert events == ["scan.adjudicated"]
 
 
 @pytest.mark.asyncio
@@ -158,14 +352,19 @@ async def test_pipeline_cancels_when_verification_makes_no_progress(
     monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
     monkeypatch.setattr(audit_cli, "audit_status", status)
     monkeypatch.setattr(audit_cli, "audit_cancel", cancel)
+    monkeypatch.setattr(
+        audit_cli.AuditOrchestrator,
+        "_run_parent_adjudication",
+        _final_adjudication,
+    )
 
     events: list[str] = []
     with pytest.raises(RuntimeError, match="made no progress"):
-        await audit_cli._run_pipeline(
+        await audit_cli.AuditOrchestrator(
             ToolContext("session", "message", agent="code-security"),
             Path("/target"),
             lambda event, _payload: events.append(event),
-        )
+        ).run()
 
     assert cancelled == ["scan_stalled"]
     assert events[-1] == "scan.cancelled"
@@ -276,13 +475,18 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
     monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
     monkeypatch.setattr(audit_cli, "audit_status", status)
     monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
+    monkeypatch.setattr(
+        audit_cli.AuditOrchestrator,
+        "_run_parent_adjudication",
+        _final_adjudication,
+    )
 
     ctx = ToolContext("session", "message", agent="code-security")
-    result = await audit_cli._run_pipeline(
+    result = await audit_cli.AuditOrchestrator(
         ctx,
         Path("/target"),
         None,
-    )
+    ).run()
 
     assert result["finding_count"] == 1
     assert "langfuse_trace_context" not in ctx.extra

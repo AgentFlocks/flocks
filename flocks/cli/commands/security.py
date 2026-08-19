@@ -113,6 +113,17 @@ def _progress_line(event: str, payload: dict[str, Any]) -> None:
             f"pending={counts.get('unverified_candidates', 0)}"
         )
         return
+    if event == "scan.adjudicated":
+        action = payload.get("action")
+        round_number = payload.get("adjudication_round")
+        console.print(
+            f"[{timestamp}] [bold cyan]Parent adjudication[/bold cyan]  "
+            f"round={round_number}  action={action}"
+        )
+        if action == "targeted_rescan":
+            paths = ", ".join((payload.get("rescan") or {}).get("paths", []))
+            console.print(f"           [dim]scope={paths or 'unspecified'}[/dim]")
+        return
     if event == "scan.finalized":
         console.print(
             f"[{timestamp}] [bold green]Audit complete[/bold green]  "
@@ -143,6 +154,13 @@ def _render_status(status: dict[str, Any]) -> None:
         f"[bold]Status:[/bold] {status.get('status')}  "
         f"[bold]Threat model:[/bold] {status.get('threat_model_status')}"
     )
+    adjudication = status.get("adjudication")
+    if adjudication:
+        console.print(
+            f"[bold]Parent adjudication:[/bold] "
+            f"round={adjudication.get('adjudication_round')}  "
+            f"action={adjudication.get('action')}"
+        )
     if status.get("integrity_status") == "invalid":
         console.print("[bold red]Integrity: invalid — do not use this audit result[/bold red]")
         for error in status.get("integrity_errors", []):
@@ -191,7 +209,7 @@ def security_audit(
         help="Emit newline-delimited JSON progress events",
     ),
 ) -> None:
-    """Run threat modeling, baseline scanning, verification, and reporting."""
+    """Run the host-orchestrated audit with parent-Agent adjudication."""
     try:
         run_standard_audit, _scan_status = _load_plugin_cli()
         progress = _json_line if json_output else _progress_line

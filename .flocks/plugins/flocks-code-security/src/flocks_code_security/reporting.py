@@ -77,6 +77,12 @@ class ReportWriter:
             verdict_by_candidate = {
                 item["candidate_id"]: item for item in data["verifications"]
             }
+            adjudications = data["adjudications"]
+            if not adjudications or adjudications[-1]["action"] != "finalize":
+                raise ValueError("A final parent-agent adjudication is required")
+            accepted_candidate_ids = set(
+                adjudications[-1]["accepted_candidate_ids"]
+            )
 
             confirmed_groups: dict[str, list[dict[str, Any]]] = {}
             outcomes: dict[str, str] = {}
@@ -90,13 +96,21 @@ class ReportWriter:
                         "Canonical reduction requires evidence and one verification per candidate"
                     )
                 verdict = verification["verdict"]
+                if candidate_id not in accepted_candidate_ids:
+                    if verdict == "insufficient_evidence":
+                        outcomes[candidate_id] = "deferred"
+                        deferred_ids.append(candidate_id)
+                    else:
+                        outcomes[candidate_id] = "rejected"
+                    continue
                 if verdict == "rejected":
-                    outcomes[candidate_id] = "rejected"
-                    continue
+                    raise ValueError(
+                        "Parent adjudication accepted a verifier-rejected candidate"
+                    )
                 if verdict == "insufficient_evidence":
-                    outcomes[candidate_id] = "deferred"
-                    deferred_ids.append(candidate_id)
-                    continue
+                    raise ValueError(
+                        "Parent adjudication accepted an insufficient-evidence candidate"
+                    )
                 if verdict != "confirmed":
                     raise ValueError(f"Unsupported persisted verification verdict: {verdict}")
 
@@ -147,14 +161,21 @@ class ReportWriter:
             completed_at = self._rfc3339_now()
             findings_bytes = canonical_json_bytes(findings_document)
             coverage_bytes = canonical_json_bytes(coverage_document)
+            adjudication_document = {
+                "scanId": scan_id,
+                "adjudications": adjudications,
+            }
+            adjudication_bytes = canonical_json_bytes(adjudication_document)
             artifact_contents = {
                 "findings.json": findings_bytes,
                 "coverage.json": coverage_bytes,
+                "adjudication.json": adjudication_bytes,
                 **receipts,
             }
             artifacts = [
                 artifact_record("findings.json", findings_bytes),
                 artifact_record("coverage.json", coverage_bytes),
+                artifact_record("adjudication.json", adjudication_bytes),
                 *[
                     artifact_record(path, contents, "application/json")
                     for path, contents in sorted(receipts.items())
@@ -198,6 +219,10 @@ class ReportWriter:
                     "threatModel": threat_model_record["threat_model"],
                     "evidence": threat_model_record["evidence"],
                 },
+            )
+            self._write_json(
+                staging / "adjudication.json",
+                adjudication_document,
             )
             self._write_bytes(
                 staging / "report.md",

@@ -307,6 +307,54 @@ class AuditSourceRepository:
             )
         return validated
 
+    def evidence_excerpt(
+        self,
+        snapshot_id: str,
+        evidence: dict[str, Any],
+        *,
+        max_characters: int = 4_000,
+    ) -> dict[str, Any]:
+        """Read a persisted digest-bound evidence range for parent adjudication."""
+        relative_path = normalize_relative_path(
+            str(evidence.get("relative_path") or "")
+        )
+        record = self._record(snapshot_id, relative_path)
+        if record.is_binary:
+            raise ValueError("Binary snapshot files cannot be used as evidence text")
+        if evidence.get("blob_digest") != record.blob_digest:
+            raise ValueError(f"Evidence digest mismatch: {relative_path}")
+        start_line = evidence.get("start_line")
+        end_line = evidence.get("end_line")
+        if (
+            isinstance(start_line, bool)
+            or not isinstance(start_line, int)
+            or isinstance(end_line, bool)
+            or not isinstance(end_line, int)
+            or start_line < 1
+            or end_line < start_line
+            or end_line > record.line_count
+        ):
+            raise ValueError(f"Invalid evidence line range: {relative_path}")
+        lines = self._verified_bytes(snapshot_id, record).decode(
+            "utf-8",
+            errors="replace",
+        ).splitlines()
+        text = "\n".join(lines[start_line - 1 : end_line])
+        excerpt_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        persisted_hash = evidence.get("excerpt_hash")
+        if persisted_hash is not None and persisted_hash != excerpt_hash:
+            raise ValueError(f"Evidence excerpt hash mismatch: {relative_path}")
+        limit = max(1, min(int(max_characters), 20_000))
+        return {
+            "relative_path": relative_path,
+            "blob_digest": record.blob_digest,
+            "start_line": start_line,
+            "end_line": end_line,
+            "excerpt_hash": excerpt_hash,
+            "text": text[:limit],
+            "text_truncated": len(text) > limit,
+        }
+
     def _assigned_paths(self, binding: SessionBinding) -> list[str]:
         if binding.work_unit_id is None:
             raise ValueError("Source access requires a bound work unit")

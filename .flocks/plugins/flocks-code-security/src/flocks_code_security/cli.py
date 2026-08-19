@@ -11,6 +11,8 @@ from uuid import uuid4
 from flocks.config.config import Config
 from flocks.project.project import Project
 from flocks.provider.provider import Provider
+from flocks.session.callable_state import set_session_callable_tools
+from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.session.session_loop import SessionLoop
 from flocks.storage.storage import Storage
@@ -214,72 +216,34 @@ async def _run_phase(
             ctx.extra["langfuse_trace_context"] = previous_trace_context
 
 
-async def _run_pipeline(
-    ctx: ToolContext,
-    target: Path,
-    progress: ProgressCallback | None,
-) -> dict[str, Any]:
-    scan_id: str | None = None
-    scan_scope = None
-    try:
-        prepared = _require_success(await audit_prepare(ctx, str(target)))
-        scan_id = prepared["scan_id"]
-        if langfuse_is_active():
-            try:
-                scan_scope = trace_scope(
-                    name="code-security.scan",
-                    session_id=scan_id,
-                    tags=[
-                        "feature:code-security",
-                        f"scan:{scan_id}",
-                        "mode:standard",
-                    ],
-                    input={
-                        "scan_id": scan_id,
-                        "target": str(target),
-                        "mode": "standard",
-                        "snapshot": prepared.get("snapshot", {}),
-                    },
-                    metadata={
-                        "scan_id": scan_id,
-                        "target_name": target.name,
-                        "mode": "standard",
-                    },
-                )
-            except Exception:
-                scan_scope = None
-        scan_observation = None if scan_scope is None else scan_scope.observation
-        _emit(
-            progress,
-            "scan.prepared",
-            prepared,
-            observation_parent=scan_observation,
-        )
+class AuditOrchestrator:
+    """Host-owned macro scheduler for the one-command standard audit."""
 
-        _threat_batch, status = await _run_phase(
-            ctx,
-            scan_id,
-            "threat_modeling",
-            progress,
-            scan_observation,
-        )
-        if status.get("threat_model_status") != "completed":
-            raise RuntimeError("Threat-modeling phase did not produce a trusted model")
+    def __init__(
+        self,
+        ctx: ToolContext,
+        target: Path,
+        progress: ProgressCallback | None,
+    ) -> None:
+        self.ctx = ctx
+        self.target = target
+        self.progress = progress
 
-        _baseline_batch, status = await _run_phase(
-            ctx,
-            scan_id,
-            "baseline",
-            progress,
-            scan_observation,
+    async def _verify_remaining(
+        self,
+        scan_id: str,
+        status: dict[str, Any],
+        scan_observation: Any,
+    ) -> dict[str, Any]:
+        unverified = int(
+            status.get("counts", {}).get("unverified_candidates", 0)
         )
-        unverified = int(status.get("counts", {}).get("unverified_candidates", 0))
         while unverified > 0:
             _verification_batch, status = await _run_phase(
-                ctx,
+                self.ctx,
                 scan_id,
                 "verification",
-                progress,
+                self.progress,
                 scan_observation,
             )
             remaining = int(
@@ -288,44 +252,204 @@ async def _run_pipeline(
             if remaining >= unverified:
                 raise RuntimeError("Verification phase made no progress")
             unverified = remaining
+        return status
 
-        finalized = _require_success(await audit_finalize(ctx, scan_id))
+    async def _run_parent_adjudication(
+        self,
+        scan_id: str,
+        scan_observation: Any,
+    ) -> dict[str, Any]:
+        store = get_runtime().store
+        previous = await asyncio.to_thread(
+            store.get_latest_adjudication,
+            scan_id,
+        )
+        expected_round = 1 if previous is None else 2
+        await set_session_callable_tools(
+            self.ctx.session_id,
+            {
+                "audit_adjudication_context",
+                "audit_submit_adjudication",
+            },
+        )
+        await Message.create(
+            session_id=self.ctx.session_id,
+            role=MessageRole.USER,
+            content=(
+                f"Host-orchestrated audit {scan_id} is ready for parent semantic "
+                f"adjudication round {expected_round}. The host has already completed "
+                "all required macro phases. Read the audit_adjudication_context overview, "
+                "then read each candidate by candidate_id. Submit exactly one decision. "
+                "A finalize decision must classify every candidate exactly once. Round 1 "
+                "may instead request one targeted_rescan with a concrete reason, "
+                "snapshot-relative paths, and answerable questions; it must not classify "
+                "candidates. Round 2 must finalize. Do not schedule workers or finalize "
+                "the report yourself."
+            ),
+            agent="code-security",
+        )
+        model = self.ctx.extra.get("model")
+        model = model if isinstance(model, dict) else {}
+        result = await SessionLoop.run(
+            self.ctx.session_id,
+            provider_id=model.get("providerID"),
+            model_id=model.get("modelID"),
+            agent_name="code-security",
+        )
+        if result.action == "error":
+            raise RuntimeError(
+                f"Parent adjudication failed: {result.error or 'model loop error'}"
+            )
+        decision = await asyncio.to_thread(
+            store.get_latest_adjudication,
+            scan_id,
+        )
+        if (
+            decision is None
+            or decision["adjudication_round"] != expected_round
+        ):
+            raise RuntimeError(
+                "Parent Agent did not submit the required audit adjudication"
+            )
         _emit(
-            progress,
-            "scan.finalized",
-            finalized,
+            self.progress,
+            "scan.adjudicated",
+            decision,
             observation_parent=scan_observation,
         )
-        _end_observation(scan_scope, output=finalized)
-        return finalized
-    except BaseException as exc:
-        cancelled_output: dict[str, Any] | None = None
-        if scan_id is not None:
-            try:
-                cancelled = await asyncio.shield(audit_cancel(ctx, scan_id))
-                if cancelled.success and isinstance(cancelled.output, dict):
-                    cancelled_output = cancelled.output
-                    _emit(
-                        progress,
-                        "scan.cancelled",
-                        cancelled_output,
-                        observation_parent=(
-                            None if scan_scope is None else scan_scope.observation
-                        ),
+        return decision
+
+    async def run(self) -> dict[str, Any]:
+        scan_id: str | None = None
+        scan_scope = None
+        try:
+            prepared = _require_success(
+                await audit_prepare(self.ctx, str(self.target))
+            )
+            scan_id = prepared["scan_id"]
+            if langfuse_is_active():
+                try:
+                    scan_scope = trace_scope(
+                        name="code-security.scan",
+                        session_id=scan_id,
+                        tags=[
+                            "feature:code-security",
+                            f"scan:{scan_id}",
+                            "mode:standard",
+                        ],
+                        input={
+                            "scan_id": scan_id,
+                            "target": str(self.target),
+                            "mode": "standard",
+                            "snapshot": prepared.get("snapshot", {}),
+                        },
+                        metadata={
+                            "scan_id": scan_id,
+                            "target_name": self.target.name,
+                            "mode": "standard",
+                        },
                     )
-            except Exception:
-                pass
-        _end_observation(
-            scan_scope,
-            output={
-                "scan_id": scan_id,
-                "error": str(exc),
-                "cancellation": cancelled_output,
-            },
-            level="ERROR",
-            status_message=str(exc),
-        )
-        raise
+                except Exception:
+                    scan_scope = None
+            scan_observation = (
+                None if scan_scope is None else scan_scope.observation
+            )
+            _emit(
+                self.progress,
+                "scan.prepared",
+                prepared,
+                observation_parent=scan_observation,
+            )
+
+            _threat_batch, status = await _run_phase(
+                self.ctx,
+                scan_id,
+                "threat_modeling",
+                self.progress,
+                scan_observation,
+            )
+            if status.get("threat_model_status") != "completed":
+                raise RuntimeError(
+                    "Threat-modeling phase did not produce a trusted model"
+                )
+
+            _baseline_batch, status = await _run_phase(
+                self.ctx,
+                scan_id,
+                "baseline",
+                self.progress,
+                scan_observation,
+            )
+            status = await self._verify_remaining(
+                scan_id,
+                status,
+                scan_observation,
+            )
+            decision = await self._run_parent_adjudication(
+                scan_id,
+                scan_observation,
+            )
+            if decision["action"] == "targeted_rescan":
+                _rescan_batch, status = await _run_phase(
+                    self.ctx,
+                    scan_id,
+                    "targeted_rescan",
+                    self.progress,
+                    scan_observation,
+                )
+                status = await self._verify_remaining(
+                    scan_id,
+                    status,
+                    scan_observation,
+                )
+                decision = await self._run_parent_adjudication(
+                    scan_id,
+                    scan_observation,
+                )
+            if decision["action"] != "finalize":
+                raise RuntimeError("Parent adjudication did not finalize the audit")
+
+            finalized = _require_success(await audit_finalize(self.ctx, scan_id))
+            _emit(
+                self.progress,
+                "scan.finalized",
+                finalized,
+                observation_parent=scan_observation,
+            )
+            _end_observation(scan_scope, output=finalized)
+            return finalized
+        except BaseException as exc:
+            cancelled_output: dict[str, Any] | None = None
+            if scan_id is not None:
+                try:
+                    cancelled = await asyncio.shield(
+                        audit_cancel(self.ctx, scan_id)
+                    )
+                    if cancelled.success and isinstance(cancelled.output, dict):
+                        cancelled_output = cancelled.output
+                        _emit(
+                            self.progress,
+                            "scan.cancelled",
+                            cancelled_output,
+                            observation_parent=(
+                                None
+                                if scan_scope is None
+                                else scan_scope.observation
+                            ),
+                        )
+                except Exception:
+                    pass
+            _end_observation(
+                scan_scope,
+                output={
+                    "scan_id": scan_id,
+                    "error": str(exc),
+                    "cancellation": cancelled_output,
+                },
+                level="ERROR",
+                status_message=str(exc),
+            )
+            raise
 
 
 async def run_standard_audit(
@@ -362,7 +486,7 @@ async def run_standard_audit(
             "suppress_parent_completion": True,
         },
     )
-    return await _run_pipeline(ctx, target, progress)
+    return await AuditOrchestrator(ctx, target, progress).run()
 
 
 def scan_status(scan_id: str) -> dict[str, Any]:
