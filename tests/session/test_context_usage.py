@@ -1,8 +1,10 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from flocks.session import context_usage
+from flocks.session.prompt import SystemPromptBlock, TurnPromptContext
 
 
 def _message(
@@ -301,3 +303,64 @@ async def test_context_usage_splits_skill_and_delegation_tools(context_usage_moc
     ]
     tools_segment = next(segment for segment in snapshot.segments if segment.key == "tools")
     assert tools_segment.tokens == 30
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_estimate_uses_resolved_turn_context(monkeypatch):
+    captured = {}
+
+    async def fake_build_system_prompt_blocks(**kwargs):
+        captured.update(kwargs)
+        return [
+            SystemPromptBlock("stable", "a" * 40, "global"),
+            SystemPromptBlock("tail", "b" * 20, "runtime_tail"),
+        ]
+
+    agent = SimpleNamespace(name="rex", prompt="agent prompt")
+    config = SimpleNamespace(instructions=["rules.md"])
+    monkeypatch.setattr(
+        context_usage.SessionPrompt,
+        "build_system_prompt_blocks",
+        fake_build_system_prompt_blocks,
+    )
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.default_agent",
+        AsyncMock(return_value="rex"),
+    )
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.get",
+        AsyncMock(return_value=agent),
+    )
+    monkeypatch.setattr(
+        "flocks.config.Config.get",
+        AsyncMock(return_value=config),
+    )
+    worktree_for_directory = MagicMock(return_value="/workspace")
+    monkeypatch.setattr(
+        "flocks.project.project.Project.worktree_for_directory",
+        worktree_for_directory,
+    )
+    monkeypatch.setattr(
+        "flocks.project.instance.Instance.get_worktree",
+        lambda: "/ambient-worktree",
+    )
+    monkeypatch.setattr(
+        "flocks.tool.registry.ToolRegistry.revision",
+        lambda: 7,
+    )
+
+    tokens = await context_usage._estimate_system_prompt_tokens(
+        "sess-1",
+        session=SimpleNamespace(directory="/workspace/project"),
+        messages=[],
+        provider_id="openai",
+        model_id="gpt-5",
+    )
+
+    assert tokens == 15
+    assert captured["turn_context"] == TurnPromptContext(
+        worktree="/workspace",
+        config_instructions=("rules.md",),
+        tool_revision=7,
+    )
+    worktree_for_directory.assert_called_once_with("/workspace/project")
