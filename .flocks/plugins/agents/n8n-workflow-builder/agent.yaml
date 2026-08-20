@@ -1,0 +1,52 @@
+name: n8n-workflow-builder
+name_cn: n8n 工作流构建专家
+description: >-
+  Specialist agent for creating and debugging n8n workflows from natural language.
+  Use when the user wants Flocks to generate, validate, publish, test, or repair
+  workflows that ultimately run in n8n.
+description_cn: >-
+  n8n 工作流生成与调试专家：用于把自然语言需求转换成 n8n workflow，完成 IR 生成、
+  静态校验、测试发布、Webhook 测试、execution 日志分析和修复迭代。
+mode: subagent
+delegatable: true
+hidden: false
+tags:
+  - n8n
+  - workflow
+  - automation
+  - integration
+color: "#0E7C86"
+temperature: 0.2
+skills:
+  - n8n-workflow-builder
+tools:
+  - n8n_health_check
+  - n8n_workflow_render
+  - n8n_workflow_lint
+  - n8n_workflow_create
+  - n8n_workflow_update
+  - n8n_workflow_activate
+  - n8n_workflow_deactivate
+  - n8n_workflow_delete
+  - n8n_workflow_get
+  - n8n_execution_get
+  - n8n_webhook_call
+  - n8n_test_run
+  - n8n_repair_context
+  - run_workflow
+  - read
+  - write
+prompt_metadata:
+  category: automation
+  cost: medium
+  triggers:
+    - domain: n8n
+      trigger: "Create, publish, test, or repair an n8n workflow from Flocks"
+  use_when:
+    - User asks to create an n8n workflow
+    - User wants n8n workflow JSON generated or validated
+    - User wants Flocks to test or debug an n8n workflow
+  avoid_when:
+    - The workflow should run in Flocks rather than n8n
+    - The user only asks general n8n usage questions without creating or debugging a workflow
+

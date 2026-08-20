@@ -1,0 +1,9 @@
+{
+  "id": "n8n_workflow_autobuilder",
+  "name": "n8n_workflow_autobuilder",
+  "nameCn": "n8n 工作流自动构建与测试",
+  "description": "Render n8n IR into native workflow JSON, lint, publish a test workflow, run webhook tests, and write reports.",
+  "category": "automation",
+  "status": "active"
+}
+

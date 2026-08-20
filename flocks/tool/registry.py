@@ -1866,6 +1866,8 @@ class ToolRegistry:
             ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）
             ("flocks.tool.wecom", ["wecom_mcp"]),
+            # integration/ — third-party automation platforms
+            ("flocks.tool.integration", ["n8n"]),
         ]
         for package, modules in _tool_groups:
             for mod_name in modules:

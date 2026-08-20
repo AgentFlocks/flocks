@@ -1,0 +1,156 @@
+"""Static validation for generated n8n workflows."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional
+
+from flocks.integrations.n8n.renderer import API_READONLY_FIELDS
+
+
+SUPPORTED_NODE_TYPES = {
+    "n8n-nodes-base.webhook",
+    "n8n-nodes-base.code",
+    "n8n-nodes-base.set",
+    "n8n-nodes-base.if",
+    "n8n-nodes-base.httpRequest",
+    "n8n-nodes-base.respondToWebhook",
+    "n8n-nodes-base.noOp",
+}
+
+SECRET_PATTERNS = (
+    re.compile(r"(?i)(api[_-]?key|authorization|bearer|secret|token|password)\s*[:=]\s*['\"][^'\"]{8,}"),
+)
+
+
+@dataclass(frozen=True)
+class N8nLintIssue:
+    code: str
+    severity: str
+    message: str
+    path: str = "$"
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "path": self.path,
+        }
+
+
+def _node_names(workflow: Dict[str, Any]) -> set[str]:
+    return {str(node.get("name")) for node in workflow.get("nodes", []) if isinstance(node, dict)}
+
+
+def _iter_nodes(workflow: Dict[str, Any]) -> Iterable[tuple[int, Dict[str, Any]]]:
+    for index, node in enumerate(workflow.get("nodes", [])):
+        if isinstance(node, dict):
+            yield index, node
+
+
+def _looks_like_expression(value: Any) -> bool:
+    return not isinstance(value, str) or not value.startswith("=") or "{{" in value
+
+
+def lint_workflow(
+    workflow: Dict[str, Any] | str,
+    *,
+    for_api_create: bool = False,
+    require_tests: bool = False,
+    tests: Optional[List[Dict[str, Any]]] = None,
+) -> List[N8nLintIssue]:
+    issues: List[N8nLintIssue] = []
+    if isinstance(workflow, str):
+        try:
+            workflow = json.loads(workflow)
+        except json.JSONDecodeError as exc:
+            return [N8nLintIssue("JSON-001", "error", f"Invalid JSON: {exc}")]
+    if not isinstance(workflow, dict):
+        return [N8nLintIssue("WF-001", "error", "Workflow must be an object")]
+
+    if for_api_create:
+        for key in sorted(API_READONLY_FIELDS):
+            if key in workflow:
+                issues.append(N8nLintIssue("API-READONLY", "error", f"Field {key!r} is read-only for n8n API create", f"$.{key}"))
+
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        issues.append(N8nLintIssue("NODE-001", "error", "Workflow must contain at least one node", "$.nodes"))
+        return issues
+
+    names = _node_names(workflow)
+    webhook_count = 0
+    respond_count = 0
+    for index, node in _iter_nodes(workflow):
+        path = f"$.nodes[{index}]"
+        node_type = node.get("type")
+        if node_type not in SUPPORTED_NODE_TYPES:
+            issues.append(N8nLintIssue("NODE-TYPE", "error", f"Unsupported node type: {node_type}", path + ".type"))
+        if not node.get("name"):
+            issues.append(N8nLintIssue("NODE-NAME", "error", "Node name is required", path + ".name"))
+        params = node.get("parameters")
+        if not isinstance(params, dict):
+            issues.append(N8nLintIssue("NODE-PARAMS", "error", "Node parameters must be an object", path + ".parameters"))
+            continue
+        if node_type == "n8n-nodes-base.webhook":
+            webhook_count += 1
+            if not params.get("path"):
+                issues.append(N8nLintIssue("WEBHOOK-PATH", "error", "Webhook path is required", path + ".parameters.path"))
+            if params.get("responseMode") == "responseNode":
+                pass
+        if node_type == "n8n-nodes-base.respondToWebhook":
+            respond_count += 1
+            body = params.get("responseBody")
+            if body is not None and not _looks_like_expression(body):
+                issues.append(N8nLintIssue("EXPR-001", "warning", "Expression should contain {{ ... }}", path + ".parameters.responseBody"))
+        if node_type == "n8n-nodes-base.httpRequest" and not params.get("url"):
+            issues.append(N8nLintIssue("HTTP-URL", "error", "HTTP Request node requires url", path + ".parameters.url"))
+        if node_type == "n8n-nodes-base.code":
+            code = str(params.get("jsCode") or "")
+            if not code.strip():
+                issues.append(N8nLintIssue("CODE-EMPTY", "error", "Code node requires jsCode", path + ".parameters.jsCode"))
+            for pattern in SECRET_PATTERNS:
+                if pattern.search(code):
+                    issues.append(N8nLintIssue("SECRET-CODE", "error", "Potential secret literal in Code node", path + ".parameters.jsCode"))
+
+    if webhook_count and not respond_count:
+        issues.append(N8nLintIssue("WEBHOOK-RESPOND", "error", "Webhook workflows must include Respond to Webhook"))
+
+    connections = workflow.get("connections")
+    if not isinstance(connections, dict):
+        issues.append(N8nLintIssue("CONN-001", "error", "connections must be an object", "$.connections"))
+    else:
+        for source, value in connections.items():
+            if source not in names:
+                issues.append(N8nLintIssue("CONN-SOURCE", "error", f"Connection source does not exist: {source}", f"$.connections.{source}"))
+            for target in _connection_targets(value):
+                if target not in names:
+                    issues.append(N8nLintIssue("CONN-TARGET", "error", f"Connection target does not exist: {target}", f"$.connections.{source}"))
+
+    if require_tests and not tests:
+        issues.append(N8nLintIssue("TEST-001", "error", "At least one test case is required", "$.tests"))
+    return issues
+
+
+def _connection_targets(value: Any) -> Iterable[str]:
+    if not isinstance(value, dict):
+        return []
+    rows = value.get("main")
+    if not isinstance(rows, list):
+        return []
+    targets: list[str] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        for edge in row:
+            if isinstance(edge, dict) and edge.get("node"):
+                targets.append(str(edge["node"]))
+    return targets
+
+
+def has_errors(issues: Iterable[N8nLintIssue]) -> bool:
+    return any(issue.severity == "error" for issue in issues)
+
