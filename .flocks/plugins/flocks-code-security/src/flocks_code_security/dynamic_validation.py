@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Awaitable, Callable, TypedDict
+from typing import Any, Awaitable, Callable, Literal, TypeVar, TypedDict
 
 from flocks.utils.langfuse import span_scope
 
@@ -28,6 +28,19 @@ MAX_SCRIPT_BYTES = 16 * 1024
 MAX_EXPECTED_DIFFERENCE = 4_000
 MAX_LOG_BYTES = 64 * 1024
 BUILD_TIMEOUT_SECONDS = 300
+MEMORY_LIMIT = "512m"
+PROCESS_LIMIT = 128
+BUILD_CPU_PERIOD = 100_000
+BUILD_CPU_QUOTA = 100_000
+BUILD_SHM_SIZE = "64m"
+RUN_TMPFS_SIZE = "64m"
+_REMOTE_BUILD_ENVIRONMENT = {
+    "BUILDKIT_HOST",
+    "BUILDX_BUILDER",
+    "BUILDX_CONFIG",
+    "DOCKER_DEFAULT_PLATFORM",
+}
+_T = TypeVar("_T")
 
 
 class CommandResult(TypedDict):
@@ -41,13 +54,27 @@ class CommandResult(TypedDict):
 
 @dataclass(frozen=True)
 class PreparedCandidate:
-    scan_id: str
     candidate_id: str
     probe: dict[str, Any]
     context: Path
     dockerfile: Path
     runtime: Path
     base_images: tuple[str, ...]
+
+
+async def _await_uninterruptibly(
+    awaitable: Awaitable[_T],
+) -> tuple[_T, bool]:
+    """Wait for cleanup to finish and report cancellation received while waiting."""
+    task = asyncio.ensure_future(awaitable)
+    interrupted = False
+    while True:
+        try:
+            return await asyncio.shield(task), interrupted
+        except asyncio.CancelledError:
+            interrupted = True
+            if task.done():
+                return task.result(), interrupted
 
 
 def _start_observation(
@@ -293,8 +320,10 @@ class DockerDynamicRunner:
         self._active_scan_ids: set[str] = set()
         self._verified_contexts: set[tuple[str, str, str]] = set()
         self._verification_lock = threading.Lock()
+        self._build_backend: Literal["buildkit", "legacy"] | None = None
 
     async def preflight(self, *, observation_parent: Any = None) -> None:
+        self._build_backend = None
         scope = _start_observation(
             observation_parent,
             "code-security.dynamic.preflight",
@@ -331,10 +360,17 @@ class DockerDynamicRunner:
             version = await self._command([docker, "version"], timeout_seconds=15)
             if version["exit_code"] != 0:
                 raise RuntimeError("The local Docker daemon is unavailable")
+            build_backend = await self._select_build_backend(docker)
+            if build_backend == "buildkit":
+                await self._require_local_default_builder(docker)
+            self._build_backend = build_backend
         except BaseException as exc:
             _end_observation(scope, output={"status": "failed"}, error=exc)
             raise
-        _end_observation(scope, output={"status": "passed"})
+        _end_observation(
+            scope,
+            output={"status": "passed", "build_backend": self._build_backend},
+        )
 
     async def run_all(
         self,
@@ -365,20 +401,27 @@ class DockerDynamicRunner:
                     tasks.create_task(run_one(run))
         except BaseException as exc:
             try:
-                await asyncio.shield(self.cleanup(observation_parent=parent))
+                _, interrupted = await _await_uninterruptibly(
+                    self.cleanup(observation_parent=parent)
+                )
             except Exception as cleanup_exc:
                 exc.add_note(
                     "Dynamic validation cleanup also failed: "
                     f"{type(cleanup_exc).__name__}"
                 )
+                interrupted = False
             _end_observation(
                 scope,
                 output={"status": "failed", "candidate_count": len(runs)},
                 error=exc,
             )
+            if interrupted and not isinstance(exc, asyncio.CancelledError):
+                raise asyncio.CancelledError from exc
             raise
         try:
-            await asyncio.shield(self.cleanup(observation_parent=parent))
+            _, interrupted = await _await_uninterruptibly(
+                self.cleanup(observation_parent=parent)
+            )
         except BaseException as exc:
             _end_observation(
                 scope,
@@ -386,6 +429,14 @@ class DockerDynamicRunner:
                 error=exc,
             )
             raise
+        if interrupted:
+            cancelled = asyncio.CancelledError()
+            _end_observation(
+                scope,
+                output={"status": "failed", "candidate_count": len(runs)},
+                error=cancelled,
+            )
+            raise cancelled
         _end_observation(
             scope,
             output={"status": "completed", "candidate_count": len(runs)},
@@ -483,6 +534,8 @@ class DockerDynamicRunner:
         docker = shutil.which("docker")
         if docker is None:
             raise RuntimeError("Dynamic validation requires the Docker CLI")
+        if self._build_backend is None:
+            raise RuntimeError("Dynamic validation preflight has not completed")
 
         facts: dict[str, Any] = {"runner_status": "inconclusive"}
         image_id: str | None = None
@@ -509,6 +562,11 @@ class DockerDynamicRunner:
             build_argv = [
                 docker,
                 "build",
+                *self._build_limit_arguments(self._build_backend),
+                "--shm-size",
+                BUILD_SHM_SIZE,
+                "--ulimit",
+                f"nproc={PROCESS_LIMIT}:{PROCESS_LIMIT}",
                 "--network",
                 "none",
                 "--pull=false",
@@ -529,6 +587,7 @@ class DockerDynamicRunner:
                     "build",
                     build_argv,
                     timeout_seconds=BUILD_TIMEOUT_SECONDS,
+                    env=self._build_environment(self._build_backend),
                 )
             facts["build"] = build
             if build["timed_out"] or build["exit_code"] != 0 or not iidfile.is_file():
@@ -570,13 +629,13 @@ class DockerDynamicRunner:
                         "no-new-privileges",
                         "--read-only",
                         "--pids-limit",
-                        "128",
+                        str(PROCESS_LIMIT),
                         "--memory",
-                        "512m",
+                        MEMORY_LIMIT,
                         "--cpus",
                         "1",
                         "--tmpfs",
-                        "/tmp:rw,nosuid,nodev,size=64m",
+                        f"/tmp:rw,nosuid,nodev,size={RUN_TMPFS_SIZE}",
                         "--label",
                         f"flocks.code_security.scan_id={scan_id}",
                         "--label",
@@ -666,7 +725,6 @@ class DockerDynamicRunner:
         context = root if probe["context_path"] == "." else root / probe["context_path"]
         dockerfile = root / probe["dockerfile_path"]
         return PreparedCandidate(
-            scan_id=scan_id,
             candidate_id=candidate_id,
             probe=probe,
             context=context,
@@ -705,6 +763,7 @@ class DockerDynamicRunner:
         timeout_seconds: int,
         input: dict[str, Any] | None = None,
         on_timeout: Callable[[], Awaitable[None]] | None = None,
+        env: dict[str, str] | None = None,
     ) -> CommandResult:
         scope = _start_observation(
             observation_parent,
@@ -717,6 +776,7 @@ class DockerDynamicRunner:
                 argv,
                 timeout_seconds=timeout_seconds,
                 on_timeout=on_timeout,
+                env=env,
             )
         except BaseException as exc:
             _end_observation(scope, output={"status": "failed"}, error=exc)
@@ -777,6 +837,111 @@ class DockerDynamicRunner:
         if result["exit_code"] == 0:
             self._containers.discard(name)
 
+    async def _select_build_backend(
+        self,
+        docker: str,
+    ) -> Literal["buildkit", "legacy"]:
+        buildkit_help = await self._command(
+            [docker, "build", "--help"],
+            timeout_seconds=15,
+            env=self._build_environment("buildkit"),
+        )
+        buildkit_flags = ("--builder", "--resource", "--shm-size", "--ulimit")
+        if self._supports_build_flags(buildkit_help, buildkit_flags):
+            return "buildkit"
+
+        legacy_help = await self._command(
+            [docker, "build", "--help"],
+            timeout_seconds=15,
+            env=self._build_environment("legacy"),
+        )
+        required_flags = (
+            "--memory",
+            "--memory-swap",
+            "--cpu-period",
+            "--cpu-quota",
+            "--shm-size",
+            "--ulimit",
+        )
+        if self._supports_build_flags(legacy_help, required_flags):
+            return "legacy"
+        raise RuntimeError("Docker cannot enforce resource limits during image builds")
+
+    async def _require_local_default_builder(self, docker: str) -> None:
+        builder = await self._command(
+            [docker, "buildx", "ls", "--format", "{{json .}}"],
+            timeout_seconds=15,
+            env=self._build_environment("buildkit"),
+        )
+        if builder["exit_code"] != 0 or builder["truncated"]:
+            raise RuntimeError("Unable to list Docker builders")
+        try:
+            builders = [
+                json.loads(line)
+                for line in builder["stdout"].splitlines()
+                if line.strip()
+            ]
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Docker returned an invalid builder list") from exc
+        default_builder = next(
+            (
+                item
+                for item in builders
+                if isinstance(item, dict) and item.get("Name") == "default"
+            ),
+            None,
+        )
+        if default_builder is None or default_builder.get("Driver") != "docker":
+            raise RuntimeError(
+                "Dynamic validation requires the local default Docker builder"
+            )
+
+    @staticmethod
+    def _supports_build_flags(result: CommandResult, flags: tuple[str, ...]) -> bool:
+        if result["exit_code"] != 0:
+            return False
+        return all(
+            re.search(
+                rf"(?m)^\s*(?:-\S+,\s+)?{re.escape(flag)}(?:[=\s]|$)",
+                result["stdout"],
+            )
+            for flag in flags
+        )
+
+    @staticmethod
+    def _build_limit_arguments(backend: Literal["buildkit", "legacy"]) -> list[str]:
+        if backend == "buildkit":
+            return [
+                "--builder",
+                "default",
+                "--resource",
+                f"memory={MEMORY_LIMIT}",
+                "--resource",
+                f"memory-swap={MEMORY_LIMIT}",
+                "--resource",
+                f"cpu-period={BUILD_CPU_PERIOD}",
+                "--resource",
+                f"cpu-quota={BUILD_CPU_QUOTA}",
+            ]
+        return [
+            "--memory",
+            MEMORY_LIMIT,
+            "--memory-swap",
+            MEMORY_LIMIT,
+            "--cpu-period",
+            str(BUILD_CPU_PERIOD),
+            "--cpu-quota",
+            str(BUILD_CPU_QUOTA),
+        ]
+
+    @staticmethod
+    def _build_environment(backend: Literal["buildkit", "legacy"]) -> dict[str, str]:
+        environment = os.environ.copy()
+        for name in _REMOTE_BUILD_ENVIRONMENT:
+            environment.pop(name, None)
+        environment["DOCKER_BUILDKIT"] = "1" if backend == "buildkit" else "0"
+        return environment
+
     @staticmethod
     def _container_name(scan_id: str, candidate_id: str, phase: str) -> str:
         return f"flocks-{scan_id[5:17]}-{candidate_id[-12:]}-{phase}"
@@ -787,6 +952,7 @@ class DockerDynamicRunner:
         *,
         timeout_seconds: int,
         on_timeout: Callable[[], Awaitable[None]] | None = None,
+        env: dict[str, str] | None = None,
     ) -> CommandResult:
         started = time.monotonic()
         process = await asyncio.create_subprocess_exec(
@@ -794,6 +960,7 @@ class DockerDynamicRunner:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
         async def read_bounded(stream: asyncio.StreamReader | None) -> tuple[str, bool]:
@@ -812,33 +979,41 @@ class DockerDynamicRunner:
         stdout_task = asyncio.create_task(read_bounded(process.stdout))
         stderr_task = asyncio.create_task(read_bounded(process.stderr))
         timed_out = False
+
+        async def terminate() -> Exception | None:
+            cleanup_error: Exception | None = None
+            try:
+                if on_timeout is not None:
+                    try:
+                        await on_timeout()
+                    except Exception as exc:
+                        cleanup_error = exc
+            finally:
+                try:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
+                finally:
+                    await asyncio.gather(
+                        stdout_task,
+                        stderr_task,
+                        return_exceptions=True,
+                    )
+            return cleanup_error
+
         timeout_cleanup_error: Exception | None = None
         try:
             await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             timed_out = True
-            if on_timeout is not None:
-                try:
-                    await on_timeout()
-                except Exception as exc:
-                    timeout_cleanup_error = exc
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            timeout_cleanup_error, interrupted = await _await_uninterruptibly(terminate())
+            if interrupted:
+                raise asyncio.CancelledError
         except asyncio.CancelledError:
-            if on_timeout is not None:
-                try:
-                    await asyncio.shield(on_timeout())
-                except Exception:
-                    pass
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            await asyncio.gather(
-                stdout_task,
-                stderr_task,
-                return_exceptions=True,
-            )
+            try:
+                await _await_uninterruptibly(terminate())
+            except BaseException:
+                pass
             raise
         stdout, stdout_truncated = await stdout_task
         stderr, stderr_truncated = await stderr_task

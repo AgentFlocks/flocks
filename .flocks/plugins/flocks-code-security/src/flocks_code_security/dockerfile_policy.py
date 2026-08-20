@@ -7,7 +7,26 @@ import re
 
 _FROM_RE = re.compile(r"^FROM\s+(\S+)(?:\s+AS\s+(\S+))?\s*$", re.I)
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
+_STAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _PARSER_DIRECTIVE_RE = re.compile(r"^#\s*(syntax|escape|check)\s*=", re.I)
+_COPY_VALUE_OPTIONS = {"--chown", "--chmod"}
+_COPY_BOOLEAN_OPTIONS = {"--link"}
+_SAFE_INSTRUCTIONS = {
+    "ARG",
+    "CMD",
+    "ENTRYPOINT",
+    "ENV",
+    "EXPOSE",
+    "HEALTHCHECK",
+    "LABEL",
+    "MAINTAINER",
+    "RUN",
+    "SHELL",
+    "STOPSIGNAL",
+    "USER",
+    "VOLUME",
+    "WORKDIR",
+}
 
 
 def dockerfile_base_images(contents: str) -> list[str]:
@@ -25,6 +44,8 @@ def dockerfile_base_images(contents: str) -> list[str]:
         instruction = instruction.upper()
         arguments = arguments or ""
 
+        if "<<" in arguments:
+            raise ValueError("Dockerfile heredoc syntax is not supported")
         if instruction == "ADD":
             raise ValueError("Dockerfile ADD instructions are not supported")
         if instruction == "ONBUILD":
@@ -36,8 +57,10 @@ def dockerfile_base_images(contents: str) -> list[str]:
             if copy_source is not None and not _is_stage(copy_source, stages):
                 images.append(copy_source)
             continue
-        if instruction != "FROM":
+        if instruction in _SAFE_INSTRUCTIONS:
             continue
+        if instruction != "FROM":
+            raise ValueError(f"Dockerfile {instruction} instruction is not supported")
 
         saw_from = True
         if arguments.lower().startswith("--platform"):
@@ -47,6 +70,8 @@ def dockerfile_base_images(contents: str) -> list[str]:
             raise ValueError("Dockerfile FROM instruction is not safely supported")
         image, alias = match.groups()
         _require_literal_image(image, field="base image")
+        if alias is not None and _STAGE_RE.fullmatch(alias) is None:
+            raise ValueError("Dockerfile stage alias is not safely supported")
         if image.lower() != "scratch" and image.lower() not in stages:
             images.append(image)
         if alias:
@@ -84,10 +109,16 @@ def _copy_source(arguments: str) -> str | None:
     for token in arguments.split():
         if not token.startswith("--"):
             break
-        if token == "--from" or token.startswith("--from="):
-            if token == "--from" or source is not None:
+        option, separator, value = token.partition("=")
+        if option == "--from":
+            if not separator or source is not None:
                 raise ValueError("Dockerfile COPY --from must use one literal source")
-            source = token.removeprefix("--from=")
+            source = value
+        elif option in _COPY_VALUE_OPTIONS:
+            if not separator or not value:
+                raise ValueError(f"Dockerfile COPY {option} must have a value")
+        elif token not in _COPY_BOOLEAN_OPTIONS:
+            raise ValueError(f"Dockerfile COPY {option} option is not supported")
     if source is not None:
         _require_literal_image(source, field="COPY --from source")
     return source

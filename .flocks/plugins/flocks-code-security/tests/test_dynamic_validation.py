@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -31,6 +32,17 @@ def _runnable_probe(candidate_id: str = "cand_test") -> dict:
         "control": {"script": "printf control", "timeout_seconds": 10},
         "attack": {"script": "printf attack", "timeout_seconds": 10},
         "expected_difference": "Attack output differs from control output.",
+    }
+
+
+def _successful_command(stdout: str = "") -> dict:
+    return {
+        "exit_code": 0,
+        "duration_ms": 1,
+        "stdout": stdout,
+        "stderr": "",
+        "timed_out": False,
+        "truncated": False,
     }
 
 
@@ -104,6 +116,10 @@ def test_probe_contract_validates_paths_scripts_and_dockerfile(tmp_path: Path) -
         "FROM local/test\nRUN --network=host echo unsafe\n",
         "FROM --platform=linux/amd64 local/test\n",
         "FROM local/test\nCOPY --chown=0 --from=$REMOTE /src /src\n",
+        "FROM local/test AS $REMOTE\nCOPY --from=$REMOTE /src /src\n",
+        "FROM local/test\nCOPY --parents /src /src\n",
+        "FROM local/test\nCOPY <<EOF /tmp/file\ncontents\nEOF\n",
+        "FROM local/test\nFUTUREFETCH local/artifact /tmp/file\n",
     ),
 )
 def test_probe_contract_rejects_unsupported_dockerfile_sources(
@@ -126,6 +142,7 @@ def test_dockerfile_sources_support_scratch_and_find_copy_flag_sources() -> None
     assert dynamic_module._dockerfile_base_images("FROM scratch\n") == []
     assert dynamic_module._dockerfile_base_images(
         "FROM local/base AS build\n"
+        "RUN printf build\n"
         "FROM scratch\n"
         "COPY --chown=0 --from=build /src /src\n"
         "COPY --link --from=local/artifact:latest /bin/tool /bin/tool\n"
@@ -136,7 +153,10 @@ def test_probe_contract_rejects_symlinked_path_components(tmp_path: Path) -> Non
     real_context = tmp_path / "real"
     real_context.mkdir()
     (real_context / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-    (tmp_path / "linked").symlink_to(real_context, target_is_directory=True)
+    try:
+        (tmp_path / "linked").symlink_to(real_context, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symbolic links are unavailable: {exc}")
     probe = _runnable_probe()
     probe["context_path"] = "linked"
     probe["dockerfile_path"] = "linked/Dockerfile"
@@ -219,6 +239,35 @@ async def test_command_timeout_runs_targeted_cleanup() -> None:
 
     assert result["timed_out"] is True
     assert removed == ["flocks-exact-container"]
+
+
+@pytest.mark.asyncio
+async def test_command_finishes_cleanup_after_repeated_cancellation() -> None:
+    cleanup_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def cleanup() -> None:
+        cleanup_started.set()
+        await asyncio.sleep(0.05)
+        cleanup_finished.set()
+
+    runner = DockerDynamicRunner(SimpleNamespace())
+    task = asyncio.create_task(
+        runner._command(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            timeout_seconds=10,
+            on_timeout=cleanup,
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await cleanup_started.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_finished.is_set()
 
 
 def test_candidate_preparation_reuses_verified_immutable_context(
@@ -333,7 +382,9 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
 
     root_observation = object()
     runner = DockerDynamicRunner(Store())
+    runner._build_backend = "buildkit"
     commands: list[list[str]] = []
+    build_environments: list[dict[str, str] | None] = []
     verification_threads: list[int] = []
     original_verify = runner._verify_context_contents
 
@@ -341,10 +392,17 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
         verification_threads.append(threading.get_ident())
         original_verify(*args)
 
-    async def command(argv: list[str], *, timeout_seconds: int, on_timeout=None):
+    async def command(
+        argv: list[str],
+        *,
+        timeout_seconds: int,
+        on_timeout=None,
+        env=None,
+    ):
         del timeout_seconds, on_timeout
         commands.append(argv)
         if argv[1] == "build":
+            build_environments.append(env)
             iidfile = Path(argv[argv.index("--iidfile") + 1])
             iidfile.write_text("sha256:" + "a" * 64, encoding="utf-8")
         return {
@@ -359,6 +417,8 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
     monkeypatch.setattr(dynamic_module, "span_scope", start_span)
     monkeypatch.setattr(runner, "_command", command)
     monkeypatch.setattr(runner, "_verify_context_contents", verify_context)
+    monkeypatch.setenv("BUILDX_BUILDER", "remote-builder")
+    monkeypatch.setenv("BUILDKIT_HOST", "tcp://remote-builder.example:1234")
     await runner.run_all(
         [
             {
@@ -379,6 +439,17 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
     ]
     assert "--pull=false" in build
     assert "--no-cache" in build
+    assert build[build.index("--builder") + 1] == "default"
+    assert "memory=512m" in build
+    assert "memory-swap=512m" in build
+    assert "cpu-period=100000" in build
+    assert "cpu-quota=100000" in build
+    assert build[build.index("--ulimit") + 1] == "nproc=128:128"
+    build_environment = build_environments[0]
+    assert build_environment is not None
+    assert build_environment["DOCKER_BUILDKIT"] == "1"
+    assert "BUILDX_BUILDER" not in build_environment
+    assert "BUILDKIT_HOST" not in build_environment
     assert len(runs) == 2
     assert (
         runs[0][runs[0].index("--name") + 1]
@@ -478,6 +549,165 @@ async def test_runner_cancels_siblings_before_cleanup(
 
     assert cleaned.is_set()
     assert cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_finishes_cleanup_after_repeated_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = DockerDynamicRunner(SimpleNamespace())
+    candidate_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    cleanup_calls = 0
+
+    async def run_candidate(_run: dict, *, observation_parent=None) -> None:
+        del observation_parent
+        candidate_started.set()
+        await asyncio.Event().wait()
+
+    async def cleanup(*, observation_parent=None) -> None:
+        del observation_parent
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        cleanup_started.set()
+        await asyncio.sleep(0.05)
+        cleanup_finished.set()
+
+    monkeypatch.setattr(runner, "_run_candidate", run_candidate)
+    monkeypatch.setattr(runner, "cleanup", cleanup)
+
+    task = asyncio.create_task(runner.run_all([{"candidate_id": "cand_test"}]))
+    await candidate_started.wait()
+    task.cancel()
+    await cleanup_started.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_finished.is_set()
+    assert cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_preflight_pins_local_default_resource_limited_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = DockerDynamicRunner(SimpleNamespace())
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+    ended: list[dict] = []
+
+    class Scope:
+        observation = object()
+
+        def end(self, **kwargs) -> None:
+            ended.append(kwargs)
+
+    async def command(
+        argv: list[str],
+        *,
+        timeout_seconds: int,
+        on_timeout=None,
+        env=None,
+    ):
+        del timeout_seconds, on_timeout
+        calls.append((argv, env))
+        stdout = ""
+        if argv[1:3] == ["context", "inspect"]:
+            stdout = json.dumps("unix:///var/run/docker.sock")
+        elif argv[1] == "version":
+            stdout = "Docker version"
+        elif argv[1:3] == ["buildx", "ls"]:
+            stdout = json.dumps({"Name": "default", "Driver": "docker"})
+        elif argv[1:] == ["build", "--help"]:
+            stdout = "\n".join(
+                ("--builder string", "--resource list", "--shm-size bytes", "--ulimit")
+            )
+        return _successful_command(stdout)
+
+    monkeypatch.setattr(dynamic_module.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(dynamic_module, "span_scope", lambda **_kwargs: Scope())
+    monkeypatch.setattr(runner, "_command", command)
+    monkeypatch.setenv("BUILDX_BUILDER", "remote-builder")
+    monkeypatch.setenv("BUILDKIT_HOST", "tcp://remote-builder.example:1234")
+
+    await runner.preflight(observation_parent=object())
+
+    assert runner._build_backend == "buildkit"
+    builder_call = next(call for call in calls if call[0][1:3] == ["buildx", "ls"])
+    assert builder_call[0][3:] == ["--format", "{{json .}}"]
+    builder_environment = builder_call[1]
+    assert builder_environment is not None
+    assert builder_environment["DOCKER_BUILDKIT"] == "1"
+    assert "BUILDX_BUILDER" not in builder_environment
+    assert "BUILDKIT_HOST" not in builder_environment
+    assert ended == [{"output": {"status": "passed", "build_backend": "buildkit"}}]
+
+
+@pytest.mark.asyncio
+async def test_preflight_rejects_nonlocal_default_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = DockerDynamicRunner(SimpleNamespace())
+
+    async def command(argv: list[str], **_kwargs):
+        if argv[1:3] == ["context", "inspect"]:
+            return _successful_command(json.dumps("unix:///var/run/docker.sock"))
+        if argv[1] == "version":
+            return _successful_command("Docker version")
+        if argv[1:] == ["build", "--help"]:
+            return _successful_command(
+                "\n".join(
+                    ("--builder string", "--resource list", "--shm-size bytes", "--ulimit")
+                )
+            )
+        return _successful_command(
+            json.dumps({"Name": "default", "Driver": "docker-container"})
+        )
+
+    monkeypatch.setattr(dynamic_module.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(runner, "_command", command)
+
+    with pytest.raises(RuntimeError, match="local default Docker builder"):
+        await runner.preflight()
+    assert runner._build_backend is None
+
+
+@pytest.mark.asyncio
+async def test_build_backend_falls_back_to_resource_limited_legacy_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = DockerDynamicRunner(SimpleNamespace())
+    environments: list[dict[str, str]] = []
+
+    async def command(argv: list[str], *, timeout_seconds: int, env=None):
+        del argv, timeout_seconds
+        environments.append(env)
+        stdout = "Build options"
+        if env["DOCKER_BUILDKIT"] == "0":
+            stdout = "\n".join(
+                (
+                    "-m, --memory",
+                    "--memory-swap",
+                    "--cpu-period",
+                    "--cpu-quota",
+                    "--shm-size",
+                    "--ulimit",
+                )
+            )
+        return _successful_command(stdout)
+
+    monkeypatch.setattr(runner, "_command", command)
+
+    assert await runner._select_build_backend("docker") == "legacy"
+    assert [env["DOCKER_BUILDKIT"] for env in environments] == ["1", "0"]
+    legacy_limits = runner._build_limit_arguments("legacy")
+    assert legacy_limits[legacy_limits.index("--memory") + 1] == "512m"
+    assert legacy_limits[legacy_limits.index("--memory-swap") + 1] == "512m"
+    assert legacy_limits[legacy_limits.index("--cpu-period") + 1] == "100000"
+    assert legacy_limits[legacy_limits.index("--cpu-quota") + 1] == "100000"
+    assert "--builder" not in legacy_limits
 
 
 @pytest.mark.asyncio
@@ -599,10 +829,17 @@ async def test_local_docker_builds_scratch_without_network(tmp_path: Path) -> No
     )
     iidfile = tmp_path / "image.iid"
     runner = DockerDynamicRunner(SimpleNamespace())
+    await runner.preflight()
+    assert runner._build_backend is not None
     build = await runner._command(
         [
             docker,
             "build",
+            *runner._build_limit_arguments(runner._build_backend),
+            "--shm-size",
+            "64m",
+            "--ulimit",
+            "nproc=128:128",
             "--network",
             "none",
             "--pull=false",
@@ -611,6 +848,7 @@ async def test_local_docker_builds_scratch_without_network(tmp_path: Path) -> No
             str(tmp_path),
         ],
         timeout_seconds=60,
+        env=runner._build_environment(runner._build_backend),
     )
     assert build["exit_code"] == 0, build["stderr"]
     image_id = iidfile.read_text(encoding="utf-8").strip()
