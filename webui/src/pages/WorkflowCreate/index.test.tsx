@@ -341,4 +341,27 @@ describe('WorkflowCreate page', () => {
     const latestProps = capturedCreateRightPanelProps[capturedCreateRightPanelProps.length - 1];
     expect(latestProps.initialChatSessionId).toBeNull();
   });
+
+  it('accepts a route-provided chat launch request when opened from a product entry', () => {
+    renderWorkflowCreate([
+      {
+        pathname: '/workflows/new',
+        state: {
+          freshCreate: true,
+          chatLaunchRequest: {
+            id: 42,
+            prompt: 'n8n prompt',
+            displayLabel: '发送到工作台生成',
+          },
+        },
+      },
+    ]);
+
+    const latestProps = capturedCreateRightPanelProps[capturedCreateRightPanelProps.length - 1];
+    expect(latestProps.chatLaunchRequest).toMatchObject({
+      id: 42,
+      prompt: 'n8n prompt',
+      displayLabel: '发送到工作台生成',
+    });
+  });
 });

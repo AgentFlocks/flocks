@@ -6,6 +6,7 @@ export * from './agent';
 export * from './skill';
 export * from './monitoring';
 export * from './tool';
+export * from './n8n';
 export * from './provider';
 export * from './permission';
 export * from './mcp';

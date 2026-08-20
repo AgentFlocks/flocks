@@ -1177,6 +1177,7 @@ from flocks.server.routes.agent import router as agent_router
 from flocks.server.routes.model import router as model_router
 # Added in Batch 3
 from flocks.server.routes.tool import router as tool_router
+from flocks.server.routes.n8n import router as n8n_router
 from flocks.server.routes.pty import router as pty_router
 # Added in Batch 4
 from flocks.server.routes.lsp import router as lsp_router
@@ -1241,6 +1242,7 @@ app.include_router(message_router, prefix="/api/message", tags=["Message"])
 app.include_router(agent_router, prefix="/api/agent", tags=["Agent"])
 # Added in Batch 3
 app.include_router(tool_router, prefix="/api/tools", tags=["Tool"])
+app.include_router(n8n_router, prefix="/api/integrations/n8n", tags=["N8nIntegration"])
 app.include_router(pty_router, prefix="/api/pty", tags=["PTY"])
 # Added in Batch 4
 # Note: LSP status endpoint must be at root level for TUI compatibility

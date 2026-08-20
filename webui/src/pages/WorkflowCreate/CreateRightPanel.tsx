@@ -4,9 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { Workflow } from '@/api/workflow';
 import CreateChatTab, { type CreateWorkflowChatLaunchRequest } from './CreateChatTab';
 import CreateOverviewTab from './CreateOverviewTab';
+import N8nBuildPanel from './N8nBuildPanel';
 import IntegrationTab from '../WorkflowDetail/tabs/IntegrationTab';
 
-type TabId = 'chat' | 'overview' | 'integration';
+type TabId = 'chat' | 'overview' | 'n8n' | 'integration';
 
 interface CreateRightPanelProps {
   workflow: Workflow | null;
@@ -65,6 +66,7 @@ export default function CreateRightPanel({
   const TABS: { id: TabId; label: string }[] = [
     { id: 'overview', label: t('create.rightPanel.tabOverview') },
     { id: 'chat', label: t('create.rightPanel.tabChat') },
+    { id: 'n8n', label: t('create.rightPanel.tabN8n') },
     { id: 'integration', label: t('create.rightPanel.tabIntegration') },
   ];
 
@@ -104,6 +106,9 @@ export default function CreateRightPanel({
         )}
         {activeTab === 'overview' && (
           <CreateOverviewTab workflow={workflow} />
+        )}
+        {activeTab === 'n8n' && (
+          <N8nBuildPanel onGuidePrompt={handlePublishGuidePrompt} />
         )}
         {activeTab === 'integration' && (
           workflow ? (

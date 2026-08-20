@@ -39,6 +39,7 @@ const SetupAdminPage = lazyPage(() => import('@/pages/SetupAdmin'));
 const ForceChangePasswordPage = lazyPage(() => import('@/pages/ForceChangePassword'));
 const WorkflowListPage = lazyPage(() => import('@/pages/Workflow'), ['workflow']);
 const WorkflowCreate = lazyPage(() => import('@/pages/WorkflowCreate'), ['workflow']);
+const N8nWorkflowPage = lazyPage(() => import('@/pages/N8nWorkflow'), ['workflow']);
 const WorkflowEditor = lazyPage(() => import('@/pages/WorkflowEditor'), ['workflow']);
 const WorkflowDetail = lazyPage(() => import('@/pages/WorkflowDetail'), ['workflow']);
 const TaskPage = lazyPage(() => import('@/pages/Task'), ['task']);
@@ -169,6 +170,9 @@ export function Routes() {
         <Route path="agents" element={<LazyRoute><AgentPage /></LazyRoute>} />
         <Route path="workflows" element={<LazyRoute><WorkflowListPage /></LazyRoute>} />
         <Route path="workflows/new" element={<LazyRoute><WorkflowCreate /></LazyRoute>} />
+        <Route path="workflows/n8n" element={<LazyRoute><N8nWorkflowPage /></LazyRoute>} />
+        <Route path="workflows/n8n/new" element={<LazyRoute><N8nWorkflowPage /></LazyRoute>} />
+        <Route path="workflows/n8n/:recordId" element={<LazyRoute><N8nWorkflowPage /></LazyRoute>} />
         <Route path="workflows/:id" element={<LazyRoute><WorkflowDetail /></LazyRoute>} />
         <Route path="workflows/:id/edit" element={<LazyRoute><WorkflowEditor /></LazyRoute>} />
         <Route path="tasks" element={<LazyRoute><TaskPage /></LazyRoute>} />

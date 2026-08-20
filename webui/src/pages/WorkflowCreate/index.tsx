@@ -22,6 +22,7 @@ import {
   getInitialSidePanelWidth,
   getMaxSidePanelWidth,
 } from '@/components/common/sidePanelSizing';
+import type { CreateWorkflowChatLaunchRequest } from './CreateChatTab';
 
 type CreateCanvasTab = 'flow' | 'md' | 'json';
 
@@ -100,6 +101,21 @@ function isFreshCreateState(value: unknown): boolean {
   );
 }
 
+function getRouteChatLaunchRequest(value: unknown): CreateWorkflowChatLaunchRequest | null {
+  if (!value || typeof value !== 'object') return null;
+  const launchRequest = (value as { chatLaunchRequest?: unknown }).chatLaunchRequest;
+  if (!launchRequest || typeof launchRequest !== 'object') return null;
+
+  const candidate = launchRequest as Partial<CreateWorkflowChatLaunchRequest>;
+  if (typeof candidate.id !== 'number' || typeof candidate.prompt !== 'string') return null;
+
+  return {
+    id: candidate.id,
+    prompt: candidate.prompt,
+    displayLabel: typeof candidate.displayLabel === 'string' ? candidate.displayLabel : undefined,
+  };
+}
+
 function isValidCanvasTab(value: unknown): value is CreateCanvasTab {
   return value === 'flow' || value === 'md' || value === 'json';
 }
@@ -122,6 +138,7 @@ export default function WorkflowCreate() {
   const location = useLocation();
   const navigate = useNavigate();
   const startFreshCreate = isFreshCreateState(location.state);
+  const initialChatLaunchRequest = getRouteChatLaunchRequest(location.state);
   const initialCreateDraftRef = useRef<StoredCreateDraft | null | undefined>(undefined);
   if (initialCreateDraftRef.current === undefined) {
     initialCreateDraftRef.current = startFreshCreate ? null : readStoredCreateDraft();
@@ -142,11 +159,7 @@ export default function WorkflowCreate() {
   const [editDocError, setEditDocError] = useState<string | null>(null);
   const [chatSessionId, setChatSessionId] = useState<string | null>(initialCreateDraft?.chatSessionId ?? null);
   const [creationStartedAt] = useState(initialCreateDraft?.creationStartedAt ?? Date.now());
-  const [chatLaunchRequest, setChatLaunchRequest] = useState<{
-    id: number;
-    prompt: string;
-    displayLabel?: string;
-  } | null>(null);
+  const [chatLaunchRequest, setChatLaunchRequest] = useState<CreateWorkflowChatLaunchRequest | null>(initialChatLaunchRequest);
   const dragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);

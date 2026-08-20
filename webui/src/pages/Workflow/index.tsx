@@ -94,6 +94,14 @@ export default function WorkflowPage() {
     });
   };
 
+  const openN8nCenter = () => {
+    navigate('/workflows/n8n');
+  };
+
+  const openN8nCreate = () => {
+    navigate('/workflows/n8n/new');
+  };
+
   const builtinWorkflows = useMemo(() => workflows.filter(isBuiltin), [workflows]);
   const customWorkflows  = useMemo(() => workflows.filter(w => !isBuiltin(w)), [workflows]);
 
@@ -192,6 +200,20 @@ export default function WorkflowPage() {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={openN8nCenter}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800 transition-colors"
+          >
+            <WorkflowIcon className="w-4 h-4" />
+            {t('n8n.entry')}
+          </button>
+          <button
+            onClick={openN8nCreate}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700 hover:bg-red-100 transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            {t('n8n.createN8n')}
+          </button>
           <button
             onClick={handleRefresh}
             disabled={refreshing}

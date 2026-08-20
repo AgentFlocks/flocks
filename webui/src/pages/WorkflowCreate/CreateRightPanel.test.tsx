@@ -21,6 +21,17 @@ vi.mock('./CreateOverviewTab', () => ({
   default: () => <div>Overview content</div>,
 }));
 
+vi.mock('./N8nBuildPanel', () => ({
+  default: ({ onGuidePrompt }: { onGuidePrompt?: (prompt: string, label: string) => void }) => (
+    <div>
+      <div>n8n build content</div>
+      <button type="button" onClick={() => onGuidePrompt?.('n8n prompt', 'n8n 生成')}>
+        n8n 生成
+      </button>
+    </div>
+  ),
+}));
+
 vi.mock('../WorkflowDetail/tabs/IntegrationTab', () => ({
   default: ({ workflow, onGuidePrompt }: { workflow: Workflow; onGuidePrompt?: (prompt: string, label: string) => void }) => {
     capturedIntegrationTabProps.push({ workflow, onGuidePrompt });
@@ -44,6 +55,7 @@ vi.mock('react-i18next', () => ({
       const translations: Record<string, string> = {
         'create.rightPanel.tabOverview': '详情',
         'create.rightPanel.tabChat': '工作台',
+        'create.rightPanel.tabN8n': 'n8n',
         'create.rightPanel.tabIntegration': '发布',
         'create.publish.emptyTitle': '等待生成工作流',
         'create.publish.emptyHint': '工作流生成后，可以在这里配置发布方式。',
@@ -95,8 +107,32 @@ describe('WorkflowCreate CreateRightPanel', () => {
 
     expect(screen.getByRole('button', { name: '详情' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '工作台' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'n8n' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '发布' })).toBeInTheDocument();
     expect(screen.getByText('Workbench content')).toBeInTheDocument();
+  });
+
+  it('opens the n8n product entry and routes guide prompts to the workbench', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreateRightPanel
+        workflow={null}
+        open
+        width={420}
+        onWorkflowCreated={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'n8n' }));
+    expect(screen.getByText('n8n build content')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'n8n 生成' }));
+    expect(screen.getByText('Workbench content')).toBeInTheDocument();
+    const latestChatProps = capturedCreateChatTabProps[capturedCreateChatTabProps.length - 1];
+    expect(latestChatProps.launchRequest).toMatchObject({
+      prompt: 'n8n prompt',
+      displayLabel: 'n8n 生成',
+    });
   });
 
   it('shows a publish placeholder before the workflow is generated', async () => {

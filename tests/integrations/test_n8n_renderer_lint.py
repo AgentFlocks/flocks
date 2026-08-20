@@ -55,7 +55,7 @@ def test_api_payload_removes_readonly_fields() -> None:
     workflow = render_ir_to_workflow(_sample_ir(), workflow_id="wf-cli-id")
     payload = workflow_to_api_create_payload(workflow)
 
-    for key in ("id", "versionId", "active", "meta"):
+    for key in ("id", "versionId", "active", "meta", "tags"):
         assert key not in payload
     assert payload["name"] == "flocks-test-hello"
 

@@ -23,12 +23,12 @@ N8nStepKind = Literal[
 
 
 class N8nTrigger(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     type: Literal["webhook"] = "webhook"
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "POST"
     path: Optional[str] = None
-    response_mode: Literal["responseNode"] = "responseNode"
+    response_mode: Literal["responseNode"] = Field("responseNode", alias="responseMode")
 
 
 class N8nStep(BaseModel):

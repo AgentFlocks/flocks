@@ -22,6 +22,8 @@ vi.mock('react-i18next', () => ({
         pageTitle: '工作流',
         pageDescription: '管理和执行工作流',
         createWorkflow: '创建工作流',
+        'n8n.entry': 'n8n 工作流',
+        'n8n.createN8n': '创建 n8n',
         'section.custom': '自定义工作流',
         'section.builtin': '内置工作流',
         'stats.nodes': '节点',
@@ -190,6 +192,17 @@ describe('WorkflowPage', () => {
         }),
       }),
     );
+  });
+
+  it('提供独立 n8n 工作流入口和 n8n 创建入口', async () => {
+    const user = userEvent.setup();
+    render(<WorkflowPage />);
+
+    await user.click(screen.getByRole('button', { name: 'n8n 工作流' }));
+    await user.click(screen.getByRole('button', { name: '创建 n8n' }));
+
+    expect(mockNavigate).toHaveBeenNthCalledWith(1, '/workflows/n8n');
+    expect(mockNavigate).toHaveBeenNthCalledWith(2, '/workflows/n8n/new');
   });
 
   it('没有自定义工作流时不渲染空分组', () => {

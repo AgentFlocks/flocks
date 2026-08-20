@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from flocks.integrations.n8n.models import N8nIR, N8nStep
 
 
-API_READONLY_FIELDS = frozenset({"id", "versionId", "active", "meta", "createdAt", "updatedAt"})
+API_READONLY_FIELDS = frozenset({"id", "versionId", "active", "meta", "createdAt", "updatedAt", "tags"})
 
 
 def slugify_webhook_path(value: str) -> str:
@@ -204,8 +204,6 @@ def render_ir_to_workflow(ir_data: N8nIR | Dict[str, Any], *, workflow_id: str |
             "flocksIntegration": "n8n_workflow_autobuilder",
         },
     }
-    if ir.description:
-        workflow["tags"] = []
     if workflow_id:
         workflow["id"] = workflow_id
     return workflow
