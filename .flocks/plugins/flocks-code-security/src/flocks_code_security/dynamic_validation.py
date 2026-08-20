@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from flocks.utils.langfuse import span_scope
+
 from flocks_code_security.paths import docker_runtime_dir, ensure_private_directory
 from flocks_code_security.snapshot import normalize_relative_path
 
@@ -24,6 +26,62 @@ _FROM_RE = re.compile(r"^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
 
 
+def _start_observation(
+    parent: Any,
+    name: str,
+    *,
+    input: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    if parent is None:
+        return None
+    try:
+        return span_scope(
+            parent=parent,
+            name=name,
+            input=input,
+            metadata=metadata,
+        )
+    except Exception:
+        return None
+
+
+def _end_observation(
+    scope: Any,
+    *,
+    output: dict[str, Any],
+    error: BaseException | None = None,
+) -> None:
+    if scope is None:
+        return
+    try:
+        if error is None:
+            scope.end(output=output)
+        else:
+            scope.end(
+                output={**output, "error_type": type(error).__name__},
+                level="ERROR",
+                status_message=type(error).__name__,
+            )
+    except Exception:
+        # Telemetry is best-effort and must never change scan behavior.
+        pass
+
+
+def _observation(scope: Any, fallback: Any) -> Any:
+    return fallback if scope is None else scope.observation
+
+
+def _command_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Return trace-safe command facts without scripts or raw process output."""
+    return {
+        "exit_code": result.get("exit_code"),
+        "duration_ms": result.get("duration_ms"),
+        "timed_out": bool(result.get("timed_out")),
+        "truncated": bool(result.get("truncated")),
+    }
+
+
 def _bounded_text(value: Any, *, field: str, max_bytes: int) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be non-empty text")
@@ -33,6 +91,18 @@ def _bounded_text(value: Any, *, field: str, max_bytes: int) -> str:
         raise ValueError(f"{field} must be valid UTF-8 text") from exc
     if len(encoded) > max_bytes:
         raise ValueError(f"{field} exceeds the {max_bytes}-byte limit")
+    return value
+
+
+def _bounded_characters(value: Any, *, field: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be non-empty text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8 text") from exc
+    if len(value) > maximum:
+        raise ValueError(f"{field} exceeds the {maximum}-character limit")
     return value
 
 
@@ -62,7 +132,11 @@ def validate_probe(
     if status == "not_runnable":
         if set(probe) != {"candidate_id", "status", "reason"}:
             raise ValueError("not_runnable probes require only candidate_id, status, and reason")
-        reason = _bounded_text(probe.get("reason"), field="reason", max_bytes=4_000).strip()
+        reason = _bounded_characters(
+            probe.get("reason"),
+            field="reason",
+            maximum=4_000,
+        ).strip()
         return {
             "candidate_id": candidate_id,
             "status": "not_runnable",
@@ -121,10 +195,10 @@ def validate_probe(
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 60:
             raise ValueError(f"{phase}.timeout_seconds must be an integer from 1 to 60")
         phases[phase] = {"script": script, "timeout_seconds": timeout}
-    expected_difference = _bounded_text(
+    expected_difference = _bounded_characters(
         probe.get("expected_difference"),
         field="expected_difference",
-        max_bytes=MAX_EXPECTED_DIFFERENCE,
+        maximum=MAX_EXPECTED_DIFFERENCE,
     ).strip()
 
     _dockerfile_base_images(dockerfile.read_text(encoding="utf-8"))
@@ -201,75 +275,190 @@ def _dockerfile_base_images(contents: str) -> list[str]:
 class DockerDynamicRunner:
     """Execute validated probes without assigning vulnerability semantics."""
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, *, observation_parent: Any = None) -> None:
         self.store = store
+        self.observation_parent = observation_parent
         self._build_lock = asyncio.Lock()
         self._containers: set[str] = set()
         self._images: set[str] = set()
         self._active_scan_ids: set[str] = set()
 
     async def preflight(self) -> None:
-        docker = shutil.which("docker")
-        if docker is None:
-            raise RuntimeError("Dynamic validation requires the Docker CLI")
-        endpoint = os.environ.get("DOCKER_HOST", "")
-        if endpoint and not endpoint.startswith(("unix://", "npipe://")):
-            raise RuntimeError("Remote Docker endpoints are not allowed")
-        context = await self._command(
-            [docker, "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
-            timeout_seconds=15,
+        scope = _start_observation(
+            self.observation_parent,
+            "code-security.dynamic.preflight",
+            input={"remote_endpoints_allowed": False},
+            metadata={"component": "docker"},
         )
-        if context["exit_code"] != 0:
-            raise RuntimeError("Unable to inspect the active Docker context")
         try:
-            active_endpoint = json.loads(context["stdout"].strip())
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Docker returned an invalid active endpoint") from exc
-        if not isinstance(active_endpoint, str) or not active_endpoint.startswith(("unix://", "npipe://")):
-            raise RuntimeError("Remote Docker endpoints are not allowed")
-        version = await self._command([docker, "version"], timeout_seconds=15)
-        if version["exit_code"] != 0:
-            raise RuntimeError("The local Docker daemon is unavailable")
+            docker = shutil.which("docker")
+            if docker is None:
+                raise RuntimeError("Dynamic validation requires the Docker CLI")
+            endpoint = os.environ.get("DOCKER_HOST", "")
+            if endpoint and not endpoint.startswith(("unix://", "npipe://")):
+                raise RuntimeError("Remote Docker endpoints are not allowed")
+            context = await self._command(
+                [
+                    docker,
+                    "context",
+                    "inspect",
+                    "--format",
+                    "{{json .Endpoints.docker.Host}}",
+                ],
+                timeout_seconds=15,
+            )
+            if context["exit_code"] != 0:
+                raise RuntimeError("Unable to inspect the active Docker context")
+            try:
+                active_endpoint = json.loads(context["stdout"].strip())
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Docker returned an invalid active endpoint") from exc
+            if not isinstance(active_endpoint, str) or not active_endpoint.startswith(
+                ("unix://", "npipe://")
+            ):
+                raise RuntimeError("Remote Docker endpoints are not allowed")
+            version = await self._command([docker, "version"], timeout_seconds=15)
+            if version["exit_code"] != 0:
+                raise RuntimeError("The local Docker daemon is unavailable")
+        except BaseException as exc:
+            _end_observation(scope, output={"status": "failed"}, error=exc)
+            raise
+        _end_observation(scope, output={"status": "passed"})
 
     async def run_all(self, runs: list[dict[str, Any]], *, concurrency: int = 2) -> None:
-        semaphore = asyncio.Semaphore(max(1, min(int(concurrency), 2)))
+        limit = max(1, min(int(concurrency), 2))
+        scope = _start_observation(
+            self.observation_parent,
+            "code-security.dynamic.runner",
+            input={"candidate_count": len(runs), "concurrency": limit},
+            metadata={"component": "docker"},
+        )
+        parent = _observation(scope, self.observation_parent)
+        semaphore = asyncio.Semaphore(limit)
 
         async def run_one(run: dict[str, Any]) -> None:
             async with semaphore:
-                await self._run_candidate(run)
+                await self._run_candidate(run, observation_parent=parent)
 
         try:
-            await asyncio.gather(*(run_one(run) for run in runs))
-        finally:
-            await asyncio.shield(self.cleanup())
+            async with asyncio.TaskGroup() as tasks:
+                for run in runs:
+                    tasks.create_task(run_one(run))
+        except BaseException as exc:
+            try:
+                await asyncio.shield(self.cleanup(observation_parent=parent))
+            except Exception as cleanup_exc:
+                exc.add_note(
+                    "Dynamic validation cleanup also failed: "
+                    f"{type(cleanup_exc).__name__}"
+                )
+            _end_observation(
+                scope,
+                output={"status": "failed", "candidate_count": len(runs)},
+                error=exc,
+            )
+            raise
+        try:
+            await asyncio.shield(self.cleanup(observation_parent=parent))
+        except BaseException as exc:
+            _end_observation(
+                scope,
+                output={"status": "cleanup_failed", "candidate_count": len(runs)},
+                error=exc,
+            )
+            raise
+        _end_observation(
+            scope,
+            output={"status": "completed", "candidate_count": len(runs)},
+        )
 
-    async def cleanup(self) -> None:
+    async def cleanup(self, *, observation_parent: Any = None) -> None:
+        parent = (
+            self.observation_parent
+            if observation_parent is None
+            else observation_parent
+        )
+        scope = _start_observation(
+            parent,
+            "code-security.dynamic.cleanup",
+            input={
+                "container_count": len(self._containers),
+                "image_count": len(self._images),
+                "runtime_count": len(self._active_scan_ids),
+            },
+            metadata={"component": "docker"},
+        )
         docker = shutil.which("docker")
         failures: list[str] = []
-        if docker is None:
-            failures.extend(f"container {item}" for item in sorted(self._containers))
-            failures.extend(f"image {item}" for item in sorted(self._images))
-        else:
-            for container in sorted(self._containers):
-                result = await self._command([docker, "rm", "-f", container], timeout_seconds=30)
-                if result["exit_code"] != 0:
-                    failures.append(f"container {container}")
-                else:
-                    self._containers.discard(container)
-            for image in sorted(self._images):
-                result = await self._command([docker, "image", "rm", "-f", image], timeout_seconds=60)
-                if result["exit_code"] != 0:
-                    failures.append(f"image {image}")
-                else:
-                    self._images.discard(image)
-        for scan_id in self._active_scan_ids:
-            path = docker_runtime_dir(scan_id)
-            if path.exists():
-                shutil.rmtree(path)
-        if failures:
-            raise RuntimeError("Dynamic validation cleanup failed for: " + ", ".join(failures))
+        try:
+            if docker is None:
+                failures.extend(f"container {item}" for item in sorted(self._containers))
+                failures.extend(f"image {item}" for item in sorted(self._images))
+            else:
+                for container in sorted(self._containers):
+                    result = await self._command(
+                        [docker, "rm", "-f", container],
+                        timeout_seconds=30,
+                    )
+                    if result["exit_code"] != 0:
+                        failures.append(f"container {container}")
+                    else:
+                        self._containers.discard(container)
+                for image in sorted(self._images):
+                    result = await self._command(
+                        [docker, "image", "rm", "-f", image],
+                        timeout_seconds=60,
+                    )
+                    if result["exit_code"] != 0:
+                        failures.append(f"image {image}")
+                    else:
+                        self._images.discard(image)
+            for scan_id in self._active_scan_ids:
+                path = docker_runtime_dir(scan_id)
+                if path.exists():
+                    shutil.rmtree(path)
+            if failures:
+                raise RuntimeError("Dynamic validation cleanup failed for: " + ", ".join(failures))
+        except BaseException as exc:
+            _end_observation(
+                scope,
+                output={"status": "failed", "failure_count": len(failures)},
+                error=exc,
+            )
+            raise
+        _end_observation(scope, output={"status": "completed"})
 
-    async def _run_candidate(self, run: dict[str, Any]) -> None:
+    async def _run_candidate(
+        self,
+        run: dict[str, Any],
+        *,
+        observation_parent: Any = None,
+    ) -> None:
+        scan_id = run["scan_id"]
+        candidate_id = run["candidate_id"]
+        scope = _start_observation(
+            observation_parent,
+            "code-security.dynamic.candidate",
+            input={"scan_id": scan_id, "candidate_id": candidate_id},
+            metadata={"scan_id": scan_id, "candidate_id": candidate_id},
+        )
+        parent = _observation(scope, observation_parent)
+        try:
+            outcome = await self._execute_candidate(
+                run,
+                observation_parent=parent,
+            )
+        except BaseException as exc:
+            _end_observation(scope, output={"status": "failed"}, error=exc)
+            raise
+        _end_observation(scope, output=outcome)
+
+    async def _execute_candidate(
+        self,
+        run: dict[str, Any],
+        *,
+        observation_parent: Any,
+    ) -> dict[str, Any]:
         scan_id = run["scan_id"]
         self._active_scan_ids.add(scan_id)
         candidate_id = run["candidate_id"]
@@ -302,10 +491,15 @@ class DockerDynamicRunner:
         facts: dict[str, Any] = {"runner_status": "inconclusive"}
         image_id: str | None = None
         try:
-            for image in _dockerfile_base_images(dockerfile.read_text(encoding="utf-8")):
-                inspection = await self._command(
+            for index, image in enumerate(
+                _dockerfile_base_images(dockerfile.read_text(encoding="utf-8"))
+            ):
+                inspection = await self._observed_command(
+                    observation_parent,
+                    "base_image_check",
                     [docker, "image", "inspect", image],
                     timeout_seconds=30,
+                    input={"base_image_index": index},
                 )
                 if inspection["exit_code"] != 0:
                     facts.update(
@@ -314,7 +508,7 @@ class DockerDynamicRunner:
                         build=inspection,
                     )
                     self.store.complete_dynamic_run(candidate_id, "inconclusive", facts)
-                    return
+                    return {"status": "inconclusive", "failed_phase": "build"}
 
             iidfile = runtime / f"{candidate_id}.iid"
             build_argv = [
@@ -335,7 +529,12 @@ class DockerDynamicRunner:
                 str(context),
             ]
             async with self._build_lock:
-                build = await self._command(build_argv, timeout_seconds=BUILD_TIMEOUT_SECONDS)
+                build = await self._observed_command(
+                    observation_parent,
+                    "build",
+                    build_argv,
+                    timeout_seconds=BUILD_TIMEOUT_SECONDS,
+                )
             facts["build"] = build
             if build["timed_out"] or build["exit_code"] != 0 or not iidfile.is_file():
                 facts.update(
@@ -343,7 +542,7 @@ class DockerDynamicRunner:
                     reason=("Docker build exceeded 300 seconds." if build["timed_out"] else "Docker build failed."),
                 )
                 self.store.complete_dynamic_run(candidate_id, "inconclusive", facts)
-                return
+                return {"status": "inconclusive", "failed_phase": "build"}
             image_id = iidfile.read_text(encoding="utf-8").strip()
             if re.fullmatch(r"sha256:[a-f0-9]{64}", image_id) is None:
                 raise RuntimeError("Docker did not return a content-addressed image ID")
@@ -354,7 +553,9 @@ class DockerDynamicRunner:
                 name = self._container_name(scan_id, candidate_id, phase)
                 self._containers.add(name)
                 phase_probe = probe[phase]
-                result = await self._command(
+                result = await self._observed_command(
+                    observation_parent,
+                    phase,
                     [
                         docker,
                         "run",
@@ -402,17 +603,48 @@ class DockerDynamicRunner:
                         ),
                     )
                     self.store.complete_dynamic_run(candidate_id, "inconclusive", facts)
-                    return
+                    return {"status": "inconclusive", "failed_phase": phase}
             facts["runner_status"] = "completed"
             self.store.complete_dynamic_run(candidate_id, "completed", facts)
+            return {"status": "completed"}
         finally:
             if image_id is not None:
-                removal = await self._command(
+                removal = await self._observed_command(
+                    observation_parent,
+                    "image_cleanup",
                     [docker, "image", "rm", "-f", image_id],
                     timeout_seconds=60,
                 )
                 if removal["exit_code"] == 0:
                     self._images.discard(image_id)
+
+    async def _observed_command(
+        self,
+        observation_parent: Any,
+        operation: str,
+        argv: list[str],
+        *,
+        timeout_seconds: int,
+        input: dict[str, Any] | None = None,
+        on_timeout: Callable[[], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        scope = _start_observation(
+            observation_parent,
+            f"code-security.dynamic.{operation}",
+            input={"timeout_seconds": timeout_seconds, **(input or {})},
+            metadata={"operation": operation},
+        )
+        try:
+            result = await self._command(
+                argv,
+                timeout_seconds=timeout_seconds,
+                on_timeout=on_timeout,
+            )
+        except BaseException as exc:
+            _end_observation(scope, output={"status": "failed"}, error=exc)
+            raise
+        _end_observation(scope, output=_command_summary(result))
+        return result
 
     @staticmethod
     def _verify_context_contents(

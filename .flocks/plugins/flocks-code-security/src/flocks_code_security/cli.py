@@ -290,6 +290,36 @@ class AuditOrchestrator:
     ) -> dict[str, Any]:
         if not self.dynamic_enabled:
             return status
+        scope = _start_phase_observation(scan_observation, "dynamic_validation")
+        observation_parent = (
+            scan_observation if scope is None else scope.observation
+        )
+        try:
+            status = await self._execute_dynamic_remaining(
+                scan_id,
+                status,
+                observation_parent,
+            )
+        except BaseException as exc:
+            _end_observation(
+                scope,
+                output={"status": "failed", "error_type": type(exc).__name__},
+                level="ERROR",
+                status_message=type(exc).__name__,
+            )
+            raise
+        _end_observation(
+            scope,
+            output={"status": "completed", "counts": status.get("counts", {})},
+        )
+        return status
+
+    async def _execute_dynamic_remaining(
+        self,
+        scan_id: str,
+        status: dict[str, Any],
+        observation_parent: Any,
+    ) -> dict[str, Any]:
         store = get_runtime().store
         remaining = int(
             status.get("counts", {}).get("confirmed_without_dynamic_record", 0)
@@ -300,7 +330,7 @@ class AuditOrchestrator:
                 scan_id,
                 "probing",
                 self.progress,
-                scan_observation,
+                observation_parent,
             )
             if probe_batch.get("status") != "completed":
                 raise RuntimeError("Probing worker batch did not complete successfully")
@@ -320,8 +350,12 @@ class AuditOrchestrator:
             status="ready",
         )
         if runnable:
-            runner = self.dynamic_runner or DockerDynamicRunner(store)
+            runner = self.dynamic_runner or DockerDynamicRunner(
+                store,
+                observation_parent=observation_parent,
+            )
             self.dynamic_runner = runner
+            runner.observation_parent = observation_parent
             await runner.preflight()
             await runner.run_all(runnable, concurrency=2)
         await asyncio.to_thread(store.assert_dynamic_runs_terminal, scan_id)
@@ -330,7 +364,7 @@ class AuditOrchestrator:
             self.progress,
             "scan.status",
             status,
-            observation_parent=scan_observation,
+            observation_parent=observation_parent,
         )
         return status
 

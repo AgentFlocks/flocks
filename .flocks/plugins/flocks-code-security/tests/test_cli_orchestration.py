@@ -108,9 +108,7 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
             }
         )
 
-    async def wait_workers(
-        _ctx, batch_id: str, timeout_seconds: int
-    ) -> ToolResult:
+    async def wait_workers(_ctx, batch_id: str, timeout_seconds: int) -> ToolResult:
         assert timeout_seconds == 10
         return _result(
             {
@@ -284,6 +282,92 @@ async def test_dynamic_pipeline_probes_and_runs_before_parent(
 
 
 @pytest.mark.asyncio
+async def test_dynamic_pipeline_attaches_runner_to_langfuse_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spans: list[tuple[dict, object]] = []
+    ended: list[tuple[object, dict]] = []
+
+    class Scope:
+        def __init__(self) -> None:
+            self.observation = object()
+
+        def end(self, **kwargs) -> None:
+            ended.append((self.observation, kwargs))
+
+    def start_span(**kwargs):
+        scope = Scope()
+        spans.append((kwargs, scope.observation))
+        return scope
+
+    class Store:
+        def list_dynamic_runs(self, scan_id: str, *, status: str):
+            assert (scan_id, status) == ("scan_dynamic_trace", "ready")
+            return [{"candidate_id": "cand_trace", "status": "ready"}]
+
+        def assert_dynamic_runs_terminal(self, scan_id: str) -> None:
+            assert scan_id == "scan_dynamic_trace"
+
+    class Runner:
+        observation_parent = None
+
+        async def preflight(self) -> None:
+            assert self.observation_parent is not None
+
+        async def run_all(self, runs, *, concurrency: int) -> None:
+            assert runs == [{"candidate_id": "cand_trace", "status": "ready"}]
+            assert concurrency == 2
+
+        async def cleanup(self) -> None:
+            return None
+
+    async def status(_ctx, scan_id: str) -> ToolResult:
+        assert scan_id == "scan_dynamic_trace"
+        return _result(
+            {
+                "scan_id": scan_id,
+                "counts": {"terminal_dynamic_runs": 1},
+            }
+        )
+
+    monkeypatch.setattr(audit_cli, "span_scope", start_span)
+    monkeypatch.setattr(audit_cli, "audit_status", status)
+    monkeypatch.setattr(
+        audit_cli,
+        "get_runtime",
+        lambda: SimpleNamespace(store=Store()),
+    )
+
+    root_observation = object()
+    runner = Runner()
+    result = await audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+        dynamic_enabled=True,
+        dynamic_runner=runner,
+    )._run_dynamic_remaining(
+        "scan_dynamic_trace",
+        {"counts": {"confirmed_without_dynamic_record": 0}},
+        root_observation,
+    )
+
+    dynamic_span = next(
+        item
+        for item in spans
+        if item[0]["name"] == "code-security.phase.dynamic_validation"
+    )
+    assert dynamic_span[0]["parent"] is root_observation
+    assert runner.observation_parent is dynamic_span[1]
+    assert result["counts"]["terminal_dynamic_runs"] == 1
+    assert any(
+        observation is dynamic_span[1]
+        and output["output"]["status"] == "completed"
+        for observation, output in ended
+    )
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runs_one_parent_directed_rescan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -416,9 +500,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         "coordinator",
         "message",
         agent="code-security",
-        extra={
-            "model": {"providerID": "provider", "modelID": "model"}
-        },
+        extra={"model": {"providerID": "provider", "modelID": "model"}},
     )
 
     result = await audit_cli.AuditOrchestrator(
@@ -428,9 +510,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
     )._run_parent_adjudication("scan_parent", None)
 
     assert result == decision
-    assert "host has already completed" in create_message.await_args.kwargs[
-        "content"
-    ].lower()
+    assert "host has already completed" in create_message.await_args.kwargs["content"].lower()
     set_callable_tools.assert_awaited_once_with(
         "coordinator",
         {
@@ -550,9 +630,7 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
     async def run_workers(_ctx, scan_id: str, phase: str) -> ToolResult:
         assert _ctx.extra["langfuse_trace_context"] == {
             "trace_id": "a" * 32,
-            "parent_span_id": _ctx.extra["langfuse_trace_context"][
-                "parent_span_id"
-            ],
+            "parent_span_id": _ctx.extra["langfuse_trace_context"]["parent_span_id"],
         }
         return _result(
             {
@@ -597,9 +675,7 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
                 "scan_id": scan_id,
                 "status": "completed",
                 "finding_count": 1,
-                "finding_summaries": [
-                    {"finding_id": "finding_1", "severity": "high"}
-                ],
+                "finding_summaries": [{"finding_id": "finding_1", "severity": "high"}],
             }
         )
 
@@ -635,9 +711,7 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
     assert "code-security.progress.scan.finalized" in span_names
     root_observation = traces[0][1]
     assert any(
-        observation is root_observation
-        and output["output"]["status"] == "completed"
-        for observation, output in ended
+        observation is root_observation and output["output"]["status"] == "completed" for observation, output in ended
     )
 
 
