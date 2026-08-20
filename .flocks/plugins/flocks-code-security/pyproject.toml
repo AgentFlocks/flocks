@@ -18,6 +18,9 @@ packages = ["src/flocks_code_security"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "docker: marks tests that require an explicitly enabled local Docker daemon",
+]
 
 [tool.ruff]
 line-length = 120

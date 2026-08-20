@@ -350,14 +350,14 @@ class AuditOrchestrator:
             status="ready",
         )
         if runnable:
-            runner = self.dynamic_runner or DockerDynamicRunner(
-                store,
+            runner = self.dynamic_runner or DockerDynamicRunner(store)
+            self.dynamic_runner = runner
+            await runner.preflight(observation_parent=observation_parent)
+            await runner.run_all(
+                runnable,
+                concurrency=2,
                 observation_parent=observation_parent,
             )
-            self.dynamic_runner = runner
-            runner.observation_parent = observation_parent
-            await runner.preflight()
-            await runner.run_all(runnable, concurrency=2)
         await asyncio.to_thread(store.assert_dynamic_runs_terminal, scan_id)
         status = _require_success(await audit_status(self.ctx, scan_id))
         _emit(
@@ -555,12 +555,6 @@ class AuditOrchestrator:
             return finalized
         except BaseException as exc:
             cancelled_output: dict[str, Any] | None = None
-            cleanup_error: Exception | None = None
-            if self.dynamic_runner is not None:
-                try:
-                    await asyncio.shield(self.dynamic_runner.cleanup())
-                except Exception as cleanup_exc:
-                    cleanup_error = cleanup_exc
             if scan_id is not None:
                 try:
                     cancelled = await asyncio.shield(
@@ -584,14 +578,12 @@ class AuditOrchestrator:
                 scan_scope,
                 output={
                     "scan_id": scan_id,
-                    "error": str(exc),
+                    "error_type": type(exc).__name__,
                     "cancellation": cancelled_output,
                 },
                 level="ERROR",
-                status_message=str(exc),
+                status_message=type(exc).__name__,
             )
-            if cleanup_error is not None:
-                raise RuntimeError(str(cleanup_error)) from exc
             raise
 
 

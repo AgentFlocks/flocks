@@ -66,6 +66,7 @@ def _ruleset_digest() -> str:
     for name in (
         "contract.py",
         "coverage.py",
+        "dockerfile_policy.py",
         "dynamic_validation.py",
         "orchestration.py",
         "reporting.py",

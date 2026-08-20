@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import re
+import shutil
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,21 +90,64 @@ def test_probe_contract_validates_paths_scripts_and_dockerfile(tmp_path: Path) -
         )
 
 
-def test_probe_contract_rejects_remote_or_dynamic_dockerfile_sources(tmp_path: Path) -> None:
-    dockerfile = tmp_path / "Dockerfile"
-    for contents in (
+@pytest.mark.parametrize(
+    "contents",
+    (
         "# syntax=docker/dockerfile:1\nFROM local/test\n",
+        "# escape=`\nFROM local/test\n",
         "ARG BASE\nFROM $BASE\n",
         "FROM local/test\nADD https://example.test/file /tmp/file\n",
-    ):
-        dockerfile.write_text(contents, encoding="utf-8")
-        with pytest.raises(ValueError):
-            validate_probe(
-                _runnable_probe(),
-                candidate_id="cand_test",
-                snapshot_root=tmp_path,
-                snapshot_files={"Dockerfile"},
-            )
+        'FROM local/test\nADD ["https://example.test/file", "/tmp/file"]\n',
+        "FROM local/test\nADD git@example.test:repo.git /src\n",
+        "FROM local/test\nONBUILD COPY --from=remote/image /src /src\n",
+        "FROM local/test\nRUN --mount=type=bind,from=remote/image echo unsafe\n",
+        "FROM local/test\nRUN --network=host echo unsafe\n",
+        "FROM --platform=linux/amd64 local/test\n",
+        "FROM local/test\nCOPY --chown=0 --from=$REMOTE /src /src\n",
+    ),
+)
+def test_probe_contract_rejects_unsupported_dockerfile_sources(
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        validate_probe(
+            _runnable_probe(),
+            candidate_id="cand_test",
+            snapshot_root=tmp_path,
+            snapshot_files={"Dockerfile"},
+        )
+
+
+def test_dockerfile_sources_support_scratch_and_find_copy_flag_sources() -> None:
+    assert dynamic_module._dockerfile_base_images("FROM scratch\n") == []
+    assert dynamic_module._dockerfile_base_images(
+        "FROM local/base AS build\n"
+        "FROM scratch\n"
+        "COPY --chown=0 --from=build /src /src\n"
+        "COPY --link --from=local/artifact:latest /bin/tool /bin/tool\n"
+    ) == ["local/base", "local/artifact:latest"]
+
+
+def test_probe_contract_rejects_symlinked_path_components(tmp_path: Path) -> None:
+    real_context = tmp_path / "real"
+    real_context.mkdir()
+    (real_context / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(real_context, target_is_directory=True)
+    probe = _runnable_probe()
+    probe["context_path"] = "linked"
+    probe["dockerfile_path"] = "linked/Dockerfile"
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        validate_probe(
+            probe,
+            candidate_id="cand_test",
+            snapshot_root=tmp_path,
+            snapshot_files={"linked/Dockerfile"},
+        )
 
 
 def test_incremental_dynamic_schema_migration_is_idempotent(tmp_path: Path) -> None:
@@ -158,6 +205,77 @@ async def test_command_truncates_logs_without_stopping_drain(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_command_timeout_runs_targeted_cleanup() -> None:
+    removed: list[str] = []
+
+    async def remove_exact_container() -> None:
+        removed.append("flocks-exact-container")
+
+    result = await DockerDynamicRunner(SimpleNamespace())._command(
+        [sys.executable, "-c", "import time; time.sleep(1)"],
+        timeout_seconds=0,
+        on_timeout=remove_exact_container,
+    )
+
+    assert result["timed_out"] is True
+    assert removed == ["flocks-exact-container"]
+
+
+def test_candidate_preparation_reuses_verified_immutable_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    dockerfile = snapshot / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    data = dockerfile.read_bytes()
+    record = SimpleNamespace(
+        relative_path="Dockerfile",
+        size_bytes=len(data),
+        blob_digest=hashlib.sha256(data).hexdigest(),
+    )
+
+    class Store:
+        def get_scan(self, _scan_id: str):
+            return {"snapshot_id": "snap_test"}
+
+        def get_snapshot(self, _snapshot_id: str):
+            return SimpleNamespace(
+                root_path=str(snapshot),
+                snapshot_id="snap_test",
+                tree_digest="tree_test",
+            )
+
+        def list_snapshot_files(self, _snapshot_id: str):
+            return [record]
+
+    runner = DockerDynamicRunner(Store())
+    original_verify = runner._verify_context_contents
+    verification_count = 0
+
+    def verify_context(*args) -> None:
+        nonlocal verification_count
+        verification_count += 1
+        original_verify(*args)
+
+    monkeypatch.setattr(runner, "_verify_context_contents", verify_context)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for candidate_id in ("cand_one", "cand_two"):
+        runner._prepare_candidate(
+            {
+                "scan_id": "scan_test",
+                "candidate_id": candidate_id,
+                "probe": _runnable_probe(candidate_id),
+            },
+            runtime,
+        )
+
+    assert verification_count == 1
+
+
+@pytest.mark.asyncio
 async def test_runner_uses_offline_build_and_hardened_fresh_containers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -194,7 +312,11 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
             return {"scan_id": scan_id, "snapshot_id": "snap_test"}
 
         def get_snapshot(self, snapshot_id: str):
-            return SimpleNamespace(root_path=str(snapshot), snapshot_id=snapshot_id)
+            return SimpleNamespace(
+                root_path=str(snapshot),
+                snapshot_id=snapshot_id,
+                tree_digest="tree_test",
+            )
 
         def list_snapshot_files(self, snapshot_id: str):
             data = (snapshot / "Dockerfile").read_bytes()
@@ -210,11 +332,14 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
             completed.append((candidate_id, status, facts))
 
     root_observation = object()
-    runner = DockerDynamicRunner(
-        Store(),
-        observation_parent=root_observation,
-    )
+    runner = DockerDynamicRunner(Store())
     commands: list[list[str]] = []
+    verification_threads: list[int] = []
+    original_verify = runner._verify_context_contents
+
+    def verify_context(*args) -> None:
+        verification_threads.append(threading.get_ident())
+        original_verify(*args)
 
     async def command(argv: list[str], *, timeout_seconds: int, on_timeout=None):
         del timeout_seconds, on_timeout
@@ -233,6 +358,7 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
 
     monkeypatch.setattr(dynamic_module, "span_scope", start_span)
     monkeypatch.setattr(runner, "_command", command)
+    monkeypatch.setattr(runner, "_verify_context_contents", verify_context)
     await runner.run_all(
         [
             {
@@ -242,7 +368,8 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
                 "probe": _runnable_probe("cand_1234567890ab"),
                 "run": None,
             }
-        ]
+        ],
+        observation_parent=root_observation,
     )
 
     build = next(argv for argv in commands if argv[1] == "build")
@@ -264,7 +391,10 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
         assert argv[argv.index("--entrypoint") + 1] == "/bin/sh"
     assert completed[0][1] == "completed"
     assert completed[0][2]["runner_status"] == "completed"
+    assert verification_threads and verification_threads[0] != threading.get_ident()
+    assert runner._active_scan_ids == set()
 
+    span_names = [kwargs["name"] for kwargs, _observation in spans]
     spans_by_name = {
         kwargs["name"]: (kwargs, observation)
         for kwargs, observation in spans
@@ -280,6 +410,7 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
         "code-security.dynamic.cleanup",
     }
     assert expected_spans <= spans_by_name.keys()
+    assert all(span_names.count(name) == 1 for name in expected_spans)
     runner_observation = spans_by_name["code-security.dynamic.runner"][1]
     candidate = spans_by_name["code-security.dynamic.candidate"]
     assert spans_by_name["code-security.dynamic.runner"][0]["parent"] is root_observation
@@ -310,6 +441,7 @@ async def test_runner_cancels_siblings_before_cleanup(
     sibling_cancelled = asyncio.Event()
     cleaned = asyncio.Event()
     started = 0
+    cleanup_calls = 0
 
     async def run_candidate(run: dict, *, observation_parent=None) -> None:
         del observation_parent
@@ -328,6 +460,8 @@ async def test_runner_cancels_siblings_before_cleanup(
 
     async def cleanup(*, observation_parent=None) -> None:
         del observation_parent
+        nonlocal cleanup_calls
+        cleanup_calls += 1
         assert sibling_cancelled.is_set()
         cleaned.set()
 
@@ -343,6 +477,7 @@ async def test_runner_cancels_siblings_before_cleanup(
         )
 
     assert cleaned.is_set()
+    assert cleanup_calls == 1
 
 
 @pytest.mark.asyncio
@@ -365,13 +500,124 @@ async def test_preflight_rejects_remote_docker_host(monkeypatch: pytest.MonkeyPa
     remote_endpoint = "tcp://private-remote.example:2376"
     monkeypatch.setenv("DOCKER_HOST", remote_endpoint)
     with pytest.raises(RuntimeError, match="Remote Docker"):
-        await DockerDynamicRunner(
-            SimpleNamespace(),
-            observation_parent=object(),
-        ).preflight()
+        await DockerDynamicRunner(SimpleNamespace()).preflight(
+            observation_parent=object()
+        )
 
     assert spans[0]["name"] == "code-security.dynamic.preflight"
     trace_payload = repr(spans) + repr(ended)
     assert remote_endpoint not in trace_payload
     assert ended[0]["level"] == "ERROR"
     assert ended[0]["status_message"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    (
+        (
+            {
+                "exit_code": 7,
+                "duration_ms": 1,
+                "stdout": "sensitive stdout",
+                "stderr": "sensitive stderr",
+                "timed_out": False,
+                "truncated": False,
+            },
+            "failed",
+        ),
+        (
+            {
+                "exit_code": None,
+                "duration_ms": 1,
+                "stdout": "sensitive stdout",
+                "stderr": "sensitive stderr",
+                "timed_out": True,
+                "truncated": False,
+            },
+            "timeout",
+        ),
+    ),
+)
+async def test_observed_command_marks_nonzero_and_timeout_as_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    result: dict,
+    expected_status: str,
+) -> None:
+    ended: list[dict] = []
+
+    class Scope:
+        observation = object()
+
+        def end(self, **kwargs) -> None:
+            ended.append(kwargs)
+
+    async def command(*_args, **_kwargs):
+        return result
+
+    monkeypatch.setattr(dynamic_module, "span_scope", lambda **_kwargs: Scope())
+    runner = DockerDynamicRunner(SimpleNamespace())
+    monkeypatch.setattr(runner, "_command", command)
+
+    returned = await runner._observed_command(
+        object(),
+        "build",
+        ["docker", "build", "sensitive-argument"],
+        timeout_seconds=1,
+    )
+
+    assert returned is result
+    assert ended == [
+        {
+            "output": {
+                "status": expected_status,
+                "exit_code": result["exit_code"],
+                "duration_ms": 1,
+                "timed_out": result["timed_out"],
+                "truncated": False,
+            },
+            "level": "ERROR",
+            "status_message": expected_status,
+        }
+    ]
+    assert "sensitive" not in repr(ended)
+
+
+@pytest.mark.asyncio
+@pytest.mark.docker
+@pytest.mark.skipif(
+    os.environ.get("FLOCKS_TEST_DOCKER") != "1",
+    reason="set FLOCKS_TEST_DOCKER=1 to run Docker integration tests",
+)
+async def test_local_docker_builds_scratch_without_network(tmp_path: Path) -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.fail("FLOCKS_TEST_DOCKER=1 requires the Docker CLI")
+    (tmp_path / "Dockerfile").write_text(
+        'FROM scratch\nLABEL flocks.test="dynamic-validation"\n',
+        encoding="utf-8",
+    )
+    iidfile = tmp_path / "image.iid"
+    runner = DockerDynamicRunner(SimpleNamespace())
+    build = await runner._command(
+        [
+            docker,
+            "build",
+            "--network",
+            "none",
+            "--pull=false",
+            "--iidfile",
+            str(iidfile),
+            str(tmp_path),
+        ],
+        timeout_seconds=60,
+    )
+    assert build["exit_code"] == 0, build["stderr"]
+    image_id = iidfile.read_text(encoding="utf-8").strip()
+    try:
+        assert re.fullmatch(r"sha256:[a-f0-9]{64}", image_id)
+    finally:
+        await runner._command(
+            [docker, "image", "rm", "-f", image_id],
+            timeout_seconds=30,
+        )

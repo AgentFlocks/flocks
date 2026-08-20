@@ -240,15 +240,14 @@ async def test_dynamic_pipeline_probes_and_runs_before_parent(
             self.preflight_called = False
             self.runs = []
 
-        async def preflight(self):
+        async def preflight(self, *, observation_parent=None):
+            del observation_parent
             self.preflight_called = True
 
-        async def run_all(self, runs, *, concurrency: int):
+        async def run_all(self, runs, *, concurrency: int, observation_parent=None):
+            del observation_parent
             assert concurrency == 2
             self.runs = runs
-
-        async def cleanup(self):
-            return None
 
     runner = Runner()
     monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
@@ -309,17 +308,23 @@ async def test_dynamic_pipeline_attaches_runner_to_langfuse_phase(
             assert scan_id == "scan_dynamic_trace"
 
     class Runner:
-        observation_parent = None
+        def __init__(self) -> None:
+            self.observation_parents = []
 
-        async def preflight(self) -> None:
-            assert self.observation_parent is not None
+        async def preflight(self, *, observation_parent=None) -> None:
+            assert observation_parent is not None
+            self.observation_parents.append(observation_parent)
 
-        async def run_all(self, runs, *, concurrency: int) -> None:
+        async def run_all(
+            self,
+            runs,
+            *,
+            concurrency: int,
+            observation_parent=None,
+        ) -> None:
             assert runs == [{"candidate_id": "cand_trace", "status": "ready"}]
             assert concurrency == 2
-
-        async def cleanup(self) -> None:
-            return None
+            self.observation_parents.append(observation_parent)
 
     async def status(_ctx, scan_id: str) -> ToolResult:
         assert scan_id == "scan_dynamic_trace"
@@ -358,7 +363,7 @@ async def test_dynamic_pipeline_attaches_runner_to_langfuse_phase(
         if item[0]["name"] == "code-security.phase.dynamic_validation"
     )
     assert dynamic_span[0]["parent"] is root_observation
-    assert runner.observation_parent is dynamic_span[1]
+    assert runner.observation_parents == [dynamic_span[1], dynamic_span[1]]
     assert result["counts"]["terminal_dynamic_runs"] == 1
     assert any(
         observation is dynamic_span[1]

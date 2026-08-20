@@ -151,6 +151,7 @@ python_functions = ["test_*"]
 addopts = "-v"
 markers = [
     "integration: marks tests as integration tests (require API keys)",
+    "docker: marks tests that require an explicitly enabled local Docker daemon",
     "slow: marks tests as slow running (>30s per test)",
     "live: marks tests as requiring live services; enable with FLOCKS_LIVE_TEST=1 and running dev server",
 ]

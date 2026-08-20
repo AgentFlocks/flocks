@@ -8,12 +8,18 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TypedDict
 
 from flocks.utils.langfuse import span_scope
 
+from flocks_code_security.dockerfile_policy import (
+    dockerfile_base_images as _dockerfile_base_images,
+)
 from flocks_code_security.paths import docker_runtime_dir, ensure_private_directory
 from flocks_code_security.snapshot import normalize_relative_path
 
@@ -22,8 +28,26 @@ MAX_SCRIPT_BYTES = 16 * 1024
 MAX_EXPECTED_DIFFERENCE = 4_000
 MAX_LOG_BYTES = 64 * 1024
 BUILD_TIMEOUT_SECONDS = 300
-_FROM_RE = re.compile(r"^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*$", re.I)
-_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
+
+
+class CommandResult(TypedDict):
+    exit_code: int | None
+    duration_ms: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class PreparedCandidate:
+    scan_id: str
+    candidate_id: str
+    probe: dict[str, Any]
+    context: Path
+    dockerfile: Path
+    runtime: Path
+    base_images: tuple[str, ...]
 
 
 def _start_observation(
@@ -51,17 +75,25 @@ def _end_observation(
     *,
     output: dict[str, Any],
     error: BaseException | None = None,
+    level: str | None = None,
+    status_message: str | None = None,
 ) -> None:
     if scope is None:
         return
     try:
-        if error is None:
+        if error is None and level is None:
             scope.end(output=output)
-        else:
+        elif error is not None:
             scope.end(
                 output={**output, "error_type": type(error).__name__},
                 level="ERROR",
                 status_message=type(error).__name__,
+            )
+        else:
+            scope.end(
+                output=output,
+                level=level,
+                status_message=status_message,
             )
     except Exception:
         # Telemetry is best-effort and must never change scan behavior.
@@ -72,13 +104,20 @@ def _observation(scope: Any, fallback: Any) -> Any:
     return fallback if scope is None else scope.observation
 
 
-def _command_summary(result: dict[str, Any]) -> dict[str, Any]:
+def _command_summary(result: CommandResult) -> dict[str, Any]:
     """Return trace-safe command facts without scripts or raw process output."""
+    if result["timed_out"]:
+        status = "timeout"
+    elif result["exit_code"] != 0:
+        status = "failed"
+    else:
+        status = "completed"
     return {
-        "exit_code": result.get("exit_code"),
-        "duration_ms": result.get("duration_ms"),
-        "timed_out": bool(result.get("timed_out")),
-        "truncated": bool(result.get("truncated")),
+        "status": status,
+        "exit_code": result["exit_code"],
+        "duration_ms": result["duration_ms"],
+        "timed_out": result["timed_out"],
+        "truncated": result["truncated"],
     }
 
 
@@ -116,6 +155,16 @@ def _inside(path: str, directory: str) -> bool:
     return directory == "." or path == directory or path.startswith(f"{directory}/")
 
 
+def _reject_symlink_components(root: Path, relative_path: str) -> None:
+    current = root
+    if relative_path == ".":
+        return
+    for part in Path(relative_path).parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError("Probe path contains a symbolic link")
+
+
 def validate_probe(
     probe: dict[str, Any],
     *,
@@ -124,6 +173,22 @@ def validate_probe(
     snapshot_files: set[str],
 ) -> dict[str, Any]:
     """Return a canonical probe after validating its complete persisted contract."""
+    validated, _base_images = _validate_probe(
+        probe,
+        candidate_id=candidate_id,
+        snapshot_root=snapshot_root,
+        snapshot_files=snapshot_files,
+    )
+    return validated
+
+
+def _validate_probe(
+    probe: dict[str, Any],
+    *,
+    candidate_id: str,
+    snapshot_root: Path,
+    snapshot_files: set[str],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
     if not isinstance(probe, dict):
         raise ValueError("probe must be an object")
     if probe.get("candidate_id") != candidate_id:
@@ -137,11 +202,14 @@ def validate_probe(
             field="reason",
             maximum=4_000,
         ).strip()
-        return {
-            "candidate_id": candidate_id,
-            "status": "not_runnable",
-            "reason": reason,
-        }
+        return (
+            {
+                "candidate_id": candidate_id,
+                "status": "not_runnable",
+                "reason": reason,
+            },
+            (),
+        )
     if status != "runnable":
         raise ValueError("Probe status must be runnable or not_runnable")
     expected_fields = {
@@ -166,20 +234,16 @@ def validate_probe(
     if snapshot_root.is_symlink():
         raise ValueError("Snapshot root cannot be a symbolic link")
     root = snapshot_root.resolve(strict=True)
+    _reject_symlink_components(root, context_path)
+    _reject_symlink_components(root, dockerfile_path)
     context = (root / context_path).resolve(strict=True)
     dockerfile = (root / dockerfile_path).resolve(strict=True)
     if not context.is_relative_to(root) or not dockerfile.is_relative_to(context):
         raise ValueError("Probe path escapes the immutable snapshot")
-    if context.is_symlink() or not context.is_dir():
+    if not context.is_dir():
         raise ValueError("context_path must name a snapshot directory")
-    if dockerfile.is_symlink() or not dockerfile.is_file():
+    if not dockerfile.is_file():
         raise ValueError("dockerfile_path must name a regular snapshot file")
-    for path in (context, dockerfile):
-        current = path
-        while current != root:
-            if current.is_symlink():
-                raise ValueError("Probe path contains a symbolic link")
-            current = current.parent
 
     phases: dict[str, dict[str, Any]] = {}
     for phase in ("control", "attack"):
@@ -201,91 +265,38 @@ def validate_probe(
         maximum=MAX_EXPECTED_DIFFERENCE,
     ).strip()
 
-    _dockerfile_base_images(dockerfile.read_text(encoding="utf-8"))
-    return {
-        "candidate_id": candidate_id,
-        "status": "runnable",
-        "context_path": context_path,
-        "dockerfile_path": dockerfile_path,
-        "control": phases["control"],
-        "attack": phases["attack"],
-        "expected_difference": expected_difference,
-    }
-
-
-def _dockerfile_base_images(contents: str) -> list[str]:
-    """Accept a deliberately small, offline-checkable Dockerfile subset."""
-    logical_lines: list[str] = []
-    pending = ""
-    for raw_line in contents.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            if line.lower().startswith("# syntax="):
-                raise ValueError("Remote Dockerfile frontends are not supported")
-            continue
-        pending += line
-        if pending.endswith("\\"):
-            pending = pending[:-1] + " "
-            continue
-        logical_lines.append(pending.strip())
-        pending = ""
-    if pending:
-        raise ValueError("Dockerfile has an unterminated continuation")
-
-    images: list[str] = []
-    stages: set[str] = set()
-    for line in logical_lines:
-        upper = line.upper()
-        if upper.startswith("ADD ") and re.search(r"(?:^|\s)https?://", line, re.I):
-            raise ValueError("Remote Dockerfile sources are not supported")
-        copy_from = re.match(r"^COPY\s+--from=(\S+)\s+", line, re.I)
-        if copy_from is not None:
-            source = copy_from.group(1)
-            if (
-                "$" in source
-                or source.lower().startswith(("http://", "https://"))
-                or _IMAGE_RE.fullmatch(source) is None
-            ):
-                raise ValueError("Remote Dockerfile sources are not supported")
-            if source not in stages and not source.isdigit():
-                images.append(source)
-        if not upper.startswith("FROM "):
-            continue
-        match = _FROM_RE.fullmatch(line)
-        if match is None:
-            raise ValueError("Dockerfile FROM instruction is not safely supported")
-        image, alias = match.groups()
-        if (
-            "$" in image
-            or image.lower().startswith(("http://", "https://"))
-            or _IMAGE_RE.fullmatch(image) is None
-        ):
-            raise ValueError("Dockerfile base image must be a literal local image")
-        if image not in stages:
-            images.append(image)
-        if alias:
-            stages.add(alias)
-    if not images:
-        raise ValueError("Dockerfile must declare a literal base image")
-    return list(dict.fromkeys(images))
+    base_images = tuple(
+        _dockerfile_base_images(dockerfile.read_text(encoding="utf-8"))
+    )
+    return (
+        {
+            "candidate_id": candidate_id,
+            "status": "runnable",
+            "context_path": context_path,
+            "dockerfile_path": dockerfile_path,
+            "control": phases["control"],
+            "attack": phases["attack"],
+            "expected_difference": expected_difference,
+        },
+        base_images,
+    )
 
 
 class DockerDynamicRunner:
     """Execute validated probes without assigning vulnerability semantics."""
 
-    def __init__(self, store: Any, *, observation_parent: Any = None) -> None:
+    def __init__(self, store: Any) -> None:
         self.store = store
-        self.observation_parent = observation_parent
         self._build_lock = asyncio.Lock()
         self._containers: set[str] = set()
         self._images: set[str] = set()
         self._active_scan_ids: set[str] = set()
+        self._verified_contexts: set[tuple[str, str, str]] = set()
+        self._verification_lock = threading.Lock()
 
-    async def preflight(self) -> None:
+    async def preflight(self, *, observation_parent: Any = None) -> None:
         scope = _start_observation(
-            self.observation_parent,
+            observation_parent,
             "code-security.dynamic.preflight",
             input={"remote_endpoints_allowed": False},
             metadata={"component": "docker"},
@@ -325,15 +336,23 @@ class DockerDynamicRunner:
             raise
         _end_observation(scope, output={"status": "passed"})
 
-    async def run_all(self, runs: list[dict[str, Any]], *, concurrency: int = 2) -> None:
+    async def run_all(
+        self,
+        runs: list[dict[str, Any]],
+        *,
+        concurrency: int = 2,
+        observation_parent: Any = None,
+    ) -> None:
         limit = max(1, min(int(concurrency), 2))
+        with self._verification_lock:
+            self._verified_contexts.clear()
         scope = _start_observation(
-            self.observation_parent,
+            observation_parent,
             "code-security.dynamic.runner",
             input={"candidate_count": len(runs), "concurrency": limit},
             metadata={"component": "docker"},
         )
-        parent = _observation(scope, self.observation_parent)
+        parent = _observation(scope, observation_parent)
         semaphore = asyncio.Semaphore(limit)
 
         async def run_one(run: dict[str, Any]) -> None:
@@ -373,13 +392,8 @@ class DockerDynamicRunner:
         )
 
     async def cleanup(self, *, observation_parent: Any = None) -> None:
-        parent = (
-            self.observation_parent
-            if observation_parent is None
-            else observation_parent
-        )
         scope = _start_observation(
-            parent,
+            observation_parent,
             "code-security.dynamic.cleanup",
             input={
                 "container_count": len(self._containers),
@@ -413,10 +427,11 @@ class DockerDynamicRunner:
                         failures.append(f"image {image}")
                     else:
                         self._images.discard(image)
-            for scan_id in self._active_scan_ids:
+            for scan_id in tuple(self._active_scan_ids):
                 path = docker_runtime_dir(scan_id)
                 if path.exists():
-                    shutil.rmtree(path)
+                    await asyncio.to_thread(shutil.rmtree, path)
+                self._active_scan_ids.discard(scan_id)
             if failures:
                 raise RuntimeError("Dynamic validation cleanup failed for: " + ", ".join(failures))
         except BaseException as exc:
@@ -461,39 +476,18 @@ class DockerDynamicRunner:
     ) -> dict[str, Any]:
         scan_id = run["scan_id"]
         self._active_scan_ids.add(scan_id)
-        candidate_id = run["candidate_id"]
-        probe = run["probe"]
-        scan = self.store.get_scan(scan_id)
-        snapshot = self.store.get_snapshot(scan["snapshot_id"]) if scan else None
-        if snapshot is None:
-            raise ValueError("Dynamic run snapshot not found")
         runtime = ensure_private_directory(docker_runtime_dir(scan_id))
+        prepared = await asyncio.to_thread(self._prepare_candidate, run, runtime)
+        candidate_id = prepared.candidate_id
+        probe = prepared.probe
         docker = shutil.which("docker")
         if docker is None:
             raise RuntimeError("Dynamic validation requires the Docker CLI")
 
-        snapshot_root = Path(snapshot.root_path)
-        records = self.store.list_snapshot_files(snapshot.snapshot_id)
-        snapshot_files = {item.relative_path for item in records}
-        probe = validate_probe(
-            probe,
-            candidate_id=candidate_id,
-            snapshot_root=snapshot_root,
-            snapshot_files=snapshot_files,
-        )
-        self._verify_context_contents(
-            snapshot_root,
-            probe["context_path"],
-            records,
-        )
-        context = snapshot_root if probe["context_path"] == "." else snapshot_root / probe["context_path"]
-        dockerfile = snapshot_root / probe["dockerfile_path"]
         facts: dict[str, Any] = {"runner_status": "inconclusive"}
         image_id: str | None = None
         try:
-            for index, image in enumerate(
-                _dockerfile_base_images(dockerfile.read_text(encoding="utf-8"))
-            ):
+            for index, image in enumerate(prepared.base_images):
                 inspection = await self._observed_command(
                     observation_parent,
                     "base_image_check",
@@ -502,15 +496,16 @@ class DockerDynamicRunner:
                     input={"base_image_index": index},
                 )
                 if inspection["exit_code"] != 0:
-                    facts.update(
-                        failed_phase="build",
+                    facts["build"] = inspection
+                    return await self._mark_inconclusive(
+                        candidate_id,
+                        facts,
+                        phase="build",
                         reason=f"Required local base image is unavailable: {image}",
-                        build=inspection,
                     )
-                    self.store.complete_dynamic_run(candidate_id, "inconclusive", facts)
-                    return {"status": "inconclusive", "failed_phase": "build"}
 
-            iidfile = runtime / f"{candidate_id}.iid"
+            iidfile = prepared.runtime / f"{candidate_id}.iid"
+            iidfile.unlink(missing_ok=True)
             build_argv = [
                 docker,
                 "build",
@@ -525,8 +520,8 @@ class DockerDynamicRunner:
                 "--iidfile",
                 str(iidfile),
                 "-f",
-                str(dockerfile),
-                str(context),
+                str(prepared.dockerfile),
+                str(prepared.context),
             ]
             async with self._build_lock:
                 build = await self._observed_command(
@@ -537,12 +532,17 @@ class DockerDynamicRunner:
                 )
             facts["build"] = build
             if build["timed_out"] or build["exit_code"] != 0 or not iidfile.is_file():
-                facts.update(
-                    failed_phase="build",
-                    reason=("Docker build exceeded 300 seconds." if build["timed_out"] else "Docker build failed."),
+                reason = (
+                    "Docker build exceeded 300 seconds."
+                    if build["timed_out"]
+                    else "Docker build failed."
                 )
-                self.store.complete_dynamic_run(candidate_id, "inconclusive", facts)
-                return {"status": "inconclusive", "failed_phase": "build"}
+                return await self._mark_inconclusive(
+                    candidate_id,
+                    facts,
+                    phase="build",
+                    reason=reason,
+                )
             image_id = iidfile.read_text(encoding="utf-8").strip()
             if re.fullmatch(r"sha256:[a-f0-9]{64}", image_id) is None:
                 raise RuntimeError("Docker did not return a content-addressed image ID")
@@ -590,22 +590,30 @@ class DockerDynamicRunner:
                         phase_probe["script"],
                     ],
                     timeout_seconds=phase_probe["timeout_seconds"],
-                    on_timeout=lambda name=name: self._remove_container(name),
+                    on_timeout=partial(self._remove_container, name),
                 )
                 if not result["timed_out"]:
                     self._containers.discard(name)
                 facts[phase] = result
                 if result["timed_out"] or result["exit_code"] != 0:
-                    facts.update(
-                        failed_phase=phase,
-                        reason=(
-                            f"Docker {phase} run timed out." if result["timed_out"] else f"Docker {phase} run failed."
-                        ),
+                    reason = (
+                        f"Docker {phase} run timed out."
+                        if result["timed_out"]
+                        else f"Docker {phase} run failed."
                     )
-                    self.store.complete_dynamic_run(candidate_id, "inconclusive", facts)
-                    return {"status": "inconclusive", "failed_phase": phase}
+                    return await self._mark_inconclusive(
+                        candidate_id,
+                        facts,
+                        phase=phase,
+                        reason=reason,
+                    )
             facts["runner_status"] = "completed"
-            self.store.complete_dynamic_run(candidate_id, "completed", facts)
+            await asyncio.to_thread(
+                self.store.complete_dynamic_run,
+                candidate_id,
+                "completed",
+                facts,
+            )
             return {"status": "completed"}
         finally:
             if image_id is not None:
@@ -618,6 +626,76 @@ class DockerDynamicRunner:
                 if removal["exit_code"] == 0:
                     self._images.discard(image_id)
 
+    def _prepare_candidate(
+        self,
+        run: dict[str, Any],
+        runtime: Path,
+    ) -> PreparedCandidate:
+        """Load and verify trusted state without blocking the event loop."""
+        scan_id = run["scan_id"]
+        candidate_id = run["candidate_id"]
+        scan = self.store.get_scan(scan_id)
+        snapshot = self.store.get_snapshot(scan["snapshot_id"]) if scan else None
+        if snapshot is None:
+            raise ValueError("Dynamic run snapshot not found")
+        snapshot_root = Path(snapshot.root_path)
+        records = self.store.list_snapshot_files(snapshot.snapshot_id)
+        snapshot_files = {item.relative_path for item in records}
+        probe, base_images = _validate_probe(
+            run["probe"],
+            candidate_id=candidate_id,
+            snapshot_root=snapshot_root,
+            snapshot_files=snapshot_files,
+        )
+        verification_key = (
+            snapshot.snapshot_id,
+            snapshot.tree_digest,
+            probe["context_path"],
+        )
+        # Snapshot roots are host-owned and read-only. Verify each shared context
+        # once per runner batch so concurrent candidates do not rehash it.
+        with self._verification_lock:
+            if verification_key not in self._verified_contexts:
+                self._verify_context_contents(
+                    snapshot_root,
+                    probe["context_path"],
+                    records,
+                )
+                self._verified_contexts.add(verification_key)
+        root = snapshot_root.resolve(strict=True)
+        context = root if probe["context_path"] == "." else root / probe["context_path"]
+        dockerfile = root / probe["dockerfile_path"]
+        return PreparedCandidate(
+            scan_id=scan_id,
+            candidate_id=candidate_id,
+            probe=probe,
+            context=context,
+            dockerfile=dockerfile,
+            runtime=runtime,
+            base_images=base_images,
+        )
+
+    async def _mark_inconclusive(
+        self,
+        candidate_id: str,
+        facts: dict[str, Any],
+        *,
+        phase: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        facts.update(
+            runner_status="inconclusive",
+            failed_phase=phase,
+            reason=reason,
+        )
+        await asyncio.to_thread(
+            self.store.complete_dynamic_run,
+            candidate_id,
+            "inconclusive",
+            facts,
+        )
+        return {"status": "inconclusive", "failed_phase": phase}
+
     async def _observed_command(
         self,
         observation_parent: Any,
@@ -627,7 +705,7 @@ class DockerDynamicRunner:
         timeout_seconds: int,
         input: dict[str, Any] | None = None,
         on_timeout: Callable[[], Awaitable[None]] | None = None,
-    ) -> dict[str, Any]:
+    ) -> CommandResult:
         scope = _start_observation(
             observation_parent,
             f"code-security.dynamic.{operation}",
@@ -643,7 +721,16 @@ class DockerDynamicRunner:
         except BaseException as exc:
             _end_observation(scope, output={"status": "failed"}, error=exc)
             raise
-        _end_observation(scope, output=_command_summary(result))
+        summary = _command_summary(result)
+        if summary["status"] == "completed":
+            _end_observation(scope, output=summary)
+        else:
+            _end_observation(
+                scope,
+                output=summary,
+                level="ERROR",
+                status_message=str(summary["status"]),
+            )
         return result
 
     @staticmethod
@@ -653,13 +740,22 @@ class DockerDynamicRunner:
         records: list[Any],
     ) -> None:
         context = snapshot_root if context_path == "." else snapshot_root / context_path
-        expected = {item.relative_path: item for item in records if _inside(item.relative_path, context_path)}
+        expected = {
+            item.relative_path: item
+            for item in records
+            if _inside(item.relative_path, context_path)
+        }
         for relative_path, record in expected.items():
             path = snapshot_root / relative_path
             if path.is_symlink() or not path.is_file():
                 raise ValueError(f"Snapshot context entry is not a regular file: {relative_path}")
-            data = path.read_bytes()
-            if len(data) != record.size_bytes or hashlib.sha256(data).hexdigest() != record.blob_digest:
+            size = 0
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    size += len(chunk)
+                    digest.update(chunk)
+            if size != record.size_bytes or digest.hexdigest() != record.blob_digest:
                 raise ValueError(f"Snapshot context content changed: {relative_path}")
         for path in context.rglob("*"):
             relative_path = path.relative_to(snapshot_root).as_posix()
@@ -691,7 +787,7 @@ class DockerDynamicRunner:
         *,
         timeout_seconds: int,
         on_timeout: Callable[[], Awaitable[None]] | None = None,
-    ) -> dict[str, Any]:
+    ) -> CommandResult:
         started = time.monotonic()
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -747,7 +843,9 @@ class DockerDynamicRunner:
         stdout, stdout_truncated = await stdout_task
         stderr, stderr_truncated = await stderr_task
         if timeout_cleanup_error is not None:
-            raise RuntimeError("Timed-out Docker container cleanup failed") from timeout_cleanup_error
+            raise RuntimeError(
+                "Timed-out Docker container cleanup failed"
+            ) from timeout_cleanup_error
         return {
             "exit_code": None if timed_out else process.returncode,
             "duration_ms": round((time.monotonic() - started) * 1_000),
