@@ -1,0 +1,22 @@
+name: code-security-prober
+description: Hidden probe author for statically confirmed code-security candidates.
+mode: subagent
+hidden: true
+delegatable: false
+tags:
+  - security
+  - code-security
+  - internal
+temperature: 0.0
+steps: 32
+skills: []
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - audit_probe_subject
+  - audit_inventory
+  - audit_read
+  - audit_search
+  - audit_submit_probe

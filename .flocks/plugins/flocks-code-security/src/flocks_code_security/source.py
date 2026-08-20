@@ -14,7 +14,7 @@ from flocks_code_security.models import SessionBinding, SnapshotFile
 from flocks_code_security.snapshot import TargetSnapshotService, normalize_relative_path
 from flocks_code_security.store import ScanStore
 
-SOURCE_ROLES = {"threat_modeler", "baseline", "investigator", "verifier"}
+SOURCE_ROLES = {"threat_modeler", "baseline", "investigator", "verifier", "prober"}
 
 
 class AuditSourceRepository:

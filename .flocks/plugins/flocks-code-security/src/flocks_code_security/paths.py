@@ -24,6 +24,12 @@ def runtime_dir() -> Path:
     return Path.home() / ".flocks" / "workspace" / "code-security" / "runtime"
 
 
+def docker_runtime_dir(scan_id: str) -> Path:
+    if not scan_id.startswith("scan_") or not scan_id[5:].isalnum():
+        raise ValueError("Invalid scan identifier")
+    return runtime_dir() / "docker" / scan_id
+
+
 def outputs_root() -> Path:
     return Path.home() / ".flocks" / "workspace" / "outputs"
 

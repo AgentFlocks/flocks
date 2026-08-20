@@ -1,7 +1,7 @@
 name: code-security
 name_cn: 代码安全审计
-description: Interactive static-audit entry point and final semantic adjudicator.
-description_cn: 交互式静态审计入口与最终语义裁决 Agent。
+description: Interactive code-audit entry point and final semantic adjudicator.
+description_cn: 交互式代码审计入口与最终语义裁决 Agent。
 mode: primary
 hidden: false
 delegatable: false

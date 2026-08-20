@@ -29,6 +29,20 @@ def test_cli_preflight_rejects_disabled_required_tool() -> None:
         audit_read.info.enabled = original_enabled
 
 
+def test_static_cli_preflight_does_not_require_dynamic_only_tools() -> None:
+    register_tools()
+    submit_probe = ToolRegistry.get("audit_submit_probe")
+    original_enabled = submit_probe.info.enabled
+    submit_probe.info.enabled = False
+
+    try:
+        audit_cli._require_enabled_audit_tools()
+        with pytest.raises(RuntimeError, match="audit_submit_probe"):
+            audit_cli._require_enabled_audit_tools(dynamic_enabled=True)
+    finally:
+        submit_probe.info.enabled = original_enabled
+
+
 async def _final_adjudication(
     orchestrator: audit_cli.AuditOrchestrator,
     scan_id: str,
@@ -159,6 +173,114 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         "scan.adjudicated",
         "scan.finalized",
     ]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_pipeline_probes_and_runs_before_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: False)
+    phases: list[str] = []
+    statuses = iter(
+        [
+            {"threat_model_status": "completed", "counts": {}},
+            {
+                "threat_model_status": "completed",
+                "counts": {"unverified_candidates": 1},
+            },
+            {
+                "threat_model_status": "completed",
+                "counts": {
+                    "unverified_candidates": 0,
+                    "confirmed_without_dynamic_record": 1,
+                },
+            },
+            {
+                "threat_model_status": "completed",
+                "counts": {"confirmed_without_dynamic_record": 0},
+            },
+            {
+                "threat_model_status": "completed",
+                "counts": {"terminal_dynamic_runs": 1},
+            },
+        ]
+    )
+
+    async def prepare(_ctx, _target_path: str, *, dynamic_enabled: bool):
+        assert dynamic_enabled is True
+        return _result({"scan_id": "scan_dynamic"})
+
+    async def run_workers(_ctx, _scan_id: str, phase: str):
+        phases.append(phase)
+        return _result({"batch_id": f"batch_{phase}", "phase": phase})
+
+    async def wait_workers(_ctx, batch_id: str, timeout_seconds: int):
+        return _result(
+            {
+                "batch_id": batch_id,
+                "phase": batch_id.removeprefix("batch_"),
+                "status": "completed",
+            }
+        )
+
+    async def status(_ctx, _scan_id: str):
+        return _result(next(statuses))
+
+    async def finalize(_ctx, scan_id: str):
+        return _result({"scan_id": scan_id, "status": "completed"})
+
+    class Store:
+        def list_dynamic_runs(self, scan_id: str, *, status: str):
+            assert (scan_id, status) == ("scan_dynamic", "ready")
+            return [{"candidate_id": "cand_test", "status": "ready"}]
+
+        def assert_dynamic_runs_terminal(self, scan_id: str):
+            assert scan_id == "scan_dynamic"
+
+    class Runner:
+        def __init__(self) -> None:
+            self.preflight_called = False
+            self.runs = []
+
+        async def preflight(self):
+            self.preflight_called = True
+
+        async def run_all(self, runs, *, concurrency: int):
+            assert concurrency == 2
+            self.runs = runs
+
+        async def cleanup(self):
+            return None
+
+    runner = Runner()
+    monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
+    monkeypatch.setattr(audit_cli, "audit_run_workers", run_workers)
+    monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
+    monkeypatch.setattr(audit_cli, "audit_status", status)
+    monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
+    monkeypatch.setattr(
+        audit_cli,
+        "get_runtime",
+        lambda: SimpleNamespace(store=Store()),
+    )
+    monkeypatch.setattr(
+        audit_cli.AuditOrchestrator,
+        "_run_parent_adjudication",
+        _final_adjudication,
+    )
+
+    result = await audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+        dynamic_enabled=True,
+        dynamic_runner=runner,
+    ).run()
+
+    assert phases == ["threat_modeling", "baseline", "verification", "probing"]
+    assert runner.preflight_called is True
+    assert runner.runs == [{"candidate_id": "cand_test", "status": "ready"}]
+    assert result["status"] == "completed"
 
 
 @pytest.mark.asyncio

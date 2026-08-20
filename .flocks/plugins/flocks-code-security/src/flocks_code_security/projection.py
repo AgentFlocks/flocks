@@ -45,6 +45,13 @@ AGENT_TOOLS = {
         "audit_search",
         "audit_submit_verdict",
     ],
+    "code-security-prober": [
+        "audit_probe_subject",
+        "audit_inventory",
+        "audit_read",
+        "audit_search",
+        "audit_submit_probe",
+    ],
 }
 
 

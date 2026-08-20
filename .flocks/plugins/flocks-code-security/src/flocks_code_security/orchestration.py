@@ -56,6 +56,19 @@ def plan_verification_units(
     ]
 
 
+def plan_probe_units(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "prober",
+            "paths": ["."],
+            "subject_id": candidate["candidate_id"],
+        }
+        for candidate in candidates
+    ]
+
+
 def baseline_prompt(*, snapshot_id: str, paths: list[str]) -> str:
     del paths  # Assignment scope is enforced by the bound work unit, not prompt text.
     return (
@@ -98,6 +111,19 @@ def verification_prompt(*, snapshot_id: str, candidate_id: str) -> str:
         "security control, reachability, and outcome, then call audit_submit_verdict "
         f"exactly once for candidate id {candidate_id}. If counter_evidence is supplied, "
         "each item must contain only relative_path, blob_digest, start_line, and end_line."
+    )
+
+
+def probe_prompt(*, snapshot_id: str, candidate_id: str) -> str:
+    return (
+        "Construct one bounded Docker probe for the statically confirmed candidate "
+        f"bound to this work unit in immutable snapshot {snapshot_id}. Call "
+        "audit_probe_subject, inspect only snapshot source through audit_inventory, "
+        "audit_search, and audit_read, then call audit_submit_probe exactly once for "
+        f"candidate id {candidate_id}. Submit not_runnable with a concrete reason if "
+        "the snapshot has no suitable Dockerfile or the behavior cannot be tested "
+        "without mounts, secrets, external network, or unsupported setup. Never execute "
+        "the probe and never decide whether the vulnerability is reproduced."
     )
 
 

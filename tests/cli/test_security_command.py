@@ -61,6 +61,35 @@ def test_security_audit_streams_json_progress(monkeypatch, tmp_path) -> None:
     assert shutdowns == [True]
 
 
+def test_security_audit_forwards_dynamic_opt_in(monkeypatch, tmp_path) -> None:
+    observed: dict[str, object] = {}
+
+    async def run_audit(target, *, model, progress, dynamic_enabled):
+        observed.update(
+            target=target,
+            model=model,
+            progress=progress,
+            dynamic_enabled=dynamic_enabled,
+        )
+        return {"scan_id": "scan_dynamic"}
+
+    monkeypatch.setattr(
+        security_cmd,
+        "_load_plugin_cli",
+        lambda: (run_audit, lambda _scan_id: {}),
+    )
+    monkeypatch.setattr(security_cmd, "shutdown_langfuse", lambda: None)
+
+    result = runner.invoke(
+        security_cmd.security_app,
+        ["audit", str(tmp_path), "--dynamic", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert observed["target"] == tmp_path
+    assert observed["dynamic_enabled"] is True
+
+
 def test_security_status_reads_persisted_progress(monkeypatch) -> None:
     expected = {
         "scan_id": "scan_test",

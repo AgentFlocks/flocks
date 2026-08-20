@@ -136,6 +136,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     threat_modeler = agents["code-security-threat-modeler"]
     baseline = agents["code-security-baseline"]
     verifier = agents["code-security-verifier"]
+    prober = agents["code-security-prober"]
 
     assert set(agents) == set(AGENT_TOOLS)
     for name, agent in agents.items():
@@ -165,6 +166,8 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert "delegate_task" not in AGENT_TOOLS[baseline.name]
     assert "audit_threat_model_context" in AGENT_TOOLS[baseline.name]
     assert verifier.hidden is True
+    assert prober.hidden is True
+    assert "audit_submit_probe" in AGENT_TOOLS[prober.name]
     assert "code-security-investigator" not in agents
 
 
@@ -194,6 +197,7 @@ def test_all_audit_tools_register() -> None:
         "threat_modeling",
         "baseline",
         "verification",
+        "probing",
         "targeted_rescan",
     ]
 

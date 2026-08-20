@@ -17,7 +17,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "flocks-code-security"
-PRODUCER_VERSION = "0.4.0"
+PRODUCER_VERSION = "0.5.0"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
 SNAPSHOT_ALGORITHM = "codex-security-snapshot/v1"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")

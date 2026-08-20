@@ -18,7 +18,7 @@ from flocks.utils.langfuse import shutdown as shutdown_langfuse
 
 security_app = typer.Typer(
     name="security",
-    help="Run and inspect trusted static code-security audits",
+    help="Run and inspect trusted code-security audits",
     no_args_is_help=True,
 )
 console = Console()
@@ -152,7 +152,8 @@ def _render_status(status: dict[str, Any]) -> None:
     console.print(f"[bold]Scan:[/bold] {status.get('scan_id')}")
     console.print(
         f"[bold]Status:[/bold] {status.get('status')}  "
-        f"[bold]Threat model:[/bold] {status.get('threat_model_status')}"
+        f"[bold]Threat model:[/bold] {status.get('threat_model_status')}  "
+        f"[bold]Dynamic:[/bold] {'enabled' if status.get('dynamic_enabled') else 'disabled'}"
     )
     adjudication = status.get("adjudication")
     if adjudication:
@@ -169,6 +170,7 @@ def _render_status(status: dict[str, Any]) -> None:
         f"[bold]Progress:[/bold] candidates={counts.get('candidates', 0)}, "
         f"verified={counts.get('verifications', 0)}, "
         f"pending={counts.get('unverified_candidates', 0)}, "
+        f"dynamic_terminal={counts.get('terminal_dynamic_runs', 0)}, "
         f"active_work_units={counts.get('active_work_units', 0)}"
     )
 
@@ -208,14 +210,20 @@ def security_audit(
         "--json",
         help="Emit newline-delimited JSON progress events",
     ),
+    dynamic: bool = typer.Option(
+        False,
+        "--dynamic",
+        help="Execute validated probes in a network-isolated local Docker runtime",
+    ),
 ) -> None:
     """Run the host-orchestrated audit with parent-Agent adjudication."""
     try:
         run_standard_audit, _scan_status = _load_plugin_cli()
         progress = _json_line if json_output else _progress_line
-        result = asyncio.run(
-            run_standard_audit(target, model=model, progress=progress)
-        )
+        audit_kwargs = {"model": model, "progress": progress}
+        if dynamic:
+            audit_kwargs["dynamic_enabled"] = True
+        result = asyncio.run(run_standard_audit(target, **audit_kwargs))
     except KeyboardInterrupt:
         if not json_output:
             console.print("[yellow]Audit interrupted; cancellation was requested.[/yellow]")

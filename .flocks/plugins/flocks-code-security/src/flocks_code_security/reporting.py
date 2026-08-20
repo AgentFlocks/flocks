@@ -22,6 +22,7 @@ from flocks_code_security.contract import (
     canonical_json_bytes,
     finding_fingerprint,
     finding_identity,
+    sha256_bytes,
     snapshot_digest,
     stable_id,
     validate_bundle,
@@ -84,6 +85,13 @@ class ReportWriter:
             accepted_candidate_ids = set(
                 adjudications[-1]["accepted_candidate_ids"]
             )
+            dynamic_runs = {
+                item["candidate_id"]: item for item in data["dynamic_runs"]
+            }
+            dynamic_assessments = {
+                item["candidate_id"]: item
+                for item in (adjudications[-1]["dynamic_assessments"] or [])
+            }
 
             confirmed_groups: dict[str, list[dict[str, Any]]] = {}
             outcomes: dict[str, str] = {}
@@ -128,6 +136,8 @@ class ReportWriter:
                         "candidate": candidate,
                         "evidence": evidence,
                         "verification": verification,
+                        "dynamic_run": dynamic_runs.get(candidate_id),
+                        "dynamic_assessment": dynamic_assessments.get(candidate_id),
                     }
                 )
 
@@ -167,20 +177,77 @@ class ReportWriter:
                 "adjudications": adjudications,
             }
             adjudication_bytes = canonical_json_bytes(adjudication_document)
+            supplemental_contents: dict[str, bytes] = {}
+            if scan["dynamic_enabled"]:
+                dynamic_document = {
+                    "documentType": "flocks-code-security.dynamic-validation",
+                    "schemaVersion": "1.0",
+                    "scanId": scan_id,
+                    "dynamicEnabled": True,
+                    "candidates": [
+                        {
+                            "candidateId": run["candidate_id"],
+                            "status": run["status"],
+                            "probe": run["probe"],
+                            "run": run["run"],
+                            "assessment": dynamic_assessments.get(run["candidate_id"]),
+                        }
+                        for run in data["dynamic_runs"]
+                    ],
+                }
+                supplemental_contents["dynamic-validation.json"] = canonical_json_bytes(
+                    dynamic_document
+                )
+                for candidate_id in sorted(accepted_candidate_ids):
+                    assessment = dynamic_assessments.get(candidate_id)
+                    verification = verdict_by_candidate.get(candidate_id)
+                    run = dynamic_runs.get(candidate_id)
+                    if (
+                        assessment is None
+                        or assessment["conclusion"] != "reproduced"
+                        or verification is None
+                        or verification["verdict"] != "confirmed"
+                    ):
+                        continue
+                    if run is None or run["status"] != "completed":
+                        raise ValueError("Reproduced assessment requires completed run facts")
+                    probe = run["probe"]
+                    probe_script = ("#!/bin/sh\n" + probe["attack"]["script"].rstrip() + "\n").encode(
+                        "utf-8"
+                    )
+                    prefix = f"poc/{candidate_id}"
+                    script_path = f"{prefix}/probe.sh"
+                    supplemental_contents[script_path] = probe_script
+                    supplemental_contents[f"{prefix}/poc.json"] = canonical_json_bytes(
+                        {
+                            "documentType": "flocks-code-security.poc",
+                            "schemaVersion": "1.0",
+                            "scanId": scan_id,
+                            "candidateId": candidate_id,
+                            "snapshotDigest": snapshot_digest(snapshot.tree_digest),
+                            "contextPath": probe["context_path"],
+                            "dockerfilePath": probe["dockerfile_path"],
+                            "probeScriptRef": "probe.sh",
+                            "probeScriptSha256": sha256_bytes(probe_script),
+                            "timeoutSeconds": probe["attack"]["timeout_seconds"],
+                            "expectedDifference": probe["expected_difference"],
+                            "networkMode": "none",
+                        }
+                    )
             artifact_contents = {
                 "findings.json": findings_bytes,
                 "coverage.json": coverage_bytes,
                 "adjudication.json": adjudication_bytes,
                 **receipts,
+                **supplemental_contents,
             }
             artifacts = [
-                artifact_record("findings.json", findings_bytes),
-                artifact_record("coverage.json", coverage_bytes),
-                artifact_record("adjudication.json", adjudication_bytes),
-                *[
-                    artifact_record(path, contents, "application/json")
-                    for path, contents in sorted(receipts.items())
-                ],
+                artifact_record(
+                    path,
+                    contents,
+                    "text/x-shellscript" if path.endswith(".sh") else "application/json",
+                )
+                for path, contents in sorted(artifact_contents.items())
             ]
             manifest = self._manifest(
                 scan,
@@ -207,6 +274,8 @@ class ReportWriter:
             )
             staging.chmod(0o700)
             for path, contents in receipts.items():
+                self._write_bytes(staging / path, contents)
+            for path, contents in supplemental_contents.items():
                 self._write_bytes(staging / path, contents)
             self._write_json(staging / "findings.json", findings_document)
             self._write_json(staging / "coverage.json", coverage_document)
@@ -292,6 +361,8 @@ class ReportWriter:
         ranked = sorted(
             group,
             key=lambda item: (
+                (item.get("dynamic_assessment") or {}).get("conclusion")
+                != "reproduced",
                 -len(item["evidence"]),
                 -float(item["candidate"]["payload"]["confidence"]),
                 item["candidate"]["candidate_id"],
@@ -382,12 +453,52 @@ class ReportWriter:
         extensions: dict[str, Any] = {
             "candidateId": candidate["candidate_id"],
         }
+        reproduced_ids = sorted(
+            item["candidate"]["candidate_id"]
+            for item in group
+            if (item.get("dynamic_assessment") or {}).get("conclusion") == "reproduced"
+        )
+        if reproduced_ids:
+            extensions["pocRefs"] = [
+                f"poc/{candidate_id}/probe.sh" for candidate_id in reproduced_ids
+            ]
         if len(group) > 1:
             extensions["candidateIds"] = sorted(
                 item["candidate"]["candidate_id"] for item in group
             )
         if len(severity_conflicts) > 1:
             extensions["severityConflicts"] = severity_conflicts
+        dynamic_assessment = selected.get("dynamic_assessment")
+        if dynamic_assessment is None:
+            validation = {
+                "method": "independent static source review",
+                "summary": verification["rationale"],
+                "conclusion": "confirmed",
+                "evidenceRefs": evidence_refs,
+                "counterevidence": verification["counter_evidence"],
+                "limitations": [
+                    "Validated by static source review; target code was not executed."
+                ],
+            }
+        else:
+            validation = {
+                "method": "independent-static-review+docker-probe",
+                "staticConclusion": "confirmed",
+                "dynamicConclusion": dynamic_assessment["conclusion"],
+                "summary": dynamic_assessment["rationale"],
+                "evidenceRefs": evidence_refs,
+                "counterevidence": verification["counter_evidence"],
+            }
+            if dynamic_assessment["conclusion"] == "reproduced":
+                validation["pocRef"] = (
+                    f"poc/{candidate['candidate_id']}/probe.sh"
+                )
+            else:
+                validation["limitations"] = [
+                    "Dynamic validation did not reproduce the claimed effect."
+                    if dynamic_assessment["conclusion"] == "not_reproduced"
+                    else "Dynamic validation was unavailable or inconclusive."
+                ]
         return {
             "findingId": finding_id,
             "occurrenceId": occurrence_id,
@@ -415,16 +526,7 @@ class ReportWriter:
                 "evidenceRefs": evidence_refs,
             },
             "remediation": payload["remediation"],
-            "validation": {
-                "method": "independent static source review",
-                "summary": verification["rationale"],
-                "conclusion": "confirmed",
-                "evidenceRefs": evidence_refs,
-                "counterevidence": verification["counter_evidence"],
-                "limitations": [
-                    "Validated by static source review; target code was not executed."
-                ],
-            },
+            "validation": validation,
             "attackPath": attack_path,
             "remediationTests": payload.get("remediation_tests", []),
             "preventiveControls": payload.get("preventive_controls", []),
@@ -807,8 +909,16 @@ class ReportWriter:
             "summary": (
                 f"Static review of {snapshot.file_count} immutable snapshot files."
             ),
-            "runtimeStatus": "Target code was not executed.",
-            "validationMode": "Independent static source verification",
+            "runtimeStatus": (
+                "Validated probes executed in network-isolated local Docker."
+                if scan["dynamic_enabled"]
+                else "Target code was not executed."
+            ),
+            "validationMode": (
+                "Independent static source verification plus Docker probes"
+                if scan["dynamic_enabled"]
+                else "Independent static source verification"
+            ),
             "context": "Threat-model-guided standard source-code security audit.",
         }
         if limitations:

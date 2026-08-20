@@ -21,11 +21,14 @@ from flocks_code_security.tools import (
     audit_cancel,
     audit_finalize,
     audit_inventory,
+    audit_probe_subject,
     audit_prepare,
     audit_read,
+    audit_search,
     audit_run_workers,
     audit_submit_candidate,
     audit_submit_coverage,
+    audit_submit_probe,
     audit_submit_adjudication,
     audit_submit_threat_model,
     audit_submit_verdict,
@@ -650,6 +653,238 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     }
     assert "result_status" not in manifest["scan"]
     assert (output_path / ".scan-manifest.final").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text(
+        "def handler(user):\n    return eval(user)\n",
+        encoding="utf-8",
+    )
+    (target / "Dockerfile").write_text(
+        "FROM local/test:latest\nCOPY . /app\n",
+        encoding="utf-8",
+    )
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    monkeypatch.setattr(
+        reporting_module,
+        "output_dir",
+        lambda scan_id: tmp_path / "outputs" / scan_id,
+    )
+    coordinator = _agent_context("dynamic-coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(
+        coordinator,
+        str(target),
+        dynamic_enabled=True,
+    )
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        session_id="dynamic-modeler",
+    )
+
+    baseline_unit = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="dynamic-baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=baseline_unit,
+    )
+    baseline = _agent_context(
+        "dynamic-baseline",
+        "message-2",
+        "code-security-baseline",
+    )
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
+    assert source.success
+    assert (await audit_search(baseline, "not-present-in-fixture")).success
+    candidate = await audit_submit_candidate(
+        baseline,
+        _candidate_payload(
+            [
+                {
+                    "relative_path": "app.py",
+                    "blob_digest": source.output["blob_digest"],
+                    "start_line": 1,
+                    "end_line": 2,
+                }
+            ]
+        ),
+    )
+    assert candidate.success
+    assert (
+        await audit_submit_coverage(
+            baseline,
+            inventoried_paths=["."],
+            analyzed_paths=["."],
+        )
+    ).success
+    runtime.store.update_work_unit_status(baseline_unit, "completed")
+
+    verifier_unit = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="verification",
+        role="verifier",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="dynamic-verifier",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="verifier",
+        work_unit_id=verifier_unit,
+    )
+    verifier = _agent_context(
+        "dynamic-verifier",
+        "message-3",
+        "code-security-verifier",
+    )
+    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
+    assert (
+        await audit_submit_verdict(
+            verifier,
+            candidate.output["candidate_id"],
+            "confirmed",
+            "The public argument reaches eval without a guard.",
+        )
+    ).success
+    runtime.store.update_work_unit_status(verifier_unit, "completed")
+
+    batch = runtime.store.create_worker_batch(
+        scan_id=scan_id,
+        phase="probing",
+        units=[
+            {
+                "role": "prober",
+                "paths": ["."],
+                "subject_id": candidate.output["candidate_id"],
+            }
+        ],
+    )
+    prober_unit = batch["units"][0]["work_unit_id"]
+    runtime.store.bind_session(
+        session_id="dynamic-prober",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="prober",
+        work_unit_id=prober_unit,
+    )
+    prober = _agent_context(
+        "dynamic-prober",
+        "message-4",
+        "code-security-prober",
+    )
+    assert (await audit_probe_subject(prober)).success
+    submitted_probe = await audit_submit_probe(
+        prober,
+        {
+            "candidate_id": candidate.output["candidate_id"],
+            "status": "runnable",
+            "context_path": ".",
+            "dockerfile_path": "Dockerfile",
+            "control": {"script": "python /app/app.py safe", "timeout_seconds": 10},
+            "attack": {"script": "python /app/app.py attack", "timeout_seconds": 10},
+            "expected_difference": "Attack demonstrates evaluation unavailable to control.",
+        },
+    )
+    assert submitted_probe.success
+    runtime.store.update_work_unit_status(prober_unit, "completed")
+    runtime.store.update_worker_batch_status(batch["batch_id"], "running")
+    runtime.store.update_worker_batch_status(batch["batch_id"], "completed")
+    with pytest.raises(ValueError, match="still pending"):
+        runtime.store.get_adjudication_context(scan_id)
+    runtime.store.complete_dynamic_run(
+        candidate.output["candidate_id"],
+        "completed",
+        {
+            "runner_status": "completed",
+            "build": {"exit_code": 0},
+            "control": {"exit_code": 0, "stdout": "safe"},
+            "attack": {"exit_code": 0, "stdout": "executed"},
+        },
+    )
+    with pytest.raises(ValueError, match="already completed"):
+        runtime.store.complete_dynamic_run(
+            candidate.output["candidate_id"],
+            "completed",
+            {"runner_status": "completed"},
+        )
+    with pytest.raises(ValueError, match="require one assessment"):
+        runtime.store.save_adjudication(
+            scan_id,
+            {
+                "action": "finalize",
+                "accepted_candidate_ids": [candidate.output["candidate_id"]],
+                "rejected_candidates": [],
+            },
+        )
+    with pytest.raises(ValueError, match="does not match run status"):
+        runtime.store.save_adjudication(
+            scan_id,
+            {
+                "action": "finalize",
+                "accepted_candidate_ids": [candidate.output["candidate_id"]],
+                "rejected_candidates": [],
+                "dynamic_assessments": [
+                    {
+                        "candidate_id": candidate.output["candidate_id"],
+                        "conclusion": "inconclusive",
+                        "rationale": "Mismatched conclusion for completed facts.",
+                    }
+                ],
+            },
+        )
+    runtime.store.save_adjudication(
+        scan_id,
+        {
+            "action": "finalize",
+            "accepted_candidate_ids": [candidate.output["candidate_id"]],
+            "rejected_candidates": [],
+            "dynamic_assessments": [
+                {
+                    "candidate_id": candidate.output["candidate_id"],
+                    "conclusion": "reproduced",
+                    "rationale": "Attack output demonstrates the claimed effect while control does not.",
+                }
+            ],
+        },
+    )
+
+    finalized = await audit_finalize(coordinator, scan_id)
+    assert finalized.success
+    output = Path(finalized.output["output_dir"])
+    candidate_id = candidate.output["candidate_id"]
+    assert (output / "dynamic-validation.json").is_file()
+    assert (output / "poc" / candidate_id / "probe.sh").is_file()
+    assert (output / "poc" / candidate_id / "poc.json").is_file()
+    findings = json.loads((output / "findings.json").read_text(encoding="utf-8"))
+    validation = findings["findings"][0]["validation"]
+    assert validation["dynamicConclusion"] == "reproduced"
+    assert validation["pocRef"] == f"poc/{candidate_id}/probe.sh"
+    manifest = json.loads(
+        (output / "scan-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["scan"]["scope"]["runtimeStatus"] != "Target code was not executed."
+    sealed_paths = {item["path"] for item in manifest["scan"]["artifacts"]}
+    assert "dynamic-validation.json" in sealed_paths
+    assert f"poc/{candidate_id}/probe.sh" in sealed_paths
 
 
 @pytest.mark.asyncio

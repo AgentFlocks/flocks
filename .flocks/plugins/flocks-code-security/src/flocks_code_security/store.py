@@ -56,6 +56,7 @@ class ScanStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS snapshots (
                     snapshot_id TEXT PRIMARY KEY,
                     repository_identity TEXT NOT NULL,
@@ -94,6 +95,7 @@ class ScanStore:
                     parent_session_id TEXT NOT NULL,
                     snapshot_id TEXT NOT NULL REFERENCES snapshots(snapshot_id),
                     mode TEXT NOT NULL,
+                    dynamic_enabled INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     ruleset_digest TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -209,8 +211,29 @@ class ScanStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (scan_id, adjudication_round)
                 );
+                CREATE TABLE IF NOT EXISTS dynamic_runs (
+                    candidate_id TEXT PRIMARY KEY REFERENCES candidates(candidate_id) ON DELETE CASCADE,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    probe_work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('ready', 'not_runnable', 'completed', 'inconclusive')
+                    ),
+                    probe_json TEXT NOT NULL,
+                    run_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
+            scan_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(scans)").fetchall()
+            }
+            if "dynamic_enabled" not in scan_columns:
+                connection.execute(
+                    "ALTER TABLE scans ADD COLUMN dynamic_enabled "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
             adjudication_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -421,6 +444,7 @@ class ScanStore:
         snapshot_id: str,
         mode: str,
         ruleset_digest: str,
+        dynamic_enabled: bool = False,
     ) -> str:
         scan_id = f"scan_{uuid.uuid4().hex}"
         now = _now()
@@ -428,13 +452,14 @@ class ScanStore:
             connection.execute(
                 "INSERT INTO scans ("
                 "scan_id, parent_session_id, snapshot_id, mode, "
-                "status, ruleset_digest, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "dynamic_enabled, status, ruleset_digest, created_at, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     parent_session_id,
                     snapshot_id,
                     mode,
+                    int(bool(dynamic_enabled)),
                     "running",
                     ruleset_digest,
                     now,
@@ -452,7 +477,7 @@ class ScanStore:
         paths: list[str],
         status: str = "pending",
     ) -> str:
-        if role not in {"threat_modeler", "baseline", "investigator", "verifier"}:
+        if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober"}:
             raise ValueError("Unsupported work-unit role")
         if not paths or not all(isinstance(path, str) and path for path in paths):
             raise ValueError("Work units require at least one path")
@@ -491,6 +516,7 @@ class ScanStore:
             "baseline",
             "investigation",
             "verification",
+            "probing",
             "targeted_rescan",
         }:
             raise ValueError("Unsupported worker phase")
@@ -500,7 +526,9 @@ class ScanStore:
         now = _now()
         created_units: list[dict[str, Any]] = []
         with self._lock, self._connect() as connection:
-            self._require_scan_status(connection, scan_id, {"running"})
+            scan = self._require_scan_status(connection, scan_id, {"running"})
+            if phase == "probing" and not bool(scan["dynamic_enabled"]):
+                raise ValueError("Dynamic validation is not enabled for this scan")
             active = connection.execute(
                 "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = ? "
                 "AND status IN ('pending', 'running')",
@@ -548,13 +576,14 @@ class ScanStore:
                 role = str(unit.get("role") or "")
                 paths = unit.get("paths")
                 subject_id = unit.get("subject_id")
-                if role not in {"threat_modeler", "baseline", "investigator", "verifier"}:
+                if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober"}:
                     raise ValueError("Unsupported work-unit role")
                 expected_role = {
                     "threat_modeling": "threat_modeler",
                     "baseline": "baseline",
                     "investigation": "investigator",
                     "verification": "verifier",
+                    "probing": "prober",
                     "targeted_rescan": "baseline",
                 }[phase]
                 if role != expected_role:
@@ -566,10 +595,10 @@ class ScanStore:
                     or not all(isinstance(path, str) and path for path in paths)
                 ):
                     raise ValueError("Work units require between 1 and 2000 paths")
-                if phase == "verification" and not subject_id:
-                    raise ValueError("Verification work units require a candidate subject")
-                if phase != "verification" and subject_id is not None:
-                    raise ValueError("Only verification work units may have a subject")
+                if phase in {"verification", "probing"} and not subject_id:
+                    raise ValueError(f"{phase.title()} work units require a candidate subject")
+                if phase not in {"verification", "probing"} and subject_id is not None:
+                    raise ValueError("Only verification and probing work units may have a subject")
                 if subject_id is not None:
                     candidate = connection.execute(
                         "SELECT scan_id FROM candidates WHERE candidate_id = ?",
@@ -577,8 +606,22 @@ class ScanStore:
                     ).fetchone()
                     if candidate is None or candidate["scan_id"] != scan_id:
                         raise ValueError(
-                            "Verification subject does not belong to the scan"
+                            "Work-unit subject does not belong to the scan"
                         )
+                    if phase == "probing":
+                        eligible = connection.execute(
+                            """
+                            SELECT 1 FROM verifications v
+                            LEFT JOIN dynamic_runs d ON d.candidate_id = v.candidate_id
+                            WHERE v.candidate_id = ? AND v.scan_id = ?
+                              AND v.verdict = 'confirmed' AND d.candidate_id IS NULL
+                            """,
+                            (subject_id, scan_id),
+                        ).fetchone()
+                        if eligible is None:
+                            raise ValueError(
+                                "Probing requires a confirmed candidate without a dynamic record"
+                            )
                 work_unit_id = f"unit_{uuid.uuid4().hex}"
                 connection.execute(
                     "INSERT INTO work_units VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -729,6 +772,18 @@ class ScanStore:
                         "SELECT 1 FROM verifications WHERE work_unit_id = ?",
                         (work_unit_id,),
                     ).fetchone()
+            elif role == "prober":
+                assignment = connection.execute(
+                    "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
+                    (work_unit_id,),
+                ).fetchone()
+                if assignment is None or assignment["subject_id"] is None:
+                    return False
+                row = connection.execute(
+                    "SELECT 1 FROM dynamic_runs WHERE probe_work_unit_id = ? "
+                    "AND candidate_id = ?",
+                    (work_unit_id, assignment["subject_id"]),
+                ).fetchone()
             else:
                 raise ValueError("Unsupported work-unit role")
         if row is None:
@@ -780,6 +835,184 @@ class ScanStore:
                 item["evidence"] = [dict(record) for record in evidence]
                 output.append(item)
         return output
+
+    def list_confirmed_without_dynamic_record(
+        self,
+        scan_id: str,
+        *,
+        limit: int = 32,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            scan = self._require_scan_status(connection, scan_id, {"running"})
+            if not bool(scan["dynamic_enabled"]):
+                return []
+            rows = connection.execute(
+                """
+                SELECT c.* FROM candidates c
+                JOIN verifications v ON v.candidate_id = c.candidate_id
+                LEFT JOIN dynamic_runs d ON d.candidate_id = c.candidate_id
+                WHERE c.scan_id = ? AND v.verdict = 'confirmed'
+                  AND d.candidate_id IS NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM worker_batch_units assigned
+                    JOIN work_units wu ON wu.work_unit_id = assigned.work_unit_id
+                    WHERE assigned.subject_id = c.candidate_id
+                      AND wu.role = 'prober'
+                      AND wu.status IN ('pending', 'running')
+                  )
+                ORDER BY c.created_at, c.candidate_id LIMIT ?
+                """,
+                (scan_id, max(1, min(int(limit), 32))),
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            output.append(item)
+        return output
+
+    @staticmethod
+    def _decode_dynamic_run(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["probe"] = json.loads(item.pop("probe_json"))
+        raw_run = item.pop("run_json")
+        item["run"] = json.loads(raw_run) if raw_run else None
+        return item
+
+    def list_dynamic_runs(
+        self,
+        scan_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if status is not None and status not in {
+            "ready",
+            "not_runnable",
+            "completed",
+            "inconclusive",
+        }:
+            raise ValueError("Unsupported dynamic-run status")
+        query = "SELECT * FROM dynamic_runs WHERE scan_id = ?"
+        values: list[Any] = [scan_id]
+        if status is not None:
+            query += " AND status = ?"
+            values.append(status)
+        query += " ORDER BY created_at, candidate_id"
+        with self._connect() as connection:
+            rows = connection.execute(query, values).fetchall()
+        return [self._decode_dynamic_run(row) for row in rows]
+
+    def get_probe_subject(self, binding: SessionBinding) -> dict[str, Any]:
+        if binding.role != "prober" or binding.work_unit_id is None:
+            raise ValueError("Probe subject requires a prober work unit")
+        with self._connect() as connection:
+            scan = self._require_scan_status(connection, binding.scan_id, {"running"})
+            if not bool(scan["dynamic_enabled"]):
+                raise ValueError("Dynamic validation is not enabled for this scan")
+            self._require_active_worker_binding(connection, binding)
+            assignment = connection.execute(
+                "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
+                (binding.work_unit_id,),
+            ).fetchone()
+            if assignment is None or not assignment["subject_id"]:
+                raise ValueError("Prober work unit has no assigned candidate")
+            row = connection.execute(
+                """
+                SELECT c.*, v.verdict, v.rationale AS verification_rationale
+                FROM candidates c
+                JOIN verifications v ON v.candidate_id = c.candidate_id
+                LEFT JOIN dynamic_runs d ON d.candidate_id = c.candidate_id
+                WHERE c.candidate_id = ? AND c.scan_id = ?
+                  AND v.verdict = 'confirmed' AND d.candidate_id IS NULL
+                """,
+                (assignment["subject_id"], binding.scan_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Assigned candidate is not eligible for probing")
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json"))
+        return item
+
+    def save_dynamic_probe(
+        self,
+        binding: SessionBinding,
+        probe: dict[str, Any],
+    ) -> None:
+        if binding.role != "prober" or binding.work_unit_id is None:
+            raise ValueError("Dynamic probe requires a bound prober work unit")
+        candidate_id = probe["candidate_id"]
+        persisted_status = "ready" if probe["status"] == "runnable" else "not_runnable"
+        now = _now()
+        with self._lock, self._connect() as connection:
+            scan = self._require_scan_status(connection, binding.scan_id, {"running"})
+            if not bool(scan["dynamic_enabled"]):
+                raise ValueError("Dynamic validation is not enabled for this scan")
+            self._require_active_worker_binding(connection, binding)
+            assignment = connection.execute(
+                "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
+                (binding.work_unit_id,),
+            ).fetchone()
+            if assignment is None or assignment["subject_id"] != candidate_id:
+                raise ValueError("Candidate is not assigned to this prober work unit")
+            candidate = connection.execute(
+                """
+                SELECT c.scan_id, v.verdict FROM candidates c
+                JOIN verifications v ON v.candidate_id = c.candidate_id
+                WHERE c.candidate_id = ?
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if (
+                candidate is None
+                or candidate["scan_id"] != binding.scan_id
+                or candidate["verdict"] != "confirmed"
+            ):
+                raise ValueError("Only statically confirmed candidates may have probes")
+            try:
+                connection.execute(
+                    "INSERT INTO dynamic_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        candidate_id,
+                        binding.scan_id,
+                        binding.work_unit_id,
+                        persisted_status,
+                        json.dumps(probe, ensure_ascii=False, sort_keys=True),
+                        None,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("Candidate already has a dynamic run record") from exc
+
+    def complete_dynamic_run(
+        self,
+        candidate_id: str,
+        status: str,
+        run: dict[str, Any],
+    ) -> None:
+        if status not in {"completed", "inconclusive"}:
+            raise ValueError("Runner may only persist completed or inconclusive facts")
+        if not isinstance(run, dict) or run.get("runner_status") != status:
+            raise ValueError("Dynamic-run facts do not match the terminal status")
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE dynamic_runs SET status = ?, run_json = ?, updated_at = ? "
+                "WHERE candidate_id = ? AND status = 'ready' AND run_json IS NULL",
+                (
+                    status,
+                    json.dumps(run, ensure_ascii=False, sort_keys=True),
+                    _now(),
+                    candidate_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Dynamic run is not ready or was already completed")
+
+    def assert_dynamic_runs_terminal(self, scan_id: str) -> None:
+        with self._connect() as connection:
+            scan = self._require_scan_status(connection, scan_id, {"running"})
+            self._require_dynamic_ready(connection, scan_id, scan=scan)
 
     def cancel_scan_work(self, scan_id: str) -> list[str]:
         with self._lock, self._connect() as connection:
@@ -839,6 +1072,56 @@ class ScanStore:
             raise ValueError(
                 "Verification conflicts must be resolved before adjudication"
             )
+
+    @staticmethod
+    def _require_dynamic_ready(
+        connection: sqlite3.Connection,
+        scan_id: str,
+        *,
+        scan: sqlite3.Row | None = None,
+    ) -> None:
+        scan = scan or connection.execute(
+            "SELECT * FROM scans WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+        if scan is None:
+            raise ValueError("Scan not found")
+        if not bool(scan["dynamic_enabled"]):
+            return
+        rows = connection.execute(
+            """
+            SELECT c.candidate_id, d.status, d.probe_json, d.run_json
+            FROM candidates c
+            JOIN verifications v ON v.candidate_id = c.candidate_id
+            LEFT JOIN dynamic_runs d ON d.candidate_id = c.candidate_id
+            WHERE c.scan_id = ? AND v.verdict = 'confirmed'
+            ORDER BY c.candidate_id
+            """,
+            (scan_id,),
+        ).fetchall()
+        for row in rows:
+            if row["status"] is None:
+                raise ValueError(
+                    "Every statically confirmed candidate requires a dynamic run record"
+                )
+            if row["status"] == "ready":
+                raise ValueError("Dynamic probe execution is still pending")
+            if row["status"] not in {"not_runnable", "completed", "inconclusive"}:
+                raise ValueError("Dynamic run has an invalid terminal status")
+            try:
+                probe = json.loads(row["probe_json"])
+                run = json.loads(row["run_json"]) if row["run_json"] else None
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("Dynamic run contains invalid JSON") from exc
+            if row["status"] == "not_runnable":
+                if probe.get("status") != "not_runnable" or run is not None:
+                    raise ValueError("not_runnable dynamic run is inconsistent")
+            elif (
+                probe.get("status") != "runnable"
+                or not isinstance(run, dict)
+                or run.get("runner_status") != row["status"]
+            ):
+                raise ValueError("Terminal dynamic run facts are inconsistent")
 
     @staticmethod
     def _next_adjudication_round(
@@ -920,6 +1203,7 @@ class ScanStore:
             self._require_scan_status(connection, scan_id, {"running"})
             self._require_threat_model_ready(connection, scan_id)
             self._require_analysis_ready(connection, scan_id)
+            self._require_dynamic_ready(connection, scan_id)
             adjudication_round = self._next_adjudication_round(
                 connection,
                 scan_id,
@@ -934,6 +1218,9 @@ class ScanStore:
         verification_by_candidate = {
             item["candidate_id"]: item for item in data["verifications"]
         }
+        dynamic_by_candidate = {
+            item["candidate_id"]: item for item in data["dynamic_runs"]
+        }
         candidates: list[dict[str, Any]] = []
         for candidate in data["candidates"]:
             item = dict(candidate)
@@ -944,9 +1231,13 @@ class ScanStore:
             item["verification"] = verification_by_candidate.get(
                 candidate["candidate_id"]
             )
+            item["dynamic_run"] = dynamic_by_candidate.get(
+                candidate["candidate_id"]
+            )
             candidates.append(item)
         return {
             "scan_id": scan_id,
+            "dynamic_enabled": data["scan"]["dynamic_enabled"],
             "adjudication_round": adjudication_round,
             "threat_model": data["threat_model"],
             "candidates": candidates,
@@ -981,15 +1272,20 @@ class ScanStore:
         accepted: list[str] = []
         normalized_rejected: list[dict[str, str]] = []
         normalized_rescan: dict[str, Any] | None = None
+        normalized_assessments: list[dict[str, str]] | None = None
         if action == "finalize":
-            if set(decision) != {
+            static_fields = {
                 "action",
                 "accepted_candidate_ids",
                 "rejected_candidates",
+            }
+            dynamic_fields = static_fields | {"dynamic_assessments"}
+            if frozenset(decision) not in {
+                frozenset(static_fields),
+                frozenset(dynamic_fields),
             }:
                 raise ValueError(
-                    "Final adjudication requires only accepted_candidate_ids "
-                    "and rejected_candidates"
+                    "Final adjudication has unsupported fields"
                 )
             raw_accepted = decision["accepted_candidate_ids"]
             rejected = decision["rejected_candidates"]
@@ -1031,6 +1327,54 @@ class ScanStore:
             if set(accepted) & set(rejected_ids):
                 raise ValueError("A candidate cannot be both accepted and rejected")
             normalized_rejected.sort(key=lambda item: item["candidate_id"])
+            if "dynamic_assessments" in decision:
+                raw_assessments = decision["dynamic_assessments"]
+                if not isinstance(raw_assessments, list):
+                    raise ValueError("dynamic_assessments must be an array")
+                normalized_assessments = []
+                for item in raw_assessments:
+                    if not isinstance(item, dict) or set(item) != {
+                        "candidate_id",
+                        "conclusion",
+                        "rationale",
+                    }:
+                        raise ValueError(
+                            "Each dynamic assessment requires only candidate_id, "
+                            "conclusion, and rationale"
+                        )
+                    candidate_id = item["candidate_id"]
+                    conclusion = item["conclusion"]
+                    rationale = item["rationale"]
+                    if not isinstance(candidate_id, str) or not candidate_id:
+                        raise ValueError("Dynamic assessment candidate_id is required")
+                    if conclusion not in {
+                        "reproduced",
+                        "not_reproduced",
+                        "inconclusive",
+                        "not_run",
+                    }:
+                        raise ValueError("Unsupported dynamic assessment conclusion")
+                    if (
+                        not isinstance(rationale, str)
+                        or not rationale.strip()
+                        or len(rationale.strip()) > 10_000
+                    ):
+                        raise ValueError(
+                            "Dynamic assessment rationale must contain 1 to 10000 characters"
+                        )
+                    normalized_assessments.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "conclusion": conclusion,
+                            "rationale": rationale.strip(),
+                        }
+                    )
+                assessment_ids = [
+                    item["candidate_id"] for item in normalized_assessments
+                ]
+                if len(assessment_ids) != len(set(assessment_ids)):
+                    raise ValueError("dynamic_assessments contains duplicates")
+                normalized_assessments.sort(key=lambda item: item["candidate_id"])
         else:
             if set(decision) != {"action", "rescan"}:
                 raise ValueError(
@@ -1085,7 +1429,18 @@ class ScanStore:
             scan = self._require_scan_status(connection, scan_id, {"running"})
             self._require_threat_model_ready(connection, scan_id)
             self._require_analysis_ready(connection, scan_id)
+            self._require_dynamic_ready(connection, scan_id, scan=scan)
             adjudication_round = self._next_adjudication_round(connection, scan_id)
+            dynamic_enabled = bool(scan["dynamic_enabled"])
+            if action == "finalize":
+                if dynamic_enabled and normalized_assessments is None:
+                    raise ValueError(
+                        "Dynamic scans require one assessment per confirmed candidate"
+                    )
+                if not dynamic_enabled and normalized_assessments is not None:
+                    raise ValueError(
+                        "Static scans do not accept dynamic assessments"
+                    )
             if adjudication_round == 2 and action != "finalize":
                 raise ValueError("The second adjudication must finalize the scan")
             if action == "finalize":
@@ -1118,6 +1473,36 @@ class ScanStore:
                     raise ValueError(
                         "Only independently confirmed candidates may be accepted"
                     )
+                if dynamic_enabled:
+                    confirmed_ids = {
+                        row["candidate_id"]
+                        for row in candidate_rows
+                        if row["verdict"] == "confirmed"
+                    }
+                    assessments = normalized_assessments or []
+                    if {item["candidate_id"] for item in assessments} != confirmed_ids:
+                        raise ValueError(
+                            "Every statically confirmed candidate requires exactly one "
+                            "dynamic assessment"
+                        )
+                    run_statuses = {
+                        row["candidate_id"]: row["status"]
+                        for row in connection.execute(
+                            "SELECT candidate_id, status FROM dynamic_runs WHERE scan_id = ?",
+                            (scan_id,),
+                        ).fetchall()
+                    }
+                    allowed_conclusions = {
+                        "not_runnable": {"not_run"},
+                        "inconclusive": {"inconclusive"},
+                        "completed": {"reproduced", "not_reproduced"},
+                    }
+                    for assessment in assessments:
+                        status = run_statuses.get(assessment["candidate_id"])
+                        if assessment["conclusion"] not in allowed_conclusions.get(status, set()):
+                            raise ValueError(
+                                "Dynamic assessment conclusion does not match run status"
+                            )
             if normalized_rescan is not None:
                 snapshot_paths = {
                     row["relative_path"]
@@ -1160,7 +1545,11 @@ class ScanStore:
                         if normalized_rescan is not None
                         else None
                     ),
-                    None,
+                    (
+                        json.dumps(normalized_assessments, ensure_ascii=False)
+                        if normalized_assessments is not None
+                        else None
+                    ),
                     _now(),
                 ),
             )
@@ -1174,6 +1563,7 @@ class ScanStore:
             self._require_scan_status(connection, scan_id, {"running"})
             self._require_threat_model_ready(connection, scan_id)
             self._require_analysis_ready(connection, scan_id)
+            self._require_dynamic_ready(connection, scan_id)
             latest = connection.execute(
                 "SELECT action FROM adjudications WHERE scan_id = ? "
                 "ORDER BY adjudication_round DESC LIMIT 1",
@@ -1225,7 +1615,11 @@ class ScanStore:
             row = connection.execute(
                 "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
             ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        item = dict(row)
+        item["dynamic_enabled"] = bool(item["dynamic_enabled"])
+        return item
 
     def delete_scan(self, scan_id: str) -> None:
         with self._lock, self._connect() as connection:
@@ -1246,6 +1640,7 @@ class ScanStore:
             "baseline",
             "investigator",
             "verifier",
+            "prober",
         }
         if role not in allowed_roles:
             raise ValueError("Unsupported session binding role")
@@ -1973,6 +2368,35 @@ class ScanStore:
                     "SELECT COUNT(*) FROM adjudications WHERE scan_id = ?",
                     (scan_id,),
                 ).fetchone()[0],
+                "dynamic_runs": connection.execute(
+                    "SELECT COUNT(*) FROM dynamic_runs WHERE scan_id = ?",
+                    (scan_id,),
+                ).fetchone()[0],
+                "ready_dynamic_runs": connection.execute(
+                    "SELECT COUNT(*) FROM dynamic_runs "
+                    "WHERE scan_id = ? AND status = 'ready'",
+                    (scan_id,),
+                ).fetchone()[0],
+                "terminal_dynamic_runs": connection.execute(
+                    "SELECT COUNT(*) FROM dynamic_runs "
+                    "WHERE scan_id = ? AND status IN "
+                    "('not_runnable', 'completed', 'inconclusive')",
+                    (scan_id,),
+                ).fetchone()[0],
+                "confirmed_without_dynamic_record": (
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) FROM candidates c
+                        JOIN verifications v ON v.candidate_id = c.candidate_id
+                        LEFT JOIN dynamic_runs d ON d.candidate_id = c.candidate_id
+                        WHERE c.scan_id = ? AND v.verdict = 'confirmed'
+                          AND d.candidate_id IS NULL
+                        """,
+                        (scan_id,),
+                    ).fetchone()[0]
+                    if scan["dynamic_enabled"]
+                    else 0
+                ),
             }
             batch_rows = connection.execute(
                 "SELECT batch_id, phase, status FROM worker_batches "
@@ -2099,6 +2523,11 @@ class ScanStore:
                 "ORDER BY adjudication_round",
                 (scan_id,),
             ).fetchall()
+            dynamic_run_rows = connection.execute(
+                "SELECT * FROM dynamic_runs WHERE scan_id = ? "
+                "ORDER BY created_at, candidate_id",
+                (scan_id,),
+            ).fetchall()
         candidates = []
         for row in candidate_rows:
             item = dict(row)
@@ -2150,6 +2579,9 @@ class ScanStore:
             ],
             "adjudications": [
                 self._decode_adjudication(row) for row in adjudication_rows
+            ],
+            "dynamic_runs": [
+                self._decode_dynamic_run(row) for row in dynamic_run_rows
             ],
         }
 
