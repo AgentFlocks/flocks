@@ -451,7 +451,7 @@ class WorkflowPollerManager:
         exec_data = await create_execution_record(
             workflow_id,
             input_params=inputs,
-            persist=False,
+            persist=True,
         )
         exec_id = str(exec_data["id"])
         step_recorder = ExecutionStepRecorder(exec_id=exec_id)

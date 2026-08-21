@@ -156,7 +156,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         exec_id: str | None = None,
         persist: bool = True,
     ) -> dict[str, Any]:
-        assert persist is False
+        assert persist is True
         record = {
             "id": exec_id or "exec-1",
             "workflowId": workflow_id,
@@ -361,7 +361,7 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         exec_id: str | None = None,
         persist: bool = True,
     ) -> dict[str, Any]:
-        assert persist is False
+        assert persist is True
         _ = input_params
         return {
             "id": exec_id or f"exec-{workflow_id}",

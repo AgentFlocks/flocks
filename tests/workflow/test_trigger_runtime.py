@@ -75,7 +75,7 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
     assert runtime_module.run_workflow.call_args.kwargs["run_id"] == "exec-1"
     assert runtime_module.run_workflow.call_args.kwargs["execution_profile"] == "high_frequency"
     assert callable(runtime_module.run_workflow.call_args.kwargs["on_step_complete"])
-    assert create_record.await_args.kwargs["persist"] is False
+    assert create_record.await_args.kwargs["persist"] is True
     assert result["executionLog"] == []
     assert result["stepCount"] == 1
     record_result.assert_awaited_once()

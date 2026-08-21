@@ -767,7 +767,7 @@ class KafkaManager:
             exec_data = await create_execution_record(
                 workflow_id,
                 input_params=summarized_inputs,
-                persist=False,
+                persist=True,
             )
             exec_id = exec_data["id"]
             start_time = time.time()

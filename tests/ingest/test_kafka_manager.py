@@ -549,7 +549,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     async def _fake_create_execution_record(  # noqa: ANN001
         workflow_id, *, input_params=None, exec_id=None, persist=True
     ):
-        assert persist is False
+        assert persist is True
         captured_input_params.update(input_params or {})
         return {"id": "exec-compact", "workflowId": workflow_id, "inputParams": input_params}
 
@@ -639,7 +639,7 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
     async def _fake_create_execution_record(  # noqa: ANN001
         workflow_id, *, input_params=None, exec_id=None, persist=True
     ):
-        assert persist is False
+        assert persist is True
         recorded_input_params.update(input_params or {})
         return {"id": "exec-merge", "workflowId": workflow_id, "inputParams": input_params}
 
@@ -700,7 +700,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     async def _fake_create_execution_record(  # noqa: ANN001
         workflow_id, *, input_params=None, exec_id=None, persist=True
     ):
-        assert persist is False
+        assert persist is True
         return {"id": "exec-filter", "workflowId": workflow_id, "inputParams": input_params}
 
     async def _fake_record_execution_result(  # noqa: ANN001
