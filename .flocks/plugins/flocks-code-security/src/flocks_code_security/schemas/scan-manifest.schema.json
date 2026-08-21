@@ -144,6 +144,35 @@
             }
           ]
         },
+        "knowledgeBase": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "displayName",
+            "sha256",
+            "byteLength",
+            "trust"
+          ],
+          "properties": {
+            "displayName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "byteLength": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32768
+            },
+            "trust": {
+              "const": "untrusted_external_hypothesis"
+            }
+          }
+        },
         "scope": {
           "type": "object",
           "required": [

@@ -30,6 +30,15 @@ Dynamic validation is explicit opt-in:
 flocks security audit /absolute/path/to/source --dynamic
 ```
 
+For a CyberGym-style guided audit, attach one small UTF-8 vulnerability description:
+
+```bash
+flocks security audit /absolute/path/to/source \
+  --knowledge-base /absolute/path/to/description.txt
+```
+
+The description is captured before the scan starts, stored as immutable scan-bound data, and exposed only to the threat modeler, static workers, independent verifiers, and final adjudicator. It is always treated as an untrusted hypothesis rather than source evidence; the dynamic probe author never receives the raw content. The sealed report records only its file name, byte length, and SHA-256 digest.
+
 Dynamic scans ask an isolated prober to describe a control/attack pair for each statically confirmed candidate. A trusted host runner validates the contract and builds only from an existing snapshot Dockerfile with no network, pulls, cache, or unrestricted build steps. BuildKit runs are pinned to the local default Docker builder and resource-limited; otherwise the runner forces the resource-limited legacy builder against the verified local daemon and fails preflight if neither backend can enforce CPU, memory, process, and shared-memory limits. Each script runs in a fresh local container with no network, no capabilities, a read-only root, bounded resources, and no mounts. The fail-closed Dockerfile policy accepts only an explicit instruction set and rejects parser directives, heredocs, `ADD`, `ONBUILD`, `FROM --platform`, and all `RUN` options; every external `FROM` or `COPY --from` image must already exist locally, while `scratch` needs no image inspection. The runner stores bounded facts only; the parent Agent decides whether those facts reproduce the candidate. Runnable probes require Docker CLI access and a local Docker daemon endpoint. Docker is a containment boundary for this opt-in workflow, not a general malicious-code sandbox.
 
 The command prints the `scan_id` as soon as the immutable snapshot is ready, then follows threat modeling, baseline scanning, independent verification, parent-Agent adjudication, and report generation. This one-command path is **host-orchestrated** by `AuditOrchestrator`; the `code-security` primary Agent makes the semantic accept/reject or targeted-rescan decision, but it does not schedule the CLI's macro phases. To inspect the same persisted progress from another terminal without changing the scan:
@@ -57,7 +66,7 @@ Model messages and audit-tool inputs/outputs can contain proprietary source code
 
 Standard static audits use the flow threat modeling → baseline → verification → parent adjudication → deterministic reduction. Dynamic audits insert probing and Docker execution after verification. The parent may instead direct one targeted rescan, followed by verification, dynamic processing of only new confirmed candidates, and a mandatory second/final adjudication. Baseline workers must consume the persisted threat model before they can submit candidates or coverage. Every candidate must receive one independent verifier verdict and be classified by the parent before finalization. Parent-rejected candidates are omitted, insufficient-evidence candidates remain deferred coverage, and only independently confirmed candidates accepted by the parent are projected into SARIF.
 
-The public `code-security` Agent remains the interactive audit entry point. In an interactive audit it may drive the audit tools directly. In the one-command CLI path it is invoked only at the adjudication boundary, where the session callable-tool set exposes `audit_adjudication_context` and `audit_submit_adjudication`; the host resumes control after the decision.
+The public `code-security` Agent remains the interactive audit entry point. In an interactive audit it may drive the audit tools directly. In the one-command CLI path it is invoked only at the adjudication boundary, where the session callable-tool set exposes `audit_knowledge_base`, `audit_adjudication_context`, and `audit_submit_adjudication`; the host resumes control after the decision.
 
 The five Agent definitions are declarative and live in `src/flocks_code_security/agents/<agent-name>/agent.yaml`, with each prompt in the adjacent `prompt.md`. Tools, skills, model settings, and isolation policy can therefore be reviewed and changed independently for each Agent while remaining owned and packaged by this plugin.
 

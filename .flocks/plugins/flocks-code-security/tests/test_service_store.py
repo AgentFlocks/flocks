@@ -15,6 +15,7 @@ from flocks_code_security.service import (
     AuditCaller,
     AuditService,
     AuditServiceError,
+    KnowledgeBaseInput,
     StartScanRequest,
     _ProgressRecorder,
     _effective_finished_at,
@@ -81,6 +82,86 @@ def test_request_metadata_enforces_caller_scoped_idempotency(tmp_path: Path) -> 
             idempotency_key="same-key",
             request_digest="digest-2",
         )
+
+
+def test_knowledge_base_is_immutable_bound_and_private_to_its_scan(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    content = "Prioritize the caller-controlled parser."
+    encoded = content.encode("utf-8")
+    store.set_scan_request_metadata(
+        scan_id,
+        owner_subject="user-1",
+        request_source="cli",
+        workspace_ref="workspace-1",
+        idempotency_key="guided",
+        request_digest="request",
+        knowledge_base={
+            "display_name": "description.txt",
+            "content": content,
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "byte_length": len(encoded),
+        },
+    )
+    store.bind_session(
+        session_id="coordinator",
+        scan_id=scan_id,
+        snapshot_id="snapshot_test",
+        role="coordinator",
+    )
+    binding = store.require_binding("coordinator", {"coordinator"})
+
+    with pytest.raises(ValueError, match="audit_knowledge_base"):
+        store.require_knowledge_base_consumed(binding)
+    captured = store.read_knowledge_base(binding)
+    assert captured is not None
+    assert captured["content"] == content
+    store.require_knowledge_base_consumed(binding)
+
+    metadata = store.get_knowledge_base_metadata(scan_id)
+    assert metadata == {
+        "display_name": "description.txt",
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "byte_length": len(encoded),
+        "trust": "untrusted_external_hypothesis",
+    }
+    assert "content" not in metadata
+    assert "content" not in store.report_data(scan_id)["knowledge_base"]
+
+    store.delete_scan(scan_id)
+    assert store.get_knowledge_base_metadata(scan_id) is None
+
+
+def test_knowledge_base_changes_the_request_digest_and_is_validated() -> None:
+    first = AuditService._validate_knowledge_base(KnowledgeBaseInput("description.txt", "\ufefffirst hypothesis"))
+    second = AuditService._validate_knowledge_base(KnowledgeBaseInput("description.txt", "second hypothesis"))
+    assert first is not None
+    assert first.content == "first hypothesis"
+
+    first_digest = AuditService._request_digest(StartScanRequest(target_path=Path("/tmp/target"), knowledge_base=first))
+    second_digest = AuditService._request_digest(
+        StartScanRequest(target_path=Path("/tmp/target"), knowledge_base=second)
+    )
+    assert first_digest != second_digest
+    renamed_digest = AuditService._request_digest(
+        StartScanRequest(
+            target_path=Path("/tmp/target"),
+            knowledge_base=KnowledgeBaseInput("renamed.txt", first.content),
+        )
+    )
+    assert first_digest != renamed_digest
+
+    with pytest.raises(AuditServiceError, match="32 KiB"):
+        AuditService._validate_knowledge_base(KnowledgeBaseInput("description.txt", "a" * (32 * 1024 + 1)))
+    with pytest.raises(AuditServiceError, match="plain file name"):
+        AuditService._validate_knowledge_base(KnowledgeBaseInput("description\n.txt", "hypothesis"))
 
 
 def test_phase_and_event_sequences_are_durable_and_monotonic(tmp_path: Path) -> None:

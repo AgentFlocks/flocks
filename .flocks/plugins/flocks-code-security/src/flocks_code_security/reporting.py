@@ -250,6 +250,7 @@ class ReportWriter:
                 data["dynamic_runs"],
                 completed_at,
                 artifacts,
+                knowledge_base=data["knowledge_base"],
             )
             artifact_contents.update(
                 {
@@ -895,6 +896,7 @@ class ReportWriter:
         dynamic_runs: list[dict[str, Any]],
         completed_at: str,
         artifacts: list[dict[str, str]],
+        knowledge_base: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         target: dict[str, Any] = {
             "kind": snapshot.target_kind,
@@ -943,26 +945,35 @@ class ReportWriter:
         }
         if limitations:
             scope["limitations"] = limitations
+        manifest_scan: dict[str, Any] = {
+            "id": scan["scan_id"],
+            "producer": {
+                "name": PRODUCER_NAME,
+                "version": PRODUCER_VERSION,
+            },
+            "status": "completed",
+            "startedAt": scan["created_at"],
+            "completedAt": completed_at,
+            "sealedAt": completed_at,
+            "target": target,
+            "scope": scope,
+            "threatModel": threat_model,
+            "coverageRef": "coverage.json",
+            "findingsRef": "findings.json",
+            "artifacts": artifacts,
+        }
+        if knowledge_base is not None:
+            scope["context"] = "Knowledge-base-guided standard source-code security audit."
+            manifest_scan["knowledgeBase"] = {
+                "displayName": knowledge_base["display_name"],
+                "sha256": knowledge_base["sha256"],
+                "byteLength": knowledge_base["byte_length"],
+                "trust": knowledge_base["trust"],
+            }
         return {
             "documentType": "codex-security.scan-manifest",
             "schemaVersion": SCHEMA_VERSION,
-            "scan": {
-                "id": scan["scan_id"],
-                "producer": {
-                    "name": PRODUCER_NAME,
-                    "version": PRODUCER_VERSION,
-                },
-                "status": "completed",
-                "startedAt": scan["created_at"],
-                "completedAt": completed_at,
-                "sealedAt": completed_at,
-                "target": target,
-                "scope": scope,
-                "threatModel": threat_model,
-                "coverageRef": "coverage.json",
-                "findingsRef": "findings.json",
-                "artifacts": artifacts,
-            },
+            "scan": manifest_scan,
         }
 
     def _evidence_code(
@@ -1088,23 +1099,37 @@ class ReportWriter:
             ),
             f"- Deferred work: **{len(coverage['deferred'])}**",
             f"- Static validation limitations: **{len(limitations)}**",
-            "",
-            "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those sealed files.",
-            "",
-            "## Scope",
-            "",
-            ReportWriter._markdown_text(scan["scope"]["summary"]),
-            "",
-            f"- Included: {', '.join(f'`{ReportWriter._markdown_text(path)}`' for path in coverage['includePaths']) or 'None'}",
-            f"- Excluded patterns: **{len(coverage['excludePaths'])}**",
-            f"- Runtime: {ReportWriter._markdown_text(scan['scope']['runtimeStatus'])}",
-            f"- Validation: {ReportWriter._markdown_text(scan['scope']['validationMode'])}",
-            "",
-            "## Threat Model",
-            "",
-            ReportWriter._markdown_text(scan["threatModel"]["summary"]),
-            "",
         ]
+        knowledge_base = scan.get("knowledgeBase")
+        if knowledge_base is not None:
+            lines.extend(
+                [
+                    "- Audit mode: `knowledge-guided`",
+                    f"- Knowledge base: `{ReportWriter._markdown_text(knowledge_base['displayName'])}`",
+                    f"- Knowledge base SHA-256: `{knowledge_base['sha256']}`",
+                    "- Knowledge base trust: `untrusted external hypothesis; not evidence`",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those sealed files.",
+                "",
+                "## Scope",
+                "",
+                ReportWriter._markdown_text(scan["scope"]["summary"]),
+                "",
+                f"- Included: {', '.join(f'`{ReportWriter._markdown_text(path)}`' for path in coverage['includePaths']) or 'None'}",
+                f"- Excluded patterns: **{len(coverage['excludePaths'])}**",
+                f"- Runtime: {ReportWriter._markdown_text(scan['scope']['runtimeStatus'])}",
+                f"- Validation: {ReportWriter._markdown_text(scan['scope']['validationMode'])}",
+                "",
+                "## Threat Model",
+                "",
+                ReportWriter._markdown_text(scan["threatModel"]["summary"]),
+                "",
+            ]
+        )
         for heading, field in (
             ("Assets", "assets"),
             ("Trust Boundaries", "trustBoundaries"),

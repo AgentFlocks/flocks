@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_SCHEMA_VERSION = "flocks.code-security.tool.v1"
 MAX_PROJECTED_EVENT_BYTES = 60 * 1024
+MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 PUBLIC_SCAN_STATUSES = {"running", *TERMINAL_SCAN_STATUSES}
 PUBLIC_PHASES = {
@@ -103,6 +104,12 @@ class AuditCaller:
 
 
 @dataclass(frozen=True)
+class KnowledgeBaseInput:
+    display_name: str
+    content: str
+
+
+@dataclass(frozen=True)
 class StartScanRequest:
     target_path: Path
     model: str | None = None
@@ -111,6 +118,7 @@ class StartScanRequest:
     max_file_bytes: int = 1_048_576
     dynamic_enabled: bool = False
     idempotency_key: str | None = None
+    knowledge_base: KnowledgeBaseInput | None = None
 
 
 @dataclass
@@ -493,6 +501,7 @@ class AuditService:
             max_file_bytes=request.max_file_bytes,
             dynamic_enabled=bool(request.dynamic_enabled),
             idempotency_key=(request.idempotency_key or "").strip() or None,
+            knowledge_base=self._validate_knowledge_base(request.knowledge_base),
         )
         if normalized.max_file_bytes < 1 or normalized.max_file_bytes > 50 * 1024 * 1024:
             raise AuditServiceError(
@@ -526,6 +535,7 @@ class AuditService:
 
             scan_id = str(prepared["scan_id"])
             owner_token = f"task_{uuid4().hex}"
+            knowledge_base = self._knowledge_base_record(normalized.knowledge_base)
             try:
                 self.store.set_scan_request_metadata(
                     scan_id,
@@ -537,6 +547,7 @@ class AuditService:
                     task_owner_pid=os.getpid(),
                     task_owner_token=owner_token,
                     task_owner_identity=process_identity(os.getpid()),
+                    knowledge_base=knowledge_base,
                 )
             except ValueError as exc:
                 self._discard_prepared_scan(scan_id, prepared)
@@ -544,6 +555,13 @@ class AuditService:
                 if existing is not None:
                     return await self.get_scan(existing["scan_id"], caller)
                 raise AuditServiceError("idempotency_conflict", str(exc), status_code=409) from exc
+
+            if knowledge_base is not None:
+                prepared = {
+                    **prepared,
+                    "audit_mode": "knowledge_guided",
+                    "knowledge_base": {key: value for key, value in knowledge_base.items() if key != "content"},
+                }
 
             recorder = _ProgressRecorder(
                 scan_id,
@@ -658,6 +676,7 @@ class AuditService:
             )
             current_phase = running_phase or phases[-1]["phase"]
         integrity_artifacts = status.get("integrity_artifacts", {})
+        knowledge_base = self.store.get_knowledge_base_metadata(scan_id)
         public_scan = {
             "scan_id": scan_id,
             "lifecycle_status": _public_lifecycle(str(scan["status"])),
@@ -679,6 +698,8 @@ class AuditService:
             "failure_summary": scan.get("failure_summary"),
             "request_source": scan.get("request_source"),
             "workspace_ref": scan.get("workspace_ref"),
+            "audit_mode": "knowledge_guided" if knowledge_base else "standard",
+            "knowledge_base": knowledge_base,
         }
         return {
             "schema_version": PUBLIC_SCHEMA_VERSION,
@@ -1130,7 +1151,10 @@ class AuditService:
         caller: AuditCaller,
     ) -> ToolContext:
         try:
-            _require_enabled_audit_tools(dynamic_enabled=request.dynamic_enabled)
+            _require_enabled_audit_tools(
+                dynamic_enabled=request.dynamic_enabled,
+                knowledge_base_enabled=request.knowledge_base is not None,
+            )
             await Storage.init()
             provider_id, model_id = await _resolve_model(request.model)
         except ValueError as exc:
@@ -1266,7 +1290,60 @@ class AuditService:
         return normalized
 
     @staticmethod
+    def _validate_knowledge_base(
+        value: KnowledgeBaseInput | None,
+    ) -> KnowledgeBaseInput | None:
+        if value is None:
+            return None
+        if not isinstance(value, KnowledgeBaseInput):
+            raise AuditServiceError("invalid_parameter", "knowledge_base is invalid")
+        if not isinstance(value.display_name, str) or not isinstance(value.content, str):
+            raise AuditServiceError("invalid_parameter", "knowledge_base must contain text")
+        display_name = value.display_name.strip()
+        if (
+            not display_name
+            or display_name in {".", ".."}
+            or "/" in display_name
+            or "\\" in display_name
+            or len(display_name) > 255
+            or any(ord(character) < 32 or ord(character) == 127 for character in display_name)
+        ):
+            raise AuditServiceError(
+                "invalid_parameter",
+                "knowledge_base display_name must be a plain file name",
+            )
+        content = value.content.removeprefix("\ufeff")
+        if "\0" in content:
+            raise AuditServiceError(
+                "invalid_parameter",
+                "knowledge_base must be UTF-8 text without NUL characters",
+            )
+        if not content.strip():
+            raise AuditServiceError("invalid_parameter", "knowledge_base must not be empty")
+        if len(content.encode("utf-8")) > MAX_KNOWLEDGE_BASE_BYTES:
+            raise AuditServiceError(
+                "invalid_parameter",
+                "knowledge_base may contain at most 32 KiB",
+            )
+        return KnowledgeBaseInput(display_name=display_name, content=content)
+
+    @staticmethod
+    def _knowledge_base_record(
+        value: KnowledgeBaseInput | None,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        contents = value.content.encode("utf-8")
+        return {
+            "display_name": value.display_name,
+            "content": value.content,
+            "sha256": hashlib.sha256(contents).hexdigest(),
+            "byte_length": len(contents),
+        }
+
+    @staticmethod
     def _request_digest(request: StartScanRequest) -> str:
+        knowledge_base = AuditService._knowledge_base_record(request.knowledge_base)
         payload = {
             "target_path": str(request.target_path),
             "model": request.model,
@@ -1274,6 +1351,14 @@ class AuditService:
             "exclude_patterns": list(request.exclude_patterns),
             "max_file_bytes": request.max_file_bytes,
             "dynamic_enabled": request.dynamic_enabled,
+            "knowledge_base": (
+                {
+                    "display_name": knowledge_base["display_name"],
+                    "sha256": knowledge_base["sha256"],
+                }
+                if knowledge_base is not None
+                else None
+            ),
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()

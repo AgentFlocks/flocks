@@ -18,6 +18,7 @@ AGENT_TOOLS = {
         "audit_run_workers",
         "audit_wait_workers",
         "audit_status",
+        "audit_knowledge_base",
         "audit_adjudication_context",
         "audit_submit_adjudication",
         "audit_finalize",
@@ -25,12 +26,14 @@ AGENT_TOOLS = {
         "question",
     ],
     "code-security-threat-modeler": [
+        "audit_knowledge_base",
         "audit_inventory",
         "audit_read",
         "audit_search",
         "audit_submit_threat_model",
     ],
     "code-security-baseline": [
+        "audit_knowledge_base",
         "audit_threat_model_context",
         "audit_inventory",
         "audit_read",
@@ -39,6 +42,7 @@ AGENT_TOOLS = {
         "audit_submit_coverage",
     ],
     "code-security-verifier": [
+        "audit_knowledge_base",
         "audit_verification_subject",
         "audit_inventory",
         "audit_read",
@@ -87,6 +91,7 @@ def code_security_tool_projection(
         and "audit_prepare" not in candidate_names
     ):
         allowed = [
+            "audit_knowledge_base",
             "audit_adjudication_context",
             "audit_submit_adjudication",
         ]

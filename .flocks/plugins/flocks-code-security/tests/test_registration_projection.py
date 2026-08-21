@@ -72,6 +72,7 @@ def test_projection_only_reduces_code_security_agents() -> None:
 def test_projection_narrows_session_scoped_parent_adjudication_tools() -> None:
     register_tools()
     names = [
+        "audit_knowledge_base",
         "audit_adjudication_context",
         "audit_submit_adjudication",
         "question",
@@ -88,6 +89,7 @@ def test_projection_narrows_session_scoped_parent_adjudication_tools() -> None:
     )
 
     assert [tool.name for tool in projected] == [
+        "audit_knowledge_base",
         "audit_adjudication_context",
         "audit_submit_adjudication",
     ]
@@ -167,9 +169,13 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert "tool_search" not in AGENT_TOOLS[baseline.name]
     assert "delegate_task" not in AGENT_TOOLS[baseline.name]
     assert "audit_threat_model_context" in AGENT_TOOLS[baseline.name]
+    assert "audit_knowledge_base" in AGENT_TOOLS[threat_modeler.name]
+    assert "audit_knowledge_base" in AGENT_TOOLS[baseline.name]
+    assert "audit_knowledge_base" in AGENT_TOOLS[verifier.name]
     assert verifier.hidden is True
     assert prober.hidden is True
     assert "audit_submit_probe" in AGENT_TOOLS[prober.name]
+    assert "audit_knowledge_base" not in AGENT_TOOLS[prober.name]
     assert "code-security-investigator" not in agents
 
 
@@ -295,6 +301,27 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     assert "single top-level candidate argument" in baseline
     assert "exact inventory paths" in baseline
     assert "relative_path, blob_digest, start_line, and end_line" in verifier
+
+
+def test_guided_worker_prompts_require_the_bound_knowledge_base() -> None:
+    threat_modeler = threat_model_prompt(
+        snapshot_id="snap_safe",
+        knowledge_base_present=True,
+    )
+    baseline = baseline_prompt(
+        snapshot_id="snap_safe",
+        paths=["."],
+        knowledge_base_present=True,
+    )
+    verifier = verification_prompt(
+        snapshot_id="snap_safe",
+        candidate_id="cand_safe",
+        knowledge_base_present=True,
+    )
+
+    for prompt in (threat_modeler, baseline, verifier):
+        assert "First call audit_knowledge_base exactly once" in prompt
+        assert "untrusted vulnerability hypothesis" in prompt
 
 
 def test_public_code_security_tool_registers_as_one_multi_action_entry() -> None:

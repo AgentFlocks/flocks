@@ -21,6 +21,7 @@ tools:
   - audit_run_workers
   - audit_wait_workers
   - audit_status
+  - audit_knowledge_base
   - audit_adjudication_context
   - audit_submit_adjudication
   - audit_finalize

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +27,77 @@ console = Console()
 
 AuditRunner = Callable[..., Any]
 StatusReader = Callable[[str], dict[str, Any]]
+MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
+
+
+def _read_knowledge_base(
+    path: Path,
+    *,
+    audited_target: Path | None = None,
+) -> dict[str, str]:
+    """Capture one small UTF-8 guidance file without following a final symlink."""
+    source = path.expanduser()
+    initial = source.lstat()
+    if stat.S_ISLNK(initial.st_mode):
+        raise ValueError("knowledge base must not be a symbolic link")
+    if not stat.S_ISREG(initial.st_mode):
+        raise ValueError("knowledge base must be a regular file")
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(source, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("knowledge base must be a regular file")
+        if (initial.st_dev, initial.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("knowledge base changed while it was opened")
+
+        contents = bytearray()
+        while len(contents) <= MAX_KNOWLEDGE_BASE_BYTES:
+            chunk = os.read(descriptor, MAX_KNOWLEDGE_BASE_BYTES + 1 - len(contents))
+            if not chunk:
+                break
+            contents.extend(chunk)
+        after = os.fstat(descriptor)
+        resolved_source = source.resolve(strict=True)
+        resolved = resolved_source.stat()
+    finally:
+        os.close(descriptor)
+
+    if len(contents) > MAX_KNOWLEDGE_BASE_BYTES:
+        raise ValueError("knowledge base may contain at most 32 KiB")
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise ValueError("knowledge base changed while it was read")
+    if (resolved.st_dev, resolved.st_ino) != (before.st_dev, before.st_ino):
+        raise ValueError("knowledge base path changed while it was read")
+    if audited_target is not None and resolved_source.is_relative_to(audited_target.resolve()):
+        raise ValueError("knowledge base must be outside the audited source directory")
+    if b"\0" in contents:
+        raise ValueError("knowledge base must be a UTF-8 text file")
+    try:
+        content = bytes(contents).decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("knowledge base must be valid UTF-8 text") from exc
+    if not content.strip():
+        raise ValueError("knowledge base must not be empty")
+    return {"display_name": source.name, "content": content}
 
 
 def _load_plugin_cli() -> tuple[AuditRunner, StatusReader]:
@@ -215,6 +288,11 @@ def security_audit(
         "--dynamic",
         help="Execute validated probes in a network-isolated local Docker runtime",
     ),
+    knowledge_base: Optional[Path] = typer.Option(
+        None,
+        "--knowledge-base",
+        help="Optional untrusted UTF-8 vulnerability target specification",
+    ),
 ) -> None:
     """Run the host-orchestrated audit with parent-Agent adjudication."""
     try:
@@ -223,6 +301,11 @@ def security_audit(
         audit_kwargs = {"model": model, "progress": progress}
         if dynamic:
             audit_kwargs["dynamic_enabled"] = True
+        if knowledge_base is not None:
+            audit_kwargs["knowledge_base"] = _read_knowledge_base(
+                knowledge_base,
+                audited_target=target,
+            )
         result = asyncio.run(run_standard_audit(target, **audit_kwargs))
     except KeyboardInterrupt:
         if not json_output:

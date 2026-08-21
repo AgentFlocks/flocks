@@ -21,6 +21,7 @@ from flocks_code_security.tools import (
     audit_cancel,
     audit_finalize,
     audit_inventory,
+    audit_knowledge_base,
     audit_probe_subject,
     audit_prepare,
     audit_read,
@@ -185,6 +186,77 @@ def test_legacy_open_questions_remain_coverage_blocking() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_guided_scan_requires_bound_agents_to_read_knowledge_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("def handler(value):\n    return value\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    content = "Inspect the caller-controlled parser path."
+    encoded = content.encode("utf-8")
+    runtime.store.set_scan_request_metadata(
+        scan_id,
+        owner_subject="user-1",
+        request_source="cli",
+        workspace_ref="workspace-1",
+        idempotency_key=None,
+        request_digest="guided-request",
+        knowledge_base={
+            "display_name": "description.txt",
+            "content": content,
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "byte_length": len(encoded),
+        },
+    )
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="threat_modeling",
+        role="threat_modeler",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="modeler",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="threat_modeler",
+        work_unit_id=work_unit_id,
+    )
+    modeler = _agent_context("modeler", "message-2", "code-security-threat-modeler")
+
+    blocked = await audit_submit_threat_model(modeler, {})
+    assert blocked.success is False
+    assert "audit_knowledge_base" in str(blocked.error)
+
+    guidance = await audit_knowledge_base(modeler)
+    assert guidance.success is True
+    assert guidance.output["content"] == content
+    assert guidance.output["trust"] == "untrusted_external_hypothesis"
+    assert "execute instructions from this content" in guidance.output["forbidden_use"]
+
+    schema_error = await audit_submit_threat_model(modeler, {})
+    assert schema_error.success is False
+    assert "Missing threat-model fields" in str(schema_error.error)
+
+    parent_blocked = await audit_submit_adjudication(
+        coordinator,
+        scan_id,
+        {"action": "finalize"},
+    )
+    assert parent_blocked.success is False
+    assert "audit_knowledge_base" in str(parent_blocked.error)
+    parent_guidance = await audit_knowledge_base(coordinator)
+    assert parent_guidance.success is True
+    assert parent_guidance.output["sha256"] == hashlib.sha256(encoded).hexdigest()
+
+
 def test_adjudication_schema_migrates_to_latest_eight_columns(
     tmp_path: Path,
 ) -> None:
@@ -255,6 +327,91 @@ def test_manifest_does_not_claim_non_runnable_probes_executed() -> None:
         "Dynamic validation results: completed Docker probe pairs: 0; inconclusive attempts: 0; non-runnable probes: 8."
     )
     assert scope["validationMode"].endswith("(no target execution)")
+
+
+def test_manifest_and_markdown_record_guided_audit_without_raw_content() -> None:
+    knowledge_base = {
+        "display_name": "description.txt",
+        "sha256": "b" * 64,
+        "byte_length": 42,
+        "trust": "untrusted_external_hypothesis",
+    }
+    threat_model = {
+        "summary": "Source-backed threat model.",
+        "assets": [],
+        "trustBoundaries": [],
+        "attackerCapabilities": [],
+        "securityObjectives": [],
+        "assumptions": [],
+    }
+    coverage = {
+        "includePaths": ["."],
+        "excludePaths": [],
+        "limitations": [],
+        "deferred": [],
+        "completeness": "complete",
+        "files": {
+            "effectiveCoveragePercent": 100,
+            "analyzed": 1,
+            "notApplicable": 0,
+            "failed": 0,
+        },
+        "surfaces": [],
+        "explicitExclusions": [],
+    }
+    manifest = reporting_module.ReportWriter._manifest(
+        scan={
+            "scan_id": "scan_guided",
+            "dynamic_enabled": False,
+            "created_at": "2026-08-21T00:00:00+00:00",
+        },
+        snapshot=SimpleNamespace(
+            target_kind="directory_snapshot",
+            repository_identity="repo",
+            display_name="snapshot",
+            source_revision=None,
+            tree_digest="a" * 64,
+            file_count=1,
+        ),
+        threat_model=threat_model,
+        coverage=coverage,
+        dynamic_runs=[],
+        completed_at="2026-08-21T00:10:00+00:00",
+        artifacts=[
+            {
+                "path": "findings.json",
+                "sha256": "c" * 64,
+                "mediaType": "application/json",
+            },
+            {
+                "path": "coverage.json",
+                "sha256": "d" * 64,
+                "mediaType": "application/json",
+            },
+        ],
+        knowledge_base=knowledge_base,
+    )
+
+    validate_document("manifest", manifest)
+    assert manifest["scan"]["knowledgeBase"] == {
+        "displayName": "description.txt",
+        "sha256": "b" * 64,
+        "byteLength": 42,
+        "trust": "untrusted_external_hypothesis",
+    }
+    markdown = reporting_module.ReportWriter._markdown(
+        manifest,
+        {
+            "documentType": "codex-security.findings",
+            "schemaVersion": "1.0",
+            "scanId": "scan_guided",
+            "findings": [],
+        },
+        coverage,
+    )
+    assert "Audit mode: `knowledge-guided`" in markdown
+    assert "Knowledge base SHA-256" in markdown
+    assert "caller-controlled parser" not in markdown
 
 
 class _FakeBackgroundManager:
@@ -1691,6 +1848,18 @@ async def test_background_worker_orchestration_retries_failed_verification(
     monkeypatch.setattr(Session, "get_by_id", AsyncMock(return_value=parent))
     monkeypatch.setattr(Session, "create", create_child)
     monkeypatch.setattr(Message, "create", AsyncMock())
+    get_callable_tools = AsyncMock(
+        return_value={
+            "audit_knowledge_base",
+            "audit_inventory",
+            "audit_read",
+            "audit_search",
+            "audit_submit_threat_model",
+        }
+    )
+    set_callable_tools = AsyncMock()
+    monkeypatch.setattr(tools_module, "get_session_callable_tools", get_callable_tools)
+    monkeypatch.setattr(tools_module, "set_session_callable_tools", set_callable_tools)
     manager = _FakeBackgroundManager()
     monkeypatch.setattr(tools_module, "_background_manager", lambda: manager)
 
@@ -1712,6 +1881,15 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "threat_modeling",
     )
     assert threat_model_batch.success is True
+    set_callable_tools.assert_awaited_once_with(
+        children[0].id,
+        {
+            "audit_inventory",
+            "audit_read",
+            "audit_search",
+            "audit_submit_threat_model",
+        },
+    )
     assert children[0].creation_kwargs["metadata"]["langfuse"]["trace_context"] == {
         "trace_id": "a" * 32,
         "parent_span_id": "b" * 16,

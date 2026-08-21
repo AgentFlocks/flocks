@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+from types import SimpleNamespace
+
+import pytest
 
 from typer.testing import CliRunner
 
@@ -88,6 +92,137 @@ def test_security_audit_forwards_dynamic_opt_in(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     assert observed["target"] == tmp_path
     assert observed["dynamic_enabled"] is True
+
+
+def test_security_audit_forwards_captured_knowledge_base(monkeypatch, tmp_path) -> None:
+    observed: dict[str, object] = {}
+    target = tmp_path / "source"
+    target.mkdir()
+    knowledge_base = tmp_path / "description.txt"
+    knowledge_base.write_bytes(b"\xef\xbb\xbfTarget vulnerability description.\n")
+
+    async def run_audit(target, *, model, progress, knowledge_base):
+        observed.update(
+            target=target,
+            model=model,
+            progress=progress,
+            knowledge_base=knowledge_base,
+        )
+        return {"scan_id": "scan_guided"}
+
+    monkeypatch.setattr(
+        security_cmd,
+        "_load_plugin_cli",
+        lambda: (run_audit, lambda _scan_id: {}),
+    )
+    monkeypatch.setattr(security_cmd, "shutdown_langfuse", lambda: None)
+
+    result = runner.invoke(
+        security_cmd.security_app,
+        ["audit", str(target), "--knowledge-base", str(knowledge_base), "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert observed["target"] == target
+    assert observed["knowledge_base"] == {
+        "display_name": "description.txt",
+        "content": "Target vulnerability description.\n",
+    }
+
+
+def test_knowledge_base_reader_rejects_unsafe_files(monkeypatch, tmp_path) -> None:
+    oversized = tmp_path / "oversized.txt"
+    oversized.write_bytes(b"a" * (security_cmd.MAX_KNOWLEDGE_BASE_BYTES + 1))
+    with pytest.raises(ValueError, match="32 KiB"):
+        security_cmd._read_knowledge_base(oversized)
+
+    binary = tmp_path / "binary.txt"
+    binary.write_bytes(b"target\0description")
+    with pytest.raises(ValueError, match="UTF-8 text"):
+        security_cmd._read_knowledge_base(binary)
+
+    invalid_utf8 = tmp_path / "invalid.txt"
+    invalid_utf8.write_bytes(b"\xff")
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        security_cmd._read_knowledge_base(invalid_utf8)
+
+    target = tmp_path / "target.txt"
+    target.write_text("description", encoding="utf-8")
+    link = tmp_path / "description.txt"
+    os.symlink(target, link)
+    with pytest.raises(ValueError, match="symbolic link"):
+        security_cmd._read_knowledge_base(link)
+
+    fifo = tmp_path / "description.fifo"
+    os.mkfifo(fifo)
+    with monkeypatch.context() as context:
+        context.setattr(
+            security_cmd.os,
+            "open",
+            lambda *_args, **_kwargs: pytest.fail("FIFO must be rejected before open"),
+        )
+        with pytest.raises(ValueError, match="regular file"):
+            security_cmd._read_knowledge_base(fifo)
+
+
+def test_knowledge_base_reader_checks_the_opened_path_against_target(tmp_path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "description.txt").write_text("target hypothesis", encoding="utf-8")
+    alias = tmp_path / "target-alias"
+    os.symlink(target, alias)
+
+    with pytest.raises(ValueError, match="outside the audited source directory"):
+        security_cmd._read_knowledge_base(
+            alias / "description.txt",
+            audited_target=target,
+        )
+
+
+def test_knowledge_base_reader_detects_changes_during_capture(monkeypatch, tmp_path) -> None:
+    knowledge_base = tmp_path / "description.txt"
+    knowledge_base.write_text("target hypothesis", encoding="utf-8")
+    real_fstat = security_cmd.os.fstat
+    calls = 0
+
+    def changing_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        current = real_fstat(descriptor)
+        if calls == 1:
+            return current
+        return SimpleNamespace(
+            st_mode=current.st_mode,
+            st_dev=current.st_dev,
+            st_ino=current.st_ino,
+            st_size=current.st_size,
+            st_mtime_ns=current.st_mtime_ns + 1,
+            st_ctime_ns=current.st_ctime_ns,
+        )
+
+    monkeypatch.setattr(security_cmd.os, "fstat", changing_fstat)
+
+    with pytest.raises(ValueError, match="changed while it was read"):
+        security_cmd._read_knowledge_base(knowledge_base)
+
+
+def test_security_audit_rejects_knowledge_base_inside_target(monkeypatch, tmp_path) -> None:
+    knowledge_base = tmp_path / "description.txt"
+    knowledge_base.write_text("target hypothesis", encoding="utf-8")
+    monkeypatch.setattr(
+        security_cmd,
+        "_load_plugin_cli",
+        lambda: (None, lambda _scan_id: {}),
+    )
+    monkeypatch.setattr(security_cmd, "shutdown_langfuse", lambda: None)
+
+    result = runner.invoke(
+        security_cmd.security_app,
+        ["audit", str(tmp_path), "--knowledge-base", str(knowledge_base), "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert "outside the audited source directory" in result.stdout
 
 
 def test_security_status_reads_persisted_progress(monkeypatch) -> None:

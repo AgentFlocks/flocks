@@ -43,6 +43,20 @@ def test_static_cli_preflight_does_not_require_dynamic_only_tools() -> None:
         submit_probe.info.enabled = original_enabled
 
 
+def test_static_cli_preflight_requires_knowledge_tool_only_for_guided_audits() -> None:
+    register_tools()
+    knowledge_base = ToolRegistry.get("audit_knowledge_base")
+    original_enabled = knowledge_base.info.enabled
+    knowledge_base.info.enabled = False
+
+    try:
+        audit_cli._require_enabled_audit_tools()
+        with pytest.raises(RuntimeError, match="audit_knowledge_base"):
+            audit_cli._require_enabled_audit_tools(knowledge_base_enabled=True)
+    finally:
+        knowledge_base.info.enabled = original_enabled
+
+
 async def _final_adjudication(
     orchestrator: audit_cli.AuditOrchestrator,
     scan_id: str,
@@ -459,8 +473,30 @@ async def test_orchestrator_runs_one_parent_directed_rescan(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("knowledge_base", "expected_tools"),
+    [
+        (
+            None,
+            {
+                "audit_adjudication_context",
+                "audit_submit_adjudication",
+            },
+        ),
+        (
+            {"sha256": "a" * 64},
+            {
+                "audit_knowledge_base",
+                "audit_adjudication_context",
+                "audit_submit_adjudication",
+            },
+        ),
+    ],
+)
 async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
     monkeypatch: pytest.MonkeyPatch,
+    knowledge_base: dict | None,
+    expected_tools: set[str],
 ) -> None:
     decision = {
         "scan_id": "scan_parent",
@@ -478,6 +514,10 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         def get_latest_adjudication(cls, _scan_id: str):
             cls.calls += 1
             return None if cls.calls == 1 else decision
+
+        @staticmethod
+        def get_knowledge_base_metadata(_scan_id: str):
+            return knowledge_base
 
     create_message = AsyncMock()
     run_loop = AsyncMock(return_value=SimpleNamespace(action="stop", error=None))
@@ -512,10 +552,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
     assert "host has already completed" in create_message.await_args.kwargs["content"].lower()
     set_callable_tools.assert_awaited_once_with(
         "coordinator",
-        {
-            "audit_adjudication_context",
-            "audit_submit_adjudication",
-        },
+        expected_tools,
     )
     run_loop.assert_awaited_once_with(
         "coordinator",

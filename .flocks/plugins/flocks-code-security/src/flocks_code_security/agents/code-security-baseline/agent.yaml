@@ -15,6 +15,7 @@ session_directory: ~/.flocks/workspace/code-security/runtime
 memory_enabled: false
 require_dedicated_session: true
 tools:
+  - audit_knowledge_base
   - audit_threat_model_context
   - audit_inventory
   - audit_read

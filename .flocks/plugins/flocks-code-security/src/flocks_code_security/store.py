@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -31,6 +32,7 @@ THREAT_MODEL_REQUIRED_LIST_FIELDS = (
     "securityObjectives",
 )
 MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
+MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 
 
@@ -205,6 +207,14 @@ class ScanStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS scan_knowledge_base (
+                    scan_id TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    display_name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    byte_length INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS work_units (
                     work_unit_id TEXT PRIMARY KEY,
                     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
@@ -253,6 +263,15 @@ class ScanStore:
                     work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
                     accessed_at TEXT NOT NULL,
                     PRIMARY KEY (scan_id, work_unit_id)
+                );
+                CREATE TABLE IF NOT EXISTS knowledge_base_access (
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    session_id TEXT NOT NULL REFERENCES session_bindings(session_id) ON DELETE CASCADE,
+                    work_unit_id TEXT REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    accessed_at TEXT NOT NULL,
+                    PRIMARY KEY (scan_id, session_id)
                 );
                 CREATE TABLE IF NOT EXISTS candidates (
                     candidate_id TEXT PRIMARY KEY,
@@ -911,6 +930,20 @@ class ScanStore:
         role: str,
     ) -> bool:
         with self._connect() as connection:
+            if role in {"threat_modeler", "baseline", "investigator", "verifier"}:
+                guided = connection.execute(
+                    "SELECT 1 FROM work_units wu "
+                    "JOIN scan_knowledge_base kb ON kb.scan_id = wu.scan_id "
+                    "WHERE wu.work_unit_id = ?",
+                    (work_unit_id,),
+                ).fetchone()
+                if guided is not None:
+                    consumed = connection.execute(
+                        "SELECT 1 FROM knowledge_base_access WHERE work_unit_id = ?",
+                        (work_unit_id,),
+                    ).fetchone()
+                    if consumed is None:
+                        return False
             if role == "threat_modeler":
                 row = connection.execute(
                     "SELECT payload_json, evidence_json FROM threat_models WHERE work_unit_id = ?",
@@ -1723,7 +1756,22 @@ class ScanStore:
         task_owner_pid: int | None = None,
         task_owner_token: str | None = None,
         task_owner_identity: str | None = None,
+        knowledge_base: dict[str, Any] | None = None,
     ) -> None:
+        if knowledge_base is not None:
+            display_name = knowledge_base.get("display_name")
+            content = knowledge_base.get("content")
+            content_sha256 = knowledge_base.get("sha256")
+            byte_length = knowledge_base.get("byte_length")
+            if not isinstance(display_name, str) or not display_name:
+                raise ValueError("Knowledge base display name is invalid")
+            if not isinstance(content, str) or not content.strip() or "\0" in content:
+                raise ValueError("Knowledge base content is invalid")
+            encoded = content.encode("utf-8")
+            if len(encoded) > MAX_KNOWLEDGE_BASE_BYTES:
+                raise ValueError("Knowledge base may contain at most 32 KiB")
+            if byte_length != len(encoded) or content_sha256 != hashlib.sha256(encoded).hexdigest():
+                raise ValueError("Knowledge base metadata does not match its content")
         try:
             with self._lock, self._connect() as connection:
                 cursor = connection.execute(
@@ -1747,6 +1795,18 @@ class ScanStore:
                 )
                 if cursor.rowcount != 1:
                     raise ValueError("Scan not found")
+                if knowledge_base is not None:
+                    connection.execute(
+                        "INSERT INTO scan_knowledge_base VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            scan_id,
+                            display_name,
+                            content,
+                            content_sha256,
+                            byte_length,
+                            _now(),
+                        ),
+                    )
         except sqlite3.IntegrityError as exc:
             raise ValueError("Idempotency key already belongs to another scan") from exc
 
@@ -2287,6 +2347,89 @@ class ScanStore:
         if binding.role not in roles:
             raise ValueError(f"Session role {binding.role!r} cannot perform this operation")
         return binding
+
+    def get_knowledge_base_metadata(self, scan_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT display_name, content_sha256, byte_length FROM scan_knowledge_base WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "display_name": row["display_name"],
+            "sha256": row["content_sha256"],
+            "byte_length": row["byte_length"],
+            "trust": "untrusted_external_hypothesis",
+        }
+
+    def read_knowledge_base(self, binding: SessionBinding) -> dict[str, Any] | None:
+        allowed_roles = {
+            "coordinator",
+            "threat_modeler",
+            "baseline",
+            "investigator",
+            "verifier",
+        }
+        if binding.role not in allowed_roles:
+            raise ValueError("This session role cannot read the audit knowledge base")
+        with self._lock, self._connect() as connection:
+            persisted = connection.execute(
+                "SELECT scan_id, work_unit_id, snapshot_id, role FROM session_bindings WHERE session_id = ?",
+                (binding.session_id,),
+            ).fetchone()
+            if persisted is None or tuple(persisted) != (
+                binding.scan_id,
+                binding.work_unit_id,
+                binding.snapshot_id,
+                binding.role,
+            ):
+                raise ValueError("Session binding changed before knowledge-base access")
+            row = connection.execute(
+                "SELECT display_name, content, content_sha256, byte_length FROM scan_knowledge_base WHERE scan_id = ?",
+                (binding.scan_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "INSERT INTO knowledge_base_access VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(scan_id, session_id) DO NOTHING",
+                (
+                    binding.scan_id,
+                    binding.session_id,
+                    binding.work_unit_id,
+                    binding.role,
+                    row["content_sha256"],
+                    _now(),
+                ),
+            )
+        return {
+            "display_name": row["display_name"],
+            "content": row["content"],
+            "sha256": row["content_sha256"],
+            "byte_length": row["byte_length"],
+        }
+
+    def require_knowledge_base_consumed(self, binding: SessionBinding) -> None:
+        with self._connect() as connection:
+            knowledge_base = connection.execute(
+                "SELECT content_sha256 FROM scan_knowledge_base WHERE scan_id = ?",
+                (binding.scan_id,),
+            ).fetchone()
+            if knowledge_base is None:
+                return
+            access = connection.execute(
+                "SELECT 1 FROM knowledge_base_access "
+                "WHERE scan_id = ? AND session_id = ? AND role = ? AND content_sha256 = ?",
+                (
+                    binding.scan_id,
+                    binding.session_id,
+                    binding.role,
+                    knowledge_base["content_sha256"],
+                ),
+            ).fetchone()
+        if access is None:
+            raise ValueError("This guided audit requires audit_knowledge_base before submitting this phase")
 
     def save_threat_model(
         self,
@@ -2990,8 +3133,11 @@ class ScanStore:
             else:
                 integrity_status = "invalid"
                 integrity_errors.append("Completed scan does not have a valid completed threat model")
+        knowledge_base = self.get_knowledge_base_metadata(scan_id)
         return {
             **scan,
+            "audit_mode": "knowledge_guided" if knowledge_base else "standard",
+            "knowledge_base": knowledge_base,
             "counts": counts,
             "threat_model_status": threat_model_status,
             "integrity_status": integrity_status,
@@ -3083,6 +3229,7 @@ class ScanStore:
             threat_model["evidence"] = json.loads(threat_model.pop("evidence_json"))
         return {
             "scan": scan,
+            "knowledge_base": self.get_knowledge_base_metadata(scan_id),
             "threat_model": threat_model,
             "candidates": candidates,
             "evidence": [dict(row) for row in evidence_rows],
