@@ -8,6 +8,7 @@ describe('WebUIContractPage runtime', () => {
     installWebUIContractPageRuntime('dash-1');
     const sdk = window.__FLOCKS_WEBUI_CONTRACT_SDK__;
     expect(sdk).toBeTruthy();
+    expect(sdk!.Markdown).toEqual(expect.any(Function));
     await sdk!.api.page.get('/stats');
     expect(getSpy).toHaveBeenCalledWith('/api/contracts/webui/pages/dash-1/api/stats', undefined);
     getSpy.mockRestore();

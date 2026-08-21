@@ -6,17 +6,19 @@ export function ElapsedTime({
   startedAt,
   finishedAt,
   initialMs,
+  running = false,
   prefix = "总耗时 ",
 }: {
   startedAt: string;
   finishedAt?: string | null;
   initialMs: number;
+  running?: boolean;
   prefix?: string;
 }) {
   const [elapsed, setElapsed] = useState(initialMs);
 
   useEffect(() => {
-    if (finishedAt) {
+    if (!running || finishedAt) {
       setElapsed(initialMs);
       return undefined;
     }
@@ -25,7 +27,7 @@ export function ElapsedTime({
     update();
     const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
-  }, [finishedAt, initialMs, startedAt]);
+  }, [finishedAt, initialMs, running, startedAt]);
 
   return (
     <span className="cs-tabular">

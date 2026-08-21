@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -11,10 +12,11 @@ import stat
 import tempfile
 from collections import Counter
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
 
+from flocks_code_security.artifact_integrity import find_output_directory, verify_artifact_bundle
 from flocks_code_security.contract import (
     PRODUCER_NAME,
     PRODUCER_VERSION,
@@ -47,6 +49,9 @@ SARIF_LEVELS = {
     "low": "note",
     "informational": "note",
 }
+LEGACY_UNSEALED_REPORT_ARTIFACTS = frozenset(
+    {"report.md", "report.sarif", "threat-model.json"}
+)
 
 
 class ReportWriter:
@@ -320,6 +325,110 @@ class ReportWriter:
                 except ValueError:
                     pass
             raise
+
+    def reseal_legacy_bundle(
+        self,
+        scan_id: str,
+        output_directory: Path | None = None,
+    ) -> bool:
+        """Complete a legacy manifest only when its report bytes are reproducible."""
+        output = output_directory or find_output_directory(scan_id)
+        if output is None or output.is_symlink() or not output.is_dir():
+            return False
+        output = output.resolve()
+
+        expected_error = (
+            "Required sealed artifacts are missing: "
+            + ", ".join(sorted(LEGACY_UNSEALED_REPORT_ARTIFACTS))
+        )
+        integrity = verify_artifact_bundle(scan_id, output)
+        if integrity.status == "valid" or integrity.errors != (expected_error,):
+            return False
+
+        scan = self.store.get_scan(scan_id)
+        if scan is None or scan["status"] != "completed":
+            return False
+        stored_output = scan.get("output_dir")
+        if stored_output and Path(stored_output).expanduser().resolve() != output:
+            return False
+
+        manifest_path = output / "scan-manifest.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            return False
+        original_manifest = manifest_path.read_bytes()
+        manifest = json.loads(original_manifest)
+
+        def read_artifact(value: Any) -> tuple[str, bytes]:
+            if not isinstance(value, str):
+                raise ValueError("Sealed artifact path is invalid")
+            relative = PurePosixPath(value)
+            if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                raise ValueError(f"Sealed artifact path is invalid: {value}")
+            candidate = output / Path(*relative.parts)
+            if not candidate.is_file() or candidate.is_symlink():
+                raise ValueError(f"Sealed artifact is missing: {value}")
+            resolved = candidate.resolve()
+            resolved.relative_to(output)
+            return relative.as_posix(), resolved.read_bytes()
+
+        artifact_contents = dict(
+            read_artifact(record.get("path"))
+            for record in manifest["scan"]["artifacts"]
+        )
+        if (output / "dynamic-validation.json").exists() and (
+            "dynamic-validation.json" not in artifact_contents
+        ):
+            return False
+
+        data = self.store.report_data(scan_id)
+        threat_model = data["threat_model"]
+        if threat_model is None:
+            return False
+        findings = json.loads(artifact_contents["findings.json"])
+        coverage = json.loads(artifact_contents["coverage.json"])
+        expected_contents = {
+            "threat-model.json": canonical_json_bytes(
+                {
+                    "scanId": scan_id,
+                    "snapshotId": data["scan"]["snapshot_id"],
+                    "workUnitId": threat_model["work_unit_id"],
+                    "createdAt": threat_model["created_at"],
+                    "threatModel": threat_model["threat_model"],
+                    "evidence": threat_model["evidence"],
+                }
+            ),
+            "report.md": self._markdown(
+                manifest,
+                findings,
+                coverage,
+            ).encode("utf-8"),
+            "report.sarif": canonical_json_bytes(
+                self._sarif(
+                    manifest,
+                    findings,
+                )
+            ),
+        }
+        for path, expected in expected_contents.items():
+            actual_path = output / path
+            if (
+                not actual_path.is_file()
+                or actual_path.is_symlink()
+                or actual_path.read_bytes() != expected
+            ):
+                return False
+        artifact_contents.update(expected_contents)
+
+        updated_manifest = copy.deepcopy(manifest)
+        updated_manifest["scan"]["artifacts"] = self._artifact_records(artifact_contents)
+        validate_bundle(updated_manifest, findings, coverage, artifact_contents)
+
+        self._write_json(manifest_path, updated_manifest)
+        verified = verify_artifact_bundle(scan_id, output)
+        if verified.status != "valid":
+            self._write_bytes(manifest_path, original_manifest)
+            raise ValueError("Legacy artifact manifest could not be resealed safely")
+        return True
 
     def _merge_confirmed_group(
         self,

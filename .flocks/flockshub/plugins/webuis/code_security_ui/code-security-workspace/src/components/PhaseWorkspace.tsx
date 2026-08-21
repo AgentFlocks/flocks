@@ -109,6 +109,7 @@ export function PhaseWorkspace({
                     startedAt={phase.started_at}
                     finishedAt={phase.finished_at}
                     initialMs={phase.duration_ms || 0}
+                    running={phase.status === "running"}
                     prefix=""
                   />
                 ) : (
@@ -146,6 +147,7 @@ export function PhaseWorkspace({
                     startedAt={selected.started_at}
                     finishedAt={selected.finished_at}
                     initialMs={selected.duration_ms || 0}
+                    running={selected.status === "running"}
                     prefix=""
                   />
                 ) : (
@@ -174,7 +176,11 @@ export function PhaseWorkspace({
       )}
 
       <WorkerList
-        workers={workers.filter((worker) => worker.phase === selected?.phase)}
+        workers={
+          selected
+            ? workers.filter((worker) => worker.phase === selected.phase)
+            : workers
+        }
       />
       <DurationTable phases={sorted} />
       <EventStream
@@ -222,6 +228,7 @@ function WorkerList({ workers }: { workers: WorkerRun[] }) {
                         startedAt={worker.started_at}
                         finishedAt={worker.finished_at}
                         initialMs={worker.elapsed_ms || 0}
+                        running={worker.status === "running"}
                         prefix=""
                       />
                     ) : (
@@ -309,6 +316,7 @@ function DurationTable({ phases }: { phases: PhaseRun[] }) {
                       startedAt={phase.started_at}
                       finishedAt={phase.finished_at}
                       initialMs={phase.duration_ms || 0}
+                      running={phase.status === "running"}
                       prefix=""
                     />
                   ) : (

@@ -15,6 +15,7 @@ export type IconName =
   | "report"
   | "close"
   | "download"
+  | "trash"
   | "panel";
 
 const paths: Record<IconName, ReactElement> = {
@@ -102,6 +103,15 @@ const paths: Record<IconName, ReactElement> = {
       <path d="M12 3v12" />
       <path d="m7 10 5 5 5-5" />
       <path d="M5 21h14" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4 7h16" />
+      <path d="M9 3h6l1 4H8l1-4Z" />
+      <path d="m7 7 1 14h8l1-14" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
     </>
   ),
   panel: (

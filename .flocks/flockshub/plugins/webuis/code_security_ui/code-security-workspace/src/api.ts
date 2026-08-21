@@ -126,6 +126,10 @@ export async function cancelScan(scanId: string): Promise<ScanDetail> {
   return response.data;
 }
 
+export async function deleteScan(scanId: string): Promise<void> {
+  await getApi().delete(`${BASE}/scans/${encodeURIComponent(scanId)}`);
+}
+
 function splitLines(value: string, fallback: string[] = []): string[] {
   const items = value
     .split(/\r?\n|,/)

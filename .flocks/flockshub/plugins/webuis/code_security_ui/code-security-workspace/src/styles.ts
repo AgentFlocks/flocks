@@ -330,12 +330,8 @@ const styles = String.raw`
   border: 1px solid transparent;
   border-radius: 8px;
   color: inherit;
-  display: grid;
-  gap: 7px;
   min-height: 102px;
-  padding: 11px 10px 11px 13px;
   position: relative;
-  text-align: left;
   transition: background-color 140ms ease, border-color 140ms ease;
   width: 100%;
 }
@@ -354,6 +350,17 @@ const styles = String.raw`
 .cs-scan-item:hover { background: var(--cs-surface-subtle); }
 .cs-scan-item.is-selected { background: var(--cs-surface-selected); border-color: var(--cs-border); }
 .cs-scan-item.is-selected::before { background: var(--cs-primary); }
+.cs-scan-item__select {
+  background: transparent;
+  border: 0;
+  display: grid;
+  gap: 7px;
+  min-height: 100px;
+  padding: 11px 10px 11px 13px;
+  text-align: left;
+  width: 100%;
+}
+.cs-scan-item__top { padding-right: 100px; }
 .cs-scan-item__top,
 .cs-scan-item__bottom,
 .cs-scan-item__meta { align-items: center; display: flex; gap: 7px; justify-content: space-between; min-width: 0; }
@@ -361,6 +368,22 @@ const styles = String.raw`
 .cs-scan-item__meta { color: var(--cs-text-secondary); font-size: 12px; justify-content: flex-start; }
 .cs-scan-item__bottom { color: var(--cs-text-muted); font-size: 11px; }
 .cs-scan-item__bottom code { max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-scan-item__actions { align-items: center; display: flex; gap: 3px; position: absolute; right: 7px; top: 9px; }
+.cs-scan-item__delete {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--cs-text-muted);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  width: 28px;
+}
+.cs-scan-item__delete svg { height: 15px; width: 15px; }
+.cs-scan-item__delete:hover:not(:disabled) { background: var(--cs-danger-soft); border-color: color-mix(in srgb, var(--cs-danger) 35%, var(--cs-border)); color: var(--cs-danger); }
+.cs-scan-item__delete:disabled { cursor: not-allowed; opacity: 0.34; }
 
 .cs-status {
   align-items: center;
@@ -649,7 +672,34 @@ const styles = String.raw`
 .cs-structured-object > div:last-child { border-bottom: 0; }
 .cs-structured-object dt { color: var(--cs-text-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .cs-structured-object dd { font-size: 12px; line-height: 18px; margin: 0; overflow-wrap: anywhere; }
-.cs-report-preview { background: var(--cs-surface-subtle); border: 1px solid var(--cs-border); border-radius: 8px; color: var(--cs-text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 19px; margin: 0; overflow: auto; padding: 12px; white-space: pre-wrap; }
+.cs-report-markdown { background: var(--cs-surface-elevated); border: 1px solid var(--cs-border); border-radius: 8px; color: var(--cs-text); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; padding: 16px; }
+.cs-report-markdown > :first-child { margin-top: 0; }
+.cs-report-markdown > :last-child { margin-bottom: 0; }
+.cs-report-markdown h1, .cs-report-markdown h2, .cs-report-markdown h3, .cs-report-markdown h4, .cs-report-markdown h5, .cs-report-markdown h6 { color: var(--cs-text); font-weight: 700; line-height: 1.35; }
+.cs-report-markdown h1 { font-size: 19px; margin: 0 0 16px; }
+.cs-report-markdown h2 { border-bottom: 1px solid var(--cs-border); font-size: 16px; margin: 24px 0 10px; padding-bottom: 6px; }
+.cs-report-markdown h3 { font-size: 14px; margin: 20px 0 8px; }
+.cs-report-markdown h4, .cs-report-markdown h5, .cs-report-markdown h6 { font-size: 13px; margin: 16px 0 6px; }
+.cs-report-markdown p { margin: 8px 0; }
+.cs-report-markdown ul, .cs-report-markdown ol { margin: 8px 0; padding-left: 22px; }
+.cs-report-markdown ul { list-style: disc; }
+.cs-report-markdown ol { list-style: decimal; }
+.cs-report-markdown li { margin: 4px 0; }
+.cs-report-markdown li > p { margin: 2px 0; }
+.cs-report-markdown .contains-task-list { list-style: none; padding-left: 0; }
+.cs-report-markdown a { color: var(--cs-primary); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.cs-report-markdown a:hover { color: var(--cs-primary-hover); }
+.cs-report-markdown code { background: var(--cs-surface-subtle); border: 1px solid var(--cs-border); border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; padding: 1px 4px; }
+.cs-report-markdown pre { background: var(--cs-surface-subtle); border: 1px solid var(--cs-border); border-radius: 7px; margin: 12px 0; max-width: 100%; overflow: auto; padding: 10px 12px; }
+.cs-report-markdown pre code { background: transparent; border: 0; border-radius: 0; display: block; font-size: 11px; line-height: 18px; padding: 0; white-space: pre; }
+.cs-report-markdown blockquote { border-left: 3px solid var(--cs-border-strong); color: var(--cs-text-secondary); margin: 12px 0; padding: 2px 0 2px 12px; }
+.cs-report-markdown table { border-collapse: collapse; display: block; margin: 12px 0; max-width: 100%; overflow-x: auto; width: max-content; }
+.cs-report-markdown th, .cs-report-markdown td { border: 1px solid var(--cs-border); min-width: 84px; padding: 6px 8px; text-align: left; vertical-align: top; }
+.cs-report-markdown th { background: var(--cs-surface-subtle); font-weight: 650; }
+.cs-report-markdown hr { border: 0; border-top: 1px solid var(--cs-border); margin: 20px 0; }
+.cs-report-markdown input[type='checkbox'] { accent-color: var(--cs-primary); margin: 0 6px 0 0; }
+.cs-report-markdown img { height: auto; max-width: 100%; }
+.cs-report-fallback { background: var(--cs-surface-subtle); border: 1px solid var(--cs-border); border-radius: 8px; color: var(--cs-text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 19px; margin: 0; overflow: auto; padding: 12px; white-space: pre-wrap; }
 
 .cs-inline-empty { color: var(--cs-text-muted); font-size: 13px; line-height: 20px; margin: 0; padding: 24px; text-align: center; }
 .cs-empty-state { align-items: center; display: flex; flex-direction: column; justify-content: center; margin: auto; max-width: 560px; min-height: calc(100dvh - 140px); padding: 40px 24px; text-align: center; }
@@ -674,6 +724,27 @@ const styles = String.raw`
 
 .cs-drawer-layer { inset: 0; position: fixed; z-index: 1000; }
 .cs-drawer-scrim, .cs-inspector-scrim { background: rgb(12 18 24 / 0.48); border: 0; inset: 0; padding: 0; position: absolute; }
+.cs-delete-dialog-layer { align-items: center; display: flex; inset: 0; justify-content: center; padding: 20px; position: fixed; z-index: 1100; }
+.cs-delete-dialog-scrim { background: rgb(12 18 24 / 0.5); border: 0; inset: 0; padding: 0; position: absolute; }
+.cs-delete-dialog {
+  background: var(--cs-surface-elevated);
+  border: 1px solid var(--cs-border);
+  border-radius: 10px;
+  box-shadow: var(--cs-shadow-drawer);
+  display: grid;
+  gap: 14px;
+  max-width: 460px;
+  padding: 22px;
+  position: relative;
+  width: 100%;
+}
+.cs-delete-dialog__icon { align-items: center; background: var(--cs-danger-soft); border-radius: 9px; color: var(--cs-danger); display: inline-flex; height: 40px; justify-content: center; width: 40px; }
+.cs-delete-dialog__icon svg { height: 20px; width: 20px; }
+.cs-delete-dialog h2 { font-size: 18px; line-height: 24px; margin: 2px 0 0; }
+.cs-delete-dialog > p { color: var(--cs-text-secondary); font-size: 13px; line-height: 20px; margin: 0; }
+.cs-delete-dialog > code { background: var(--cs-surface-subtle); border: 1px solid var(--cs-border); border-radius: 7px; color: var(--cs-text-secondary); font-size: 11px; padding: 8px 10px; }
+.cs-delete-dialog .cs-delete-dialog__error { background: var(--cs-danger-soft); border-radius: 7px; color: var(--cs-danger); padding: 9px 10px; }
+.cs-delete-dialog footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px; }
 .cs-new-audit {
   background: var(--cs-surface-elevated);
   bottom: 0;
@@ -804,11 +875,19 @@ const styles = String.raw`
   .cs-inspector { max-width: none; width: 100vw; }
   .cs-artifact-tabs { display: flex; overflow-x: auto; }
   .cs-artifact-tabs button { flex: 0 0 auto; gap: 8px; min-height: 44px; }
+  .cs-report-markdown { font-size: 16px; }
+  .cs-report-markdown h1 { font-size: 22px; }
+  .cs-report-markdown h2 { font-size: 19px; }
+  .cs-report-markdown h3 { font-size: 17px; }
+  .cs-report-markdown pre code { font-size: 13px; line-height: 20px; }
   .cs-new-audit { max-width: none; width: 100vw; }
   .cs-new-audit form { padding-left: 16px; padding-right: 16px; }
   .cs-field input, .cs-field select, .cs-field textarea { font-size: 16px; min-height: 44px; }
   .cs-toggle { min-height: 52px; }
   .cs-drawer-scrim { display: none; }
+  .cs-delete-dialog-layer { padding: 16px; }
+  .cs-delete-dialog { padding: 18px; }
+  .cs-delete-dialog footer { display: grid; grid-template-columns: 1fr 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

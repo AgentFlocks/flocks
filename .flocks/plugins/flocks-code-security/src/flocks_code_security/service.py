@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,10 +29,13 @@ from flocks_code_security.cli import (
 )
 from flocks_code_security.artifact_integrity import find_output_directory
 from flocks_code_security.paths import data_dir, outputs_root, runtime_dir
+from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
 from flocks_code_security.store import process_identity
 from flocks_code_security.tools import audit_cancel, audit_prepare
 
+
+logger = logging.getLogger(__name__)
 
 PUBLIC_SCHEMA_VERSION = "flocks.code-security.tool.v1"
 MAX_PROJECTED_EVENT_BYTES = 60 * 1024
@@ -48,6 +53,15 @@ ARTIFACT_FILENAMES = {
     "threat_model": "threat-model.json",
     "adjudication": "adjudication.json",
     "dynamic_validation": "dynamic-validation.json",
+}
+PROJECTED_ARTIFACT_KINDS = {
+    "snapshot_summary",
+    "threat_model",
+    "candidate_index",
+    "verification_index",
+    "dynamic_validation",
+    "adjudication",
+    "coverage",
 }
 EVENT_TITLES = {
     "scan.prepared": "不可变源码快照已创建",
@@ -124,6 +138,34 @@ def _public_phase(phase: str | None) -> str | None:
     if phase is None:
         return None
     return PUBLIC_PHASES.get(phase, phase)
+
+
+def _effective_finished_at(scan: dict[str, Any]) -> str | None:
+    finished_at = scan.get("finished_at")
+    if isinstance(finished_at, str) and finished_at:
+        return finished_at
+    if scan.get("status") in TERMINAL_SCAN_STATUSES:
+        updated_at = scan.get("updated_at")
+        if isinstance(updated_at, str) and updated_at:
+            return updated_at
+    return None
+
+
+def _remove_owned_tree(path: Path | None, *, root: Path, expected_name: str) -> None:
+    if path is None or not path.exists():
+        return
+    if path.is_symlink():
+        raise OSError(f"Refusing to delete symbolic link: {path}")
+    resolved_root = root.expanduser().resolve()
+    resolved = path.expanduser().resolve()
+    if resolved.name != expected_name or not resolved.is_relative_to(resolved_root):
+        raise OSError(f"Refusing to delete path outside owned storage: {resolved}")
+    for child in resolved.rglob("*"):
+        if child.is_symlink():
+            continue
+        child.chmod(0o700 if child.is_dir() else 0o600)
+    resolved.chmod(0o700)
+    shutil.rmtree(resolved)
 
 
 class _ProgressRecorder:
@@ -595,17 +637,31 @@ class AuditService:
     async def get_scan(self, scan_id: str, caller: AuditCaller) -> dict[str, Any]:
         scan = self._require_visible_scan(scan_id, caller)
         status = await asyncio.to_thread(self.store.scan_status, scan_id)
+        if scan["status"] == "completed" and status.get("integrity_status") == "invalid":
+            repaired = await asyncio.to_thread(self._reseal_legacy_bundle, scan_id)
+            if repaired:
+                status = await asyncio.to_thread(self.store.scan_status, scan_id)
         snapshot = self.store.get_snapshot(scan["snapshot_id"])
         if snapshot is None:
             raise AuditServiceError("scan_invalid", "Scan snapshot is unavailable", status_code=500)
-        phases = self.store.list_phase_runs(scan_id)
+        workers = self._public_workers(scan_id)
+        phases = [self._public_phase_run(item) for item in self.store.list_phase_runs(scan_id)]
+        if not phases and workers:
+            phases = self._phase_runs_from_workers(scan_id, workers)
         events = self.store.list_scan_events(scan_id, after_seq=0, limit=1)
-        finished_at = scan.get("finished_at")
+        finished_at = _effective_finished_at(scan)
+        current_phase = _public_phase(scan.get("current_phase"))
+        if current_phase is None and phases:
+            running_phase = next(
+                (item["phase"] for item in phases if item["status"] == "running"),
+                None,
+            )
+            current_phase = running_phase or phases[-1]["phase"]
         integrity_artifacts = status.get("integrity_artifacts", {})
         public_scan = {
             "scan_id": scan_id,
             "lifecycle_status": _public_lifecycle(str(scan["status"])),
-            "current_phase": _public_phase(scan.get("current_phase")),
+            "current_phase": current_phase,
             "integrity_status": status.get("integrity_status", "pending"),
             "integrity_errors": status.get("integrity_errors", []),
             "coverage_status": self._coverage_status(
@@ -641,8 +697,8 @@ class AuditService:
                 status,
                 enabled=bool(scan["dynamic_enabled"]),
             ),
-            "phase_runs": [self._public_phase_run(item) for item in phases],
-            "workers": self._public_workers(scan_id),
+            "phase_runs": phases,
+            "workers": workers,
             "artifacts": self._artifact_index(
                 scan_id,
                 scan,
@@ -651,6 +707,15 @@ class AuditService:
             "server_time": _utc_now().isoformat(),
             "workspace_url": (f"/contracts/webui/workspaces/code_security/code-security-workspace?scan_id={scan_id}"),
         }
+
+    def _reseal_legacy_bundle(self, scan_id: str) -> bool:
+        output = find_output_directory(scan_id)
+        if output is None:
+            return False
+        try:
+            return ReportWriter(self.store).reseal_legacy_bundle(scan_id, output)
+        except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+            return False
 
     async def list_scans(
         self,
@@ -684,6 +749,7 @@ class AuditService:
         except ValueError as exc:
             raise AuditServiceError("invalid_parameter", str(exc)) from exc
         for item in page["items"]:
+            item["finished_at"] = _effective_finished_at(item)
             item["lifecycle_status"] = _public_lifecycle(item.pop("status"))
             item["current_phase"] = _public_phase(item.get("current_phase"))
             item.pop("parent_session_id", None)
@@ -773,6 +839,72 @@ class AuditService:
             active.task.cancel()
         return await self.get_scan(scan_id, caller)
 
+    async def delete_scan(self, scan_id: str, caller: AuditCaller) -> None:
+        if not caller.is_admin:
+            raise AuditServiceError(
+                "scan_delete_forbidden",
+                "Only administrators may delete code-security audits",
+                status_code=403,
+            )
+        scan = self._require_visible_scan(scan_id, caller)
+        if scan["status"] not in TERMINAL_SCAN_STATUSES:
+            raise AuditServiceError(
+                "scan_delete_conflict",
+                "Please cancel the audit and wait for it to stop before deleting it",
+                status_code=409,
+            )
+
+        output = find_output_directory(scan_id)
+        try:
+            deleted = await asyncio.to_thread(self.store.delete_terminal_scan, scan_id)
+        except ValueError as exc:
+            current = self.store.get_scan(scan_id)
+            if current is None:
+                raise AuditServiceError(
+                    "scan_not_found",
+                    "Scan was not found",
+                    status_code=404,
+                ) from exc
+            raise AuditServiceError(
+                "scan_delete_conflict",
+                "Please cancel the audit and wait for it to stop before deleting it",
+                status_code=409,
+            ) from exc
+        if output is None and deleted["output_dir"]:
+            output = Path(str(deleted["output_dir"]))
+        cleanup_targets = (
+            (
+                output,
+                outputs_root(),
+                scan_id,
+            ),
+            (
+                Path(deleted["snapshot_root"]) if deleted["snapshot_root"] else None,
+                self.runtime.snapshots.snapshots_root,
+                str(deleted["snapshot_id"]),
+            ),
+            (
+                runtime_dir() / "docker" / scan_id,
+                runtime_dir() / "docker",
+                scan_id,
+            ),
+        )
+        for path, root, expected_name in cleanup_targets:
+            try:
+                await asyncio.to_thread(
+                    _remove_owned_tree,
+                    path,
+                    root=root,
+                    expected_name=expected_name,
+                )
+            except OSError:
+                logger.warning(
+                    "Failed to remove code-security storage after deleting scan %s: %s",
+                    scan_id,
+                    path,
+                    exc_info=True,
+                )
+
     async def get_result(self, scan_id: str, caller: AuditCaller) -> dict[str, Any]:
         detail = await self.get_scan(scan_id, caller)
         lifecycle = detail["scan"]["lifecycle_status"]
@@ -855,6 +987,21 @@ class AuditService:
         caller: AuditCaller,
     ) -> dict[str, Any]:
         scan = self._require_visible_scan(scan_id, caller)
+        if kind in PROJECTED_ARTIFACT_KINDS:
+            file_path = self._artifact_file(scan_id, kind)
+            if file_path is not None:
+                status = await asyncio.to_thread(self.store.scan_status, scan_id)
+                if status.get("integrity_status") == "valid" and file_path.name in status.get(
+                    "integrity_artifacts", {}
+                ):
+                    contents = await asyncio.to_thread(
+                        self._read_verified_artifact,
+                        scan,
+                        file_path,
+                    )
+                    return {"kind": kind, "state": "sealed", "content": json.loads(contents)}
+            return self._projected_artifact(scan_id, kind)
+
         file_path = self._artifact_file(scan_id, kind)
         if file_path:
             contents = await asyncio.to_thread(
@@ -866,6 +1013,10 @@ class AuditService:
                 return {"kind": kind, "state": "sealed", "content": contents.decode("utf-8")}
             return {"kind": kind, "state": "sealed", "content": json.loads(contents)}
 
+        raise AuditServiceError("artifact_not_found", "Artifact is not available", status_code=404)
+
+    def _projected_artifact(self, scan_id: str, kind: str) -> dict[str, Any]:
+        """Read structured audit facts without weakening sealed-file validation."""
         data = self.store.report_data(scan_id)
         if kind == "snapshot_summary":
             snapshot = self.store.get_snapshot(data["scan"]["snapshot_id"])
@@ -1259,14 +1410,19 @@ class AuditService:
                 related = set(candidate_ids.get(work_unit_id, set()))
                 if isinstance(subject_id, str) and subject_id:
                     related.add(subject_id)
+                worker_status = str(item.get("status") or "pending")
                 started_at = item.get("started_at")
+                if not started_at and worker_status != "pending":
+                    started_at = item.get("created_at")
                 finished_at = item.get("finished_at")
+                if not finished_at and worker_status in {"completed", "failed", "cancelled"}:
+                    finished_at = item.get("updated_at")
                 workers.append(
                     {
                         "work_unit_id": work_unit_id,
                         "phase": _public_phase(item.get("phase")),
                         "role": item.get("role"),
-                        "status": item.get("status"),
+                        "status": worker_status,
                         "started_at": started_at,
                         "finished_at": finished_at,
                         "elapsed_ms": (_elapsed_ms(started_at, finished_at) if isinstance(started_at, str) else None),
@@ -1278,6 +1434,81 @@ class AuditService:
                     }
                 )
         return workers
+
+    @staticmethod
+    def _phase_runs_from_workers(
+        scan_id: str,
+        workers: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Project legacy worker history when durable phase rows do not exist."""
+        groups: list[tuple[str, list[dict[str, Any]]]] = []
+        for worker in workers:
+            phase = str(worker.get("phase") or "unknown")
+            if groups and groups[-1][0] == phase:
+                groups[-1][1].append(worker)
+            else:
+                groups.append((phase, [worker]))
+
+        phases: list[dict[str, Any]] = []
+        phase_ordinals: dict[str, int] = {}
+        terminal_worker_statuses = {"completed", "failed", "cancelled"}
+        for phase, phase_workers in groups:
+            ordinal = phase_ordinals.get(phase, 0) + 1
+            phase_ordinals[phase] = ordinal
+            status_counts: dict[str, int] = {}
+            for worker in phase_workers:
+                worker_status = str(worker.get("status") or "pending")
+                status_counts[worker_status] = status_counts.get(worker_status, 0) + 1
+
+            if status_counts.get("running"):
+                status = "running"
+            elif status_counts.get("pending"):
+                status = "pending" if status_counts["pending"] == len(phase_workers) else "partial"
+            elif status_counts.get("completed") == len(phase_workers):
+                status = "completed"
+            elif status_counts.get("completed"):
+                status = "partial"
+            elif status_counts.get("failed"):
+                status = "failed"
+            else:
+                status = "cancelled"
+
+            started_values = [
+                str(worker["started_at"])
+                for worker in phase_workers
+                if isinstance(worker.get("started_at"), str) and worker["started_at"]
+            ]
+            finished_values = [
+                str(worker["finished_at"])
+                for worker in phase_workers
+                if isinstance(worker.get("finished_at"), str) and worker["finished_at"]
+            ]
+            started_at = min(started_values) if started_values else None
+            all_terminal = all(worker.get("status") in terminal_worker_statuses for worker in phase_workers)
+            finished_at = max(finished_values) if all_terminal and len(finished_values) == len(phase_workers) else None
+            duration_ms = (
+                _elapsed_ms(started_at, finished_at) if started_at and (finished_at or status == "running") else None
+            )
+            phases.append(
+                {
+                    "phase_run_id": f"projected_{scan_id}_{phase}_{ordinal}",
+                    "phase": phase,
+                    "ordinal": ordinal,
+                    "status": status,
+                    "created_at": started_at,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "duration_ms": duration_ms,
+                    "worker_count": len(phase_workers),
+                    "worker_status_counts": status_counts,
+                    "summary": {
+                        "projection_source": "worker_history",
+                        "launched_workers": len(phase_workers),
+                        "status_counts": status_counts,
+                    },
+                }
+            )
+        return phases
 
     def _artifact_index(
         self,
@@ -1310,6 +1541,8 @@ class AuditService:
                 continue
             digest = verified_artifacts.get(filename)
             if digest is None:
+                if kind in PROJECTED_ARTIFACT_KINDS:
+                    continue
                 items[kind] = {
                     "kind": kind,
                     "state": "invalid" if scan["status"] == "completed" else "pending",

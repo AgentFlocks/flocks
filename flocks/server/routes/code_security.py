@@ -268,6 +268,17 @@ async def cancel_scan(request: Request, scan_id: str):
         raise _map_service_error(exc, AuditServiceError) from exc
 
 
+@router.delete("/scans/{scan_id}", status_code=204)
+async def delete_scan(request: Request, scan_id: str):
+    user = require_admin(request)
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    try:
+        await service.delete_scan(scan_id, _caller(user))
+    except Exception as exc:
+        raise _map_service_error(exc, AuditServiceError) from exc
+    return Response(status_code=204)
+
+
 @router.get("/scans/{scan_id}/downloads/{artifact_name}")
 async def download_artifact(request: Request, scan_id: str, artifact_name: str):
     user = require_user(request)

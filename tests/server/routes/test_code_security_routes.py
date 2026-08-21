@@ -75,3 +75,36 @@ async def test_dynamic_scan_requires_explicit_confirmation(monkeypatch) -> None:
 
     assert raised.value.status_code == 400
     assert raised.value.detail["code"] == "dynamic_confirmation_required"
+
+
+@pytest.mark.asyncio
+async def test_delete_scan_requires_admin_and_returns_no_content(monkeypatch) -> None:
+    caller_values = {}
+
+    class FakeCaller:
+        def __init__(self, **values):
+            caller_values.update(values)
+
+    class FakeServiceError(Exception):
+        pass
+
+    class FakeService:
+        async def delete_scan(self, scan_id, _caller):
+            assert scan_id == "scan_demo"
+
+    monkeypatch.setattr(
+        code_security,
+        "require_admin",
+        lambda _request: SimpleNamespace(id="admin-1", role="admin"),
+    )
+    monkeypatch.setattr(
+        code_security,
+        "_service_types",
+        lambda: (FakeService(), FakeCaller, object, FakeServiceError),
+    )
+
+    response = await code_security.delete_scan(SimpleNamespace(), "scan_demo")
+
+    assert response.status_code == 204
+    assert caller_values["subject"] == "admin-1"
+    assert caller_values["is_admin"] is True

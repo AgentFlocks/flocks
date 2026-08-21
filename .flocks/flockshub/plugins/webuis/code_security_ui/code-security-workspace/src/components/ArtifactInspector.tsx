@@ -50,6 +50,9 @@ export function ArtifactInspector({
     [detail.artifacts],
   );
   const visible = wideLayout || open;
+  const activeState =
+    activeTab === "overview" ? "available" : states.get(activeTab) || "pending";
+  const blockedByIntegrity = activeState === "invalid";
   const activeContent =
     content?.scanId === detail.scan.scan_id &&
     content.artifact.kind === activeTab
@@ -105,6 +108,12 @@ export function ArtifactInspector({
       return;
     }
     if (!visible) return;
+    if (blockedByIntegrity) {
+      setContent(null);
+      setLoading(false);
+      setError("该产物未通过完整性校验，不能作为可信产物展示。");
+      return;
+    }
     const scanId = detail.scan.scan_id;
     let cancelled = false;
     setLoading(true);
@@ -133,7 +142,7 @@ export function ArtifactInspector({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, detail.scan.scan_id, refreshKey, visible]);
+  }, [activeTab, blockedByIntegrity, detail.scan.scan_id, refreshKey, visible]);
 
   return (
     <aside
@@ -153,7 +162,7 @@ export function ArtifactInspector({
           </h2>
         </div>
         <div className="cs-inspector__actions">
-          {activeTab !== "overview" && (
+          {activeTab !== "overview" && !blockedByIntegrity && (
             <button
               className="cs-inspector__refresh"
               type="button"
@@ -210,9 +219,13 @@ export function ArtifactInspector({
         ) : error && !activeContent ? (
           <div className="cs-error-state" role="alert">
             <Icon name="warning" />
-            <h3>产物暂不可用</h3>
+            <h3>{blockedByIntegrity ? "产物未通过校验" : "产物暂不可用"}</h3>
             <p>{error}</p>
-            <p>扫描继续运行时，可稍后点击“刷新”读取最新版本。</p>
+            <p>
+              {blockedByIntegrity
+                ? "结构化中间数据仍可从其他标签查看；最终报告需要重新发起审计后生成。"
+                : "扫描继续运行时，可稍后点击“刷新”读取最新版本。"}
+            </p>
           </div>
         ) : activeContent ? (
           <>
@@ -280,7 +293,7 @@ function Overview({ detail }: { detail: ScanDetail }) {
           <div className="cs-callout cs-callout--warning" role="alert">
             <strong>最终产物未通过完整性校验</strong>
             {(detail.scan.integrity_errors || []).map((message) => (
-              <span key={message}>{message}</span>
+              <span key={message}>{formatIntegrityError(message)}</span>
             ))}
           </div>
         )}
@@ -359,7 +372,7 @@ function ArtifactBody({
   if (kind === "candidate_index")
     return <CandidateList content={content} scanId={detail.scan.scan_id} />;
   if (kind === "report_markdown" && typeof content === "string") {
-    return <pre className="cs-report-preview">{content}</pre>;
+    return <MarkdownReport content={content} />;
   }
   if (content == null || (Array.isArray(content) && !content.length)) {
     return (
@@ -369,6 +382,19 @@ function ArtifactBody({
     );
   }
   return <StructuredValue value={content} />;
+}
+
+function MarkdownReport({ content }: { content: string }) {
+  const Markdown = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__
+    ?.Markdown;
+  if (!Markdown) {
+    return <pre className="cs-report-fallback">{content}</pre>;
+  }
+  return (
+    <article className="cs-report-markdown" aria-label="最终审计报告">
+      <Markdown content={content} />
+    </article>
+  );
 }
 
 function CandidateList({
@@ -577,6 +603,17 @@ function asRecord(value: unknown): Record<string, any> {
 
 function humanize(value: string): string {
   return value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ");
+}
+
+function formatIntegrityError(message: string): string {
+  const missingPrefix = "Required sealed artifacts are missing:";
+  if (message.startsWith(missingPrefix)) {
+    return `完整性清单未封装以下必需产物：${message.slice(missingPrefix.length).trim()}。`;
+  }
+  if (message === "Completed scan output is missing")
+    return "已完成扫描的产物目录不存在。";
+  if (message === "Scan manifest is missing") return "产物完整性清单不存在。";
+  return message;
 }
 
 function formatScalar(value: unknown): string {

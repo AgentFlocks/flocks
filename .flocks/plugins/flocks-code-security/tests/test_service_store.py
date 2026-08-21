@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from flocks_code_security.models import SnapshotRef
+from flocks_code_security import service as service_module
 from flocks_code_security import store as store_module
 from flocks_code_security.service import (
     AuditCaller,
@@ -16,6 +17,7 @@ from flocks_code_security.service import (
     AuditServiceError,
     StartScanRequest,
     _ProgressRecorder,
+    _effective_finished_at,
 )
 from flocks_code_security.store import ScanStore, process_identity
 
@@ -23,8 +25,8 @@ from flocks_code_security.store import ScanStore, process_identity
 def _store(tmp_path: Path) -> ScanStore:
     store = ScanStore(tmp_path / "audit.db")
     store.initialize()
-    snapshot_root = tmp_path / "snapshot"
-    snapshot_root.mkdir()
+    snapshot_root = tmp_path / "snapshots" / "snapshot_test"
+    snapshot_root.mkdir(parents=True)
     store.save_snapshot(
         SnapshotRef(
             snapshot_id="snapshot_test",
@@ -308,6 +310,91 @@ def test_terminal_scan_status_cannot_be_overwritten(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_scan_requires_admin_and_a_terminal_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-delete",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+        owner_subject="admin-1",
+    )
+    service = object.__new__(AuditService)
+    service.store = store
+    service.runtime = SimpleNamespace(
+        snapshots=SimpleNamespace(snapshots_root=tmp_path / "snapshots"),
+    )
+    service._active = {}
+
+    with pytest.raises(AuditServiceError) as forbidden:
+        await service.delete_scan(
+            scan_id,
+            AuditCaller(subject="user-1", source="webui"),
+        )
+    assert forbidden.value.code == "scan_delete_forbidden"
+    assert forbidden.value.status_code == 403
+
+    with pytest.raises(AuditServiceError) as running:
+        await service.delete_scan(
+            scan_id,
+            AuditCaller(subject="admin-1", source="webui", is_admin=True),
+        )
+    assert running.value.code == "scan_delete_conflict"
+    assert running.value.status_code == 409
+    assert store.get_scan(scan_id) is not None
+
+    output_root = tmp_path / "outputs"
+    output = output_root / "2026-08-21" / "code-security" / scan_id
+    output.mkdir(parents=True)
+    (output / "report.md").write_text("report", encoding="utf-8")
+    monkeypatch.setattr(service_module, "find_output_directory", lambda _scan_id: output)
+    monkeypatch.setattr(service_module, "outputs_root", lambda: output_root)
+    store.start_phase_run(scan_id, "snapshot")
+    store.append_scan_event(scan_id, "scan.status", "Completed", {})
+    store.mark_scan_terminal(scan_id, "completed")
+
+    await service.delete_scan(
+        scan_id,
+        AuditCaller(subject="admin-1", source="webui", is_admin=True),
+    )
+
+    assert store.get_scan(scan_id) is None
+    assert store.get_snapshot("snapshot_test") is None
+    assert store.list_phase_runs(scan_id) == []
+    assert store.list_scan_events(scan_id, after_seq=0)["items"] == []
+    assert not output.exists()
+    assert not (tmp_path / "snapshots" / "snapshot_test").exists()
+
+
+def test_legacy_terminal_scan_uses_and_persists_its_last_update_time(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-legacy",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    store.mark_scan_terminal(scan_id, "completed")
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE scans SET finished_at = NULL WHERE scan_id = ?",
+            (scan_id,),
+        )
+
+    legacy = store.get_scan(scan_id)
+    assert legacy is not None
+    assert _effective_finished_at(legacy) == legacy["updated_at"]
+
+    store.initialize()
+    repaired = store.get_scan(scan_id)
+    assert repaired is not None
+    assert repaired["finished_at"] == repaired["updated_at"]
+
+
+@pytest.mark.asyncio
 async def test_scan_start_requires_admin_and_an_authorized_workspace(
     tmp_path: Path,
 ) -> None:
@@ -369,6 +456,73 @@ async def test_completed_scan_with_invalid_integrity_has_invalid_result_state(
     )
 
     assert result["result_state"] == "invalid"
+
+
+@pytest.mark.asyncio
+async def test_invalid_bundle_still_exposes_projected_coverage() -> None:
+    service = object.__new__(AuditService)
+    service.store = SimpleNamespace(
+        scan_status=lambda _scan_id: {
+            "integrity_status": "invalid",
+            "integrity_artifacts": {},
+        },
+        report_data=lambda _scan_id: {"coverage": [{"payload": {"scope": "src"}}]},
+    )
+    service._require_visible_scan = lambda _scan_id, _caller: {
+        "scan_id": "scan_legacy",
+        "status": "completed",
+    }
+    service._artifact_file = lambda _scan_id, _kind: Path("/unsealed/coverage.json")
+    service._read_verified_artifact = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("unsealed file must not be read")
+    )
+
+    artifact = await service.get_artifact(
+        "scan_legacy",
+        "coverage",
+        AuditCaller(subject="admin-1", source="webui", is_admin=True),
+    )
+
+    assert artifact == {
+        "kind": "coverage",
+        "state": "partial",
+        "content": [{"payload": {"scope": "src"}}],
+    }
+
+
+def test_legacy_worker_history_projects_completed_phases() -> None:
+    phases = AuditService._phase_runs_from_workers(
+        "scan_legacy",
+        [
+            {
+                "work_unit_id": "unit_model",
+                "phase": "threat_modeling",
+                "status": "completed",
+                "started_at": "2026-08-21T00:00:00+00:00",
+                "finished_at": "2026-08-21T00:00:02+00:00",
+            },
+            {
+                "work_unit_id": "unit_baseline_1",
+                "phase": "baseline",
+                "status": "completed",
+                "started_at": "2026-08-21T00:00:02+00:00",
+                "finished_at": "2026-08-21T00:00:05+00:00",
+            },
+            {
+                "work_unit_id": "unit_baseline_2",
+                "phase": "baseline",
+                "status": "completed",
+                "started_at": "2026-08-21T00:00:02+00:00",
+                "finished_at": "2026-08-21T00:00:06+00:00",
+            },
+        ],
+    )
+
+    assert [phase["phase"] for phase in phases] == ["threat_modeling", "baseline"]
+    assert phases[0]["duration_ms"] == 2_000
+    assert phases[1]["duration_ms"] == 4_000
+    assert phases[1]["worker_count"] == 2
+    assert phases[1]["worker_status_counts"] == {"completed": 2}
 
 
 def test_verified_artifact_response_uses_the_bytes_that_were_hashed(tmp_path: Path) -> None:

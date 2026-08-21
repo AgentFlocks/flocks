@@ -644,7 +644,33 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert "result_status" not in manifest["scan"]
     assert (output_path / ".scan-manifest.final").exists() is False
 
+    legacy_manifest = json.loads(json.dumps(manifest))
+    legacy_manifest["scan"]["artifacts"] = [
+        artifact
+        for artifact in legacy_manifest["scan"]["artifacts"]
+        if artifact["path"]
+        not in reporting_module.LEGACY_UNSEALED_REPORT_ARTIFACTS
+    ]
+    manifest_path = output_path / "scan-manifest.json"
+    reporting_module.ReportWriter._write_json(manifest_path, legacy_manifest)
+    legacy_manifest_bytes = manifest_path.read_bytes()
+    legacy_status = runtime.store.scan_status(scan_id)
+    assert legacy_status["integrity_status"] == "invalid"
+    assert "Required sealed artifacts are missing" in legacy_status["integrity_errors"][0]
+
+    writer = reporting_module.ReportWriter(runtime.store)
+    assert writer.reseal_legacy_bundle(scan_id, output_path) is True
+    assert writer.reseal_legacy_bundle(scan_id, output_path) is False
+    assert runtime.store.scan_status(scan_id)["integrity_status"] == "valid"
+    repaired_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    repaired_paths = {
+        artifact["path"] for artifact in repaired_manifest["scan"]["artifacts"]
+    }
+    assert reporting_module.LEGACY_UNSEALED_REPORT_ARTIFACTS <= repaired_paths
+
+    reporting_module.ReportWriter._write_bytes(manifest_path, legacy_manifest_bytes)
     (output_path / "report.md").write_text("tampered\n", encoding="utf-8")
+    assert writer.reseal_legacy_bundle(scan_id, output_path) is False
     tampered_status = runtime.store.scan_status(scan_id)
     assert tampered_status["integrity_status"] == "invalid"
     assert "report.md" in tampered_status["integrity_errors"][0]

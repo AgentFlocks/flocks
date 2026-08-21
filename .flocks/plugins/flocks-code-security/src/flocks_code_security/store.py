@@ -395,6 +395,11 @@ class ScanStore:
                 "AND status IN ('completed', 'failed', 'cancelled')"
             )
             connection.execute(
+                "UPDATE scans SET finished_at = updated_at "
+                "WHERE finished_at IS NULL "
+                "AND status IN ('completed', 'failed', 'cancelled', 'interrupted')"
+            )
+            connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS scans_owner_idempotency "
                 "ON scans(owner_subject, idempotency_key) "
                 "WHERE owner_subject IS NOT NULL AND idempotency_key IS NOT NULL"
@@ -2034,8 +2039,7 @@ class ScanStore:
             raise ValueError("limit must be between 1 and 200")
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM scan_events WHERE scan_id = ? AND seq < ? "
-                "ORDER BY seq DESC LIMIT ?",
+                "SELECT * FROM scan_events WHERE scan_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
                 (scan_id, before_seq, limit + 1),
             ).fetchall()
             latest = int(
@@ -2151,6 +2155,41 @@ class ScanStore:
     def delete_scan(self, scan_id: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
+
+    def delete_terminal_scan(self, scan_id: str) -> dict[str, str | None]:
+        """Delete a terminal scan and its unreferenced snapshot in one transaction."""
+        with self._lock, self._connect() as connection:
+            scan = connection.execute(
+                "SELECT status, snapshot_id, output_dir FROM scans WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+            if scan is None:
+                raise ValueError("Scan not found")
+            if scan["status"] not in TERMINAL_SCAN_STATUSES:
+                raise ValueError("Only terminal scans may be deleted")
+
+            snapshot = connection.execute(
+                "SELECT root_path FROM snapshots WHERE snapshot_id = ?",
+                (scan["snapshot_id"],),
+            ).fetchone()
+            connection.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
+            references = connection.execute(
+                "SELECT COUNT(*) FROM scans WHERE snapshot_id = ?",
+                (scan["snapshot_id"],),
+            ).fetchone()[0]
+            snapshot_root = None
+            if not references:
+                connection.execute(
+                    "DELETE FROM snapshots WHERE snapshot_id = ?",
+                    (scan["snapshot_id"],),
+                )
+                snapshot_root = snapshot["root_path"] if snapshot is not None else None
+
+            return {
+                "snapshot_id": scan["snapshot_id"],
+                "snapshot_root": snapshot_root,
+                "output_dir": scan["output_dir"],
+            }
 
     def bind_session(
         self,

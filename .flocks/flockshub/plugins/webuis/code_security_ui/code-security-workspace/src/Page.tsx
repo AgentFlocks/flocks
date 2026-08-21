@@ -8,6 +8,7 @@ import {
 
 import {
   cancelScan,
+  deleteScan,
   getEarlierEvents,
   getEvents,
   getRecentEvents,
@@ -16,6 +17,7 @@ import {
   listScans,
 } from "./api";
 import { ArtifactInspector } from "./components/ArtifactInspector";
+import { DeleteScanDialog } from "./components/DeleteScanDialog";
 import { ElapsedTime } from "./components/ElapsedTime";
 import { NewAuditDrawer } from "./components/NewAuditDrawer";
 import { PhaseWorkspace } from "./components/PhaseWorkspace";
@@ -61,6 +63,9 @@ export default function Page() {
   const [loadingMoreScans, setLoadingMoreScans] = useState(false);
   const [hasOlderEvents, setHasOlderEvents] = useState(false);
   const [loadingOlderEvents, setLoadingOlderEvents] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<ScanSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const titleRef = useRef<HTMLHeadingElement>(null);
   const latestSeqRef = useRef(0);
   const selectedIdRef = useRef<string | null>(selectedId);
@@ -72,6 +77,8 @@ export default function Page() {
   const loadingMoreScansRef = useRef(false);
   const listRefreshTimerRef = useRef<number | null>(null);
   const queuedScanRefreshRef = useRef(new Set<string>());
+  const deletedScanIdsRef = useRef(new Set<string>());
+  const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
 
   const openDrawer = useCallback(() => {
     drawerOpenerRef.current =
@@ -111,6 +118,22 @@ export default function Page() {
     setScanPanelOpen(false);
     window.setTimeout(() => scanPanelOpenerRef.current?.focus(), 0);
   }, []);
+
+  const openDeleteDialog = useCallback(
+    (scan: ScanSummary, opener: HTMLButtonElement) => {
+      deleteOpenerRef.current = opener;
+      setDeleteError("");
+      setDeleteTarget(scan);
+    },
+    [],
+  );
+
+  const closeDeleteDialog = useCallback(() => {
+    if (deleting) return;
+    setDeleteTarget(null);
+    setDeleteError("");
+    window.setTimeout(() => deleteOpenerRef.current?.focus(), 0);
+  }, [deleting]);
 
   const applySelection = useCallback(
     (scanId: string, updateHistory: boolean) => {
@@ -162,7 +185,11 @@ export default function Page() {
       afterSeq ? getEvents(scanId, afterSeq) : getRecentEvents(scanId),
     ]);
     const eventItems: AuditEvent[] = page.items;
-    setScans((current) => mergeScans(current, [summaryFromDetail(nextDetail)]));
+    if (!deletedScanIdsRef.current.has(scanId)) {
+      setScans((current) =>
+        mergeScans(current, [summaryFromDetail(nextDetail)]),
+      );
+    }
     if (selectedIdRef.current !== scanId)
       return { detail: nextDetail, hasMore: false };
     setDetail(nextDetail);
@@ -218,9 +245,12 @@ export default function Page() {
 
   const reloadList = useCallback(async () => {
     const page = await listScans();
-    setScans((current) => mergeScans(current, page.items));
+    const visibleItems = page.items.filter(
+      (scan) => !deletedScanIdsRef.current.has(scan.scan_id),
+    );
+    setScans((current) => mergeScans(current, visibleItems));
     setScanCursor(page.nextCursor);
-    return page.items;
+    return visibleItems;
   }, []);
 
   const loadMoreScans = useCallback(async () => {
@@ -229,7 +259,10 @@ export default function Page() {
     setLoadingMoreScans(true);
     try {
       const page = await listScans(scanCursor);
-      setScans((current) => mergeScans(current, page.items));
+      const visibleItems = page.items.filter(
+        (scan) => !deletedScanIdsRef.current.has(scan.scan_id),
+      );
+      setScans((current) => mergeScans(current, visibleItems));
       setScanCursor(page.nextCursor);
     } catch (reason: any) {
       setError(
@@ -254,7 +287,8 @@ export default function Page() {
         (details) => {
           const summaries = details
             .filter((item): item is ScanDetail => item !== null)
-            .map(summaryFromDetail);
+            .map(summaryFromDetail)
+            .filter((scan) => !deletedScanIdsRef.current.has(scan.scan_id));
           if (summaries.length)
             setScans((current) => mergeScans(current, summaries));
         },
@@ -441,6 +475,63 @@ export default function Page() {
     );
   };
 
+  const handleDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    const target = deleteTarget;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deleteScan(target.scan_id);
+      deletedScanIdsRef.current.add(target.scan_id);
+      const remaining = scans.filter((scan) => scan.scan_id !== target.scan_id);
+      setScans(remaining);
+      setDeleteTarget(null);
+      setLiveMessage(`已删除 ${target.display_name} 的审计记录。`);
+
+      if (selectedIdRef.current === target.scan_id) {
+        refreshQueuedRef.current.delete(target.scan_id);
+        queuedScanRefreshRef.current.delete(target.scan_id);
+        const nextScan = remaining[0];
+        if (nextScan) {
+          replaceSelection(nextScan.scan_id);
+        } else {
+          selectedIdRef.current = null;
+          setSelectedId(null);
+          setDetail(null);
+          setEvents([]);
+          setLoading(false);
+          setInspectorOpen(false);
+          latestSeqRef.current = 0;
+          const params = new URLSearchParams(window.location.search);
+          params.delete("scan_id");
+          params.delete("artifact");
+          const query = params.toString();
+          window.history.replaceState(
+            {},
+            "",
+            `${window.location.pathname}${query ? `?${query}` : ""}`,
+          );
+        }
+      } else {
+        window.setTimeout(
+          () =>
+            document
+              .querySelector<HTMLElement>(".cs-scan-item__select")
+              ?.focus(),
+          0,
+        );
+      }
+    } catch (reason: any) {
+      setDeleteError(
+        reason?.response?.data?.detail?.message ||
+          reason?.message ||
+          "删除审计失败",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading && !detail) {
     return showSkeleton ? (
       <WorkspaceSkeleton />
@@ -472,6 +563,7 @@ export default function Page() {
         hasMore={Boolean(scanCursor)}
         loadingMore={loadingMoreScans}
         onLoadMore={loadMoreScans}
+        onDelete={openDeleteDialog}
       />
       {scanPanelOpen && (
         <button
@@ -568,6 +660,9 @@ export default function Page() {
                     startedAt={detail.scan.started_at}
                     finishedAt={detail.scan.finished_at}
                     initialMs={detail.scan.elapsed_ms}
+                    running={["preparing", "running", "cancelling"].includes(
+                      detail.scan.lifecycle_status,
+                    )}
                   />
                   <code title={detail.scan.scan_id}>
                     {shortId(detail.scan.scan_id, 18)}
@@ -580,7 +675,7 @@ export default function Page() {
               <div className="cs-header-actions">
                 {canCreate && (
                   <button
-                    className="cs-button cs-button--primary cs-header-new-audit"
+                    className="cs-button cs-button--secondary cs-header-new-audit"
                     type="button"
                     onClick={openDrawer}
                   >
@@ -601,7 +696,7 @@ export default function Page() {
                 {detail.scan.lifecycle_status === "completed" &&
                   detail.scan.integrity_status === "valid" && (
                     <a
-                      className="cs-button cs-button--primary"
+                      className="cs-button cs-button--secondary"
                       href={`/api/code-security/v1/scans/${detail.scan.scan_id}/downloads/report.md`}
                     >
                       <Icon name="download" />
@@ -669,6 +764,13 @@ export default function Page() {
         onClose={closeDrawer}
         onCreated={handleCreated}
       />
+      <DeleteScanDialog
+        scan={deleteTarget}
+        deleting={deleting}
+        error={deleteError}
+        onClose={closeDeleteDialog}
+        onConfirm={handleDelete}
+      />
     </main>
   );
 }
@@ -723,7 +825,7 @@ function EmptyWorkspace({
       </p>
       {canCreate ? (
         <button
-          className="cs-button cs-button--primary"
+          className="cs-button cs-button--secondary"
           type="button"
           onClick={onNewAudit}
         >

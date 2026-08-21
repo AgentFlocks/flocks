@@ -1,6 +1,8 @@
 import React, { type ComponentType, type ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import apiClient from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -31,6 +33,7 @@ export interface WebUIContractPageSdk {
   jsxs: typeof jsxs;
   api: WebUIContractPageApiClient;
   Card: typeof Card;
+  Markdown: typeof Markdown;
   useCurrentUser: typeof useCurrentUser;
 }
 
@@ -46,6 +49,14 @@ export function Card({ title, children }: { title: string; children: ReactNode }
       <h2 className="mb-2 text-lg font-semibold text-zinc-900">{title}</h2>
       <div className="text-sm text-zinc-700">{children}</div>
     </div>
+  );
+}
+
+export function Markdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      {content}
+    </ReactMarkdown>
   );
 }
 
@@ -108,6 +119,7 @@ export function installWebUIContractPageRuntime(pageId: string): void {
     jsxs,
     api,
     Card,
+    Markdown,
     useCurrentUser,
   };
 }

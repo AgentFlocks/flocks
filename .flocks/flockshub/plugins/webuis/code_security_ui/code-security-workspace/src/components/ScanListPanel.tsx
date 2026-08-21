@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Icon } from "../icons";
-import { phaseLabels, relativeTime } from "../labels";
+import { lifecycleLabels, phaseLabels, relativeTime } from "../labels";
 import type { ScanSummary } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -19,6 +19,7 @@ export function ScanListPanel({
   hasMore,
   loadingMore,
   onLoadMore,
+  onDelete,
 }: {
   scans: ScanSummary[];
   selectedId: string | null;
@@ -30,6 +31,7 @@ export function ScanListPanel({
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => Promise<void>;
+  onDelete: (scan: ScanSummary, opener: HTMLButtonElement) => void;
 }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
@@ -168,7 +170,7 @@ export function ScanListPanel({
       </div>
       {canCreate && (
         <button
-          className="cs-button cs-button--primary cs-button--full"
+          className="cs-button cs-button--secondary cs-button--full"
           type="button"
           onClick={onNewAudit}
         >
@@ -222,44 +224,83 @@ export function ScanListPanel({
             virtual ? { height: filtered.length * SCAN_ROW_HEIGHT } : undefined
           }
         >
-          {visible.map((scan, index) => (
-            <button
-              key={scan.scan_id}
-              type="button"
-              className={`cs-scan-item${selectedId === scan.scan_id ? " is-selected" : ""}${virtual ? " is-virtual" : ""}`}
-              style={
-                virtual
-                  ? {
-                      transform: `translateY(${(start + index) * SCAN_ROW_HEIGHT}px)`,
-                    }
-                  : undefined
-              }
-              onClick={() => {
-                onSelect(scan.scan_id);
-                if (overlayLayout) onClose();
-              }}
-              aria-current={selectedId === scan.scan_id ? "page" : undefined}
-            >
-              <span className="cs-scan-item__top">
-                <strong>{scan.display_name}</strong>
-                <StatusBadge status={scan.lifecycle_status} />
-              </span>
-              <span className="cs-scan-item__meta">
-                {scan.lifecycle_status === "completed"
-                  ? `${scan.candidate_count || 0} 个候选`
-                  : phaseLabels[scan.current_phase || ""] || "等待阶段信息"}
-                {scan.dynamic_enabled && (
-                  <span className="cs-mode-tag">动态</span>
-                )}
-              </span>
-              <span className="cs-scan-item__bottom">
-                <code title={scan.scan_id}>{scan.scan_id.slice(0, 16)}</code>
-                <time dateTime={scan.created_at}>
-                  {relativeTime(scan.created_at)}
-                </time>
-              </span>
-            </button>
-          ))}
+          {visible.map((scan, index) => {
+            const canDelete = [
+              "completed",
+              "failed",
+              "cancelled",
+              "interrupted",
+            ].includes(scan.lifecycle_status);
+            return (
+              <div
+                key={scan.scan_id}
+                className={`cs-scan-item${selectedId === scan.scan_id ? " is-selected" : ""}${virtual ? " is-virtual" : ""}`}
+                style={
+                  virtual
+                    ? {
+                        transform: `translateY(${(start + index) * SCAN_ROW_HEIGHT}px)`,
+                      }
+                    : undefined
+                }
+              >
+                <button
+                  type="button"
+                  className="cs-scan-item__select"
+                  onClick={() => {
+                    onSelect(scan.scan_id);
+                    if (overlayLayout) onClose();
+                  }}
+                  aria-label={`${scan.display_name} · ${lifecycleLabels[scan.lifecycle_status] || scan.lifecycle_status}`}
+                  aria-current={
+                    selectedId === scan.scan_id ? "page" : undefined
+                  }
+                >
+                  <span className="cs-scan-item__top">
+                    <strong>{scan.display_name}</strong>
+                  </span>
+                  <span className="cs-scan-item__meta">
+                    {scan.lifecycle_status === "completed"
+                      ? `${scan.candidate_count || 0} 个候选`
+                      : phaseLabels[scan.current_phase || ""] || "等待阶段信息"}
+                    {scan.dynamic_enabled && (
+                      <span className="cs-mode-tag">动态</span>
+                    )}
+                  </span>
+                  <span className="cs-scan-item__bottom">
+                    <code title={scan.scan_id}>
+                      {scan.scan_id.slice(0, 16)}
+                    </code>
+                    <time dateTime={scan.created_at}>
+                      {relativeTime(scan.created_at)}
+                    </time>
+                  </span>
+                </button>
+                <span className="cs-scan-item__actions">
+                  <StatusBadge status={scan.lifecycle_status} />
+                  {canCreate && (
+                    <button
+                      type="button"
+                      className="cs-scan-item__delete"
+                      disabled={!canDelete}
+                      aria-label={
+                        canDelete
+                          ? `删除审计 ${scan.display_name}`
+                          : `审计 ${scan.display_name} 仍在运行，需先取消后才能删除`
+                      }
+                      title={
+                        canDelete
+                          ? "删除审计"
+                          : "请先取消审计，待其停止后再删除"
+                      }
+                      onClick={(event) => onDelete(scan, event.currentTarget)}
+                    >
+                      <Icon name="trash" />
+                    </button>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
         {!filtered.length && (
           <p className="cs-inline-empty">没有匹配的审计记录</p>

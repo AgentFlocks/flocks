@@ -1,15 +1,18 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import Page from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/Page";
 import { ArtifactInspector } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/ArtifactInspector";
+import { ElapsedTime } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/ElapsedTime";
 import { PhaseWorkspace } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/PhaseWorkspace";
 import type { PhaseRun } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/types";
+import { Markdown } from "../pages/WebUIContractPageHost/runtime";
 
 const apiGet = vi.fn();
 const apiPost = vi.fn();
+const apiDelete = vi.fn();
 
 const scanDetail = {
   schemaVersion: "flocks.code-security.tool.v1",
@@ -120,8 +123,9 @@ describe("code security workspace contract page", () => {
   beforeEach(() => {
     (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__ = {
       React,
+      Markdown,
       useCurrentUser: () => ({ id: "admin-1", role: "admin" }),
-      api: { get: apiGet, post: apiPost },
+      api: { get: apiGet, post: apiPost, delete: apiDelete },
     };
     (globalThis as any).EventSource = undefined;
     window.matchMedia = vi.fn().mockImplementation((media: string) => ({
@@ -132,6 +136,7 @@ describe("code security workspace contract page", () => {
     }));
     window.history.replaceState({}, "", "/?scan_id=scan_demo");
     window.sessionStorage.clear();
+    apiDelete.mockResolvedValue({ data: null });
     apiGet.mockImplementation((path: string) => {
       if (path === "/api/project/") {
         return Promise.resolve({
@@ -256,6 +261,7 @@ describe("code security workspace contract page", () => {
     delete (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__;
     apiGet.mockReset();
     apiPost.mockReset();
+    apiDelete.mockReset();
   });
 
   it("renders lifecycle, coverage, skipped dynamic phase, and durable events separately", async () => {
@@ -285,6 +291,99 @@ describe("code security workspace contract page", () => {
     expect(
       document.head.querySelector("style[data-flocks-code-security-workspace]"),
     ).toBeNull();
+  });
+
+  it("uses flat white actions for creating an audit and downloading its report", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans/scan_demo") {
+        return Promise.resolve({
+          data: {
+            ...scanDetail,
+            scan: {
+              ...scanDetail.scan,
+              lifecycle_status: "completed",
+              integrity_status: "valid",
+              finished_at: "2026-08-21T06:30:00Z",
+              can_cancel: false,
+            },
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+
+    render(<Page />);
+
+    const download = await screen.findByRole("link", { name: "下载报告" });
+    expect(download).toHaveClass("cs-button--secondary");
+    expect(download).not.toHaveClass("cs-button--primary");
+    for (const button of screen.getAllByRole("button", { name: "新建审计" })) {
+      expect(button).toHaveClass("cs-button--secondary");
+      expect(button).not.toHaveClass("cs-button--primary");
+    }
+  });
+
+  it("confirms and deletes a terminal audit from the history list", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                scan_id: "scan_demo",
+                display_name: "flocks",
+                lifecycle_status: "running",
+                current_phase: "verification",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T06:20:00Z",
+                candidate_count: 1,
+              },
+              {
+                scan_id: "scan_older",
+                display_name: "legacy-service",
+                lifecycle_status: "completed",
+                current_phase: "finalization",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T05:20:00Z",
+                candidate_count: 2,
+              },
+            ],
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    const deleteButton = screen.getByRole("button", {
+      name: "删除审计 legacy-service",
+    });
+    await userEvent.click(deleteButton);
+
+    expect(
+      screen.getByRole("alertdialog", { name: "删除这条审计记录？" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "取消" })).toHaveFocus(),
+    );
+    expect(apiDelete).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "永久删除" }));
+
+    await waitFor(() =>
+      expect(apiDelete).toHaveBeenCalledWith(
+        "/api/code-security/v1/scans/scan_older",
+      ),
+    );
+    expect(
+      screen.queryByRole("button", { name: /legacy-service.*已完成/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("已删除 legacy-service 的审计记录。"),
+    ).toBeInTheDocument();
   });
 
   it("keeps stylesheet content out of the loading skeleton", async () => {
@@ -800,5 +899,121 @@ describe("code security workspace contract page", () => {
         .getAllByRole("tab")
         .map((tab) => tab.querySelector("strong")?.textContent),
     ).toEqual(["准备源码快照", "独立验证", "定向复扫", "独立验证"]);
+  });
+
+  it("shows legacy workers even when phase projection is absent", () => {
+    render(
+      <PhaseWorkspace
+        phases={[]}
+        events={[]}
+        workers={scanDetail.workers as any}
+        currentPhase={null}
+      />,
+    );
+
+    expect(screen.getByText("独立验证员")).toBeInTheDocument();
+    expect(screen.getByText("1 个")).toBeInTheDocument();
+  });
+
+  it("keeps a terminal elapsed time fixed when a legacy finish time is absent", () => {
+    vi.useFakeTimers();
+    render(
+      <ElapsedTime
+        startedAt="2026-08-21T06:20:00Z"
+        finishedAt={null}
+        initialMs={120_000}
+        running={false}
+      />,
+    );
+
+    expect(screen.getByText("总耗时 2分0秒")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.getByText("总耗时 2分0秒")).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it("does not request an artifact already marked as integrity-invalid", async () => {
+    render(
+      <ArtifactInspector
+        detail={
+          {
+            ...scanDetail,
+            artifacts: [
+              ...scanDetail.artifacts,
+              { kind: "report_markdown", state: "invalid" },
+            ],
+          } as any
+        }
+        activeTab="report_markdown"
+        onTabChange={() => undefined}
+        open={false}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("产物未通过校验")).toBeInTheDocument();
+    expect(apiGet).not.toHaveBeenCalledWith(
+      "/api/code-security/v1/scans/scan_demo/artifacts/report_markdown",
+    );
+  });
+
+  it("renders the final report as GitHub-flavored Markdown", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path.endsWith("/artifacts/report_markdown")) {
+        return Promise.resolve({
+          data: {
+            kind: "report_markdown",
+            state: "sealed",
+            content: [
+              "# Code Security Audit Report",
+              "",
+              "- Findings: **5**",
+              "- Status: `completed`",
+              "",
+              "## Scope",
+              "",
+              "| Path | Result |",
+              "| --- | --- |",
+              "| `src/app.py` | Reviewed |",
+              "",
+              "<script>unsafe-marker</script>",
+            ].join("\n"),
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+
+    const { container } = render(
+      <ArtifactInspector
+        detail={
+          {
+            ...scanDetail,
+            artifacts: [
+              ...scanDetail.artifacts,
+              { kind: "report_markdown", state: "sealed" },
+            ],
+          } as any
+        }
+        activeTab="report_markdown"
+        onTabChange={() => undefined}
+        open={false}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Code Security Audit Report",
+        level: 1,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("5").tagName).toBe("STRONG");
+    expect(screen.getByText("completed").tagName).toBe("CODE");
+    expect(screen.queryByText("unsafe-marker")).not.toBeInTheDocument();
+    expect(container.querySelector(".cs-report-markdown")).toBeInTheDocument();
+    expect(container.querySelector(".cs-report-fallback")).toBeNull();
   });
 });
