@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useInsertionEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   cancelScan,
@@ -26,6 +32,7 @@ import type {
 import styles from "./styles";
 
 export default function Page() {
+  useWorkspaceStyles();
   const user = useSdkUser();
   const canCreate = user?.role === "admin";
   const initialParams = new URLSearchParams(window.location.search);
@@ -435,23 +442,17 @@ export default function Page() {
   };
 
   if (loading && !detail) {
-    return (
-      <>
-        <style>{styles}</style>
-        {showSkeleton ? (
-          <WorkspaceSkeleton />
-        ) : (
-          <main className="code-security-workspace" aria-busy="true">
-            <span className="cs-visually-hidden">正在加载代码审计工作区</span>
-          </main>
-        )}
-      </>
+    return showSkeleton ? (
+      <WorkspaceSkeleton />
+    ) : (
+      <main className="code-security-workspace" aria-busy="true">
+        <span className="cs-visually-hidden">正在加载代码审计工作区</span>
+      </main>
     );
   }
 
   return (
     <main className="code-security-workspace">
-      <style>{styles}</style>
       <div
         className="cs-live-region"
         role="status"
@@ -742,7 +743,6 @@ function WorkspaceSkeleton() {
       className="code-security-workspace cs-workspace-skeleton"
       aria-label="正在加载代码审计工作区"
     >
-      <style>{styles}</style>
       <aside>
         <span />
         <span />
@@ -762,4 +762,14 @@ function WorkspaceSkeleton() {
       </aside>
     </main>
   );
+}
+
+function useWorkspaceStyles() {
+  useInsertionEffect(() => {
+    const element = document.createElement("style");
+    element.dataset.flocksCodeSecurityWorkspace = "true";
+    element.textContent = styles;
+    document.head.append(element);
+    return () => element.remove();
+  }, []);
 }

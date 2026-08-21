@@ -259,11 +259,16 @@ describe("code security workspace contract page", () => {
   });
 
   it("renders lifecycle, coverage, skipped dynamic phase, and durable events separately", async () => {
-    render(<Page />);
+    const { container, unmount } = render(<Page />);
 
     expect(
       await screen.findByRole("heading", { name: "flocks" }),
     ).toBeInTheDocument();
+    expect(container.querySelector("style")).toBeNull();
+    const workspaceStyle = document.head.querySelector(
+      "style[data-flocks-code-security-workspace]",
+    );
+    expect(workspaceStyle?.textContent).toContain(".code-security-workspace");
     expect(screen.getAllByText("运行中").length).toBeGreaterThan(0);
     expect(screen.getAllByText("已跳过").length).toBeGreaterThan(0);
     expect(screen.getByText("独立验证员")).toBeInTheDocument();
@@ -276,6 +281,33 @@ describe("code security workspace contract page", () => {
       "/api/code-security/v1/scans/scan_demo/events",
       { params: { recent: true, limit: 200 } },
     );
+    unmount();
+    expect(
+      document.head.querySelector("style[data-flocks-code-security-workspace]"),
+    ).toBeNull();
+  });
+
+  it("keeps stylesheet content out of the loading skeleton", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans/scan_demo") {
+        return new Promise(() => undefined);
+      }
+      return baseGet(path, config);
+    });
+
+    const { container, unmount } = render(<Page />);
+
+    expect(await screen.findByLabelText("正在加载代码审计工作区")).toHaveClass(
+      "cs-workspace-skeleton",
+    );
+    expect(
+      container.querySelector(".code-security-workspace > style"),
+    ).toBeNull();
+    expect(
+      document.head.querySelector("style[data-flocks-code-security-workspace]"),
+    ).toBeInTheDocument();
+    unmount();
   });
 
   it("keeps a valid deep-linked scan even when it is not in the first history page", async () => {

@@ -14640,7 +14640,7 @@
       "name": "Code Security Workspace",
       "description": "Trusted code-security audit workspace with durable phases, events, evidence, and artifacts.",
       "descriptionCn": "可信代码审计工作区，展示持久阶段、事件、证据和审计产物。",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "category": "devtools",
       "tags": [
         "api-security",
