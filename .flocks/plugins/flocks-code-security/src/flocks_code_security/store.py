@@ -205,11 +205,22 @@ class ScanStore:
                     accepted_candidate_ids_json TEXT NOT NULL,
                     rejected_candidates_json TEXT NOT NULL,
                     rescan_json TEXT,
+                    dynamic_assessments_json TEXT,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (scan_id, adjudication_round)
                 );
                 """
             )
+            adjudication_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(adjudications)"
+                ).fetchall()
+            }
+            if "dynamic_assessments_json" not in adjudication_columns:
+                connection.execute(
+                    "ALTER TABLE adjudications ADD COLUMN dynamic_assessments_json TEXT"
+                )
             snapshot_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(snapshots)").fetchall()
@@ -867,6 +878,10 @@ class ScanStore:
         )
         raw_rescan = item.pop("rescan_json")
         item["rescan"] = json.loads(raw_rescan) if raw_rescan else None
+        raw_assessments = item.pop("dynamic_assessments_json")
+        item["dynamic_assessments"] = (
+            json.loads(raw_assessments) if raw_assessments else None
+        )
         return item
 
     def get_latest_adjudication(self, scan_id: str) -> dict[str, Any] | None:
@@ -1129,7 +1144,11 @@ class ScanStore:
                             f"Targeted-rescan path is outside the snapshot: {path}"
                         )
             connection.execute(
-                "INSERT INTO adjudications VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO adjudications ("
+                "scan_id, adjudication_round, action, "
+                "accepted_candidate_ids_json, rejected_candidates_json, "
+                "rescan_json, dynamic_assessments_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     adjudication_round,
@@ -1141,6 +1160,7 @@ class ScanStore:
                         if normalized_rescan is not None
                         else None
                     ),
+                    None,
                     _now(),
                 ),
             )

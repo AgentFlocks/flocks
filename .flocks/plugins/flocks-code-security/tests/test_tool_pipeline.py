@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -192,6 +193,47 @@ def test_legacy_open_questions_remain_coverage_blocking() -> None:
             "related_paths": [],
         }
     ]
+
+
+def test_adjudication_schema_migrates_to_latest_eight_columns(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "plugin-data"
+    root.mkdir()
+    database = root / "code-security.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE adjudications (
+                scan_id TEXT NOT NULL,
+                adjudication_round INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                accepted_candidate_ids_json TEXT NOT NULL,
+                rejected_candidates_json TEXT NOT NULL,
+                rescan_json TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (scan_id, adjudication_round)
+            )
+            """
+        )
+
+    runtime = build_runtime(root)
+
+    with runtime.store._connect() as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(adjudications)")
+        }
+    assert columns == {
+        "scan_id",
+        "adjudication_round",
+        "action",
+        "accepted_candidate_ids_json",
+        "rejected_candidates_json",
+        "rescan_json",
+        "dynamic_assessments_json",
+        "created_at",
+    }
 
 
 class _FakeBackgroundManager:
@@ -537,7 +579,8 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     )
     assert verdict.success is True
     runtime.store.update_work_unit_status(verifier_unit, "completed")
-    _submit_final_adjudication(runtime, scan_id)
+    adjudication = _submit_final_adjudication(runtime, scan_id)
+    assert adjudication["dynamic_assessments"] is None
 
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
