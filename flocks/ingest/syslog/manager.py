@@ -622,10 +622,7 @@ class SyslogManager:
                 persist=False,
             )
             exec_id = exec_data["id"]
-            step_recorder = ExecutionStepRecorder(
-                exec_id=exec_id,
-                capture_steps=False,
-            )
+            step_recorder = ExecutionStepRecorder(exec_id=exec_id)
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             tool_context = None

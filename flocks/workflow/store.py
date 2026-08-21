@@ -158,6 +158,8 @@ class WorkflowStore:
 
     @classmethod
     async def _completion_db(cls) -> aiosqlite.Connection:
+        if cls._initialized and cls._init_pid is not None and cls._init_pid != os.getpid():
+            await cls.init()
         if not cls._completion_conn or not cls._initialized:
             await cls.init()
         return cls._completion_conn  # type: ignore[return-value]
@@ -439,6 +441,26 @@ class WorkflowStore:
         return exec_ids
 
     @classmethod
+    def _step_rows(
+        cls,
+        exec_id: str,
+        steps: Iterable[Tuple[int, Dict[str, Any]]],
+    ) -> List[Tuple[Any, ...]]:
+        return [
+            (
+                exec_id,
+                int(step_index),
+                step_payload.get("node_id"),
+                step_payload.get("node_type") or step_payload.get("type"),
+                cls._json_dumps(step_payload.get("inputs") or {}),
+                cls._json_dumps(step_payload.get("outputs") or {}),
+                step_payload.get("error"),
+                cls._json_dumps(step_payload),
+            )
+            for step_index, step_payload in steps
+        ]
+
+    @classmethod
     async def record_step(
         cls,
         exec_id: str,
@@ -453,19 +475,7 @@ class WorkflowStore:
         exec_id: str,
         steps: Iterable[Tuple[int, Dict[str, Any]]],
     ) -> None:
-        rows = [
-            (
-                exec_id,
-                int(step_index),
-                step_payload.get("node_id"),
-                step_payload.get("node_type") or step_payload.get("type"),
-                cls._json_dumps(step_payload.get("inputs") or {}),
-                cls._json_dumps(step_payload.get("outputs") or {}),
-                step_payload.get("error"),
-                cls._json_dumps(step_payload),
-            )
-            for step_index, step_payload in steps
-        ]
+        rows = cls._step_rows(exec_id, steps)
         if not rows:
             return
         db = await cls._db()
@@ -484,12 +494,8 @@ class WorkflowStore:
         cls,
         exec_data: Dict[str, Any],
         steps: Iterable[Tuple[int, Dict[str, Any]]],
-        *,
-        success: bool,
-        duration: float,
-        history_limit: Optional[int] = None,
-    ) -> List[str]:
-        """Persist one completed execution, stats, and retention in one transaction."""
+    ) -> None:
+        """Atomically persist one final execution summary and its step batch."""
         db = await cls._completion_db()
         payload = dict(exec_data)
         exec_id = str(payload.get("id") or "")
@@ -497,22 +503,7 @@ class WorkflowStore:
         if not exec_id or not workflow_id:
             raise ValueError("workflow execution requires id and workflowId")
 
-        step_rows = [
-            (
-                exec_id,
-                int(step_index),
-                step_payload.get("node_id"),
-                step_payload.get("node_type") or step_payload.get("type"),
-                cls._json_dumps(step_payload.get("inputs") or {}),
-                cls._json_dumps(step_payload.get("outputs") or {}),
-                step_payload.get("error"),
-                cls._json_dumps(step_payload),
-            )
-            for step_index, step_payload in steps
-        ]
-        runtime = float(duration)
-        success_delta = 1 if success else 0
-        error_delta = 0 if success else 1
+        step_rows = cls._step_rows(exec_id, steps)
         lock = cls._completion_lock
         if lock is None:
             lock = asyncio.Lock()
@@ -559,57 +550,19 @@ class WorkflowStore:
                         cls._json_dumps(payload),
                     ),
                 )
-                await db.execute(
-                    """
-                    INSERT INTO workflow_stats (
-                        workflow_id, call_count, success_count, error_count,
-                        total_runtime, avg_runtime, thumbs_up, thumbs_down, updated_at
-                    )
-                    VALUES (?, 1, ?, ?, ?, ?, 0, 0, ?)
-                    ON CONFLICT(workflow_id) DO UPDATE SET
-                        call_count = workflow_stats.call_count + 1,
-                        success_count = workflow_stats.success_count + excluded.success_count,
-                        error_count = workflow_stats.error_count + excluded.error_count,
-                        total_runtime = workflow_stats.total_runtime + excluded.total_runtime,
-                        avg_runtime = (
-                            workflow_stats.total_runtime + excluded.total_runtime
-                        ) / (workflow_stats.call_count + 1),
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        workflow_id,
-                        success_delta,
-                        error_delta,
-                        runtime,
-                        runtime,
-                        cls._now_ms(),
-                    ),
-                )
-                trimmed_exec_ids: List[str] = []
-                if history_limit is not None:
-                    async with db.execute(
-                        """
-                        SELECT id FROM workflow_executions
-                        WHERE workflow_id = ?
-                        ORDER BY started_at DESC, rowid DESC
-                        LIMIT -1 OFFSET ?
-                        """,
-                        (workflow_id, max(int(history_limit), 0)),
-                    ) as cur:
-                        trimmed_exec_ids = [str(row["id"]) for row in await cur.fetchall()]
-                    for trimmed_exec_id in trimmed_exec_ids:
-                        await db.execute(
-                            "DELETE FROM workflow_execution_steps WHERE exec_id = ?",
-                            (trimmed_exec_id,),
-                        )
-                        await db.execute(
-                            "DELETE FROM workflow_executions WHERE id = ?",
-                            (trimmed_exec_id,),
-                        )
                 await db.commit()
-                return trimmed_exec_ids
-            except Exception:
-                await db.rollback()
+            except BaseException:
+                try:
+                    await db.rollback()
+                except BaseException as rollback_exc:
+                    log.error(
+                        "workflow.store.completion_rollback_failed",
+                        {
+                            "workflow_id": workflow_id,
+                            "exec_id": exec_id,
+                            "error": str(rollback_exc),
+                        },
+                    )
                 raise
 
     @classmethod

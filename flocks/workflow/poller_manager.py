@@ -454,10 +454,7 @@ class WorkflowPollerManager:
             persist=False,
         )
         exec_id = str(exec_data["id"])
-        step_recorder = ExecutionStepRecorder(
-            exec_id=exec_id,
-            capture_steps=False,
-        )
+        step_recorder = ExecutionStepRecorder(exec_id=exec_id)
         current = self._status.get(workflow_id) or self._base_status(workflow_id)
         current["lastRunAt"] = started_at_ms
         current["activeRuns"] = self._cleanup_done_runs(workflow_id)

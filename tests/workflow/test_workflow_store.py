@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -118,7 +119,7 @@ async def test_workflow_store_increment_stats_is_atomic_for_concurrent_updates()
 
 
 @pytest.mark.asyncio
-async def test_complete_execution_writes_steps_summary_and_stats_with_one_commit(
+async def test_complete_execution_writes_steps_and_summary_with_one_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
@@ -147,8 +148,6 @@ async def test_complete_execution_writes_steps_summary_and_stats_with_one_commit
             (1, {"node_id": "n1", "outputs": {"ok": 1}}),
             (2, {"node_id": "n2", "outputs": {"ok": 2}}),
         ],
-        success=True,
-        duration=0.25,
     )
 
     assert commit_count == 1
@@ -158,11 +157,7 @@ async def test_complete_execution_writes_steps_summary_and_stats_with_one_commit
     steps, total = await WorkflowStore.list_steps("exec-complete")
     assert total == 2
     assert [step["node_id"] for step in steps] == ["n1", "n2"]
-    stats = await WorkflowStore.get_stats("wf-complete")
-    assert stats is not None
-    assert stats["callCount"] == 1
-    assert stats["successCount"] == 1
-    assert stats["totalRuntime"] == pytest.approx(0.25)
+    assert await WorkflowStore.get_stats("wf-complete") is None
 
 
 @pytest.mark.asyncio
@@ -199,8 +194,6 @@ async def test_complete_execution_reduces_28_step_writes_to_four_commits(
                     "stepCount": 7,
                 },
                 steps,
-                success=True,
-                duration=0.01,
             )
             for index in range(4)
         )
@@ -216,10 +209,7 @@ async def test_complete_execution_reduces_28_step_writes_to_four_commits(
         assert [step["node_id"] for step in persisted_steps] == [
             f"node-{step_index}" for step_index in range(1, 8)
         ]
-    stats = await WorkflowStore.get_stats("wf-trigger")
-    assert stats is not None
-    assert stats["callCount"] == 4
-    assert stats["successCount"] == 4
+    assert await WorkflowStore.get_stats("wf-trigger") is None
 
 
 @pytest.mark.asyncio
@@ -248,8 +238,6 @@ async def test_complete_execution_rolls_back_partial_transaction(
                 "stepCount": 1,
             },
             [(1, {"node_id": "node-1", "outputs": {"ok": True}})],
-            success=True,
-            duration=0.01,
         )
 
     monkeypatch.setattr(db, "commit", original_commit)
@@ -261,48 +249,59 @@ async def test_complete_execution_rolls_back_partial_transaction(
 
 
 @pytest.mark.asyncio
-async def test_complete_execution_applies_retention_before_single_commit(
+async def test_complete_execution_rolls_back_cancelled_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
     db = await WorkflowStore.raw_completion_db()
-    commit_count = 0
     original_commit = db.commit
 
-    async def counted_commit() -> None:
-        nonlocal commit_count
-        commit_count += 1
-        await original_commit()
+    async def cancel_commit() -> None:
+        raise asyncio.CancelledError
 
-    monkeypatch.setattr(db, "commit", counted_commit)
-    trimmed: list[str] = []
-    for index in range(4):
-        trimmed = await WorkflowStore.complete_execution(
+    monkeypatch.setattr(db, "commit", cancel_commit)
+
+    with pytest.raises(asyncio.CancelledError):
+        await WorkflowStore.complete_execution(
             {
-                "id": f"exec-retain-{index}",
-                "workflowId": "wf-retain",
+                "id": "exec-cancelled-commit",
+                "workflowId": "wf-cancelled-commit",
                 "status": "success",
-                "startedAt": index + 1,
-                "finishedAt": index + 2,
-                "duration": 0.01,
+                "startedAt": 1,
+                "finishedAt": 2,
                 "executionLog": [],
                 "stepCount": 1,
             },
-            [(1, {"node_id": f"node-{index}", "outputs": {"ok": True}})],
-            success=True,
-            duration=0.01,
-            history_limit=3,
+            [(1, {"node_id": "node-1", "outputs": {"ok": True}})],
         )
 
-    assert commit_count == 4
-    assert trimmed == ["exec-retain-0"]
-    assert await WorkflowStore.get_execution("exec-retain-0") is None
-    old_steps, old_total = await WorkflowStore.list_steps("exec-retain-0")
-    assert old_steps == []
-    assert old_total == 0
-    executions = await WorkflowStore.list_executions("wf-retain", limit=10)
-    assert [execution["id"] for execution in executions] == [
-        "exec-retain-3",
-        "exec-retain-2",
-        "exec-retain-1",
-    ]
+    monkeypatch.setattr(db, "commit", original_commit)
+    await WorkflowStore.complete_execution(
+        {
+            "id": "exec-after-cancel",
+            "workflowId": "wf-cancelled-commit",
+            "status": "success",
+            "startedAt": 3,
+            "finishedAt": 4,
+            "executionLog": [],
+            "stepCount": 1,
+        },
+        [(1, {"node_id": "node-2", "outputs": {"ok": True}})],
+    )
+
+    assert await WorkflowStore.get_execution("exec-cancelled-commit") is None
+    assert await WorkflowStore.get_execution("exec-after-cancel") is not None
+
+
+@pytest.mark.asyncio
+async def test_completion_connection_reinitializes_after_pid_change() -> None:
+    await WorkflowStore.init()
+    original_connection = await WorkflowStore.raw_completion_db()
+    original_lock = WorkflowStore._completion_lock
+    WorkflowStore._init_pid = -1
+
+    refreshed_connection = await WorkflowStore.raw_completion_db()
+
+    assert refreshed_connection is not original_connection
+    assert WorkflowStore._completion_lock is not original_lock
+    assert WorkflowStore._init_pid == os.getpid()

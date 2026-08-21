@@ -616,7 +616,15 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     }
     assert captured_exec_data["executionLog"] == []
     assert captured_exec_data["stepCount"] == 2
-    assert captured_steps == []
+    assert [step_index for step_index, _ in captured_steps] == [1, 2]
+    assert [step["node_id"] for _, step in captured_steps] == [
+        "receive_alert",
+        "dedup_and_write",
+    ]
+    assert captured_steps[0][1]["inputs"]["kafka_message"]["_type"] == "dict"
+    assert captured_steps[0][1]["outputs"] == {"_raw_alerts_count": 1}
+    assert captured_steps[1][1]["inputs"] == {"_filtered_alerts_count": 1}
+    assert captured_steps[1][1]["outputs"] == {"_enriched_alerts_count": 1}
     assert len(json.dumps(captured_exec_data, ensure_ascii=False)) < 10_000
 
 

@@ -18,6 +18,7 @@ stripping legitimately small metadata lists.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, patch
 
@@ -27,8 +28,8 @@ from flocks.workflow.execution_store import (
     DEFAULT_GENERIC_SEQUENCE_THRESHOLD,
     DEFAULT_LARGE_LIST_KEYS,
     DEFAULT_MAX_INLINE_COLLECTION_BYTES,
+    ExecutionProgressWriter,
     ExecutionStepRecorder,
-    _trim_execution_history,
     compact_history_for_storage,
     compact_execution_summary,
     compact_outputs_for_storage,
@@ -372,8 +373,129 @@ async def test_four_trigger_workers_collect_steps_without_storage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_progress_writer_submits_without_waiting_and_coalesces_updates() -> None:
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    writes: List[Dict[str, Any]] = []
+    active_writes = 0
+    max_active_writes = 0
+
+    async def blocked_upsert(summary: Dict[str, Any]) -> None:
+        nonlocal active_writes, max_active_writes
+        active_writes += 1
+        max_active_writes = max(max_active_writes, active_writes)
+        writes.append(dict(summary))
+        try:
+            if len(writes) == 1:
+                write_started.set()
+                await release_write.wait()
+        finally:
+            active_writes -= 1
+
+    writer = ExecutionProgressWriter(
+        {
+            "id": "exec-progress",
+            "workflowId": "wf-progress",
+            "status": "running",
+            "executionLog": [{"node_id": "ignored"}],
+        }
+    )
+
+    with patch.object(WorkflowStore, "upsert_execution", side_effect=blocked_upsert):
+        writer.submit({"currentNodeId": "node-1", "currentStepIndex": 1})
+        await write_started.wait()
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                writer.submit,
+                {"currentNodeId": "node-2", "currentStepIndex": 2},
+            ),
+            timeout=0.1,
+        )
+        await asyncio.to_thread(
+            writer.submit,
+            {"currentNodeId": "node-3", "currentStepIndex": 3},
+        )
+        release_write.set()
+        await writer.close_and_drain()
+
+    assert max_active_writes == 1
+    assert len(writes) == 2
+    assert writes[0]["currentNodeId"] == "node-1"
+    assert writes[-1]["currentNodeId"] == "node-3"
+    assert writes[-1]["currentStepIndex"] == 3
+    assert writes[-1]["executionLog"] == []
+
+
+@pytest.mark.asyncio
+async def test_progress_writer_awaited_update_is_ordered_and_close_rejects_late_updates() -> None:
+    writes: List[Dict[str, Any]] = []
+
+    async def capture_upsert(summary: Dict[str, Any]) -> None:
+        writes.append(dict(summary))
+
+    writer = ExecutionProgressWriter(
+        {
+            "id": "exec-cancelling",
+            "workflowId": "wf-cancelling",
+            "status": "running",
+            "currentPhase": "queued",
+            "executionLog": [],
+        }
+    )
+
+    with patch.object(WorkflowStore, "upsert_execution", side_effect=capture_upsert):
+        await asyncio.to_thread(
+            writer.submit,
+            {"currentPhase": "running", "currentNodeId": "node-1"},
+        )
+        await writer.update({"currentPhase": "cancelling"})
+        await writer.close_and_drain()
+        writer.submit({"currentPhase": "running", "currentNodeId": "late-node"})
+        await asyncio.sleep(0)
+
+    assert writes[-1]["currentPhase"] == "cancelling"
+    assert writes[-1]["currentNodeId"] == "node-1"
+    assert all(write.get("currentNodeId") != "late-node" for write in writes)
+
+
+@pytest.mark.asyncio
+async def test_progress_writer_logs_write_failures_without_raising() -> None:
+    writer = ExecutionProgressWriter(
+        {
+            "id": "exec-write-failure",
+            "workflowId": "wf-write-failure",
+            "status": "running",
+            "executionLog": [],
+        }
+    )
+
+    with patch.object(
+        WorkflowStore,
+        "upsert_execution",
+        AsyncMock(side_effect=RuntimeError("database locked")),
+    ):
+        await writer.update({"currentPhase": "running"})
+        await writer.close_and_drain()
+
+
+@pytest.mark.asyncio
 async def test_record_execution_result_backfills_execution_log_steps() -> None:
-    complete_execution = AsyncMock(return_value=[])
+    calls: List[str] = []
+
+    async def complete_execution(*args, **kwargs):  # noqa: ANN002, ANN003
+        calls.append("complete")
+
+    async def increment_stats(*args, **kwargs):  # noqa: ANN002, ANN003
+        calls.append("stats")
+
+    async def trim_executions(*args, **kwargs):  # noqa: ANN002, ANN003
+        calls.append("trim")
+        return []
+
+    complete_execution_mock = AsyncMock(side_effect=complete_execution)
+    increment_stats_mock = AsyncMock(side_effect=increment_stats)
+    trim_executions_mock = AsyncMock(side_effect=trim_executions)
+    record_audit = AsyncMock(return_value=None)
     exec_data = {
         "id": "exec-1",
         "workflowId": "wf",
@@ -390,33 +512,39 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
         raise RuntimeError
 
     with (
-        patch.object(WorkflowStore, "complete_execution", complete_execution),
-        patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
+        patch.object(WorkflowStore, "complete_execution", complete_execution_mock),
+        patch.object(WorkflowStore, "increment_stats", increment_stats_mock),
+        patch.object(WorkflowStore, "trim_executions", trim_executions_mock),
+        patch("flocks.session.recorder.Recorder.record_workflow_execution", record_audit),
         patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
     ):
         await record_execution_result("wf", "exec-1", exec_data)
 
-    complete_execution.assert_awaited_once()
-    summary, steps = complete_execution.await_args.args
+    assert calls == ["complete", "stats", "trim"]
+    complete_execution_mock.assert_awaited_once()
+    summary, steps = complete_execution_mock.await_args.args
+    assert complete_execution_mock.await_args.kwargs == {}
     assert steps[0][0] == 1
     assert steps[0][1]["outputs"] == {"_raw_alerts_count": 150}
     assert steps[1][0] == 2
     assert steps[1][1]["inputs"] == {"_filtered_alerts_count": 150}
     assert summary["executionLog"] == []
     assert summary["stepCount"] == 2
-    assert complete_execution.await_args.kwargs == {
-        "success": True,
-        "duration": 1.0,
-        "history_limit": 30,
-    }
+    increment_stats_mock.assert_awaited_once_with("wf", success=True, duration=1.0)
+    trim_executions_mock.assert_awaited_once_with("wf", keep=30)
+    audit_data = record_audit.await_args.kwargs["run_result"]
+    assert audit_data["executionLog"] == [step for _, step in steps]
 
 
 @pytest.mark.asyncio
 async def test_record_execution_result_accepts_explicit_step_batch() -> None:
-    complete_execution = AsyncMock(return_value=[])
+    complete_execution = AsyncMock(return_value=None)
+    increment_stats = AsyncMock(return_value=None)
+    trim_executions = AsyncMock(return_value=[])
+    record_audit = AsyncMock(return_value=None)
     explicit_steps = [
-        (1, {"node_id": "step-1", "outputs": {"ok": True}}),
         (2, {"node_id": "step-2", "outputs": {"ok": True}}),
+        (1, {"node_id": "step-1", "outputs": {"ok": True}}),
     ]
     exec_data = {
         "id": "exec-trigger",
@@ -433,7 +561,9 @@ async def test_record_execution_result_accepts_explicit_step_batch() -> None:
 
     with (
         patch.object(WorkflowStore, "complete_execution", complete_execution),
-        patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
+        patch.object(WorkflowStore, "increment_stats", increment_stats),
+        patch.object(WorkflowStore, "trim_executions", trim_executions),
+        patch("flocks.session.recorder.Recorder.record_workflow_execution", record_audit),
         patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
     ):
         await record_execution_result(
@@ -444,13 +574,88 @@ async def test_record_execution_result_accepts_explicit_step_batch() -> None:
         )
 
     summary, persisted_steps = complete_execution.await_args.args
+    assert complete_execution.await_args.kwargs == {}
     assert summary["executionLog"] == []
     assert persisted_steps == explicit_steps
-    assert complete_execution.await_args.kwargs == {
-        "success": True,
-        "duration": 0.01,
-        "history_limit": 30,
-    }
+    increment_stats.assert_awaited_once_with("wf-trigger", success=True, duration=0.01)
+    trim_executions.assert_awaited_once_with("wf-trigger", keep=30)
+    audit_data = record_audit.await_args.kwargs["run_result"]
+    assert [step["node_id"] for step in audit_data["executionLog"]] == [
+        "step-1",
+        "step-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_execution_result_stats_failure_does_not_block_retention() -> None:
+    complete_execution = AsyncMock(return_value=None)
+    increment_stats = AsyncMock(side_effect=RuntimeError("stats locked"))
+    trim_executions = AsyncMock(return_value=[])
+
+    def raise_create_task(coro, *args, **kwargs):  # noqa: ANN001, ARG001
+        coro.close()
+        raise RuntimeError
+
+    with (
+        patch.object(WorkflowStore, "complete_execution", complete_execution),
+        patch.object(WorkflowStore, "increment_stats", increment_stats),
+        patch.object(WorkflowStore, "trim_executions", trim_executions),
+        patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
+        patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
+    ):
+        await record_execution_result(
+            "wf-stats-failure",
+            "exec-stats-failure",
+            {
+                "id": "exec-stats-failure",
+                "workflowId": "wf-stats-failure",
+                "status": "success",
+                "duration": 0.5,
+                "executionLog": [],
+            },
+        )
+
+    complete_execution.assert_awaited_once()
+    increment_stats.assert_awaited_once()
+    trim_executions.assert_awaited_once_with("wf-stats-failure", keep=30)
+
+
+@pytest.mark.asyncio
+async def test_record_execution_result_retention_failure_keeps_committed_execution() -> None:
+    complete_execution = AsyncMock(return_value=None)
+    increment_stats = AsyncMock(return_value=None)
+    trim_executions = AsyncMock(side_effect=RuntimeError("retention locked"))
+
+    def raise_create_task(coro, *args, **kwargs):  # noqa: ANN001, ARG001
+        coro.close()
+        raise RuntimeError
+
+    with (
+        patch.object(WorkflowStore, "complete_execution", complete_execution),
+        patch.object(WorkflowStore, "increment_stats", increment_stats),
+        patch.object(WorkflowStore, "trim_executions", trim_executions),
+        patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
+        patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
+    ):
+        await record_execution_result(
+            "wf-retention-failure",
+            "exec-retention-failure",
+            {
+                "id": "exec-retention-failure",
+                "workflowId": "wf-retention-failure",
+                "status": "error",
+                "duration": 0.5,
+                "executionLog": [],
+            },
+        )
+
+    complete_execution.assert_awaited_once()
+    increment_stats.assert_awaited_once_with(
+        "wf-retention-failure",
+        success=False,
+        duration=0.5,
+    )
+    trim_executions.assert_awaited_once_with("wf-retention-failure", keep=30)
 
 
 def test_compact_history_compacts_each_step_inputs() -> None:
@@ -538,62 +743,55 @@ def test_compact_outputs_covers_raw_alerts_in_input_params() -> None:
 
 
 @pytest.mark.asyncio
-async def test_trim_execution_history_keeps_only_30_and_deletes_matching_jsonl(
-    tmp_path,
-) -> None:
-    workflow_id = "wf-trim"
-    for idx in range(32):
-        exec_id = f"exec-{idx:02d}"
-        workflow_record = tmp_path / "workflow" / f"{exec_id}.jsonl"
-        workflow_record.parent.mkdir(parents=True, exist_ok=True)
-        workflow_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
+async def test_record_execution_result_deletes_jsonl_for_trimmed_executions(tmp_path) -> None:
+    workflow_dir = tmp_path / "workflow"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    trimmed_paths = [workflow_dir / "exec-00.jsonl", workflow_dir / "exec-01.jsonl"]
+    retained_path = workflow_dir / "exec-02.jsonl"
+    for record_path in [*trimmed_paths, retained_path]:
+        record_path.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
 
-    # Another workflow's record should be ignored entirely because the trim
-    # only reads workflow_execution_index/<workflow_id>/.
-    other_record = tmp_path / "workflow" / "other-exec.jsonl"
-    other_record.parent.mkdir(parents=True, exist_ok=True)
-    other_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
+    complete_execution = AsyncMock(return_value=None)
+    increment_stats = AsyncMock(return_value=None)
+    trim_executions = AsyncMock(return_value=["exec-00", "exec-01"])
+    record_audit = AsyncMock(return_value=None)
+    created_tasks: List[asyncio.Task[None]] = []
+    real_create_task = asyncio.create_task
 
-    trim_mock = AsyncMock(return_value=["exec-00", "exec-01"])
-
-    with (
-        patch.object(WorkflowStore, "trim_executions", trim_mock),
-        patch("flocks.session.recorder._record_dir", return_value=tmp_path),
-    ):
-        await _trim_execution_history(workflow_id)
-
-    trim_mock.assert_awaited_once_with(workflow_id, keep=30)
-    assert not (tmp_path / "workflow" / "exec-00.jsonl").exists()
-    assert not (tmp_path / "workflow" / "exec-01.jsonl").exists()
-    assert (tmp_path / "workflow" / "exec-02.jsonl").exists()
-    assert other_record.exists()
-
-
-@pytest.mark.asyncio
-async def test_trim_execution_history_uses_index_without_full_scan(tmp_path) -> None:
-    workflow_id = "wf-indexed"
-    for idx in range(32):
-        exec_id = f"exec-{idx:02d}"
-        workflow_record = tmp_path / "workflow" / f"{exec_id}.jsonl"
-        workflow_record.parent.mkdir(parents=True, exist_ok=True)
-        workflow_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
-
-    trim_mock = AsyncMock(return_value=["exec-00", "exec-01"])
+    def capture_create_task(coro, *args, **kwargs):  # noqa: ANN001
+        task = real_create_task(coro, *args, **kwargs)
+        created_tasks.append(task)
+        return task
 
     with (
-        patch.object(WorkflowStore, "trim_executions", trim_mock),
-        patch("flocks.session.recorder._record_dir", return_value=tmp_path),
+        patch.object(WorkflowStore, "complete_execution", complete_execution),
+        patch.object(WorkflowStore, "increment_stats", increment_stats),
+        patch.object(WorkflowStore, "trim_executions", trim_executions),
+        patch("flocks.session.recorder.Recorder.record_workflow_execution", record_audit),
+        patch(
+            "flocks.workflow.execution_store.Recorder.paths",
+            return_value=SimpleNamespace(workflow_dir=workflow_dir),
+        ),
+        patch(
+            "flocks.workflow.execution_store.asyncio.create_task",
+            side_effect=capture_create_task,
+        ),
     ):
-        await _trim_execution_history(workflow_id)
+        await record_execution_result(
+            "wf-trim",
+            "exec-32",
+            {
+                "id": "exec-32",
+                "workflowId": "wf-trim",
+                "status": "success",
+                "duration": 0.25,
+                "executionLog": [],
+            },
+            steps=[(1, {"node_id": "node-1", "outputs": {"ok": True}})],
+        )
+        await asyncio.gather(*created_tasks)
 
-    trim_mock.assert_awaited_once_with(workflow_id, keep=30)
-    assert not (tmp_path / "workflow" / "exec-00.jsonl").exists()
-    assert not (tmp_path / "workflow" / "exec-01.jsonl").exists()
-
-
-@pytest.mark.asyncio
-async def test_trim_execution_history_surfaces_delete_failures() -> None:
-    workflow_id = "wf-trim-fail"
-    with patch.object(WorkflowStore, "trim_executions", AsyncMock(side_effect=RuntimeError("locked"))):
-        with pytest.raises(RuntimeError, match="locked"):
-            await _trim_execution_history(workflow_id)
+    trim_executions.assert_awaited_once_with("wf-trim", keep=30)
+    record_audit.assert_awaited_once()
+    assert all(not path.exists() for path in trimmed_paths)
+    assert retained_path.exists()

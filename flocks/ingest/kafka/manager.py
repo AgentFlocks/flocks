@@ -775,7 +775,6 @@ class KafkaManager:
             trigger_input_keys = list((trigger.mapping or {}).keys()) or [input_key]
             step_recorder = ExecutionStepRecorder(
                 exec_id=exec_id,
-                capture_steps=False,
                 step_compactor=lambda step: _compact_step_for_kafka_storage(
                     step,
                     input_key=input_key,

@@ -79,7 +79,17 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
     assert result["executionLog"] == []
     assert result["stepCount"] == 1
     record_result.assert_awaited_once()
-    assert record_result.await_args.kwargs["steps"] == []
+    assert record_result.await_args.kwargs["steps"] == [
+        (
+            1,
+            {
+                "node_id": "notify",
+                "node_type": "tool",
+                "inputs": {},
+                "outputs": {"ok": True},
+            },
+        )
+    ]
     cleanup_context.assert_awaited_once_with(tool_context)
 
 

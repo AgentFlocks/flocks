@@ -251,10 +251,7 @@ class TriggerRuntime:
             persist=False,
         )
         exec_id = exec_data["id"]
-        step_recorder = ExecutionStepRecorder(
-            exec_id=exec_id,
-            capture_steps=False,
-        )
+        step_recorder = ExecutionStepRecorder(exec_id=exec_id)
         started_at = time.time()
         tool_context = None
         try:

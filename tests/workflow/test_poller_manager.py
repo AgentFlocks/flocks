@@ -250,7 +250,17 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     assert recorded_results[0]["executionLog"] == []
     assert recorded_results[0]["stepCount"] == 1
     assert recorded_results[0]["loopProgress"]["total_iterations"] == 2
-    assert recorded_steps == []
+    assert recorded_steps == [
+        (
+            1,
+            {
+                "node_id": "load",
+                "node_type": "python",
+                "inputs": {"iteration": 1, "total_iterations": 2},
+                "outputs": {"load_stats": {"record_count": 9}},
+            },
+        )
+    ]
     assert status["lastStatus"] == "error"
     assert status["lastError"] == "business rule blocked"
     assert status["selectedCount"] == 9

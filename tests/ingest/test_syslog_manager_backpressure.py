@@ -427,7 +427,17 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         action_name="trigger:syslog",
     )
     trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
-    assert recorded_steps == []
+    assert recorded_steps == [
+        (
+            1,
+            {
+                "node_id": "receive_alert",
+                "node_type": "python",
+                "inputs": {"message": "demo"},
+                "outputs": {"ok": True},
+            },
+        )
+    ]
     assert recorded_exec_data["triggerId"] == "syslog-alerts"
     assert recorded_exec_data["triggerSource"] == "udp://0.0.0.0:5514"
     assert recorded_exec_data["executionLog"] == []

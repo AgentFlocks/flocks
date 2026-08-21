@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from itertools import islice
 import sys
+import threading
 import time
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -337,18 +338,6 @@ def derive_loop_progress(
 # Keep this intentionally small so high-frequency workflows do not keep
 # inflating the SQLite row set and matching JSONL audit files indefinitely.
 _MAX_EXECUTION_HISTORY_PER_WORKFLOW = 30
-# Per-workflow trim lock.  Trims are awaited by the writer so the retention cap
-# is enforced before ``record_execution_result`` returns, while concurrent runs
-# for the same workflow serialize instead of skipping cleanup.
-_trim_locks: Dict[str, asyncio.Lock] = {}
-
-
-def _get_trim_lock(workflow_id: str) -> asyncio.Lock:
-    lock = _trim_locks.get(workflow_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _trim_locks[workflow_id] = lock
-    return lock
 
 
 def workflow_execution_key(exec_id: str) -> str:
@@ -410,11 +399,9 @@ class ExecutionStepRecorder:
         self,
         *,
         exec_id: str,
-        capture_steps: bool = True,
         step_compactor: Callable[[Any], Dict[str, Any]] = compact_step_for_storage,
     ) -> None:
         self.exec_id = exec_id
-        self.capture_steps = capture_steps
         self.step_compactor = step_compactor
         self.step_count = 0
         self.summary: Dict[str, Any] = {}
@@ -444,14 +431,101 @@ class ExecutionStepRecorder:
                 "updatedAt": int(time.time() * 1000),
             }
         )
-        if self.capture_steps:
-            self._pending_steps.append((self.step_count, step_dict))
+        self._pending_steps.append((self.step_count, step_dict))
 
     def take_steps(self) -> List[Tuple[int, Dict[str, Any]]]:
         """Return buffered steps for the final execution transaction."""
         pending_steps = self._pending_steps
         self._pending_steps = []
         return pending_steps
+
+
+class ExecutionProgressWriter:
+    """Coalesce nonblocking execution-summary updates onto one SQLite writer."""
+
+    def __init__(self, execution_summary: Dict[str, Any]) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._summary = compact_execution_summary(execution_summary)
+        self._pending_summary: Optional[Dict[str, Any]] = None
+        self._pending_waiters: List[asyncio.Future[None]] = []
+        self._writer_task: Optional[asyncio.Task[None]] = None
+        self._submission_lock = threading.Lock()
+        self._closed = False
+
+    def submit(self, update: Dict[str, Any]) -> None:
+        """Queue an update from any thread without waiting for persistence."""
+        with self._submission_lock:
+            if self._closed:
+                return
+            self._loop.call_soon_threadsafe(self._merge_update, dict(update), None)
+
+    async def update(self, update: Dict[str, Any]) -> None:
+        """Queue and await an owner-loop update, preserving submission order."""
+        if asyncio.get_running_loop() is not self._loop:
+            raise RuntimeError("ExecutionProgressWriter.update must run on its owner loop")
+
+        waiter = self._loop.create_future()
+        with self._submission_lock:
+            if self._closed:
+                return
+            self._loop.call_soon(self._merge_update, dict(update), waiter)
+        await waiter
+
+    async def close_and_drain(self) -> None:
+        """Reject new updates and flush every update accepted before closing."""
+        if asyncio.get_running_loop() is not self._loop:
+            raise RuntimeError("ExecutionProgressWriter.close_and_drain must run on its owner loop")
+
+        barrier = self._loop.create_future()
+        with self._submission_lock:
+            self._closed = True
+            self._loop.call_soon(barrier.set_result, None)
+        await barrier
+
+        writer_task = self._writer_task
+        if writer_task is not None:
+            await asyncio.shield(writer_task)
+
+    def _merge_update(
+        self,
+        update: Dict[str, Any],
+        waiter: Optional[asyncio.Future[None]],
+    ) -> None:
+        self._summary.update(update)
+        self._pending_summary = compact_execution_summary(self._summary)
+        if waiter is not None:
+            self._pending_waiters.append(waiter)
+        if self._writer_task is None:
+            exec_id = str(self._summary.get("id") or "unknown")
+            self._writer_task = self._loop.create_task(
+                self._flush(),
+                name=f"workflow-progress-{exec_id}",
+            )
+
+    async def _flush(self) -> None:
+        try:
+            while self._pending_summary is not None:
+                summary = self._pending_summary
+                waiters = self._pending_waiters
+                self._pending_summary = None
+                self._pending_waiters = []
+                try:
+                    await WorkflowStore.upsert_execution(summary)
+                except Exception as exc:
+                    log.warning(
+                        "workflow.progress.update_failed",
+                        {
+                            "workflow_id": summary.get("workflowId"),
+                            "exec_id": summary.get("id"),
+                            "error": str(exc),
+                        },
+                    )
+                finally:
+                    for waiter in waiters:
+                        if not waiter.done():
+                            waiter.set_result(None)
+        finally:
+            self._writer_task = None
 
 
 def _prepare_execution_steps(execution_log: Any) -> List[Tuple[int, Dict[str, Any]]]:
@@ -594,15 +668,48 @@ async def record_execution_result(
         started_at = summary_data.get("startedAt", 0)
         finished_at = summary_data.get("finishedAt", int(time.time() * 1000))
         duration = max(0.0, (finished_at - started_at) / 1000.0)
-    trimmed_exec_ids = await WorkflowStore.complete_execution(
+
+    await WorkflowStore.complete_execution(
         compact_execution_summary(summary_data),
         prepared_steps,
-        success=success,
-        duration=float(duration),
-        history_limit=_MAX_EXECUTION_HISTORY_PER_WORKFLOW,
     )
-    if not isinstance(trimmed_exec_ids, list):
-        trimmed_exec_ids = []
+
+    try:
+        await WorkflowStore.increment_stats(
+            workflow_id,
+            success=success,
+            duration=float(duration),
+        )
+    except Exception as exc:
+        log.warning(
+            "workflow.stats.update_failed",
+            {
+                "workflow_id": workflow_id,
+                "exec_id": exec_id,
+                "error": str(exc),
+            },
+        )
+
+    trimmed_exec_ids: List[str] = []
+    try:
+        trimmed_exec_ids = await WorkflowStore.trim_executions(
+            workflow_id,
+            keep=_MAX_EXECUTION_HISTORY_PER_WORKFLOW,
+        )
+    except Exception as exc:
+        log.error(
+            "workflow.history.trim_failed",
+            {
+                "workflow_id": workflow_id,
+                "exec_id": exec_id,
+                "error": str(exc),
+            },
+        )
+
+    audit_data = dict(exec_data)
+    audit_data["executionLog"] = [
+        step for _, step in sorted(prepared_steps, key=lambda item: item[0])
+    ]
 
     # Recorder writes to its own SQLite tables and can be slow under load.
     # Run it as a background task so the syslog/HTTP dispatcher can release the
@@ -614,7 +721,7 @@ async def record_execution_result(
                 await Recorder.record_workflow_execution(
                     exec_id=exec_id,
                     workflow_id=workflow_id,
-                    run_result=exec_data,
+                    run_result=audit_data,
                 )
             except Exception as exc:
                 log.debug(
@@ -645,65 +752,7 @@ async def record_execution_result(
             await Recorder.record_workflow_execution(
                 exec_id=exec_id,
                 workflow_id=workflow_id,
-                run_result=exec_data,
+                run_result=audit_data,
             )
         except Exception:
             pass
-
-
-async def _delete_execution_history_record(
-    execution_key: str,
-    *,
-    index_key: Optional[str] = None,
-) -> None:
-    exec_id = execution_key.rsplit("/", 1)[-1]
-    deleted_steps = await WorkflowStore.clear_steps(exec_id)
-    removed_execution = await WorkflowStore.delete_execution(exec_id)
-    record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
-    await asyncio.to_thread(record_path.unlink, missing_ok=True)
-    log.debug(
-        "workflow.history.trim_deleted",
-        {
-            "exec_id": exec_id,
-            "execution_key": execution_key,
-            "steps": deleted_steps,
-            "removed_execution": removed_execution,
-        },
-    )
-
-
-async def _trim_execution_history(workflow_id: str) -> None:
-    """Delete the oldest execution records once the per-workflow cap is exceeded.
-
-    New records carry a per-workflow ``workflow_execution_index`` key, so hot
-    trims avoid scanning unrelated workflows.  This path is intentionally
-    index-only: if an old execution has no index key, it is outside the hot
-    retention path and should be handled by a separate migration/GC task.
-
-    A per-workflow lock serializes concurrent trims.  Cleanup is awaited by
-    ``record_execution_result`` so the retention cap is enforced synchronously
-    instead of being an opportunistic background task.
-    """
-    lock = _get_trim_lock(workflow_id)
-    async with lock:
-        failures: List[str] = []
-        for exec_id in await WorkflowStore.trim_executions(
-            workflow_id,
-            keep=_MAX_EXECUTION_HISTORY_PER_WORKFLOW,
-        ):
-            try:
-                record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
-                await asyncio.to_thread(record_path.unlink, missing_ok=True)
-            except Exception as exc:
-                failures.append(f"{exec_id}: {exc}")
-                log.warning(
-                    "workflow.history.trim_delete_failed",
-                    {
-                        "workflow_id": workflow_id,
-                        "exec_id": exec_id,
-                        "error": str(exc),
-                    },
-                )
-
-        if failures:
-            raise RuntimeError("Failed to trim workflow execution history: " + "; ".join(failures[:3]))
