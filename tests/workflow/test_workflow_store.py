@@ -18,6 +18,7 @@ def _reset_state() -> None:
     Storage._init_pid = None
     WorkflowStore._initialized = False
     WorkflowStore._conn = None
+    WorkflowStore._completion_conn = None
     WorkflowStore._init_pid = None
     WorkflowStore._db_path = None
     WorkflowStore._completion_lock = None
@@ -121,7 +122,7 @@ async def test_complete_execution_writes_steps_summary_and_stats_with_one_commit
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
-    db = await WorkflowStore.raw_db()
+    db = await WorkflowStore.raw_completion_db()
     commit_count = 0
     original_commit = db.commit
 
@@ -169,7 +170,7 @@ async def test_complete_execution_reduces_28_step_writes_to_four_commits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
-    db = await WorkflowStore.raw_db()
+    db = await WorkflowStore.raw_completion_db()
     commit_count = 0
     original_commit = db.commit
 
@@ -226,7 +227,7 @@ async def test_complete_execution_rolls_back_partial_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
-    db = await WorkflowStore.raw_db()
+    db = await WorkflowStore.raw_completion_db()
     original_commit = db.commit
 
     async def fail_commit() -> None:
@@ -257,3 +258,51 @@ async def test_complete_execution_rolls_back_partial_transaction(
     assert persisted_steps == []
     assert total == 0
     assert await WorkflowStore.get_stats("wf-rollback") is None
+
+
+@pytest.mark.asyncio
+async def test_complete_execution_applies_retention_before_single_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await WorkflowStore.init()
+    db = await WorkflowStore.raw_completion_db()
+    commit_count = 0
+    original_commit = db.commit
+
+    async def counted_commit() -> None:
+        nonlocal commit_count
+        commit_count += 1
+        await original_commit()
+
+    monkeypatch.setattr(db, "commit", counted_commit)
+    trimmed: list[str] = []
+    for index in range(4):
+        trimmed = await WorkflowStore.complete_execution(
+            {
+                "id": f"exec-retain-{index}",
+                "workflowId": "wf-retain",
+                "status": "success",
+                "startedAt": index + 1,
+                "finishedAt": index + 2,
+                "duration": 0.01,
+                "executionLog": [],
+                "stepCount": 1,
+            },
+            [(1, {"node_id": f"node-{index}", "outputs": {"ok": True}})],
+            success=True,
+            duration=0.01,
+            history_limit=3,
+        )
+
+    assert commit_count == 4
+    assert trimmed == ["exec-retain-0"]
+    assert await WorkflowStore.get_execution("exec-retain-0") is None
+    old_steps, old_total = await WorkflowStore.list_steps("exec-retain-0")
+    assert old_steps == []
+    assert old_total == 0
+    executions = await WorkflowStore.list_executions("wf-retain", limit=10)
+    assert [execution["id"] for execution in executions] == [
+        "exec-retain-3",
+        "exec-retain-2",
+        "exec-retain-1",
+    ]

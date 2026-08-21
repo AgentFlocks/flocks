@@ -344,17 +344,11 @@ def test_execution_step_recorder_collects_steps_without_storage_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_four_trigger_workers_keep_step_history_disabled() -> None:
-    """Four trigger threads track progress without retaining step history."""
+async def test_four_trigger_workers_collect_steps_without_storage() -> None:
+    """Four trigger threads collect complete batches without callback SQL."""
     record_step = AsyncMock(return_value=None)
     record_steps = AsyncMock(return_value=None)
-    recorders = [
-        ExecutionStepRecorder(
-            exec_id=f"exec-trigger-{worker}",
-            capture_steps=False,
-        )
-        for worker in range(4)
-    ]
+    recorders = [ExecutionStepRecorder(exec_id=f"exec-trigger-{worker}") for worker in range(4)]
 
     def _run_seven_steps(recorder: ExecutionStepRecorder) -> None:
         for step in range(7):
@@ -371,7 +365,7 @@ async def test_four_trigger_workers_keep_step_history_disabled() -> None:
         )
 
     batches = [recorder.take_steps() for recorder in recorders]
-    assert batches == [[], [], [], []]
+    assert [len(batch) for batch in batches] == [7, 7, 7, 7]
     assert [recorder.step_count for recorder in recorders] == [7, 7, 7, 7]
     record_step.assert_not_awaited()
     record_steps.assert_not_awaited()
@@ -379,7 +373,7 @@ async def test_four_trigger_workers_keep_step_history_disabled() -> None:
 
 @pytest.mark.asyncio
 async def test_record_execution_result_backfills_execution_log_steps() -> None:
-    complete_execution = AsyncMock(return_value=None)
+    complete_execution = AsyncMock(return_value=[])
     exec_data = {
         "id": "exec-1",
         "workflowId": "wf",
@@ -399,7 +393,6 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
         patch.object(WorkflowStore, "complete_execution", complete_execution),
         patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
         patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
-        patch("flocks.workflow.execution_store._trim_execution_history", AsyncMock(return_value=None)),
     ):
         await record_execution_result("wf", "exec-1", exec_data)
 
@@ -414,12 +407,13 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
     assert complete_execution.await_args.kwargs == {
         "success": True,
         "duration": 1.0,
+        "history_limit": 30,
     }
 
 
 @pytest.mark.asyncio
 async def test_record_execution_result_accepts_explicit_step_batch() -> None:
-    complete_execution = AsyncMock(return_value=None)
+    complete_execution = AsyncMock(return_value=[])
     explicit_steps = [
         (1, {"node_id": "step-1", "outputs": {"ok": True}}),
         (2, {"node_id": "step-2", "outputs": {"ok": True}}),
@@ -441,7 +435,6 @@ async def test_record_execution_result_accepts_explicit_step_batch() -> None:
         patch.object(WorkflowStore, "complete_execution", complete_execution),
         patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
         patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
-        patch("flocks.workflow.execution_store._trim_execution_history", AsyncMock(return_value=None)),
     ):
         await record_execution_result(
             "wf-trigger",
@@ -456,6 +449,7 @@ async def test_record_execution_result_accepts_explicit_step_batch() -> None:
     assert complete_execution.await_args.kwargs == {
         "success": True,
         "duration": 0.01,
+        "history_limit": 30,
     }
 
 

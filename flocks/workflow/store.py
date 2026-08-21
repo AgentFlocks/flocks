@@ -44,6 +44,7 @@ class WorkflowStore:
 
     _initialized = False
     _conn: Optional[aiosqlite.Connection] = None
+    _completion_conn: Optional[aiosqlite.Connection] = None
     _init_pid: Optional[int] = None
     _db_path: Optional[Path] = None
     _completion_lock: Optional[asyncio.Lock] = None
@@ -73,7 +74,10 @@ class WorkflowStore:
             )
             if cls._conn:
                 await cls._conn.close()
+            if cls._completion_conn:
+                await cls._completion_conn.close()
             cls._conn = None
+            cls._completion_conn = None
             cls._initialized = False
             cls._init_pid = None
 
@@ -91,6 +95,12 @@ class WorkflowStore:
             for stmt in _INDEX_STMTS:
                 await cls._conn.execute(stmt)
             await cls._conn.commit()
+            cls._completion_conn = await aiosqlite.connect(
+                db_path,
+                timeout=Storage._sqlite_timeout_s,
+            )
+            cls._completion_conn.row_factory = aiosqlite.Row
+            await Storage.configure_connection(cls._completion_conn)
             cls._initialized = True
             cls._init_pid = current_pid
             cls._db_path = db_path
@@ -103,7 +113,10 @@ class WorkflowStore:
         except Exception as exc:
             if cls._conn:
                 await cls._conn.close()
+            if cls._completion_conn:
+                await cls._completion_conn.close()
             cls._conn = None
+            cls._completion_conn = None
             cls._initialized = False
             cls._init_pid = None
             cls._db_path = None
@@ -122,7 +135,10 @@ class WorkflowStore:
     async def close(cls) -> None:
         if cls._conn:
             await cls._conn.close()
+        if cls._completion_conn:
+            await cls._completion_conn.close()
         cls._conn = None
+        cls._completion_conn = None
         cls._initialized = False
         cls._init_pid = None
         cls._db_path = None
@@ -139,6 +155,17 @@ class WorkflowStore:
     @classmethod
     async def raw_db(cls) -> aiosqlite.Connection:
         return await cls._db()
+
+    @classmethod
+    async def _completion_db(cls) -> aiosqlite.Connection:
+        if not cls._completion_conn or not cls._initialized:
+            await cls.init()
+        return cls._completion_conn  # type: ignore[return-value]
+
+    @classmethod
+    async def raw_completion_db(cls) -> aiosqlite.Connection:
+        """Return the completion connection for transaction-level tests."""
+        return await cls._completion_db()
 
     @staticmethod
     def _json_dumps(value: Any) -> str:
@@ -357,7 +384,7 @@ class WorkflowStore:
             f"""
             SELECT payload FROM workflow_executions
             WHERE {" AND ".join(clauses)}
-            ORDER BY started_at DESC
+            ORDER BY started_at DESC, rowid DESC
             LIMIT ?
             """,
             tuple(params),
@@ -399,7 +426,7 @@ class WorkflowStore:
             """
             SELECT id FROM workflow_executions
             WHERE workflow_id = ?
-            ORDER BY started_at DESC
+            ORDER BY started_at DESC, rowid DESC
             LIMIT -1 OFFSET ?
             """,
             (workflow_id, max(int(keep), 0)),
@@ -460,9 +487,10 @@ class WorkflowStore:
         *,
         success: bool,
         duration: float,
-    ) -> None:
-        """Persist one completed execution and its stats in one transaction."""
-        db = await cls._db()
+        history_limit: Optional[int] = None,
+    ) -> List[str]:
+        """Persist one completed execution, stats, and retention in one transaction."""
+        db = await cls._completion_db()
         payload = dict(exec_data)
         exec_id = str(payload.get("id") or "")
         workflow_id = str(payload.get("workflowId") or payload.get("workflow_id") or "")
@@ -492,6 +520,7 @@ class WorkflowStore:
 
         async with lock:
             try:
+                await db.execute("BEGIN IMMEDIATE")
                 if step_rows:
                     await db.executemany(
                         """
@@ -556,7 +585,29 @@ class WorkflowStore:
                         cls._now_ms(),
                     ),
                 )
+                trimmed_exec_ids: List[str] = []
+                if history_limit is not None:
+                    async with db.execute(
+                        """
+                        SELECT id FROM workflow_executions
+                        WHERE workflow_id = ?
+                        ORDER BY started_at DESC, rowid DESC
+                        LIMIT -1 OFFSET ?
+                        """,
+                        (workflow_id, max(int(history_limit), 0)),
+                    ) as cur:
+                        trimmed_exec_ids = [str(row["id"]) for row in await cur.fetchall()]
+                    for trimmed_exec_id in trimmed_exec_ids:
+                        await db.execute(
+                            "DELETE FROM workflow_execution_steps WHERE exec_id = ?",
+                            (trimmed_exec_id,),
+                        )
+                        await db.execute(
+                            "DELETE FROM workflow_executions WHERE id = ?",
+                            (trimmed_exec_id,),
+                        )
                 await db.commit()
+                return trimmed_exec_ids
             except Exception:
                 await db.rollback()
                 raise

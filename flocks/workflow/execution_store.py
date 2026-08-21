@@ -594,12 +594,15 @@ async def record_execution_result(
         started_at = summary_data.get("startedAt", 0)
         finished_at = summary_data.get("finishedAt", int(time.time() * 1000))
         duration = max(0.0, (finished_at - started_at) / 1000.0)
-    await WorkflowStore.complete_execution(
+    trimmed_exec_ids = await WorkflowStore.complete_execution(
         compact_execution_summary(summary_data),
         prepared_steps,
         success=success,
         duration=float(duration),
+        history_limit=_MAX_EXECUTION_HISTORY_PER_WORKFLOW,
     )
+    if not isinstance(trimmed_exec_ids, list):
+        trimmed_exec_ids = []
 
     # Recorder writes to its own SQLite tables and can be slow under load.
     # Run it as a background task so the syslog/HTTP dispatcher can release the
@@ -621,6 +624,19 @@ async def record_execution_result(
                         "error": str(exc),
                     },
                 )
+            for trimmed_exec_id in trimmed_exec_ids:
+                try:
+                    record_path = Recorder.paths().workflow_dir / f"{trimmed_exec_id}.jsonl"
+                    await asyncio.to_thread(record_path.unlink, missing_ok=True)
+                except Exception as exc:
+                    log.warning(
+                        "workflow.history.trim_delete_failed",
+                        {
+                            "workflow_id": workflow_id,
+                            "exec_id": trimmed_exec_id,
+                            "error": str(exc),
+                        },
+                    )
 
         asyncio.create_task(_record_audit(), name=f"audit-{exec_id}")
     except RuntimeError:
@@ -633,21 +649,6 @@ async def record_execution_result(
             )
         except Exception:
             pass
-
-    # Prune old execution records when the per-workflow limit is exceeded.
-    # This is awaited so a successful completion does not silently leave the
-    # workflow above its retention cap.
-    try:
-        await _trim_execution_history(workflow_id)
-    except Exception as exc:
-        log.error(
-            "workflow.history.trim_failed",
-            {
-                "workflow_id": workflow_id,
-                "exec_id": exec_id,
-                "error": str(exc),
-            },
-        )
 
 
 async def _delete_execution_history_record(

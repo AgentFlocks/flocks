@@ -406,7 +406,10 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     assert manager.get_status("wf-stop")["activeRuns"] == 1
 
     release_run.set()
-    await asyncio.sleep(0.05)
+    for _ in range(100):
+        if manager.get_status("wf-stop")["activeRuns"] == 0:
+            break
+        await asyncio.sleep(0.01)
     assert manager.get_status("wf-stop")["activeRuns"] == 0
 
 
@@ -421,7 +424,12 @@ async def test_start_all_only_restarts_enabled_configs(monkeypatch: pytest.Monke
             ("wf-disabled", {"enabled": False}),
         ]
 
-    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+    async def _fake_restart(
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> dict[str, Any]:
+        assert startup is True
         restarted.append(workflow_id)
         return {"workflowId": workflow_id, "state": "running"}
 
