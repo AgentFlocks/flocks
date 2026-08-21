@@ -307,6 +307,24 @@ const styles = String.raw`
   scrollbar-gutter: stable;
 }
 
+.cs-scan-list__items { display: grid; gap: 4px; }
+.cs-scan-list__virtual { position: relative; }
+.cs-scan-item.is-virtual { height: 102px; left: 0; position: absolute; top: 0; }
+.cs-load-more-scans,
+.cs-load-older {
+  background: var(--cs-surface-elevated);
+  border: 1px solid var(--cs-border);
+  border-radius: 8px;
+  color: var(--cs-primary);
+  font-size: 12px;
+  font-weight: 650;
+  min-height: 38px;
+  padding: 7px 12px;
+}
+.cs-load-more-scans { margin-top: 4px; width: 100%; }
+.cs-load-more-scans:disabled,
+.cs-load-older:disabled { color: var(--cs-text-muted); cursor: wait; }
+
 .cs-scan-item {
   background: transparent;
   border: 1px solid transparent;
@@ -533,6 +551,7 @@ const styles = String.raw`
 .cs-events { position: relative; }
 .cs-events__heading { flex-wrap: wrap; gap: 8px; }
 .cs-events__heading > div { display: grid; gap: 2px; }
+.cs-load-older { align-self: flex-start; }
 .cs-event-filters { display: flex; flex-wrap: wrap; gap: 6px; }
 .cs-event-filters select { max-width: 150px; }
 .cs-event-viewport { min-height: 220px; overflow-y: auto; position: relative; scrollbar-gutter: stable; }
@@ -566,6 +585,19 @@ const styles = String.raw`
 }
 
 .cs-inspector__header { border-bottom: 1px solid var(--cs-border); min-height: 66px; padding: 12px 16px; }
+.cs-inspector__actions { align-items: center; display: flex; gap: 8px; }
+.cs-inspector__refresh {
+  background: transparent;
+  border: 1px solid var(--cs-border);
+  border-radius: 7px;
+  color: var(--cs-primary);
+  font-size: 12px;
+  font-weight: 650;
+  min-height: 36px;
+  padding: 0 10px;
+}
+.cs-inspector__refresh:disabled { color: var(--cs-text-muted); cursor: wait; }
+.cs-artifact-refresh-error { background: var(--cs-warning-soft); border: 1px solid var(--cs-warning); border-radius: 8px; color: var(--cs-text); font-size: 12px; line-height: 18px; margin: 0 0 12px; padding: 9px 10px; }
 .cs-inspector__close { display: none; }
 .cs-artifact-tabs { border-bottom: 1px solid var(--cs-border); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px; }
 .cs-artifact-tabs button { align-items: center; background: transparent; border: 0; border-radius: 7px; color: var(--cs-text-secondary); display: flex; font-size: 12px; justify-content: space-between; min-height: 38px; padding: 6px 8px; text-align: left; }
@@ -743,6 +775,7 @@ const styles = String.raw`
   .cs-mobile-scan-select { display: grid; gap: 4px; grid-column: 1 / -1; }
   .cs-mobile-scan-select label { color: var(--cs-text-muted); font-size: 11px; font-weight: 650; }
   .cs-mobile-scan-select select { min-height: 44px; padding: 0 10px; width: 100%; }
+  .cs-mobile-load-more { width: 100%; }
   .cs-scan-title__line h1 { font-size: 18px; }
   .cs-header-meta { font-size: 12px; }
   .cs-header-meta code:last-child { display: none; }

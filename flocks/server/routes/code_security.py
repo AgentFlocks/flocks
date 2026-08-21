@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from flocks.project.project import Project
@@ -207,6 +207,7 @@ async def get_events(
     request: Request,
     scan_id: str,
     after_seq: int = Query(0, ge=0),
+    before_seq: int | None = Query(None, ge=1),
     limit: int = Query(200, ge=1, le=200),
     recent: bool = False,
 ):
@@ -217,6 +218,7 @@ async def get_events(
             scan_id,
             _caller(user),
             after_seq=after_seq,
+            before_seq=before_seq,
             limit=limit,
             recent=recent,
         )
@@ -271,12 +273,18 @@ async def download_artifact(request: Request, scan_id: str, artifact_name: str):
     user = require_user(request)
     service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
     try:
-        path = service.download_path(scan_id, artifact_name, _caller(user))
+        filename, contents = await service.download_artifact(
+            scan_id,
+            artifact_name,
+            _caller(user),
+        )
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
-    return FileResponse(
-        path=str(path),
-        filename=path.name,
+    return Response(
+        content=contents,
         media_type="application/octet-stream",
-        headers={"X-Content-Type-Options": "nosniff"},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
     )

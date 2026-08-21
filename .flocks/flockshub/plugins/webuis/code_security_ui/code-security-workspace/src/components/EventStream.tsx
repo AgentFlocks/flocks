@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,14 +13,27 @@ import type { AuditEvent } from "../types";
 const ROW_HEIGHT = 72;
 const VIEWPORT_HEIGHT = 360;
 
-export function EventStream({ events }: { events: AuditEvent[] }) {
+export function EventStream({
+  events,
+  hasOlder,
+  loadingOlder,
+  onLoadOlder,
+}: {
+  events: AuditEvent[];
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  onLoadOlder: () => Promise<void>;
+}) {
   const [level, setLevel] = useState("all");
   const [phase, setPhase] = useState("all");
   const [worker, setWorker] = useState("all");
   const [autoFollow, setAutoFollow] = useState(true);
   const [unseen, setUnseen] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
-  const previousCount = useRef(events.length);
+  const previousFirstSeq = useRef(events[0]?.seq);
+  const previousLastSeq = useRef(events[events.length - 1]?.seq);
+  const layoutFirstSeq = useRef(events[0]?.seq);
+  const previousScrollHeight = useRef(0);
   const viewport = useRef<HTMLDivElement>(null);
   const phaseOptions = useMemo(
     () => uniqueEventValues(events, "phase"),
@@ -41,15 +55,42 @@ export function EventStream({ events }: { events: AuditEvent[] }) {
   );
 
   useEffect(() => {
-    const added = Math.max(0, events.length - previousCount.current);
-    previousCount.current = events.length;
+    const firstSeq = events[0]?.seq;
+    const lastSeq = events[events.length - 1]?.seq;
+    const prepended =
+      previousFirstSeq.current !== undefined &&
+      firstSeq !== undefined &&
+      firstSeq < previousFirstSeq.current;
+    const added = events.filter(
+      (event) =>
+        previousLastSeq.current === undefined ||
+        event.seq > previousLastSeq.current,
+    ).length;
+    previousFirstSeq.current = firstSeq;
+    previousLastSeq.current = lastSeq;
+    if (prepended) return;
     if (!added) return;
     if (autoFollow && viewport.current) {
       viewport.current.scrollTop = viewport.current.scrollHeight;
     } else {
       setUnseen((value) => value + added);
     }
-  }, [autoFollow, events.length]);
+  }, [autoFollow, events]);
+
+  useLayoutEffect(() => {
+    const element = viewport.current;
+    const firstSeq = events[0]?.seq;
+    if (!element) return;
+    if (
+      layoutFirstSeq.current !== undefined &&
+      firstSeq !== undefined &&
+      firstSeq < layoutFirstSeq.current
+    ) {
+      element.scrollTop += element.scrollHeight - previousScrollHeight.current;
+    }
+    layoutFirstSeq.current = firstSeq;
+    previousScrollHeight.current = element.scrollHeight;
+  }, [events, filtered.length]);
 
   const virtual = filtered.length > 100;
   const start = virtual
@@ -75,7 +116,7 @@ export function EventStream({ events }: { events: AuditEvent[] }) {
       <div className="cs-subsection-heading cs-events__heading">
         <div>
           <h3 id="event-title">实时事件</h3>
-          <span>{events.length} 条可信事件</span>
+          <span>已加载 {events.length} 条可信事件</span>
         </div>
         <div className="cs-event-filters">
           <label>
@@ -122,6 +163,16 @@ export function EventStream({ events }: { events: AuditEvent[] }) {
           </label>
         </div>
       </div>
+      {hasOlder && (
+        <button
+          className="cs-load-older"
+          type="button"
+          onClick={() => void onLoadOlder()}
+          disabled={loadingOlder}
+        >
+          {loadingOlder ? "正在加载更早事件…" : "加载更早事件"}
+        </button>
+      )}
       <div
         ref={viewport}
         className="cs-event-viewport"

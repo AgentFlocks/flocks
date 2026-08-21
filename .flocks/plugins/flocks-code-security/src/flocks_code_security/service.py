@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 from collections.abc import Callable
@@ -27,10 +28,12 @@ from flocks_code_security.cli import (
 from flocks_code_security.artifact_integrity import find_output_directory
 from flocks_code_security.paths import data_dir, outputs_root, runtime_dir
 from flocks_code_security.runtime import get_runtime
+from flocks_code_security.store import process_identity
 from flocks_code_security.tools import audit_cancel, audit_prepare
 
 
 PUBLIC_SCHEMA_VERSION = "flocks.code-security.tool.v1"
+MAX_PROJECTED_EVENT_BYTES = 60 * 1024
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 PUBLIC_SCAN_STATUSES = {"running", *TERMINAL_SCAN_STATUSES}
 PUBLIC_PHASES = {
@@ -100,6 +103,7 @@ class StartScanRequest:
 class _ActiveScan:
     ctx: ToolContext
     task: asyncio.Task[dict[str, Any]]
+    owner_token: str
 
 
 def _utc_now() -> datetime:
@@ -142,9 +146,10 @@ class _ProgressRecorder:
     def __call__(self, event: str, payload: dict[str, Any]) -> None:
         try:
             self._record(event, self._safe_payload(payload))
-        except Exception:
+        except Exception as exc:
             # UI projection must never change the trusted audit execution.
-            pass
+            if event == "scan.finalized":
+                self._record_terminal_fallback(exc)
         if self.downstream is not None:
             try:
                 self.downstream(event, payload)
@@ -311,8 +316,25 @@ class _ProgressRecorder:
 
         loop.create_task(publish())
 
-    @staticmethod
-    def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    def _record_terminal_fallback(self, exc: Exception) -> None:
+        try:
+            stored = self.store.append_scan_event(
+                self.scan_id,
+                "scan.completed",
+                EVENT_TITLES["scan.finalized"],
+                {
+                    "scan_id": self.scan_id,
+                    "status": "completed",
+                    "payload_truncated": True,
+                    "projection_error": type(exc).__name__,
+                },
+            )
+        except Exception:
+            return
+        self._publish_change(stored["seq"])
+
+    @classmethod
+    def _safe_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
         allowed = {
             "scan_id",
             "status",
@@ -340,7 +362,28 @@ class _ProgressRecorder:
             "error_type",
             "reason",
         }
-        return {key: value for key, value in payload.items() if key in allowed}
+        safe = {key: value for key, value in payload.items() if key in allowed}
+        if cls._payload_size(safe) <= MAX_PROJECTED_EVENT_BYTES:
+            return safe
+
+        compact: dict[str, Any] = {}
+        truncated_fields: list[str] = []
+        for key, value in safe.items():
+            if isinstance(value, str):
+                compact[key] = value[:1_000]
+            elif value is None or isinstance(value, (bool, int, float)):
+                compact[key] = value
+            elif key in {"counts", "status_counts"} and cls._payload_size({key: value}) <= 8 * 1024:
+                compact[key] = value
+            else:
+                truncated_fields.append(key)
+        compact["payload_truncated"] = True
+        compact["truncated_fields"] = truncated_fields
+        return compact
+
+    @staticmethod
+    def _payload_size(payload: dict[str, Any]) -> int:
+        return len(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
 
 
 class AuditService:
@@ -353,7 +396,9 @@ class AuditService:
         self._start_lock = asyncio.Lock()
 
     def recover_orphaned_scans(self) -> list[str]:
-        scan_ids = self.store.recover_interrupted_scans()
+        scan_ids = self.store.recover_interrupted_scans(
+            active_owner_tokens={item.owner_token for item in self._active.values()},
+        )
         for scan_id in scan_ids:
             for phase in self.store.list_phase_runs(scan_id):
                 if phase["status"] != "running":
@@ -438,6 +483,7 @@ class AuditService:
                 raise AuditServiceError("preparation_failed", str(exc)) from exc
 
             scan_id = str(prepared["scan_id"])
+            owner_token = f"task_{uuid4().hex}"
             try:
                 self.store.set_scan_request_metadata(
                     scan_id,
@@ -447,6 +493,8 @@ class AuditService:
                     idempotency_key=normalized.idempotency_key,
                     request_digest=digest,
                     task_owner_pid=os.getpid(),
+                    task_owner_token=owner_token,
+                    task_owner_identity=process_identity(os.getpid()),
                 )
             except ValueError as exc:
                 self._discard_prepared_scan(scan_id, prepared)
@@ -465,7 +513,11 @@ class AuditService:
                 self._run_background(normalized, ctx, prepared, recorder),
                 name=f"code-security:{scan_id}",
             )
-            self._active[scan_id] = _ActiveScan(ctx=ctx, task=task)
+            self._active[scan_id] = _ActiveScan(
+                ctx=ctx,
+                task=task,
+                owner_token=owner_token,
+            )
 
         return await self.get_scan(scan_id, caller)
 
@@ -608,6 +660,10 @@ class AuditService:
         cursor: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
+        if limit < 1 or limit > 100:
+            raise AuditServiceError("invalid_parameter", "limit must be between 1 and 100")
+        if cursor and len(cursor) > 4_096:
+            raise AuditServiceError("invalid_parameter", "cursor is too long")
         invalid_statuses = set(statuses or ()) - PUBLIC_SCAN_STATUSES
         if invalid_statuses:
             raise AuditServiceError(
@@ -617,13 +673,16 @@ class AuditService:
         persisted_statuses = set(statuses or ())
         if "running" in persisted_statuses:
             persisted_statuses.update({"reducing", "cancelling"})
-        page = self.store.list_scans(
-            owner_subject=caller.subject,
-            include_all=caller.is_admin,
-            statuses=persisted_statuses,
-            cursor=cursor,
-            limit=limit,
-        )
+        try:
+            page = self.store.list_scans(
+                owner_subject=caller.subject,
+                include_all=caller.is_admin,
+                statuses=persisted_statuses,
+                cursor=cursor,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise AuditServiceError("invalid_parameter", str(exc)) from exc
         for item in page["items"]:
             item["lifecycle_status"] = _public_lifecycle(item.pop("status"))
             item["current_phase"] = _public_phase(item.get("current_phase"))
@@ -634,6 +693,8 @@ class AuditService:
             item.pop("owner_subject", None)
             item.pop("idempotency_key", None)
             item.pop("task_owner_pid", None)
+            item.pop("task_owner_token", None)
+            item.pop("task_owner_identity", None)
             item.pop("output_dir", None)
         return {
             "schema_version": PUBLIC_SCHEMA_VERSION,
@@ -753,20 +814,34 @@ class AuditService:
         caller: AuditCaller,
         *,
         after_seq: int = 0,
+        before_seq: int | None = None,
         limit: int = 200,
         recent: bool = False,
     ) -> dict[str, Any]:
         self._require_visible_scan(scan_id, caller)
+        if before_seq is not None and (recent or after_seq):
+            raise AuditServiceError(
+                "invalid_parameter",
+                "before_seq cannot be combined with recent or after_seq",
+            )
         if recent and after_seq:
             raise AuditServiceError(
                 "invalid_parameter",
                 "recent and after_seq cannot be used together",
             )
-        page = (
-            self.store.list_recent_scan_events(scan_id, limit=limit)
-            if recent
-            else self.store.list_scan_events(scan_id, after_seq=after_seq, limit=limit)
-        )
+        try:
+            if before_seq is not None:
+                page = self.store.list_scan_events_before(
+                    scan_id,
+                    before_seq=before_seq,
+                    limit=limit,
+                )
+            elif recent:
+                page = self.store.list_recent_scan_events(scan_id, limit=limit)
+            else:
+                page = self.store.list_scan_events(scan_id, after_seq=after_seq, limit=limit)
+        except ValueError as exc:
+            raise AuditServiceError("invalid_parameter", str(exc)) from exc
         return {
             "items": page["items"],
             "latestSeq": page["latest_seq"],
@@ -782,10 +857,14 @@ class AuditService:
         scan = self._require_visible_scan(scan_id, caller)
         file_path = self._artifact_file(scan_id, kind)
         if file_path:
-            self._require_verified_artifact(scan, file_path.name)
+            contents = await asyncio.to_thread(
+                self._read_verified_artifact,
+                scan,
+                file_path,
+            )
             if kind == "report_markdown":
-                return {"kind": kind, "state": "sealed", "content": file_path.read_text(encoding="utf-8")}
-            return {"kind": kind, "state": "sealed", "content": json.loads(file_path.read_text(encoding="utf-8"))}
+                return {"kind": kind, "state": "sealed", "content": contents.decode("utf-8")}
+            return {"kind": kind, "state": "sealed", "content": json.loads(contents)}
 
         data = self.store.report_data(scan_id)
         if kind == "snapshot_summary":
@@ -878,7 +957,12 @@ class AuditService:
             "truncated": context["text_truncated"],
         }
 
-    def download_path(self, scan_id: str, artifact_name: str, caller: AuditCaller) -> Path:
+    async def download_artifact(
+        self,
+        scan_id: str,
+        artifact_name: str,
+        caller: AuditCaller,
+    ) -> tuple[str, bytes]:
         scan = self._require_visible_scan(scan_id, caller)
         kind = next((key for key, filename in ARTIFACT_FILENAMES.items() if filename == artifact_name), None)
         if kind is None:
@@ -886,8 +970,8 @@ class AuditService:
         path = self._artifact_file(scan_id, kind)
         if path is None:
             raise AuditServiceError("artifact_not_found", "Artifact is not available", status_code=404)
-        self._require_verified_artifact(scan, artifact_name)
-        return path
+        contents = await asyncio.to_thread(self._read_verified_artifact, scan, path)
+        return path.name, contents
 
     async def _create_execution_context(
         self,
@@ -1296,24 +1380,41 @@ class AuditService:
         candidate = output / filename
         if not candidate.is_file() or candidate.is_symlink():
             return None
-        return candidate.resolve()
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(output)
+        except ValueError:
+            return None
+        return resolved
 
-    def _require_verified_artifact(
+    def _read_verified_artifact(
         self,
         scan: dict[str, Any],
-        filename: str,
-    ) -> None:
+        path: Path,
+    ) -> bytes:
+        try:
+            contents = path.read_bytes()
+        except OSError as exc:
+            raise AuditServiceError(
+                "artifact_integrity_invalid",
+                "Artifact bundle did not pass integrity validation",
+                status_code=409,
+            ) from exc
         status = self.store.scan_status(str(scan["scan_id"]))
-        if (
-            scan["status"] != "completed"
-            or status.get("integrity_status") != "valid"
-            or filename not in status.get("integrity_artifacts", {})
+        expected_digest = status.get("integrity_artifacts", {}).get(path.name)
+        actual_digest = hashlib.sha256(contents).hexdigest()
+        if not (
+            scan["status"] == "completed"
+            and status.get("integrity_status") == "valid"
+            and isinstance(expected_digest, str)
+            and hmac.compare_digest(actual_digest, expected_digest)
         ):
             raise AuditServiceError(
                 "artifact_integrity_invalid",
                 "Artifact bundle did not pass integrity validation",
                 status_code=409,
             )
+        return contents
 
     @staticmethod
     def _failure_code(exc: BaseException) -> str:

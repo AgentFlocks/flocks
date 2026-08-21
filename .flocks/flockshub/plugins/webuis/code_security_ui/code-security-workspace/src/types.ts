@@ -21,6 +21,8 @@ export interface ProjectSummary {
   name?: string;
   worktree: string;
   pathStatus?: string;
+  canWrite?: boolean;
+  isShared?: boolean;
 }
 
 export interface ScanSummary {
@@ -33,6 +35,11 @@ export interface ScanSummary {
   finished_at?: string | null;
   failure_summary?: string | null;
   candidate_count?: number;
+}
+
+export interface ScanPage {
+  items: ScanSummary[];
+  nextCursor: string | null;
 }
 
 export interface PhaseRun {

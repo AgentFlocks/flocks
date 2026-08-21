@@ -5,6 +5,9 @@ import { phaseLabels, relativeTime } from "../labels";
 import type { ScanSummary } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
+const SCAN_ROW_HEIGHT = 106;
+const SCAN_OVERSCAN = 5;
+
 export function ScanListPanel({
   scans,
   selectedId,
@@ -13,6 +16,9 @@ export function ScanListPanel({
   canCreate,
   open,
   onClose,
+  hasMore,
+  loadingMore,
+  onLoadMore,
 }: {
   scans: ScanSummary[];
   selectedId: string | null;
@@ -21,6 +27,9 @@ export function ScanListPanel({
   canCreate: boolean;
   open: boolean;
   onClose: () => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
@@ -30,8 +39,11 @@ export function ScanListPanel({
   const [mobileLayout, setMobileLayout] = useState(
     () => window.matchMedia?.("(max-width: 767px)").matches ?? false,
   );
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(600);
   const panelRef = useRef<HTMLElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const listRef = useRef<HTMLElement>(null);
   const filtered = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
     return scans.filter((scan) => {
@@ -44,6 +56,17 @@ export function ScanListPanel({
       return matchesStatus && matchesQuery;
     });
   }, [query, scans, status]);
+  const virtual = filtered.length > 100;
+  const start = virtual
+    ? Math.max(0, Math.floor(scrollTop / SCAN_ROW_HEIGHT) - SCAN_OVERSCAN)
+    : 0;
+  const end = virtual
+    ? Math.min(
+        filtered.length,
+        start + Math.ceil(viewportHeight / SCAN_ROW_HEIGHT) + SCAN_OVERSCAN * 2,
+      )
+    : filtered.length;
+  const visible = filtered.slice(start, end);
 
   useEffect(() => {
     if (!window.matchMedia) return undefined;
@@ -61,6 +84,22 @@ export function ScanListPanel({
       mobile.removeEventListener?.("change", update);
     };
   }, []);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() =>
+      setViewportHeight(list.clientHeight),
+    );
+    observer.observe(list);
+    setViewportHeight(list.clientHeight || 600);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    setScrollTop(0);
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [query, status]);
 
   useEffect(() => {
     if (!overlayLayout || mobileLayout || !open) return undefined;
@@ -160,40 +199,80 @@ export function ScanListPanel({
           <option value="interrupted">已中断</option>
         </select>
       </label>
-      <nav className="cs-scan-list" aria-label="扫描列表">
-        {filtered.map((scan) => (
-          <button
-            key={scan.scan_id}
-            type="button"
-            className={`cs-scan-item${selectedId === scan.scan_id ? " is-selected" : ""}`}
-            onClick={() => {
-              onSelect(scan.scan_id);
-              if (overlayLayout) onClose();
-            }}
-            aria-current={selectedId === scan.scan_id ? "page" : undefined}
-          >
-            <span className="cs-scan-item__top">
-              <strong>{scan.display_name}</strong>
-              <StatusBadge status={scan.lifecycle_status} />
-            </span>
-            <span className="cs-scan-item__meta">
-              {scan.lifecycle_status === "completed"
-                ? `${scan.candidate_count || 0} 个候选`
-                : phaseLabels[scan.current_phase || ""] || "等待阶段信息"}
-              {scan.dynamic_enabled && (
-                <span className="cs-mode-tag">动态</span>
-              )}
-            </span>
-            <span className="cs-scan-item__bottom">
-              <code title={scan.scan_id}>{scan.scan_id.slice(0, 16)}</code>
-              <time dateTime={scan.created_at}>
-                {relativeTime(scan.created_at)}
-              </time>
-            </span>
-          </button>
-        ))}
+      <nav
+        ref={listRef}
+        className="cs-scan-list"
+        aria-label="扫描列表"
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          setScrollTop(element.scrollTop);
+          if (
+            hasMore &&
+            !loadingMore &&
+            element.scrollHeight - element.scrollTop - element.clientHeight <
+              120
+          ) {
+            void onLoadMore();
+          }
+        }}
+      >
+        <div
+          className={virtual ? "cs-scan-list__virtual" : "cs-scan-list__items"}
+          style={
+            virtual ? { height: filtered.length * SCAN_ROW_HEIGHT } : undefined
+          }
+        >
+          {visible.map((scan, index) => (
+            <button
+              key={scan.scan_id}
+              type="button"
+              className={`cs-scan-item${selectedId === scan.scan_id ? " is-selected" : ""}${virtual ? " is-virtual" : ""}`}
+              style={
+                virtual
+                  ? {
+                      transform: `translateY(${(start + index) * SCAN_ROW_HEIGHT}px)`,
+                    }
+                  : undefined
+              }
+              onClick={() => {
+                onSelect(scan.scan_id);
+                if (overlayLayout) onClose();
+              }}
+              aria-current={selectedId === scan.scan_id ? "page" : undefined}
+            >
+              <span className="cs-scan-item__top">
+                <strong>{scan.display_name}</strong>
+                <StatusBadge status={scan.lifecycle_status} />
+              </span>
+              <span className="cs-scan-item__meta">
+                {scan.lifecycle_status === "completed"
+                  ? `${scan.candidate_count || 0} 个候选`
+                  : phaseLabels[scan.current_phase || ""] || "等待阶段信息"}
+                {scan.dynamic_enabled && (
+                  <span className="cs-mode-tag">动态</span>
+                )}
+              </span>
+              <span className="cs-scan-item__bottom">
+                <code title={scan.scan_id}>{scan.scan_id.slice(0, 16)}</code>
+                <time dateTime={scan.created_at}>
+                  {relativeTime(scan.created_at)}
+                </time>
+              </span>
+            </button>
+          ))}
+        </div>
         {!filtered.length && (
           <p className="cs-inline-empty">没有匹配的审计记录</p>
+        )}
+        {hasMore && (
+          <button
+            type="button"
+            className="cs-load-more-scans"
+            onClick={() => void onLoadMore()}
+            disabled={loadingMore}
+          >
+            {loadingMore ? "正在加载…" : "加载更多审计记录"}
+          </button>
         )}
       </nav>
     </aside>

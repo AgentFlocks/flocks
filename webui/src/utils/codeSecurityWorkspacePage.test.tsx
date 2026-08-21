@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import Page from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/Page";
+import { ArtifactInspector } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/ArtifactInspector";
 import { PhaseWorkspace } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/PhaseWorkspace";
 import type { PhaseRun } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/types";
 
@@ -275,6 +276,328 @@ describe("code security workspace contract page", () => {
       "/api/code-security/v1/scans/scan_demo/events",
       { params: { recent: true, limit: 200 } },
     );
+  });
+
+  it("keeps a valid deep-linked scan even when it is not in the first history page", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                scan_id: "scan_older",
+                display_name: "legacy-service",
+                lifecycle_status: "running",
+                current_phase: "baseline",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T05:20:00Z",
+              },
+            ],
+            next_cursor: null,
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+
+    render(<Page />);
+
+    expect(
+      await screen.findByRole("heading", { name: "flocks" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(window.location.search).toContain("scan_id=scan_demo"),
+    );
+    expect(apiGet).not.toHaveBeenCalledWith(
+      "/api/code-security/v1/scans/scan_older",
+    );
+  });
+
+  it("loads earlier durable events on demand", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: any) => {
+      if (path.endsWith("/events") && config?.params?.before_seq === 1) {
+        return Promise.resolve({
+          data: { items: [], latestSeq: 2, hasMore: false },
+        });
+      }
+      if (path.endsWith("/events")) {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                seq: 1,
+                scan_id: "scan_demo",
+                type: "scan.snapshot_ready",
+                level: "info",
+                title: "不可变源码快照已创建",
+                summary: {},
+                created_at: "2026-08-21T06:20:01Z",
+              },
+              {
+                seq: 2,
+                scan_id: "scan_demo",
+                type: "phase.started",
+                level: "info",
+                title: "独立验证 Worker 已开始",
+                summary: { phase: "verification" },
+                created_at: "2026-08-21T06:22:00Z",
+              },
+            ],
+            latestSeq: 2,
+            hasMore: true,
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    await user.click(screen.getByRole("button", { name: "加载更早事件" }));
+
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith(
+        "/api/code-security/v1/scans/scan_demo/events",
+        { params: { before_seq: 1, limit: 200 } },
+      ),
+    );
+    expect(
+      screen.queryByRole("button", { name: "加载更早事件" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not refetch an artifact for unrelated event sequence updates", async () => {
+    const { rerender } = render(
+      <ArtifactInspector
+        detail={scanDetail as any}
+        activeTab="candidate_index"
+        onTabChange={() => undefined}
+        open={false}
+        onClose={() => undefined}
+      />,
+    );
+    await screen.findByText("待验证路径穿越");
+    const artifactCalls = () =>
+      apiGet.mock.calls.filter(([path]) =>
+        String(path).endsWith("/artifacts/candidate_index"),
+      ).length;
+    expect(artifactCalls()).toBe(1);
+
+    rerender(
+      <ArtifactInspector
+        detail={
+          {
+            ...scanDetail,
+            scan: { ...scanDetail.scan, latest_event_seq: 99 },
+          } as any
+        }
+        activeTab="candidate_index"
+        onTabChange={() => undefined}
+        open={false}
+        onClose={() => undefined}
+      />,
+    );
+
+    await waitFor(() => expect(artifactCalls()).toBe(1));
+  });
+
+  it("does not display artifact content from a previously selected scan", async () => {
+    let resolveNextArtifact: ((value: any) => void) | undefined;
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (
+        path ===
+        "/api/code-security/v1/scans/scan_next/artifacts/candidate_index"
+      ) {
+        return new Promise((resolve) => {
+          resolveNextArtifact = resolve;
+        });
+      }
+      return baseGet(path, config);
+    });
+    const { rerender } = render(
+      <ArtifactInspector
+        detail={scanDetail as any}
+        activeTab="candidate_index"
+        onTabChange={() => undefined}
+        open={false}
+        onClose={() => undefined}
+      />,
+    );
+    expect(await screen.findByText("待验证路径穿越")).toBeInTheDocument();
+
+    rerender(
+      <ArtifactInspector
+        detail={
+          {
+            ...scanDetail,
+            scan: { ...scanDetail.scan, scan_id: "scan_next" },
+          } as any
+        }
+        activeTab="candidate_index"
+        onTabChange={() => undefined}
+        open={false}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByText("待验证路径穿越")).not.toBeInTheDocument();
+    resolveNextArtifact?.({
+      data: {
+        kind: "candidate_index",
+        state: "partial",
+        content: [],
+      },
+    });
+  });
+
+  it("updates a non-selected scan summary from an SSE invalidation", async () => {
+    let source: {
+      onmessage: ((message: MessageEvent) => void) | null;
+    } | null = null;
+    class TestEventSource {
+      onopen: (() => void) | null = null;
+      onmessage: ((message: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor() {
+        source = this;
+      }
+
+      close() {}
+    }
+    (globalThis as any).EventSource = TestEventSource;
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans/scan_older") {
+        return Promise.resolve({
+          data: {
+            ...scanDetail,
+            scan: {
+              ...scanDetail.scan,
+              scan_id: "scan_older",
+              lifecycle_status: "completed",
+              current_phase: "finalization",
+              finished_at: "2026-08-21T06:30:00Z",
+              can_cancel: false,
+            },
+            target: { ...scanDetail.target, display_name: "legacy-service" },
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    source!.onmessage?.({
+      data: JSON.stringify({
+        type: "code-security.scan.changed",
+        properties: { scanId: "scan_older", latestEventSeq: 9 },
+      }),
+    } as MessageEvent);
+
+    await waitFor(
+      () =>
+        expect(
+          screen.getByRole("button", { name: /legacy-service.*已完成/ }),
+        ).toBeInTheDocument(),
+      { timeout: 2_000 },
+    );
+  });
+
+  it("filters shared read-only workspaces from the audit target selector", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/project/") {
+        return Promise.resolve({
+          data: [
+            {
+              id: "shared-project",
+              name: "Shared",
+              worktree: "/workspace/shared",
+              pathStatus: "available",
+              canWrite: false,
+              isShared: true,
+            },
+            {
+              id: "owned-project",
+              name: "Owned",
+              worktree: "/workspace/owned",
+              pathStatus: "available",
+              canWrite: true,
+            },
+          ],
+        });
+      }
+      return baseGet(path, config);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+
+    expect(
+      screen.queryByRole("option", { name: "Shared" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Owned" })).toBeInTheDocument();
+  });
+
+  it("loads the next scan history page without dropping existing rows", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: any) => {
+      if (path === "/api/code-security/v1/scans" && config?.params?.cursor) {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                scan_id: "scan_archived",
+                display_name: "archived-service",
+                lifecycle_status: "completed",
+                current_phase: "finalization",
+                dynamic_enabled: false,
+                created_at: "2026-08-20T05:20:00Z",
+              },
+            ],
+            next_cursor: null,
+          },
+        });
+      }
+      if (path === "/api/code-security/v1/scans") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                scan_id: "scan_demo",
+                display_name: "flocks",
+                lifecycle_status: "running",
+                current_phase: "verification",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T06:20:00Z",
+              },
+            ],
+            next_cursor: "cursor-2",
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    await user.click(
+      screen.getAllByRole("button", { name: "加载更多审计记录" })[0],
+    );
+
+    expect(await screen.findByText("archived-service")).toBeInTheDocument();
+    expect(screen.getAllByText("flocks").length).toBeGreaterThan(0);
+    expect(apiGet).toHaveBeenCalledWith("/api/code-security/v1/scans", {
+      params: { limit: 20, cursor: "cursor-2" },
+    });
   });
 
   it("keeps an unverified candidate labeled as a candidate instead of a final finding", async () => {

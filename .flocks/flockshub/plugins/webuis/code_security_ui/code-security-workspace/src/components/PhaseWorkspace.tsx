@@ -31,11 +31,17 @@ export function PhaseWorkspace({
   events,
   workers,
   currentPhase,
+  hasOlderEvents = false,
+  loadingOlderEvents = false,
+  onLoadOlderEvents = async () => undefined,
 }: {
   phases: PhaseRun[];
   events: AuditEvent[];
   workers: WorkerRun[];
   currentPhase?: string | null;
+  hasOlderEvents?: boolean;
+  loadingOlderEvents?: boolean;
+  onLoadOlderEvents?: () => Promise<void>;
 }) {
   const sorted = useMemo(
     () =>
@@ -171,7 +177,12 @@ export function PhaseWorkspace({
         workers={workers.filter((worker) => worker.phase === selected?.phase)}
       />
       <DurationTable phases={sorted} />
-      <EventStream events={events} />
+      <EventStream
+        events={events}
+        hasOlder={hasOlderEvents}
+        loadingOlder={loadingOlderEvents}
+        onLoadOlder={onLoadOlderEvents}
+      />
     </section>
   );
 }

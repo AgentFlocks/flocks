@@ -5,6 +5,7 @@ import type {
   NewAuditValues,
   ProjectSummary,
   ScanDetail,
+  ScanPage,
   ScanSummary,
 } from "./types";
 
@@ -22,11 +23,17 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return response.data;
 }
 
-export async function listScans(): Promise<ScanSummary[]> {
+export async function listScans(
+  cursor?: string | null,
+  limit = 20,
+): Promise<ScanPage> {
   const response = await getApi().get(`${BASE}/scans`, {
-    params: { limit: 100 },
+    params: { limit, ...(cursor ? { cursor } : {}) },
   });
-  return response.data.items;
+  return {
+    items: response.data.items,
+    nextCursor: response.data.next_cursor || null,
+  };
 }
 
 export async function getScan(scanId: string): Promise<ScanDetail> {
@@ -56,6 +63,19 @@ export async function getRecentEvents(
     `${BASE}/scans/${encodeURIComponent(scanId)}/events`,
     {
       params: { recent: true, limit: 200 },
+    },
+  );
+  return response.data;
+}
+
+export async function getEarlierEvents(
+  scanId: string,
+  beforeSeq: number,
+): Promise<{ items: AuditEvent[]; latestSeq: number; hasMore: boolean }> {
+  const response = await getApi().get(
+    `${BASE}/scans/${encodeURIComponent(scanId)}/events`,
+    {
+      params: { before_seq: beforeSeq, limit: 200 },
     },
   );
   return response.data;

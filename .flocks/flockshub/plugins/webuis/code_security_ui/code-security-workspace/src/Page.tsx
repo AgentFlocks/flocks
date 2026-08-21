@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   cancelScan,
+  getEarlierEvents,
   getEvents,
   getRecentEvents,
   getScan,
@@ -49,6 +50,10 @@ export default function Page() {
   const [liveMessage, setLiveMessage] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [scanPanelOpen, setScanPanelOpen] = useState(false);
+  const [scanCursor, setScanCursor] = useState<string | null>(null);
+  const [loadingMoreScans, setLoadingMoreScans] = useState(false);
+  const [hasOlderEvents, setHasOlderEvents] = useState(false);
+  const [loadingOlderEvents, setLoadingOlderEvents] = useState(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const latestSeqRef = useRef(0);
   const selectedIdRef = useRef<string | null>(selectedId);
@@ -57,6 +62,9 @@ export default function Page() {
   const drawerOpenerRef = useRef<HTMLElement | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const scanPanelOpenerRef = useRef<HTMLElement | null>(null);
+  const loadingMoreScansRef = useRef(false);
+  const listRefreshTimerRef = useRef<number | null>(null);
+  const queuedScanRefreshRef = useRef(new Set<string>());
 
   const openDrawer = useCallback(() => {
     drawerOpenerRef.current =
@@ -106,6 +114,8 @@ export default function Page() {
       setError("");
       setLoading(true);
       setInspectorOpen(false);
+      setHasOlderEvents(false);
+      setLoadingOlderEvents(false);
       latestSeqRef.current = 0;
       if (updateHistory) {
         const params = new URLSearchParams(window.location.search);
@@ -145,24 +155,11 @@ export default function Page() {
       afterSeq ? getEvents(scanId, afterSeq) : getRecentEvents(scanId),
     ]);
     const eventItems: AuditEvent[] = page.items;
-    setScans((current) =>
-      current.map((scan) =>
-        scan.scan_id === scanId
-          ? {
-              ...scan,
-              lifecycle_status: nextDetail.scan.lifecycle_status,
-              current_phase: nextDetail.scan.current_phase,
-              dynamic_enabled: nextDetail.scan.dynamic_enabled,
-              finished_at: nextDetail.scan.finished_at,
-              failure_summary: nextDetail.scan.failure_summary,
-              candidate_count: nextDetail.counts.candidates,
-            }
-          : scan,
-      ),
-    );
+    setScans((current) => mergeScans(current, [summaryFromDetail(nextDetail)]));
     if (selectedIdRef.current !== scanId)
       return { detail: nextDetail, hasMore: false };
     setDetail(nextDetail);
+    if (!afterSeq) setHasOlderEvents(page.hasMore);
     const deliveredSeq = eventItems.length
       ? eventItems[eventItems.length - 1].seq
       : afterSeq;
@@ -213,10 +210,58 @@ export default function Page() {
   );
 
   const reloadList = useCallback(async () => {
-    const nextScans = await listScans();
-    setScans(nextScans);
-    return nextScans;
+    const page = await listScans();
+    setScans((current) => mergeScans(current, page.items));
+    setScanCursor(page.nextCursor);
+    return page.items;
   }, []);
+
+  const loadMoreScans = useCallback(async () => {
+    if (!scanCursor || loadingMoreScansRef.current) return;
+    loadingMoreScansRef.current = true;
+    setLoadingMoreScans(true);
+    try {
+      const page = await listScans(scanCursor);
+      setScans((current) => mergeScans(current, page.items));
+      setScanCursor(page.nextCursor);
+    } catch (reason: any) {
+      setError(
+        reason?.response?.data?.detail?.message ||
+          reason?.message ||
+          "无法加载更多审计记录",
+      );
+    } finally {
+      loadingMoreScansRef.current = false;
+      setLoadingMoreScans(false);
+    }
+  }, [scanCursor]);
+
+  const scheduleListRefresh = useCallback((scanId: string) => {
+    queuedScanRefreshRef.current.add(scanId);
+    if (listRefreshTimerRef.current !== null) return;
+    listRefreshTimerRef.current = window.setTimeout(() => {
+      listRefreshTimerRef.current = null;
+      const scanIds = [...queuedScanRefreshRef.current];
+      queuedScanRefreshRef.current.clear();
+      Promise.all(scanIds.map((item) => getScan(item).catch(() => null))).then(
+        (details) => {
+          const summaries = details
+            .filter((item): item is ScanDetail => item !== null)
+            .map(summaryFromDetail);
+          if (summaries.length)
+            setScans((current) => mergeScans(current, summaries));
+        },
+      );
+    }, 250);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (listRefreshTimerRef.current !== null)
+        window.clearTimeout(listRefreshTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     const onPopState = () => {
@@ -234,11 +279,7 @@ export default function Page() {
       .then(([nextScans, nextProjects]) => {
         setProjects(nextProjects);
         const currentSelection = selectedIdRef.current;
-        const candidate =
-          currentSelection &&
-          nextScans.some((scan) => scan.scan_id === currentSelection)
-            ? currentSelection
-            : nextScans[0]?.scan_id || null;
+        const candidate = currentSelection || nextScans[0]?.scan_id || null;
         if (candidate && candidate !== currentSelection)
           replaceSelection(candidate);
         if (!candidate) setLoading(false);
@@ -290,10 +331,13 @@ export default function Page() {
         const event = JSON.parse(message.data);
         if (event.type !== "code-security.scan.changed") return;
         const properties = event.properties || {};
-        if (
-          properties.scanId !== selectedId ||
-          Number(properties.latestEventSeq || 0) <= latestSeqRef.current
-        )
+        const changedScanId = String(properties.scanId || "");
+        if (!changedScanId) return;
+        if (changedScanId !== selectedId) {
+          scheduleListRefresh(changedScanId);
+          return;
+        }
+        if (Number(properties.latestEventSeq || 0) <= latestSeqRef.current)
           return;
         refreshChangedScan(selectedId).catch(() =>
           setConnection("reconnecting"),
@@ -304,7 +348,34 @@ export default function Page() {
     };
     source.onerror = () => setConnection("reconnecting");
     return () => source.close();
-  }, [refreshChangedScan, selectedId]);
+  }, [refreshChangedScan, scheduleListRefresh, selectedId]);
+
+  const loadOlderEvents = async () => {
+    const scanId = selectedIdRef.current;
+    const beforeSeq = events[0]?.seq;
+    if (!scanId || !beforeSeq || loadingOlderEvents) return;
+    setLoadingOlderEvents(true);
+    try {
+      const page = await getEarlierEvents(scanId, beforeSeq);
+      if (selectedIdRef.current !== scanId) return;
+      setEvents((current) =>
+        Array.from(
+          new Map(
+            [...page.items, ...current].map((item) => [item.seq, item]),
+          ).values(),
+        ).sort((a, b) => a.seq - b.seq),
+      );
+      setHasOlderEvents(page.hasMore);
+    } catch (reason: any) {
+      setError(
+        reason?.response?.data?.detail?.message ||
+          reason?.message ||
+          "无法加载更早的可信事件",
+      );
+    } finally {
+      if (selectedIdRef.current === scanId) setLoadingOlderEvents(false);
+    }
+  };
 
   useEffect(() => {
     if (connection === "connected" || !selectedId) return undefined;
@@ -397,6 +468,9 @@ export default function Page() {
         canCreate={canCreate}
         open={scanPanelOpen}
         onClose={closeScanPanel}
+        hasMore={Boolean(scanCursor)}
+        loadingMore={loadingMoreScans}
+        onLoadMore={loadMoreScans}
       />
       {scanPanelOpen && (
         <button
@@ -455,6 +529,16 @@ export default function Page() {
                     </option>
                   ))}
                 </select>
+                {scanCursor && (
+                  <button
+                    type="button"
+                    className="cs-button cs-button--secondary cs-mobile-load-more"
+                    onClick={loadMoreScans}
+                    disabled={loadingMoreScans}
+                  >
+                    {loadingMoreScans ? "正在加载…" : "加载更多审计记录"}
+                  </button>
+                )}
               </div>
               <button
                 className="cs-icon-button cs-scan-drawer-trigger"
@@ -552,6 +636,9 @@ export default function Page() {
               events={events}
               workers={detail.workers || []}
               currentPhase={detail.scan.current_phase}
+              hasOlderEvents={hasOlderEvents}
+              loadingOlderEvents={loadingOlderEvents}
+              onLoadOlderEvents={loadOlderEvents}
             />
           </>
         )}
@@ -582,6 +669,33 @@ export default function Page() {
         onCreated={handleCreated}
       />
     </main>
+  );
+}
+
+function summaryFromDetail(detail: ScanDetail): ScanSummary {
+  return {
+    scan_id: detail.scan.scan_id,
+    display_name: detail.target.display_name,
+    lifecycle_status: detail.scan.lifecycle_status,
+    current_phase: detail.scan.current_phase,
+    dynamic_enabled: detail.scan.dynamic_enabled,
+    created_at: detail.scan.created_at,
+    finished_at: detail.scan.finished_at,
+    failure_summary: detail.scan.failure_summary,
+    candidate_count: detail.counts.candidates,
+  };
+}
+
+function mergeScans(
+  current: ScanSummary[],
+  incoming: ScanSummary[],
+): ScanSummary[] {
+  const items = new Map(current.map((scan) => [scan.scan_id, scan]));
+  incoming.forEach((scan) => items.set(scan.scan_id, scan));
+  return [...items.values()].sort(
+    (left, right) =>
+      right.created_at.localeCompare(left.created_at) ||
+      right.scan_id.localeCompare(left.scan_id),
   );
 }
 

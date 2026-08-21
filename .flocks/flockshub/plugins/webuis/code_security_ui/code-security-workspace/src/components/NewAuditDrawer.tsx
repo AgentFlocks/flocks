@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createIdempotencyKey, createScan } from "../api";
 import { Icon } from "../icons";
@@ -42,6 +42,14 @@ export function NewAuditDrawer({
   const errorRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const dirty = JSON.stringify(values) !== JSON.stringify(baselineRef.current);
+  const availableProjects = useMemo(
+    () =>
+      projects.filter(
+        (project) =>
+          project.pathStatus === "available" && project.canWrite !== false,
+      ),
+    [projects],
+  );
 
   function requestClose() {
     if (dirty && !window.confirm("表单中有尚未提交的内容，确定关闭吗？"))
@@ -51,18 +59,21 @@ export function NewAuditDrawer({
 
   useEffect(() => {
     if (!open) return;
-    if (!values.workspaceId && projects[0]) {
+    if (
+      !availableProjects.some((project) => project.id === values.workspaceId)
+    ) {
+      const workspaceId = availableProjects[0]?.id || "";
       setValues((current) => {
-        const next = { ...current, workspaceId: projects[0].id };
+        const next = { ...current, workspaceId };
         baselineRef.current = {
           ...(baselineRef.current || EMPTY_VALUES),
-          workspaceId: projects[0].id,
+          workspaceId,
         };
         return next;
       });
     }
     window.setTimeout(() => titleRef.current?.focus(), 0);
-  }, [open, projects, values.workspaceId]);
+  }, [availableProjects, open, values.workspaceId]);
 
   useEffect(() => {
     if (open && !wasOpenRef.current) {
@@ -260,13 +271,11 @@ export function NewAuditDrawer({
                 aria-invalid={Boolean(errors.workspaceId)}
               >
                 <option value="">请选择工作区</option>
-                {projects
-                  .filter((project) => project.pathStatus !== "missing")
-                  .map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name || project.worktree}
-                    </option>
-                  ))}
+                {availableProjects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name || project.worktree}
+                  </option>
+                ))}
               </select>
               {errors.workspaceId && (
                 <small role="alert">{errors.workspaceId}</small>

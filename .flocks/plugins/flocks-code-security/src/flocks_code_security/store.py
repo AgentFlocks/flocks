@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
@@ -45,6 +47,91 @@ def _pid_is_running(value: Any) -> bool:
         return False
     except PermissionError:
         return True
+    return True
+
+
+def process_identity(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            stat_text = Path(f"/proc/{value}/stat").read_text(encoding="utf-8")
+            start_ticks = stat_text.rsplit(")", 1)[1].split()[19]
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        except (IndexError, OSError):
+            return None
+        return f"linux:{boot_id}:{start_ticks}"
+    if sys.platform == "win32":
+        return _windows_process_identity(value)
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(value)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    started_at = " ".join(result.stdout.split())
+    return f"posix:{started_at}" if result.returncode == 0 and started_at else None
+
+
+def _windows_process_identity(pid: int) -> str | None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        try:
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return None
+        finally:
+            kernel32.CloseHandle(handle)
+        created = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        return f"windows:{created}"
+    except (AttributeError, OSError):
+        return None
+
+
+def _scan_owner_is_running(
+    pid: Any,
+    owner_token: Any,
+    owner_identity: Any,
+    *,
+    active_owner_tokens: set[str] | None,
+) -> bool:
+    if not _pid_is_running(pid):
+        return False
+    if isinstance(owner_identity, str) and process_identity(pid) != owner_identity:
+        return False
+    if active_owner_tokens is not None and pid == os.getpid():
+        return isinstance(owner_token, str) and owner_token in active_owner_tokens
     return True
 
 
@@ -288,6 +375,8 @@ class ScanStore:
                 ("failure_summary", "TEXT"),
                 ("finished_at", "TEXT"),
                 ("task_owner_pid", "INTEGER"),
+                ("task_owner_token", "TEXT"),
+                ("task_owner_identity", "TEXT"),
                 ("output_dir", "TEXT"),
             )
             for column, definition in scan_column_definitions:
@@ -499,6 +588,8 @@ class ScanStore:
         idempotency_key: str | None = None,
         request_digest: str | None = None,
         task_owner_pid: int | None = None,
+        task_owner_token: str | None = None,
+        task_owner_identity: str | None = None,
     ) -> str:
         scan_id = f"scan_{uuid.uuid4().hex}"
         now = _now()
@@ -508,8 +599,9 @@ class ScanStore:
                 "scan_id, parent_session_id, snapshot_id, mode, "
                 "dynamic_enabled, status, ruleset_digest, created_at, updated_at, "
                 "owner_subject, request_source, workspace_ref, idempotency_key, "
-                "request_digest, current_phase, task_owner_pid"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "request_digest, current_phase, task_owner_pid, task_owner_token, "
+                "task_owner_identity"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     parent_session_id,
@@ -527,6 +619,8 @@ class ScanStore:
                     request_digest,
                     "snapshot",
                     task_owner_pid,
+                    task_owner_token,
+                    task_owner_identity,
                 ),
             )
         return scan_id
@@ -1622,13 +1716,16 @@ class ScanStore:
         idempotency_key: str | None,
         request_digest: str,
         task_owner_pid: int | None = None,
+        task_owner_token: str | None = None,
+        task_owner_identity: str | None = None,
     ) -> None:
         try:
             with self._lock, self._connect() as connection:
                 cursor = connection.execute(
                     "UPDATE scans SET owner_subject = ?, request_source = ?, "
                     "workspace_ref = ?, idempotency_key = ?, request_digest = ?, "
-                    "task_owner_pid = ?, current_phase = 'snapshot', updated_at = ? "
+                    "task_owner_pid = ?, task_owner_token = ?, task_owner_identity = ?, "
+                    "current_phase = 'snapshot', updated_at = ? "
                     "WHERE scan_id = ?",
                     (
                         owner_subject,
@@ -1637,6 +1734,8 @@ class ScanStore:
                         idempotency_key,
                         request_digest,
                         task_owner_pid,
+                        task_owner_token,
+                        task_owner_identity,
                         _now(),
                         scan_id,
                     ),
@@ -1692,13 +1791,27 @@ class ScanStore:
                 raise ValueError("Scan not found")
             return False
 
-    def recover_interrupted_scans(self) -> list[str]:
+    def recover_interrupted_scans(
+        self,
+        *,
+        active_owner_tokens: set[str] | None = None,
+    ) -> list[str]:
         now = _now()
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT scan_id, task_owner_pid FROM scans WHERE status IN ('running', 'reducing', 'cancelling')"
+                "SELECT scan_id, task_owner_pid, task_owner_token, task_owner_identity FROM scans "
+                "WHERE status IN ('running', 'reducing', 'cancelling')"
             ).fetchall()
-            scan_ids = [str(row["scan_id"]) for row in rows if not _pid_is_running(row["task_owner_pid"])]
+            scan_ids = [
+                str(row["scan_id"])
+                for row in rows
+                if not _scan_owner_is_running(
+                    row["task_owner_pid"],
+                    row["task_owner_token"],
+                    row["task_owner_identity"],
+                    active_owner_tokens=active_owner_tokens,
+                )
+            ]
             if scan_ids:
                 placeholders = ", ".join("?" for _ in scan_ids)
                 connection.execute(
@@ -1906,6 +2019,33 @@ class ScanStore:
         has_more = len(rows) > limit
         items = [self._decode_scan_event(row) for row in reversed(rows[:limit])]
         latest = items[-1]["seq"] if items else 0
+        return {"items": items, "latest_seq": latest, "has_more": has_more}
+
+    def list_scan_events_before(
+        self,
+        scan_id: str,
+        *,
+        before_seq: int,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if before_seq < 1:
+            raise ValueError("before_seq must be positive")
+        if limit < 1 or limit > 200:
+            raise ValueError("limit must be between 1 and 200")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM scan_events WHERE scan_id = ? AND seq < ? "
+                "ORDER BY seq DESC LIMIT ?",
+                (scan_id, before_seq, limit + 1),
+            ).fetchall()
+            latest = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(seq), 0) FROM scan_events WHERE scan_id = ?",
+                    (scan_id,),
+                ).fetchone()[0]
+            )
+        has_more = len(rows) > limit
+        items = [self._decode_scan_event(row) for row in reversed(rows[:limit])]
         return {"items": items, "latest_seq": latest, "has_more": has_more}
 
     def list_scans(

@@ -30,9 +30,13 @@ export function ArtifactInspector({
   open: boolean;
   onClose: () => void;
 }) {
-  const [content, setContent] = useState<ArtifactContent | null>(null);
+  const [content, setContent] = useState<{
+    scanId: string;
+    artifact: ArtifactContent;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
   const [wideLayout, setWideLayout] = useState(
     () => window.matchMedia?.("(min-width: 1440px)").matches ?? false,
   );
@@ -45,6 +49,12 @@ export function ArtifactInspector({
       ),
     [detail.artifacts],
   );
+  const visible = wideLayout || open;
+  const activeContent =
+    content?.scanId === detail.scan.scan_id &&
+    content.artifact.kind === activeTab
+      ? content.artifact
+      : null;
 
   useEffect(() => {
     if (!window.matchMedia) return undefined;
@@ -91,18 +101,25 @@ export function ArtifactInspector({
   useEffect(() => {
     if (activeTab === "overview") {
       setContent(null);
+      setLoading(false);
       return;
     }
+    if (!visible) return;
+    const scanId = detail.scan.scan_id;
     let cancelled = false;
     setLoading(true);
     setError("");
-    getArtifact(detail.scan.scan_id, activeTab)
+    getArtifact(scanId, activeTab)
       .then((value) => {
-        if (!cancelled) setContent(value);
+        if (!cancelled) setContent({ scanId, artifact: value });
       })
       .catch((reason) => {
         if (!cancelled) {
-          setContent(null);
+          setContent((current) =>
+            current?.scanId === scanId && current.artifact.kind === activeTab
+              ? current
+              : null,
+          );
           setError(
             reason?.response?.data?.detail?.message ||
               reason?.message ||
@@ -116,7 +133,7 @@ export function ArtifactInspector({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, detail.scan.scan_id, detail.scan.latest_event_seq]);
+  }, [activeTab, detail.scan.scan_id, refreshKey, visible]);
 
   return (
     <aside
@@ -135,14 +152,26 @@ export function ArtifactInspector({
             审计产物
           </h2>
         </div>
-        <button
-          className="cs-icon-button cs-inspector__close"
-          type="button"
-          onClick={onClose}
-          aria-label="关闭产物检查器"
-        >
-          <Icon name="close" />
-        </button>
+        <div className="cs-inspector__actions">
+          {activeTab !== "overview" && (
+            <button
+              className="cs-inspector__refresh"
+              type="button"
+              onClick={() => setRefreshKey((value) => value + 1)}
+              disabled={loading}
+            >
+              {loading ? "刷新中…" : "刷新"}
+            </button>
+          )}
+          <button
+            className="cs-icon-button cs-inspector__close"
+            type="button"
+            onClick={onClose}
+            aria-label="关闭产物检查器"
+          >
+            <Icon name="close" />
+          </button>
+        </div>
       </div>
       <div className="cs-artifact-tabs" role="tablist" aria-label="审计产物">
         {tabs.map((tab) => {
@@ -176,21 +205,30 @@ export function ArtifactInspector({
       <div className="cs-inspector__body" role="tabpanel">
         {activeTab === "overview" ? (
           <Overview detail={detail} />
-        ) : loading ? (
+        ) : loading && !activeContent ? (
           <InspectorSkeleton />
-        ) : error ? (
+        ) : error && !activeContent ? (
           <div className="cs-error-state" role="alert">
             <Icon name="warning" />
             <h3>产物暂不可用</h3>
             <p>{error}</p>
-            <p>扫描继续运行时，这里会在新版本产生后自动刷新。</p>
+            <p>扫描继续运行时，可稍后点击“刷新”读取最新版本。</p>
           </div>
+        ) : activeContent ? (
+          <>
+            {error && (
+              <p className="cs-artifact-refresh-error" role="alert">
+                刷新失败，仍显示上一次成功读取的内容：{error}
+              </p>
+            )}
+            <ArtifactBody
+              kind={activeTab}
+              content={activeContent.content}
+              detail={detail}
+            />
+          </>
         ) : (
-          <ArtifactBody
-            kind={activeTab}
-            content={content?.content}
-            detail={detail}
-          />
+          <InspectorSkeleton />
         )}
       </div>
     </aside>
