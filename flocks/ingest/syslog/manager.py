@@ -619,10 +619,9 @@ class SyslogManager:
             exec_data = await create_execution_record(
                 workflow_id,
                 input_params=summarized_inputs,
-                persist=True,
             )
             exec_id = exec_data["id"]
-            step_recorder = ExecutionStepRecorder(exec_id=exec_id)
+            step_recorder = ExecutionStepRecorder()
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             tool_context = None

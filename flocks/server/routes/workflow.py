@@ -1128,7 +1128,7 @@ async def _run_workflow_execution_task(
 ) -> None:
     """Execute a workflow in the background and keep the execution record updated."""
     start_time = time.time()
-    step_recorder = ExecutionStepRecorder(exec_id=exec_id)
+    step_recorder = ExecutionStepRecorder()
     pending_step_index: Optional[int] = None
     pending_step: Optional[Dict[str, Any]] = None
     execution_summary: Dict[str, Any] = {

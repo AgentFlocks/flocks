@@ -372,7 +372,7 @@ def workflow_execution_step_prefix(exec_id: str) -> str:
 def compact_execution_summary(exec_data: Dict[str, Any]) -> Dict[str, Any]:
     """Return an execution record safe to keep in the hot summary row.
 
-    Step details are stored separately under ``workflow_execution_step`` keys.
+    Step details are stored separately in ``workflow_execution_steps`` rows.
     Keeping ``executionLog`` out of the summary row avoids rewriting an
     ever-growing JSON blob on every progress update.
     """
@@ -398,10 +398,8 @@ class ExecutionStepRecorder:
     def __init__(
         self,
         *,
-        exec_id: str,
         step_compactor: Callable[[Any], Dict[str, Any]] = compact_step_for_storage,
     ) -> None:
-        self.exec_id = exec_id
         self.step_compactor = step_compactor
         self.step_count = 0
         self.summary: Dict[str, Any] = {}
@@ -618,9 +616,8 @@ async def create_execution_record(
     *,
     input_params: Optional[Dict[str, Any]] = None,
     exec_id: Optional[str] = None,
-    persist: bool = True,
 ) -> Dict[str, Any]:
-    """Build a running workflow execution record and optionally persist it.
+    """Build and persist a running workflow execution record.
 
     *input_params* is passed through ``compact_outputs_for_storage`` before
     writing to SQLite so that batch HTTP calls whose inputs contain a key in
@@ -635,8 +632,7 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
-    if persist:
-        await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
+    await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
     return exec_data
 
 

@@ -351,9 +351,8 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     recorded_steps: list[tuple[int, dict]] = []
 
     async def _fake_create_execution_record(  # noqa: ANN001
-        workflow_id, *, input_params=None, exec_id=None, persist=True
+        workflow_id, *, input_params=None, exec_id=None
     ):
-        assert persist is True
         return {"id": "exec-syslog", "workflowId": workflow_id, "inputParams": input_params}
 
     async def _fake_record_execution_result(  # noqa: ANN001

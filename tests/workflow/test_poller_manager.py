@@ -99,7 +99,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     monkeypatch.setattr(
         poller_manager,
         "create_execution_record",
-        lambda workflow_id, *, input_params=None, exec_id=None, persist=True: asyncio.sleep(
+        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(
             0,
             result={
                 "id": exec_id or f"exec-{workflow_id}",
@@ -154,9 +154,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         *,
         input_params: dict[str, Any] | None = None,
         exec_id: str | None = None,
-        persist: bool = True,
     ) -> dict[str, Any]:
-        assert persist is True
         record = {
             "id": exec_id or "exec-1",
             "workflowId": workflow_id,
@@ -304,7 +302,7 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
     monkeypatch.setattr(
         poller_manager,
         "create_execution_record",
-        lambda workflow_id, *, input_params=None, exec_id=None, persist=True: asyncio.sleep(
+        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(
             0,
             result={
                 "id": exec_id or f"exec-{workflow_id}",
@@ -359,9 +357,7 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         *,
         input_params: dict[str, Any] | None = None,
         exec_id: str | None = None,
-        persist: bool = True,
     ) -> dict[str, Any]:
-        assert persist is True
         _ = input_params
         return {
             "id": exec_id or f"exec-{workflow_id}",

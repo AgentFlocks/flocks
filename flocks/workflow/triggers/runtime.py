@@ -248,10 +248,9 @@ class TriggerRuntime:
         exec_data = await create_execution_record(
             workflow_id,
             input_params=mapped_inputs,
-            persist=True,
         )
         exec_id = exec_data["id"]
-        step_recorder = ExecutionStepRecorder(exec_id=exec_id)
+        step_recorder = ExecutionStepRecorder()
         started_at = time.time()
         tool_context = None
         try:

@@ -570,9 +570,8 @@ async def run_workflow_tool(
     canonical_workflow_id = registered_workflow_id or resolve_workflow_id_from_source(workflow_source)
     display_workflow_id = canonical_workflow_id or workflow_id
     tracked_execution: Optional[Dict[str, Any]] = None
-    step_recorder: Optional[ExecutionStepRecorder] = None
+    step_recorder = ExecutionStepRecorder()
     progress_writer: Optional[ExecutionProgressWriter] = None
-    callback_step_count = 0
     pending_step_index: Optional[int] = None
     pending_step: Optional[Dict[str, Any]] = None
     final_step_batch: Optional[List[Tuple[int, Dict[str, Any]]]] = None
@@ -639,35 +638,9 @@ async def run_workflow_tool(
         return step_index
 
     def _on_step_complete(step_result: Any) -> None:
-        nonlocal callback_step_count, pending_step_index, pending_step
-        if step_recorder is not None:
-            step_recorder.on_step_complete(step_result)
-            callback_step_count = step_recorder.step_count
-            progress_update = dict(step_recorder.summary)
-        else:
-            if hasattr(step_result, "model_dump"):
-                step_dict = step_result.model_dump(mode="json")
-            elif isinstance(step_result, dict):
-                step_dict = dict(step_result)
-            else:
-                step_dict = {"node_id": None, "outputs": {}, "error": str(step_result)}
-            callback_step_count += 1
-            compacted_step = compact_step_for_storage(step_dict)
-            progress_update = {
-                "stepCount": callback_step_count,
-                "currentNodeId": compacted_step.get("node_id"),
-                "currentNodeType": compacted_step.get("node_type")
-                or compacted_step.get("type"),
-                "currentPhase": "running",
-                "currentStepIndex": callback_step_count,
-                "loopProgress": derive_loop_progress(
-                    node_id=compacted_step.get("node_id"),
-                    global_step_index=callback_step_count,
-                    inputs=compacted_step.get("inputs"),
-                    outputs=compacted_step.get("outputs"),
-                ),
-                "updatedAt": int(time.time() * 1000),
-            }
+        nonlocal pending_step_index, pending_step
+        step_recorder.on_step_complete(step_result)
+        progress_update = dict(step_recorder.summary)
         pending_step_index = None
         pending_step = None
         if ctx.abort.is_set():
@@ -688,8 +661,8 @@ async def run_workflow_tool(
                     "phase": progress_update["currentPhase"],
                     "current_node_id": progress_update.get("currentNodeId"),
                     "current_node_type": progress_update.get("currentNodeType"),
-                    "step_index": callback_step_count,
-                    "step_count": callback_step_count,
+                    "step_index": step_recorder.step_count,
+                    "step_count": step_recorder.step_count,
                     "loop_progress": progress_update.get("loopProgress"),
                 },
             }
@@ -698,7 +671,7 @@ async def run_workflow_tool(
     def _take_final_step_batch() -> List[Tuple[int, Dict[str, Any]]]:
         nonlocal final_step_batch
         if final_step_batch is None:
-            final_step_batch = step_recorder.take_steps() if step_recorder is not None else []
+            final_step_batch = step_recorder.take_steps()
             if pending_step_index is not None and pending_step is not None:
                 final_step_batch.append((pending_step_index, pending_step))
             final_step_batch.sort(key=lambda item: item[0])
@@ -721,7 +694,6 @@ async def run_workflow_tool(
             canonical_workflow_id,
             input_params=workflow_inputs,
         )
-        step_recorder = ExecutionStepRecorder(exec_id=tracked_execution["id"])
         progress_writer = ExecutionProgressWriter(tracked_execution)
 
     # Update metadata to show workflow is running
@@ -868,7 +840,7 @@ async def run_workflow_tool(
         history_count = len(final_history)
         final_step_count = result_dict.get("steps")
         if not isinstance(final_step_count, int):
-            final_step_count = callback_step_count
+            final_step_count = step_recorder.step_count
         final_step_count = max(
             final_step_count,
             max((step_index for step_index, _ in tracked_steps), default=0),
@@ -988,7 +960,7 @@ async def run_workflow_tool(
             },
         )
         terminal_status = "cancelled" if ctx.abort.is_set() else "error"
-        final_step_count = callback_step_count
+        final_step_count = step_recorder.step_count
         if tracked_execution and canonical_workflow_id:
             tracked_steps = _take_final_step_batch()
             final_step_count = max(

@@ -41,6 +41,17 @@ def _two_node_workflow_json(edge):
     }
 
 
+def _progress_writer(exec_id: str, **updates):
+    summary = {
+        "id": exec_id,
+        "workflowId": "wf-1",
+        "status": "running",
+        "executionLog": [],
+    }
+    summary.update(updates)
+    return workflow_module.ExecutionProgressWriter(summary)
+
+
 @pytest.mark.asyncio
 async def test_create_workflow_applies_vertex_cache_runtime_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     writes: list[dict] = []
@@ -252,35 +263,17 @@ async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     run_mock = Mock(side_effect=run_workflow_mock)
     record_result = AsyncMock(return_value=None)
     upsert_execution = AsyncMock(return_value=None)
-    storage_read = AsyncMock(
-        return_value={
-            "id": "exec-1",
-            "workflowId": "wf-1",
-            "currentNodeType": "tool",
-            "executionLog": [],
-        }
-    )
-
     monkeypatch.setattr(MCP, "init", init_mock)
     monkeypatch.setattr(workflow_module, "run_workflow", run_mock)
     monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", upsert_execution)
     monkeypatch.setattr(workflow_module, "_resolve_execution_outcome", lambda _result: ("success", None))
     monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
-    monkeypatch.setattr(workflow_module.Storage, "read", storage_read)
-    monkeypatch.setattr(workflow_module.Storage, "write", AsyncMock(return_value=None))
     monkeypatch.setattr(workflow_module, "compact_outputs_for_storage", lambda value: value)
     monkeypatch.setattr(workflow_module, "compact_history_for_storage", lambda value: value)
 
     req = workflow_module.WorkflowRunRequest(inputs={"ip": "8.8.8.8"}, trace=False)
     tool_context = ToolContext(session_id="session-1", message_id="message-1", agent="rex")
-    progress_writer = workflow_module.ExecutionProgressWriter(
-        {
-            "id": "exec-1",
-            "workflowId": "wf-1",
-            "status": "running",
-            "executionLog": [],
-        }
-    )
+    progress_writer = _progress_writer("exec-1")
 
     await workflow_module._run_workflow_execution_task(
         workflow_id="wf-1",
@@ -342,14 +335,7 @@ async def test_run_workflow_execution_task_batches_cancelled_pending_step(
 
     cancel_event = workflow_module.threading.Event()
     cancel_event.set()
-    progress_writer = workflow_module.ExecutionProgressWriter(
-        {
-            "id": "exec-cancelled",
-            "workflowId": "wf-1",
-            "status": "running",
-            "executionLog": [],
-        }
-    )
+    progress_writer = _progress_writer("exec-cancelled")
     await workflow_module._run_workflow_execution_task(
         workflow_id="wf-1",
         workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
@@ -418,14 +404,7 @@ async def test_run_workflow_execution_task_keeps_completed_and_pending_step_indi
     monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
     monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", upsert_execution)
 
-    progress_writer = workflow_module.ExecutionProgressWriter(
-        {
-            "id": "exec-partial-cancel",
-            "workflowId": "wf-1",
-            "status": "running",
-            "executionLog": [],
-        }
-    )
+    progress_writer = _progress_writer("exec-partial-cancel")
     await workflow_module._run_workflow_execution_task(
         workflow_id="wf-1",
         workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
@@ -481,14 +460,7 @@ async def test_run_workflow_execution_task_keeps_steps_when_runner_raises(
         AsyncMock(return_value=None),
     )
 
-    progress_writer = workflow_module.ExecutionProgressWriter(
-        {
-            "id": "exec-runner-error",
-            "workflowId": "wf-1",
-            "status": "running",
-            "executionLog": [],
-        }
-    )
+    progress_writer = _progress_writer("exec-runner-error")
     await workflow_module._run_workflow_execution_task(
         workflow_id="wf-1",
         workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
@@ -544,14 +516,7 @@ async def test_run_workflow_execution_task_does_not_reclassify_persistence_failu
         AsyncMock(return_value=None),
     )
 
-    progress_writer = workflow_module.ExecutionProgressWriter(
-        {
-            "id": "exec-storage-error",
-            "workflowId": "wf-1",
-            "status": "running",
-            "executionLog": [],
-        }
-    )
+    progress_writer = _progress_writer("exec-storage-error")
 
     with pytest.raises(RuntimeError, match="storage failed"):
         await workflow_module._run_workflow_execution_task(
@@ -627,14 +592,7 @@ async def test_run_workflow_callbacks_do_not_wait_for_blocked_progress_write(
     monkeypatch.setattr(workflow_module, "_record_execution_result", record_result_mock)
     monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", blocked_upsert)
 
-    progress_writer = workflow_module.ExecutionProgressWriter(
-        {
-            "id": "exec-blocked-progress",
-            "workflowId": "wf-1",
-            "status": "running",
-            "executionLog": [],
-        }
-    )
+    progress_writer = _progress_writer("exec-blocked-progress")
     task = asyncio.create_task(
         workflow_module._run_workflow_execution_task(
             workflow_id="wf-1",
@@ -680,15 +638,7 @@ async def test_cancel_workflow_execution_uses_active_progress_writer(
     )
     monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", capture_upsert)
 
-    progress_writer = workflow_module.ExecutionProgressWriter(
-        {
-            "id": "exec-cancel-route",
-            "workflowId": "wf-1",
-            "status": "running",
-            "currentPhase": "queued",
-            "executionLog": [],
-        }
-    )
+    progress_writer = _progress_writer("exec-cancel-route", currentPhase="queued")
     progress_writer.submit({"currentPhase": "running", "currentNodeId": "node-1"})
     cancel_event = workflow_module.threading.Event()
     current_task = asyncio.current_task()

@@ -37,6 +37,13 @@ _WORKFLOW_TABLE_PREFIXES = (
     "workflow_syslog_config/",
 )
 _WORKFLOW_PREFIXES = _WORKFLOW_KV_PREFIXES + _WORKFLOW_TABLE_PREFIXES
+_EXECUTION_UPSERT_SQL = """
+    INSERT OR REPLACE INTO workflow_executions
+    (id, workflow_id, status, current_phase, current_node_id, current_node_type,
+     current_step_index, step_count, input_params, output_results, error_message,
+     trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
 
 
 class WorkflowStore:
@@ -312,21 +319,18 @@ class WorkflowStore:
         log.info("workflow.store.legacy_kv_migrated", counts)
 
     @classmethod
-    async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
-        db = await cls._db()
+    def _execution_row(
+        cls,
+        exec_data: Dict[str, Any],
+    ) -> Tuple[str, str, Tuple[Any, ...]]:
         payload = dict(exec_data)
         exec_id = str(payload.get("id") or "")
         workflow_id = str(payload.get("workflowId") or payload.get("workflow_id") or "")
         if not exec_id or not workflow_id:
             raise ValueError("workflow execution requires id and workflowId")
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO workflow_executions
-            (id, workflow_id, status, current_phase, current_node_id, current_node_type,
-             current_step_index, step_count, input_params, output_results, error_message,
-             trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        return (
+            exec_id,
+            workflow_id,
             (
                 exec_id,
                 workflow_id,
@@ -348,6 +352,12 @@ class WorkflowStore:
                 cls._json_dumps(payload),
             ),
         )
+
+    @classmethod
+    async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
+        db = await cls._db()
+        _, _, row = cls._execution_row(exec_data)
+        await db.execute(_EXECUTION_UPSERT_SQL, row)
         await db.commit()
 
     @classmethod
@@ -497,12 +507,7 @@ class WorkflowStore:
     ) -> None:
         """Atomically persist one final execution summary and its step batch."""
         db = await cls._completion_db()
-        payload = dict(exec_data)
-        exec_id = str(payload.get("id") or "")
-        workflow_id = str(payload.get("workflowId") or payload.get("workflow_id") or "")
-        if not exec_id or not workflow_id:
-            raise ValueError("workflow execution requires id and workflowId")
-
+        exec_id, workflow_id, execution_row = cls._execution_row(exec_data)
         step_rows = cls._step_rows(exec_id, steps)
         lock = cls._completion_lock
         if lock is None:
@@ -521,35 +526,7 @@ class WorkflowStore:
                         """,
                         step_rows,
                     )
-                await db.execute(
-                    """
-                    INSERT OR REPLACE INTO workflow_executions
-                    (id, workflow_id, status, current_phase, current_node_id, current_node_type,
-                     current_step_index, step_count, input_params, output_results, error_message,
-                     trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        exec_id,
-                        workflow_id,
-                        str(payload.get("status") or "running"),
-                        payload.get("currentPhase"),
-                        payload.get("currentNodeId"),
-                        payload.get("currentNodeType"),
-                        cls._as_int(payload.get("currentStepIndex")),
-                        cls._as_int(payload.get("stepCount")) or 0,
-                        cls._json_dumps(payload.get("inputParams") or {}),
-                        cls._json_dumps(payload.get("outputResults") or {}),
-                        payload.get("errorMessage"),
-                        payload.get("triggerId"),
-                        payload.get("triggerType"),
-                        cls._as_int(payload.get("startedAt")) or cls._now_ms(),
-                        cls._as_int(payload.get("finishedAt")),
-                        cls._as_float(payload.get("duration")),
-                        cls._as_int(payload.get("updatedAt")) or cls._now_ms(),
-                        cls._json_dumps(payload),
-                    ),
-                )
+                await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
                 await db.commit()
             except BaseException:
                 try:

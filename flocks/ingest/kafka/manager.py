@@ -767,14 +767,12 @@ class KafkaManager:
             exec_data = await create_execution_record(
                 workflow_id,
                 input_params=summarized_inputs,
-                persist=True,
             )
             exec_id = exec_data["id"]
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             trigger_input_keys = list((trigger.mapping or {}).keys()) or [input_key]
             step_recorder = ExecutionStepRecorder(
-                exec_id=exec_id,
                 step_compactor=lambda step: _compact_step_for_kafka_storage(
                     step,
                     input_key=input_key,
