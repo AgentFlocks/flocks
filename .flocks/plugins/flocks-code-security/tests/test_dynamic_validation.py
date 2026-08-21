@@ -46,6 +46,93 @@ def _successful_command(stdout: str = "") -> dict:
     }
 
 
+def _build_identity(
+    *,
+    context_path: str = ".",
+    dockerfile_path: str = "Dockerfile",
+) -> dynamic_module.BuildIdentity:
+    return dynamic_module.BuildIdentity(
+        scan_id="scan_test",
+        snapshot_id="snap_test",
+        tree_digest="tree_test",
+        context_path=context_path,
+        dockerfile_path=dockerfile_path,
+    )
+
+
+def _shared_image_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    build_succeeds: bool = True,
+    failed_control_candidate: str | None = None,
+) -> tuple[DockerDynamicRunner, list[list[str]], list[tuple[str, str, dict]], str]:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    dockerfile = snapshot / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(dynamic_module.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        dynamic_module,
+        "docker_runtime_dir",
+        lambda scan_id: runtime_root / scan_id,
+    )
+    completed: list[tuple[str, str, dict]] = []
+
+    class Store:
+        def get_scan(self, scan_id: str):
+            return {"scan_id": scan_id, "snapshot_id": "snap_shared"}
+
+        def get_snapshot(self, snapshot_id: str):
+            return SimpleNamespace(
+                root_path=str(snapshot),
+                snapshot_id=snapshot_id,
+                tree_digest="tree_shared",
+            )
+
+        def list_snapshot_files(self, _snapshot_id: str):
+            data = dockerfile.read_bytes()
+            return [
+                SimpleNamespace(
+                    relative_path="Dockerfile",
+                    size_bytes=len(data),
+                    blob_digest=hashlib.sha256(data).hexdigest(),
+                )
+            ]
+
+        def complete_dynamic_run(self, candidate_id: str, status: str, facts: dict):
+            completed.append((candidate_id, status, facts))
+
+    runner = DockerDynamicRunner(Store())
+    runner._build_backend = "buildkit"
+    commands: list[list[str]] = []
+    image_id = "sha256:" + "b" * 64
+
+    async def command(argv: list[str], **_kwargs):
+        commands.append(argv)
+        if argv[1] == "build":
+            if not build_succeeds:
+                return {
+                    **_successful_command(),
+                    "exit_code": 1,
+                    "stderr": "build failed",
+                }
+            iidfile = Path(argv[argv.index("--iidfile") + 1])
+            iidfile.write_text(image_id, encoding="utf-8")
+        if (
+            argv[1] == "run"
+            and failed_control_candidate is not None
+            and f"flocks.code_security.candidate_id={failed_control_candidate}" in argv
+            and "flocks.code_security.phase=control" in argv
+        ):
+            return {**_successful_command(), "exit_code": 1}
+        return _successful_command()
+
+    monkeypatch.setattr(runner, "_command", command)
+    return runner, commands, completed, image_id
+
+
 def test_probe_contract_validates_paths_scripts_and_dockerfile(tmp_path: Path) -> None:
     (tmp_path / "Dockerfile").write_text("FROM local/test:latest\n", encoding="utf-8")
     validated = validate_probe(
@@ -472,6 +559,7 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
     }
     expected_spans = {
         "code-security.dynamic.runner",
+        "code-security.dynamic.build_group",
         "code-security.dynamic.candidate",
         "code-security.dynamic.base_image_check",
         "code-security.dynamic.build",
@@ -483,15 +571,20 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
     assert expected_spans <= spans_by_name.keys()
     assert all(span_names.count(name) == 1 for name in expected_spans)
     runner_observation = spans_by_name["code-security.dynamic.runner"][1]
+    build_group = spans_by_name["code-security.dynamic.build_group"]
     candidate = spans_by_name["code-security.dynamic.candidate"]
     assert spans_by_name["code-security.dynamic.runner"][0]["parent"] is root_observation
-    assert candidate[0]["parent"] is runner_observation
+    assert build_group[0]["parent"] is runner_observation
+    assert candidate[0]["parent"] is build_group[1]
     for name in (
         "code-security.dynamic.base_image_check",
         "code-security.dynamic.build",
+        "code-security.dynamic.image_cleanup",
+    ):
+        assert spans_by_name[name][0]["parent"] is build_group[1]
+    for name in (
         "code-security.dynamic.control",
         "code-security.dynamic.attack",
-        "code-security.dynamic.image_cleanup",
     ):
         assert spans_by_name[name][0]["parent"] is candidate[1]
 
@@ -501,6 +594,173 @@ async def test_runner_uses_offline_build_and_hardened_fresh_containers(
     assert "stdout" not in trace_payload
     assert "stderr" not in trace_payload
     assert str(snapshot) not in trace_payload
+
+
+@pytest.mark.asyncio
+async def test_runner_reuses_one_image_for_matching_build_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, commands, completed, image_id = _shared_image_runner(
+        tmp_path,
+        monkeypatch,
+    )
+    candidate_ids = (
+        "cand_shared_000000000001",
+        "cand_shared_000000000002",
+    )
+    await runner.run_all(
+        [
+            {
+                "candidate_id": candidate_id,
+                "scan_id": "scan_shared",
+                "status": "ready",
+                "probe": _runnable_probe(candidate_id),
+                "run": None,
+            }
+            for candidate_id in candidate_ids
+        ]
+    )
+
+    builds = [argv for argv in commands if argv[1] == "build"]
+    runs = [argv for argv in commands if argv[1] == "run"]
+    removals = [argv for argv in commands if argv[1:3] == ["image", "rm"]]
+    assert len(builds) == 1
+    assert len(runs) == 4
+    assert len(removals) == 1
+    build_labels = [
+        builds[0][index + 1]
+        for index, value in enumerate(builds[0])
+        if value == "--label"
+    ]
+    assert "flocks.code_security.scan_id=scan_shared" in build_labels
+    assert any(label.startswith("flocks.code_security.build_id=") for label in build_labels)
+    assert not any("candidate_id=" in label for label in build_labels)
+    assert all(image_id in argv for argv in runs)
+    run_labels = {
+        value
+        for argv in runs
+        for value in argv
+        if value.startswith("flocks.code_security.candidate_id=")
+    }
+    assert run_labels == {
+        f"flocks.code_security.candidate_id={candidate_id}"
+        for candidate_id in candidate_ids
+    }
+    assert {item[0] for item in completed} == set(candidate_ids)
+    assert all(item[1] == "completed" for item in completed)
+    assert {item[2]["image_id"] for item in completed} == {image_id}
+    assert len({item[2]["build_id"] for item in completed}) == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_build_failure_marks_every_candidate_inconclusive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, commands, completed, _image_id = _shared_image_runner(
+        tmp_path,
+        monkeypatch,
+        build_succeeds=False,
+    )
+    candidate_ids = ("cand_failed_one", "cand_failed_two")
+    await runner.run_all(
+        [
+            {
+                "candidate_id": candidate_id,
+                "scan_id": "scan_failed",
+                "status": "ready",
+                "probe": _runnable_probe(candidate_id),
+                "run": None,
+            }
+            for candidate_id in candidate_ids
+        ]
+    )
+
+    assert len([argv for argv in commands if argv[1] == "build"]) == 1
+    assert not any(argv[1] == "run" for argv in commands)
+    assert {item[0] for item in completed} == set(candidate_ids)
+    assert all(item[1] == "inconclusive" for item in completed)
+    assert all(item[2]["failed_phase"] == "build" for item in completed)
+    assert len({item[2]["build_id"] for item in completed}) == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_failure_does_not_stop_shared_image_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed_candidate = "cand_shared_000000000001"
+    successful_candidate = "cand_shared_000000000002"
+    runner, commands, completed, _image_id = _shared_image_runner(
+        tmp_path,
+        monkeypatch,
+        failed_control_candidate=failed_candidate,
+    )
+    await runner.run_all(
+        [
+            {
+                "candidate_id": candidate_id,
+                "scan_id": "scan_shared",
+                "status": "ready",
+                "probe": _runnable_probe(candidate_id),
+                "run": None,
+            }
+            for candidate_id in (failed_candidate, successful_candidate)
+        ]
+    )
+
+    assert len([argv for argv in commands if argv[1] == "build"]) == 1
+    assert len([argv for argv in commands if argv[1] == "run"]) == 3
+    status_by_candidate = {candidate_id: status for candidate_id, status, _ in completed}
+    assert status_by_candidate == {
+        failed_candidate: "inconclusive",
+        successful_candidate: "completed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runner_separates_different_build_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = DockerDynamicRunner(SimpleNamespace())
+    shared = _build_identity()
+    distinct = _build_identity(
+        context_path="service",
+        dockerfile_path="service/Dockerfile",
+    )
+    prepared = [
+        SimpleNamespace(candidate_id="cand_one", build_identity=shared),
+        SimpleNamespace(candidate_id="cand_two", build_identity=shared),
+        SimpleNamespace(candidate_id="cand_three", build_identity=distinct),
+    ]
+    groups: list[set[str]] = []
+
+    async def prepare_runs(_runs: list[dict]) -> list[SimpleNamespace]:
+        return prepared
+
+    async def run_build_group(
+        candidates: list[SimpleNamespace],
+        *,
+        semaphore: asyncio.Semaphore,
+        observation_parent=None,
+    ) -> None:
+        del semaphore, observation_parent
+        groups.append({candidate.candidate_id for candidate in candidates})
+
+    async def cleanup(*, observation_parent=None) -> None:
+        del observation_parent
+
+    monkeypatch.setattr(runner, "_prepare_runs", prepare_runs)
+    monkeypatch.setattr(runner, "_run_build_group", run_build_group)
+    monkeypatch.setattr(runner, "cleanup", cleanup)
+
+    await runner.run_all([{}, {}, {}])
+
+    assert {frozenset(group) for group in groups} == {
+        frozenset({"cand_one", "cand_two"}),
+        frozenset({"cand_three"}),
+    }
 
 
 @pytest.mark.asyncio
@@ -514,14 +774,35 @@ async def test_runner_cancels_siblings_before_cleanup(
     started = 0
     cleanup_calls = 0
 
-    async def run_candidate(run: dict, *, observation_parent=None) -> None:
-        del observation_parent
+    identities = [
+        _build_identity(dockerfile_path=f"Dockerfile.{index}")
+        for index in range(2)
+    ]
+    prepared = [
+        SimpleNamespace(candidate_id=candidate_id, build_identity=identity)
+        for candidate_id, identity in zip(
+            ("cand_failure", "cand_sibling"),
+            identities,
+            strict=True,
+        )
+    ]
+
+    async def prepare_runs(_runs: list[dict]) -> list[SimpleNamespace]:
+        return prepared
+
+    async def run_build_group(
+        candidates: list[SimpleNamespace],
+        *,
+        semaphore: asyncio.Semaphore,
+        observation_parent=None,
+    ) -> None:
+        del semaphore, observation_parent
         nonlocal started
         started += 1
         if started == 2:
             both_started.set()
         await both_started.wait()
-        if run["candidate_id"] == "cand_failure":
+        if candidates[0].candidate_id == "cand_failure":
             raise RuntimeError("candidate failed")
         try:
             await asyncio.Event().wait()
@@ -536,7 +817,8 @@ async def test_runner_cancels_siblings_before_cleanup(
         assert sibling_cancelled.is_set()
         cleaned.set()
 
-    monkeypatch.setattr(runner, "_run_candidate", run_candidate)
+    monkeypatch.setattr(runner, "_prepare_runs", prepare_runs)
+    monkeypatch.setattr(runner, "_run_build_group", run_build_group)
     monkeypatch.setattr(runner, "cleanup", cleanup)
 
     with pytest.raises(ExceptionGroup, match="unhandled errors in a TaskGroup"):
@@ -561,8 +843,19 @@ async def test_runner_finishes_cleanup_after_repeated_cancellation(
     cleanup_finished = asyncio.Event()
     cleanup_calls = 0
 
-    async def run_candidate(_run: dict, *, observation_parent=None) -> None:
-        del observation_parent
+    identity = _build_identity()
+    prepared = SimpleNamespace(candidate_id="cand_test", build_identity=identity)
+
+    async def prepare_runs(_runs: list[dict]) -> list[SimpleNamespace]:
+        return [prepared]
+
+    async def run_build_group(
+        _candidates: list[SimpleNamespace],
+        *,
+        semaphore: asyncio.Semaphore,
+        observation_parent=None,
+    ) -> None:
+        del semaphore, observation_parent
         candidate_started.set()
         await asyncio.Event().wait()
 
@@ -574,7 +867,8 @@ async def test_runner_finishes_cleanup_after_repeated_cancellation(
         await asyncio.sleep(0.05)
         cleanup_finished.set()
 
-    monkeypatch.setattr(runner, "_run_candidate", run_candidate)
+    monkeypatch.setattr(runner, "_prepare_runs", prepare_runs)
+    monkeypatch.setattr(runner, "_run_build_group", run_build_group)
     monkeypatch.setattr(runner, "cleanup", cleanup)
 
     task = asyncio.create_task(runner.run_all([{"candidate_id": "cand_test"}]))

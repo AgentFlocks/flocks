@@ -53,7 +53,30 @@ class CommandResult(TypedDict):
 
 
 @dataclass(frozen=True)
+class BuildIdentity:
+    scan_id: str
+    snapshot_id: str
+    tree_digest: str
+    context_path: str
+    dockerfile_path: str
+
+    @property
+    def digest(self) -> str:
+        value = "\0".join(
+            (
+                self.scan_id,
+                self.snapshot_id,
+                self.tree_digest,
+                self.context_path,
+                self.dockerfile_path,
+            )
+        )
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
 class PreparedCandidate:
+    build_identity: BuildIdentity
     candidate_id: str
     probe: dict[str, Any]
     context: Path
@@ -389,16 +412,24 @@ class DockerDynamicRunner:
             metadata={"component": "docker"},
         )
         parent = _observation(scope, observation_parent)
-        semaphore = asyncio.Semaphore(limit)
-
-        async def run_one(run: dict[str, Any]) -> None:
-            async with semaphore:
-                await self._run_candidate(run, observation_parent=parent)
+        build_group_count = 0
 
         try:
+            prepared = await self._prepare_runs(runs)
+            groups: dict[BuildIdentity, list[PreparedCandidate]] = {}
+            for candidate in prepared:
+                groups.setdefault(candidate.build_identity, []).append(candidate)
+            build_group_count = len(groups)
+            semaphore = asyncio.Semaphore(limit)
             async with asyncio.TaskGroup() as tasks:
-                for run in runs:
-                    tasks.create_task(run_one(run))
+                for candidates in groups.values():
+                    tasks.create_task(
+                        self._run_build_group(
+                            candidates,
+                            semaphore=semaphore,
+                            observation_parent=parent,
+                        )
+                    )
         except BaseException as exc:
             try:
                 _, interrupted = await _await_uninterruptibly(
@@ -412,7 +443,11 @@ class DockerDynamicRunner:
                 interrupted = False
             _end_observation(
                 scope,
-                output={"status": "failed", "candidate_count": len(runs)},
+                output={
+                    "status": "failed",
+                    "candidate_count": len(runs),
+                    "build_group_count": build_group_count,
+                },
                 error=exc,
             )
             if interrupted and not isinstance(exc, asyncio.CancelledError):
@@ -425,7 +460,11 @@ class DockerDynamicRunner:
         except BaseException as exc:
             _end_observation(
                 scope,
-                output={"status": "cleanup_failed", "candidate_count": len(runs)},
+                output={
+                    "status": "cleanup_failed",
+                    "candidate_count": len(runs),
+                    "build_group_count": build_group_count,
+                },
                 error=exc,
             )
             raise
@@ -433,14 +472,40 @@ class DockerDynamicRunner:
             cancelled = asyncio.CancelledError()
             _end_observation(
                 scope,
-                output={"status": "failed", "candidate_count": len(runs)},
+                output={
+                    "status": "failed",
+                    "candidate_count": len(runs),
+                    "build_group_count": build_group_count,
+                },
                 error=cancelled,
             )
             raise cancelled
         _end_observation(
             scope,
-            output={"status": "completed", "candidate_count": len(runs)},
+            output={
+                "status": "completed",
+                "candidate_count": len(runs),
+                "build_group_count": build_group_count,
+            },
         )
+
+    async def _prepare_runs(
+        self,
+        runs: list[dict[str, Any]],
+    ) -> list[PreparedCandidate]:
+        runtimes: dict[str, Path] = {}
+        prepared: list[PreparedCandidate] = []
+        for run in runs:
+            scan_id = run["scan_id"]
+            self._active_scan_ids.add(scan_id)
+            runtime = runtimes.get(scan_id)
+            if runtime is None:
+                runtime = ensure_private_directory(docker_runtime_dir(scan_id))
+                runtimes[scan_id] = runtime
+            prepared.append(
+                await asyncio.to_thread(self._prepare_candidate, run, runtime)
+            )
+        return prepared
 
     async def cleanup(self, *, observation_parent: Any = None) -> None:
         scope = _start_observation(
@@ -494,14 +559,207 @@ class DockerDynamicRunner:
             raise
         _end_observation(scope, output={"status": "completed"})
 
+    async def _run_build_group(
+        self,
+        candidates: list[PreparedCandidate],
+        *,
+        semaphore: asyncio.Semaphore,
+        observation_parent: Any,
+    ) -> None:
+        if not candidates:
+            raise ValueError("Dynamic build group cannot be empty")
+        identity = candidates[0].build_identity
+        if any(candidate.build_identity != identity for candidate in candidates):
+            raise ValueError("Dynamic build group contains incompatible candidates")
+        scope = _start_observation(
+            observation_parent,
+            "code-security.dynamic.build_group",
+            input={
+                "build_id": identity.digest,
+                "candidate_count": len(candidates),
+            },
+            metadata={"component": "docker", "build_id": identity.digest},
+        )
+        parent = _observation(scope, observation_parent)
+        try:
+            outcome = await self._execute_build_group(
+                candidates,
+                semaphore=semaphore,
+                observation_parent=parent,
+            )
+        except BaseException as exc:
+            _end_observation(scope, output={"status": "failed"}, error=exc)
+            raise
+        _end_observation(scope, output=outcome)
+
+    async def _execute_build_group(
+        self,
+        candidates: list[PreparedCandidate],
+        *,
+        semaphore: asyncio.Semaphore,
+        observation_parent: Any,
+    ) -> dict[str, Any]:
+        prepared = candidates[0]
+        identity = prepared.build_identity
+        docker = shutil.which("docker")
+        if docker is None:
+            raise RuntimeError("Dynamic validation requires the Docker CLI")
+        if self._build_backend is None:
+            raise RuntimeError("Dynamic validation preflight has not completed")
+
+        for index, image in enumerate(prepared.base_images):
+            inspection = await self._observed_command(
+                observation_parent,
+                "base_image_check",
+                [docker, "image", "inspect", image],
+                timeout_seconds=30,
+                input={"base_image_index": index},
+            )
+            if inspection["exit_code"] != 0:
+                return await self._mark_build_group_inconclusive(
+                    candidates,
+                    build=inspection,
+                    reason=f"Required local base image is unavailable: {image}",
+                    observation_parent=observation_parent,
+                )
+
+        iidfile = prepared.runtime / f"build-{identity.digest}.iid"
+        iidfile.unlink(missing_ok=True)
+        build_argv = [
+            docker,
+            "build",
+            *self._build_limit_arguments(self._build_backend),
+            "--shm-size",
+            BUILD_SHM_SIZE,
+            "--ulimit",
+            f"nproc={PROCESS_LIMIT}:{PROCESS_LIMIT}",
+            "--network",
+            "none",
+            "--pull=false",
+            "--no-cache",
+            "--label",
+            f"flocks.code_security.scan_id={identity.scan_id}",
+            "--label",
+            f"flocks.code_security.build_id={identity.digest}",
+            "--iidfile",
+            str(iidfile),
+            "-f",
+            str(prepared.dockerfile),
+            str(prepared.context),
+        ]
+        async with self._build_lock:
+            build = await self._observed_command(
+                observation_parent,
+                "build",
+                build_argv,
+                timeout_seconds=BUILD_TIMEOUT_SECONDS,
+                env=self._build_environment(self._build_backend),
+            )
+        if build["timed_out"] or build["exit_code"] != 0 or not iidfile.is_file():
+            reason = (
+                "Docker build exceeded 300 seconds."
+                if build["timed_out"]
+                else "Docker build failed."
+            )
+            return await self._mark_build_group_inconclusive(
+                candidates,
+                build=build,
+                reason=reason,
+                observation_parent=observation_parent,
+            )
+
+        image_id = iidfile.read_text(encoding="utf-8").strip()
+        if re.fullmatch(r"sha256:[a-f0-9]{64}", image_id) is None:
+            raise RuntimeError("Docker did not return a content-addressed image ID")
+        self._images.add(image_id)
+        outcomes: list[dict[str, Any]] = []
+
+        async def run_one(candidate: PreparedCandidate) -> None:
+            async with semaphore:
+                outcomes.append(
+                    await self._run_candidate(
+                        candidate,
+                        docker=docker,
+                        image_id=image_id,
+                        build=build,
+                        observation_parent=observation_parent,
+                    )
+                )
+
+        try:
+            async with asyncio.TaskGroup() as tasks:
+                for candidate in candidates:
+                    tasks.create_task(run_one(candidate))
+            completed = sum(item["status"] == "completed" for item in outcomes)
+            return {
+                "status": "completed" if completed == len(candidates) else "partial",
+                "candidate_count": len(candidates),
+                "completed_count": completed,
+                "inconclusive_count": len(candidates) - completed,
+            }
+        finally:
+            removal = await self._observed_command(
+                observation_parent,
+                "image_cleanup",
+                [docker, "image", "rm", "-f", image_id],
+                timeout_seconds=60,
+            )
+            if removal["exit_code"] == 0:
+                self._images.discard(image_id)
+
+    async def _mark_build_group_inconclusive(
+        self,
+        candidates: list[PreparedCandidate],
+        *,
+        build: CommandResult,
+        reason: str,
+        observation_parent: Any,
+    ) -> dict[str, Any]:
+        for candidate in candidates:
+            scope = _start_observation(
+                observation_parent,
+                "code-security.dynamic.candidate",
+                input={
+                    "scan_id": candidate.build_identity.scan_id,
+                    "candidate_id": candidate.candidate_id,
+                },
+                metadata={
+                    "scan_id": candidate.build_identity.scan_id,
+                    "candidate_id": candidate.candidate_id,
+                },
+            )
+            try:
+                outcome = await self._mark_inconclusive(
+                    candidate.candidate_id,
+                    {
+                        "runner_status": "inconclusive",
+                        "build_id": candidate.build_identity.digest,
+                        "build": build,
+                    },
+                    phase="build",
+                    reason=reason,
+                )
+            except BaseException as exc:
+                _end_observation(scope, output={"status": "failed"}, error=exc)
+                raise
+            _end_observation(scope, output=outcome)
+        return {
+            "status": "inconclusive",
+            "candidate_count": len(candidates),
+            "failed_phase": "build",
+        }
+
     async def _run_candidate(
         self,
-        run: dict[str, Any],
+        prepared: PreparedCandidate,
         *,
-        observation_parent: Any = None,
-    ) -> None:
-        scan_id = run["scan_id"]
-        candidate_id = run["candidate_id"]
+        docker: str,
+        image_id: str,
+        build: CommandResult,
+        observation_parent: Any,
+    ) -> dict[str, Any]:
+        scan_id = prepared.build_identity.scan_id
+        candidate_id = prepared.candidate_id
         scope = _start_observation(
             observation_parent,
             "code-security.dynamic.candidate",
@@ -511,179 +769,103 @@ class DockerDynamicRunner:
         parent = _observation(scope, observation_parent)
         try:
             outcome = await self._execute_candidate(
-                run,
+                prepared,
+                docker=docker,
+                image_id=image_id,
+                build=build,
                 observation_parent=parent,
             )
         except BaseException as exc:
             _end_observation(scope, output={"status": "failed"}, error=exc)
             raise
         _end_observation(scope, output=outcome)
+        return outcome
 
     async def _execute_candidate(
         self,
-        run: dict[str, Any],
+        prepared: PreparedCandidate,
         *,
+        docker: str,
+        image_id: str,
+        build: CommandResult,
         observation_parent: Any,
     ) -> dict[str, Any]:
-        scan_id = run["scan_id"]
-        self._active_scan_ids.add(scan_id)
-        runtime = ensure_private_directory(docker_runtime_dir(scan_id))
-        prepared = await asyncio.to_thread(self._prepare_candidate, run, runtime)
+        scan_id = prepared.build_identity.scan_id
         candidate_id = prepared.candidate_id
         probe = prepared.probe
-        docker = shutil.which("docker")
-        if docker is None:
-            raise RuntimeError("Dynamic validation requires the Docker CLI")
-        if self._build_backend is None:
-            raise RuntimeError("Dynamic validation preflight has not completed")
+        facts: dict[str, Any] = {
+            "runner_status": "inconclusive",
+            "build_id": prepared.build_identity.digest,
+            "build": build,
+            "image_id": image_id,
+        }
 
-        facts: dict[str, Any] = {"runner_status": "inconclusive"}
-        image_id: str | None = None
-        try:
-            for index, image in enumerate(prepared.base_images):
-                inspection = await self._observed_command(
-                    observation_parent,
-                    "base_image_check",
-                    [docker, "image", "inspect", image],
-                    timeout_seconds=30,
-                    input={"base_image_index": index},
-                )
-                if inspection["exit_code"] != 0:
-                    facts["build"] = inspection
-                    return await self._mark_inconclusive(
-                        candidate_id,
-                        facts,
-                        phase="build",
-                        reason=f"Required local base image is unavailable: {image}",
-                    )
-
-            iidfile = prepared.runtime / f"{candidate_id}.iid"
-            iidfile.unlink(missing_ok=True)
-            build_argv = [
-                docker,
-                "build",
-                *self._build_limit_arguments(self._build_backend),
-                "--shm-size",
-                BUILD_SHM_SIZE,
-                "--ulimit",
-                f"nproc={PROCESS_LIMIT}:{PROCESS_LIMIT}",
-                "--network",
-                "none",
-                "--pull=false",
-                "--no-cache",
-                "--label",
-                f"flocks.code_security.scan_id={scan_id}",
-                "--label",
-                f"flocks.code_security.candidate_id={candidate_id}",
-                "--iidfile",
-                str(iidfile),
-                "-f",
-                str(prepared.dockerfile),
-                str(prepared.context),
-            ]
-            async with self._build_lock:
-                build = await self._observed_command(
-                    observation_parent,
-                    "build",
-                    build_argv,
-                    timeout_seconds=BUILD_TIMEOUT_SECONDS,
-                    env=self._build_environment(self._build_backend),
-                )
-            facts["build"] = build
-            if build["timed_out"] or build["exit_code"] != 0 or not iidfile.is_file():
+        for phase in ("control", "attack"):
+            name = self._container_name(scan_id, candidate_id, phase)
+            self._containers.add(name)
+            phase_probe = probe[phase]
+            result = await self._observed_command(
+                observation_parent,
+                phase,
+                [
+                    docker,
+                    "run",
+                    "--rm",
+                    "--name",
+                    name,
+                    "--network",
+                    "none",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--read-only",
+                    "--pids-limit",
+                    str(PROCESS_LIMIT),
+                    "--memory",
+                    MEMORY_LIMIT,
+                    "--cpus",
+                    "1",
+                    "--tmpfs",
+                    f"/tmp:rw,nosuid,nodev,size={RUN_TMPFS_SIZE}",
+                    "--label",
+                    f"flocks.code_security.scan_id={scan_id}",
+                    "--label",
+                    f"flocks.code_security.candidate_id={candidate_id}",
+                    "--label",
+                    f"flocks.code_security.phase={phase}",
+                    "--entrypoint",
+                    "/bin/sh",
+                    image_id,
+                    "-c",
+                    phase_probe["script"],
+                ],
+                timeout_seconds=phase_probe["timeout_seconds"],
+                on_timeout=partial(self._remove_container, name),
+            )
+            if not result["timed_out"]:
+                self._containers.discard(name)
+            facts[phase] = result
+            if result["timed_out"] or result["exit_code"] != 0:
                 reason = (
-                    "Docker build exceeded 300 seconds."
-                    if build["timed_out"]
-                    else "Docker build failed."
+                    f"Docker {phase} run timed out."
+                    if result["timed_out"]
+                    else f"Docker {phase} run failed."
                 )
                 return await self._mark_inconclusive(
                     candidate_id,
                     facts,
-                    phase="build",
+                    phase=phase,
                     reason=reason,
                 )
-            image_id = iidfile.read_text(encoding="utf-8").strip()
-            if re.fullmatch(r"sha256:[a-f0-9]{64}", image_id) is None:
-                raise RuntimeError("Docker did not return a content-addressed image ID")
-            self._images.add(image_id)
-            facts["image_id"] = image_id
-
-            for phase in ("control", "attack"):
-                name = self._container_name(scan_id, candidate_id, phase)
-                self._containers.add(name)
-                phase_probe = probe[phase]
-                result = await self._observed_command(
-                    observation_parent,
-                    phase,
-                    [
-                        docker,
-                        "run",
-                        "--rm",
-                        "--name",
-                        name,
-                        "--network",
-                        "none",
-                        "--cap-drop",
-                        "ALL",
-                        "--security-opt",
-                        "no-new-privileges",
-                        "--read-only",
-                        "--pids-limit",
-                        str(PROCESS_LIMIT),
-                        "--memory",
-                        MEMORY_LIMIT,
-                        "--cpus",
-                        "1",
-                        "--tmpfs",
-                        f"/tmp:rw,nosuid,nodev,size={RUN_TMPFS_SIZE}",
-                        "--label",
-                        f"flocks.code_security.scan_id={scan_id}",
-                        "--label",
-                        f"flocks.code_security.candidate_id={candidate_id}",
-                        "--label",
-                        f"flocks.code_security.phase={phase}",
-                        "--entrypoint",
-                        "/bin/sh",
-                        image_id,
-                        "-c",
-                        phase_probe["script"],
-                    ],
-                    timeout_seconds=phase_probe["timeout_seconds"],
-                    on_timeout=partial(self._remove_container, name),
-                )
-                if not result["timed_out"]:
-                    self._containers.discard(name)
-                facts[phase] = result
-                if result["timed_out"] or result["exit_code"] != 0:
-                    reason = (
-                        f"Docker {phase} run timed out."
-                        if result["timed_out"]
-                        else f"Docker {phase} run failed."
-                    )
-                    return await self._mark_inconclusive(
-                        candidate_id,
-                        facts,
-                        phase=phase,
-                        reason=reason,
-                    )
-            facts["runner_status"] = "completed"
-            await asyncio.to_thread(
-                self.store.complete_dynamic_run,
-                candidate_id,
-                "completed",
-                facts,
-            )
-            return {"status": "completed"}
-        finally:
-            if image_id is not None:
-                removal = await self._observed_command(
-                    observation_parent,
-                    "image_cleanup",
-                    [docker, "image", "rm", "-f", image_id],
-                    timeout_seconds=60,
-                )
-                if removal["exit_code"] == 0:
-                    self._images.discard(image_id)
+        facts["runner_status"] = "completed"
+        await asyncio.to_thread(
+            self.store.complete_dynamic_run,
+            candidate_id,
+            "completed",
+            facts,
+        )
+        return {"status": "completed"}
 
     def _prepare_candidate(
         self,
@@ -725,6 +907,13 @@ class DockerDynamicRunner:
         context = root if probe["context_path"] == "." else root / probe["context_path"]
         dockerfile = root / probe["dockerfile_path"]
         return PreparedCandidate(
+            build_identity=BuildIdentity(
+                scan_id=scan_id,
+                snapshot_id=snapshot.snapshot_id,
+                tree_digest=snapshot.tree_digest,
+                context_path=probe["context_path"],
+                dockerfile_path=probe["dockerfile_path"],
+            ),
             candidate_id=candidate_id,
             probe=probe,
             context=context,
