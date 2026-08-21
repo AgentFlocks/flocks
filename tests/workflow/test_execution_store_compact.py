@@ -16,6 +16,8 @@ stripping legitimately small metadata lists.
 """
 
 from __future__ import annotations
+
+import asyncio
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, patch
 
@@ -25,11 +27,13 @@ from flocks.workflow.execution_store import (
     DEFAULT_GENERIC_SEQUENCE_THRESHOLD,
     DEFAULT_LARGE_LIST_KEYS,
     DEFAULT_MAX_INLINE_COLLECTION_BYTES,
+    ExecutionStepRecorder,
     _trim_execution_history,
     compact_history_for_storage,
     compact_execution_summary,
     compact_outputs_for_storage,
     compact_step_for_storage,
+    create_execution_record,
     record_execution_result,
     workflow_execution_step_key,
 )
@@ -300,10 +304,82 @@ def test_workflow_execution_step_key_is_append_only_namespaced() -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_execution_result_backfills_execution_log_steps() -> None:
-    record_step = AsyncMock(return_value=None)
+async def test_create_execution_record_can_skip_initial_database_write() -> None:
     upsert_execution = AsyncMock(return_value=None)
-    update_stats = AsyncMock(return_value=None)
+
+    with patch.object(WorkflowStore, "upsert_execution", upsert_execution):
+        record = await create_execution_record(
+            "wf-trigger",
+            input_params={"message": "hello"},
+            exec_id="exec-trigger",
+            persist=False,
+        )
+
+    assert record["id"] == "exec-trigger"
+    assert record["currentPhase"] == "queued"
+    upsert_execution.assert_not_awaited()
+
+
+def test_execution_step_recorder_collects_steps_without_storage_calls() -> None:
+    record_step = AsyncMock(return_value=None)
+    record_steps = AsyncMock(return_value=None)
+    recorder = ExecutionStepRecorder(exec_id="exec-batch")
+
+    with (
+        patch.object(WorkflowStore, "record_step", record_step),
+        patch.object(WorkflowStore, "record_steps", record_steps),
+    ):
+        recorder.on_step_complete({"node_id": "n1", "outputs": {"ok": 1}})
+        recorder.on_step_complete({"node_id": "n2", "outputs": {"ok": 2}})
+
+    assert recorder.step_count == 2
+    assert recorder.summary["currentNodeId"] == "n2"
+    assert recorder.take_steps() == [
+        (1, {"node_id": "n1", "outputs": {"ok": 1}}),
+        (2, {"node_id": "n2", "outputs": {"ok": 2}}),
+    ]
+    assert recorder.take_steps() == []
+    record_step.assert_not_awaited()
+    record_steps.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_four_trigger_workers_keep_step_history_disabled() -> None:
+    """Four trigger threads track progress without retaining step history."""
+    record_step = AsyncMock(return_value=None)
+    record_steps = AsyncMock(return_value=None)
+    recorders = [
+        ExecutionStepRecorder(
+            exec_id=f"exec-trigger-{worker}",
+            capture_steps=False,
+        )
+        for worker in range(4)
+    ]
+
+    def _run_seven_steps(recorder: ExecutionStepRecorder) -> None:
+        for step in range(7):
+            recorder.on_step_complete(
+                {"node_id": f"node-{step}", "outputs": {"ok": True}}
+            )
+
+    with (
+        patch.object(WorkflowStore, "record_step", record_step),
+        patch.object(WorkflowStore, "record_steps", record_steps),
+    ):
+        await asyncio.gather(
+            *(asyncio.to_thread(_run_seven_steps, recorder) for recorder in recorders)
+        )
+
+    batches = [recorder.take_steps() for recorder in recorders]
+    assert batches == [[], [], [], []]
+    assert [recorder.step_count for recorder in recorders] == [7, 7, 7, 7]
+    record_step.assert_not_awaited()
+    record_steps.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_record_execution_result_backfills_execution_log_steps() -> None:
+    complete_execution = AsyncMock(return_value=None)
     exec_data = {
         "id": "exec-1",
         "workflowId": "wf",
@@ -320,24 +396,67 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
         raise RuntimeError
 
     with (
-        patch.object(WorkflowStore, "record_step", record_step),
-        patch.object(WorkflowStore, "upsert_execution", upsert_execution),
-        patch("flocks.workflow.execution_store._update_workflow_stats", update_stats),
+        patch.object(WorkflowStore, "complete_execution", complete_execution),
         patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
         patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
         patch("flocks.workflow.execution_store._trim_execution_history", AsyncMock(return_value=None)),
     ):
         await record_execution_result("wf", "exec-1", exec_data)
 
-    step_calls = record_step.await_args_list
-    assert step_calls[0].args[:2] == ("exec-1", 1)
-    assert step_calls[0].args[2]["outputs"] == {"_raw_alerts_count": 150}
-    assert step_calls[1].args[:2] == ("exec-1", 2)
-    assert step_calls[1].args[2]["inputs"] == {"_filtered_alerts_count": 150}
-    upsert_execution.assert_awaited_once()
-    summary = upsert_execution.await_args.args[0]
+    complete_execution.assert_awaited_once()
+    summary, steps = complete_execution.await_args.args
+    assert steps[0][0] == 1
+    assert steps[0][1]["outputs"] == {"_raw_alerts_count": 150}
+    assert steps[1][0] == 2
+    assert steps[1][1]["inputs"] == {"_filtered_alerts_count": 150}
     assert summary["executionLog"] == []
     assert summary["stepCount"] == 2
+    assert complete_execution.await_args.kwargs == {
+        "success": True,
+        "duration": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_record_execution_result_accepts_explicit_step_batch() -> None:
+    complete_execution = AsyncMock(return_value=None)
+    explicit_steps = [
+        (1, {"node_id": "step-1", "outputs": {"ok": True}}),
+        (2, {"node_id": "step-2", "outputs": {"ok": True}}),
+    ]
+    exec_data = {
+        "id": "exec-trigger",
+        "workflowId": "wf-trigger",
+        "status": "success",
+        "duration": 0.01,
+        "executionLog": [],
+        "stepCount": 2,
+    }
+
+    def raise_create_task(coro, *args, **kwargs):  # noqa: ANN001, ARG001
+        coro.close()
+        raise RuntimeError
+
+    with (
+        patch.object(WorkflowStore, "complete_execution", complete_execution),
+        patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
+        patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
+        patch("flocks.workflow.execution_store._trim_execution_history", AsyncMock(return_value=None)),
+    ):
+        await record_execution_result(
+            "wf-trigger",
+            "exec-trigger",
+            exec_data,
+            steps=explicit_steps,
+        )
+
+    summary, persisted_steps = complete_execution.await_args.args
+    assert summary["executionLog"] == []
+    assert persisted_steps == explicit_steps
+    assert complete_execution.await_args.kwargs == {
+        "success": True,
+        "duration": 0.01,
+    }
 
 
 def test_compact_history_compacts_each_step_inputs() -> None:

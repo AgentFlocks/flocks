@@ -8,7 +8,7 @@ import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import aiosqlite
 
@@ -46,6 +46,7 @@ class WorkflowStore:
     _conn: Optional[aiosqlite.Connection] = None
     _init_pid: Optional[int] = None
     _db_path: Optional[Path] = None
+    _completion_lock: Optional[asyncio.Lock] = None
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -93,6 +94,7 @@ class WorkflowStore:
             cls._initialized = True
             cls._init_pid = current_pid
             cls._db_path = db_path
+            cls._completion_lock = asyncio.Lock()
             await cls._migrate_legacy_kv()
 
         try:
@@ -124,6 +126,7 @@ class WorkflowStore:
         cls._initialized = False
         cls._init_pid = None
         cls._db_path = None
+        cls._completion_lock = None
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
@@ -415,13 +418,15 @@ class WorkflowStore:
         step_index: int,
         step_payload: Dict[str, Any],
     ) -> None:
-        db = await cls._db()
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO workflow_execution_steps
-            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        await cls.record_steps(exec_id, [(step_index, step_payload)])
+
+    @classmethod
+    async def record_steps(
+        cls,
+        exec_id: str,
+        steps: Iterable[Tuple[int, Dict[str, Any]]],
+    ) -> None:
+        rows = [
             (
                 exec_id,
                 int(step_index),
@@ -431,9 +436,130 @@ class WorkflowStore:
                 cls._json_dumps(step_payload.get("outputs") or {}),
                 step_payload.get("error"),
                 cls._json_dumps(step_payload),
-            ),
+            )
+            for step_index, step_payload in steps
+        ]
+        if not rows:
+            return
+        db = await cls._db()
+        await db.executemany(
+            """
+            INSERT OR REPLACE INTO workflow_execution_steps
+            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
         )
         await db.commit()
+
+    @classmethod
+    async def complete_execution(
+        cls,
+        exec_data: Dict[str, Any],
+        steps: Iterable[Tuple[int, Dict[str, Any]]],
+        *,
+        success: bool,
+        duration: float,
+    ) -> None:
+        """Persist one completed execution and its stats in one transaction."""
+        db = await cls._db()
+        payload = dict(exec_data)
+        exec_id = str(payload.get("id") or "")
+        workflow_id = str(payload.get("workflowId") or payload.get("workflow_id") or "")
+        if not exec_id or not workflow_id:
+            raise ValueError("workflow execution requires id and workflowId")
+
+        step_rows = [
+            (
+                exec_id,
+                int(step_index),
+                step_payload.get("node_id"),
+                step_payload.get("node_type") or step_payload.get("type"),
+                cls._json_dumps(step_payload.get("inputs") or {}),
+                cls._json_dumps(step_payload.get("outputs") or {}),
+                step_payload.get("error"),
+                cls._json_dumps(step_payload),
+            )
+            for step_index, step_payload in steps
+        ]
+        runtime = float(duration)
+        success_delta = 1 if success else 0
+        error_delta = 0 if success else 1
+        lock = cls._completion_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._completion_lock = lock
+
+        async with lock:
+            try:
+                if step_rows:
+                    await db.executemany(
+                        """
+                        INSERT OR REPLACE INTO workflow_execution_steps
+                        (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        step_rows,
+                    )
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO workflow_executions
+                    (id, workflow_id, status, current_phase, current_node_id, current_node_type,
+                     current_step_index, step_count, input_params, output_results, error_message,
+                     trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        exec_id,
+                        workflow_id,
+                        str(payload.get("status") or "running"),
+                        payload.get("currentPhase"),
+                        payload.get("currentNodeId"),
+                        payload.get("currentNodeType"),
+                        cls._as_int(payload.get("currentStepIndex")),
+                        cls._as_int(payload.get("stepCount")) or 0,
+                        cls._json_dumps(payload.get("inputParams") or {}),
+                        cls._json_dumps(payload.get("outputResults") or {}),
+                        payload.get("errorMessage"),
+                        payload.get("triggerId"),
+                        payload.get("triggerType"),
+                        cls._as_int(payload.get("startedAt")) or cls._now_ms(),
+                        cls._as_int(payload.get("finishedAt")),
+                        cls._as_float(payload.get("duration")),
+                        cls._as_int(payload.get("updatedAt")) or cls._now_ms(),
+                        cls._json_dumps(payload),
+                    ),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO workflow_stats (
+                        workflow_id, call_count, success_count, error_count,
+                        total_runtime, avg_runtime, thumbs_up, thumbs_down, updated_at
+                    )
+                    VALUES (?, 1, ?, ?, ?, ?, 0, 0, ?)
+                    ON CONFLICT(workflow_id) DO UPDATE SET
+                        call_count = workflow_stats.call_count + 1,
+                        success_count = workflow_stats.success_count + excluded.success_count,
+                        error_count = workflow_stats.error_count + excluded.error_count,
+                        total_runtime = workflow_stats.total_runtime + excluded.total_runtime,
+                        avg_runtime = (
+                            workflow_stats.total_runtime + excluded.total_runtime
+                        ) / (workflow_stats.call_count + 1),
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        workflow_id,
+                        success_delta,
+                        error_delta,
+                        runtime,
+                        runtime,
+                        cls._now_ms(),
+                    ),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
 
     @classmethod
     async def list_steps(

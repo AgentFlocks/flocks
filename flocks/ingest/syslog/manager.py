@@ -335,10 +335,13 @@ class SyslogManager:
             err = "workflow_not_found"
             if startup:
                 self._listener_status[workflow_id] = {"state": "stopped", "error": err}
-                log.info("syslog.workflow_not_found_on_start", {
-                    "workflow_id": workflow_id,
-                    "action": "stale_config_skipped",
-                })
+                log.info(
+                    "syslog.workflow_not_found_on_start",
+                    {
+                        "workflow_id": workflow_id,
+                        "action": "stale_config_skipped",
+                    },
+                )
                 return {"state": "stopped", "error": err}
             self._listener_status[workflow_id] = {"state": "failed", "error": err}
             log.warning("syslog.workflow_not_found", {"workflow_id": workflow_id})
@@ -553,9 +556,7 @@ class SyslogManager:
         of in-flight workflow runs is exactly ``_MAX_CONCURRENT_EXECUTIONS``.
         """
         run_cancel_event = (
-            generation_cancel_event
-            or self._generation_cancel_events.get(workflow_id)
-            or threading.Event()
+            generation_cancel_event or self._generation_cancel_events.get(workflow_id) or threading.Event()
         )
         while not abort.is_set():
             try:
@@ -618,14 +619,12 @@ class SyslogManager:
             exec_data = await create_execution_record(
                 workflow_id,
                 input_params=summarized_inputs,
+                persist=False,
             )
             exec_id = exec_data["id"]
-            loop = asyncio.get_running_loop()
             step_recorder = ExecutionStepRecorder(
                 exec_id=exec_id,
-                loop=loop,
-                logger=log,
-                log_event="syslog.execution_step.write_failed",
+                capture_steps=False,
             )
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
@@ -692,9 +691,15 @@ class SyslogManager:
                     }
                 )
             finally:
+                steps = step_recorder.take_steps()
                 await cleanup_workflow_tool_context(tool_context)
                 try:
-                    await record_execution_result(workflow_id, exec_id, exec_data)
+                    await record_execution_result(
+                        workflow_id,
+                        exec_id,
+                        exec_data,
+                        steps=steps,
+                    )
                 except Exception as exc:
                     log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
             return exec_data

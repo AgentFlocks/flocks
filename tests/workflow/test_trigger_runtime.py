@@ -25,11 +25,21 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
 
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
         missing_context = kwargs.get("tool_context") is None
+        kwargs["on_step_complete"](
+            SimpleNamespace(
+                model_dump=lambda mode="json": {
+                    "node_id": "notify",
+                    "node_type": "tool",
+                    "inputs": {},
+                    "outputs": {"ok": True},
+                }
+            )
+        )
         return SimpleNamespace(
             status="FAILED" if missing_context else "SUCCEEDED",
             outputs={},
             error="Parent session not found" if missing_context else None,
-            history=[],
+            history=[{"node_id": "notify", "outputs": {"ok": True}}],
             last_node_id="notify",
             steps=1,
         )
@@ -41,12 +51,10 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
     )
     monkeypatch.setattr(runtime_module, "cleanup_workflow_tool_context", cleanup_context)
     monkeypatch.setattr(runtime_module, "run_workflow", Mock(side_effect=_fake_run_workflow))
-    monkeypatch.setattr(
-        runtime_module,
-        "create_execution_record",
-        AsyncMock(return_value={"id": "exec-1"}),
-    )
-    monkeypatch.setattr(runtime_module, "record_execution_result", AsyncMock())
+    create_record = AsyncMock(return_value={"id": "exec-1"})
+    record_result = AsyncMock()
+    monkeypatch.setattr(runtime_module, "create_execution_record", create_record)
+    monkeypatch.setattr(runtime_module, "record_execution_result", record_result)
 
     trigger = TriggerDefinition.model_validate({"id": "webhook-trigger", "type": "custom_webhook"})
     runtime = runtime_module.TriggerRuntime()
@@ -64,6 +72,14 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
         action_name="trigger:custom_webhook",
     )
     assert runtime_module.run_workflow.call_args.kwargs["tool_context"] is tool_context
+    assert runtime_module.run_workflow.call_args.kwargs["run_id"] == "exec-1"
+    assert runtime_module.run_workflow.call_args.kwargs["execution_profile"] == "high_frequency"
+    assert callable(runtime_module.run_workflow.call_args.kwargs["on_step_complete"])
+    assert create_record.await_args.kwargs["persist"] is False
+    assert result["executionLog"] == []
+    assert result["stepCount"] == 1
+    record_result.assert_awaited_once()
+    assert record_result.await_args.kwargs["steps"] == []
     cleanup_context.assert_awaited_once_with(tool_context)
 
 

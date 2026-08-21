@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from flocks.workflow import poller_manager
-from flocks.workflow import execution_store
 from flocks.workflow.runner import RunWorkflowResult
 
 
@@ -100,7 +99,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     monkeypatch.setattr(
         poller_manager,
         "create_execution_record",
-        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(
+        lambda workflow_id, *, input_params=None, exec_id=None, persist=True: asyncio.sleep(
             0,
             result={
                 "id": exec_id or f"exec-{workflow_id}",
@@ -141,7 +140,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     manager = poller_manager.WorkflowPollerManager()
     created_records: list[dict[str, Any]] = []
     recorded_results: list[dict[str, Any]] = []
-    recorded_steps: list[tuple[str, int, dict[str, Any]]] = []
+    recorded_steps: list[tuple[int, dict[str, Any]]] = []
 
     async def _fake_get_config(_workflow_id: str, *, kind: str) -> dict[str, Any]:
         return {
@@ -155,7 +154,9 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         *,
         input_params: dict[str, Any] | None = None,
         exec_id: str | None = None,
+        persist: bool = True,
     ) -> dict[str, Any]:
+        assert persist is False
         record = {
             "id": exec_id or "exec-1",
             "workflowId": workflow_id,
@@ -173,17 +174,12 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         workflow_id: str,
         exec_id: str,
         exec_data: dict[str, Any],
+        *,
+        steps: list[tuple[int, dict[str, Any]]] | None = None,
     ) -> None:
         _ = workflow_id, exec_id
         recorded_results.append(dict(exec_data))
-
-    async def _fake_record_execution_step(
-        exec_id: str,
-        step_index: int,
-        step: dict[str, Any],
-    ) -> dict[str, Any]:
-        recorded_steps.append((exec_id, step_index, step))
-        return step
+        recorded_steps.extend(steps or [])
 
     def _fake_run_workflow(  # noqa: ANN001
         *,
@@ -242,7 +238,6 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     )
     monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
 
     status = await manager.run_once("wf-business-failure")
@@ -255,9 +250,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     assert recorded_results[0]["executionLog"] == []
     assert recorded_results[0]["stepCount"] == 1
     assert recorded_results[0]["loopProgress"]["total_iterations"] == 2
-    assert recorded_steps[0][0] == "exec-1"
-    assert recorded_steps[0][1] == 1
-    assert recorded_steps[0][2]["node_id"] == "load"
+    assert recorded_steps == []
     assert status["lastStatus"] == "error"
     assert status["lastError"] == "business rule blocked"
     assert status["selectedCount"] == 9
@@ -301,7 +294,7 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
     monkeypatch.setattr(
         poller_manager,
         "create_execution_record",
-        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(
+        lambda workflow_id, *, input_params=None, exec_id=None, persist=True: asyncio.sleep(
             0,
             result={
                 "id": exec_id or f"exec-{workflow_id}",
@@ -356,7 +349,9 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         *,
         input_params: dict[str, Any] | None = None,
         exec_id: str | None = None,
+        persist: bool = True,
     ) -> dict[str, Any]:
+        assert persist is False
         _ = input_params
         return {
             "id": exec_id or f"exec-{workflow_id}",
@@ -372,8 +367,10 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         workflow_id: str,
         exec_id: str,
         exec_data: dict[str, Any],
+        *,
+        steps: list[tuple[int, dict[str, Any]]] | None = None,
     ) -> None:
-        _ = workflow_id, exec_id, exec_data
+        _ = workflow_id, exec_id, exec_data, steps
 
     def _fake_run_workflow(  # noqa: ANN001
         *,

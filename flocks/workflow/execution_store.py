@@ -342,24 +342,6 @@ _MAX_EXECUTION_HISTORY_PER_WORKFLOW = 30
 # for the same workflow serialize instead of skipping cleanup.
 _trim_locks: Dict[str, asyncio.Lock] = {}
 
-# Per-workflow lock to serialize read-modify-write of stats. Concurrent
-# executions of the same workflow (e.g. syslog-triggered runs with
-# semaphore=8) would otherwise race on ``Storage.read → mutate → write``
-# and silently lose counter increments.
-_stats_locks: Dict[str, asyncio.Lock] = {}
-
-
-def _get_stats_lock(workflow_id: str) -> asyncio.Lock:
-    lock = _stats_locks.get(workflow_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _stats_locks[workflow_id] = lock
-    return lock
-
-
-def _workflow_stats_key(workflow_id: str) -> str:
-    return f"workflow/{workflow_id}/stats"
-
 
 def _get_trim_lock(workflow_id: str) -> asyncio.Lock:
     lock = _trim_locks.get(workflow_id)
@@ -367,37 +349,6 @@ def _get_trim_lock(workflow_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _trim_locks[workflow_id] = lock
     return lock
-
-
-_DEFAULT_STATS: Dict[str, Any] = {
-    "callCount": 0,
-    "successCount": 0,
-    "errorCount": 0,
-    "totalRuntime": 0.0,
-    "avgRuntime": 0.0,
-    "thumbsUp": 0,
-    "thumbsDown": 0,
-}
-
-
-async def _update_workflow_stats(workflow_id: str, success: bool, duration: float) -> None:
-    """Increment workflow call/success/error counters and update avgRuntime.
-
-    Serialised per workflow to keep concurrent updates from clobbering each
-    other (read → mutate → write race).
-    """
-    lock = _get_stats_lock(workflow_id)
-    async with lock:
-        try:
-            await WorkflowStore.increment_stats(workflow_id, success=success, duration=duration)
-        except Exception as exc:
-            log.warning(
-                "workflow.stats.update_failed",
-                {
-                    "workflow_id": workflow_id,
-                    "error": str(exc),
-                },
-            )
 
 
 def workflow_execution_key(exec_id: str) -> str:
@@ -453,26 +404,21 @@ async def record_execution_step(
 
 
 class ExecutionStepRecorder:
-    """Bridge synchronous workflow step callbacks to append-only step rows."""
+    """Collect compact workflow steps without blocking the runner thread."""
 
     def __init__(
         self,
         *,
         exec_id: str,
-        loop: asyncio.AbstractEventLoop,
-        logger: Any = None,
-        log_event: str = "workflow.execution_step.write_failed",
+        capture_steps: bool = True,
         step_compactor: Callable[[Any], Dict[str, Any]] = compact_step_for_storage,
-        write_timeout_s: float = 5.0,
     ) -> None:
         self.exec_id = exec_id
-        self.loop = loop
-        self.logger = logger or log
-        self.log_event = log_event
+        self.capture_steps = capture_steps
         self.step_compactor = step_compactor
-        self.write_timeout_s = write_timeout_s
         self.step_count = 0
         self.summary: Dict[str, Any] = {}
+        self._pending_steps: List[Tuple[int, Dict[str, Any]]] = []
 
     def on_step_complete(self, step_result: Any) -> None:
         raw_step = step_result.model_dump(mode="json") if hasattr(step_result, "model_dump") else step_result
@@ -498,48 +444,25 @@ class ExecutionStepRecorder:
                 "updatedAt": int(time.time() * 1000),
             }
         )
-        try:
-            asyncio.run_coroutine_threadsafe(
-                record_execution_step(self.exec_id, self.step_count, step_dict),
-                self.loop,
-            ).result(timeout=self.write_timeout_s)
-        except Exception as exc:
-            self.logger.warning(
-                self.log_event,
-                {
-                    "exec_id": self.exec_id,
-                    "step_index": self.step_count,
-                    "error": str(exc),
-                },
-            )
+        if self.capture_steps:
+            self._pending_steps.append((self.step_count, step_dict))
+
+    def take_steps(self) -> List[Tuple[int, Dict[str, Any]]]:
+        """Return buffered steps for the final execution transaction."""
+        pending_steps = self._pending_steps
+        self._pending_steps = []
+        return pending_steps
 
 
-async def _backfill_execution_steps(
-    exec_id: str,
-    execution_log: Any,
-) -> int:
-    """Persist legacy inline executionLog entries as append-only step rows."""
+def _prepare_execution_steps(execution_log: Any) -> List[Tuple[int, Dict[str, Any]]]:
+    """Compact an inline execution log for one final batch transaction."""
     if not isinstance(execution_log, list):
-        return 0
-
-    written = 0
-    for step_index, step in enumerate(execution_log, start=1):
-        step_payload = compact_step_for_storage(step)
-        if not isinstance(step_payload, dict):
-            continue
-        try:
-            await WorkflowStore.record_step(exec_id, step_index, step_payload)
-            written += 1
-        except Exception as exc:
-            log.warning(
-                "workflow.execution_step.backfill_failed",
-                {
-                    "exec_id": exec_id,
-                    "step_index": step_index,
-                    "error": str(exc),
-                },
-            )
-    return written
+        return []
+    return [
+        (step_index, compact_step_for_storage(step))
+        for step_index, step in enumerate(execution_log, start=1)
+        if isinstance(step, dict)
+    ]
 
 
 async def load_execution_steps(
@@ -621,8 +544,9 @@ async def create_execution_record(
     *,
     input_params: Optional[Dict[str, Any]] = None,
     exec_id: Optional[str] = None,
+    persist: bool = True,
 ) -> Dict[str, Any]:
-    """Create and persist a running workflow execution record.
+    """Build a running workflow execution record and optionally persist it.
 
     *input_params* is passed through ``compact_outputs_for_storage`` before
     writing to SQLite so that batch HTTP calls whose inputs contain a key in
@@ -637,7 +561,8 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
-    await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
+    if persist:
+        await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
     return exec_data
 
 
@@ -645,18 +570,23 @@ async def record_execution_result(
     workflow_id: str,
     exec_id: str,
     exec_data: Dict[str, Any],
+    *,
+    steps: Optional[Iterable[Tuple[int, Dict[str, Any]]]] = None,
 ) -> None:
-    """Persist the final execution record, audit trail, and workflow stats."""
+    """Persist the final execution record, step batch, audit trail, and stats."""
     summary_data = dict(exec_data)
-    backfilled_steps = await _backfill_execution_steps(exec_id, summary_data.get("executionLog"))
+    prepared_steps = (
+        list(steps)
+        if steps is not None
+        else _prepare_execution_steps(summary_data.get("executionLog"))
+    )
+    persisted_step_count = len(prepared_steps)
     existing_step_count = _as_positive_int(summary_data.get("stepCount"))
-    if backfilled_steps and (existing_step_count is None or existing_step_count < backfilled_steps):
-        summary_data["stepCount"] = backfilled_steps
+    if persisted_step_count and (
+        existing_step_count is None or existing_step_count < persisted_step_count
+    ):
+        summary_data["stepCount"] = persisted_step_count
 
-    await WorkflowStore.upsert_execution(compact_execution_summary(summary_data))
-
-    # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
-    # are reflected in the UI stats panel.
     status = summary_data.get("status", "error")
     success = status == "success"
     duration = summary_data.get("duration")
@@ -664,7 +594,12 @@ async def record_execution_result(
         started_at = summary_data.get("startedAt", 0)
         finished_at = summary_data.get("finishedAt", int(time.time() * 1000))
         duration = max(0.0, (finished_at - started_at) / 1000.0)
-    await _update_workflow_stats(workflow_id, success, float(duration))
+    await WorkflowStore.complete_execution(
+        compact_execution_summary(summary_data),
+        prepared_steps,
+        success=success,
+        duration=float(duration),
+    )
 
     # Recorder writes to its own SQLite tables and can be slow under load.
     # Run it as a background task so the syslog/HTTP dispatcher can release the

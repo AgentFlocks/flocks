@@ -57,7 +57,6 @@ from flocks.workflow.execution_store import (
     derive_loop_progress,
     load_execution_steps,
     normalize_execution_status as _normalize_execution_status,
-    record_execution_step,
     record_execution_result as _record_execution_result,
     resolve_execution_outcome as _resolve_execution_outcome,
     workflow_execution_key as _workflow_execution_key,
@@ -99,7 +98,6 @@ router = APIRouter()
 webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
 
-_PROGRESS_FLUSH_EVERY_STEPS = 5
 _WORKFLOW_LIST_ENRICH_CONCURRENCY = 8
 _WORKFLOW_API_HEALTH_INTERVAL_S = 5.0
 _WORKFLOW_API_HEALTH_PROBE_CONCURRENCY = 4
@@ -1127,7 +1125,6 @@ async def _run_workflow_execution_task(
     """Execute a workflow in the background and keep the execution record updated."""
     start_time = time.time()
     step_count = 0
-    loop = asyncio.get_running_loop()
     pending_step_index: Optional[int] = None
     pending_step: Optional[Dict[str, Any]] = None
     execution_summary: Dict[str, Any] = {
@@ -1150,21 +1147,6 @@ async def _run_workflow_execution_task(
             }
         )
 
-    def _write_progress(update_fields: Dict[str, Any]) -> None:
-        try:
-            execution_summary.update(update_fields)
-            asyncio.run_coroutine_threadsafe(
-                WorkflowStore.upsert_execution(compact_execution_summary(execution_summary)), loop
-            ).result(timeout=5)
-        except Exception as exc:
-            log.warning(
-                "workflow.step_progress.write_failed",
-                {
-                    "exec_id": exec_id,
-                    "error": str(exc),
-                },
-            )
-
     def _on_step_start(_run_id, step_index, node, _inputs):
         nonlocal pending_step_index, pending_step
         node_id = getattr(node, "id", None)
@@ -1185,7 +1167,7 @@ async def _run_workflow_execution_task(
                 "error": "Run cancelled before node completed",
             }
         )
-        _write_progress(
+        execution_summary.update(
             {
                 "currentNodeId": node_id,
                 "currentNodeType": node_type,
@@ -1220,47 +1202,6 @@ async def _run_workflow_execution_task(
                 "updatedAt": int(time.time() * 1000),
             }
         )
-        try:
-            asyncio.run_coroutine_threadsafe(
-                record_execution_step(exec_id, step_count, step_dict),
-                loop,
-            ).result(timeout=5)
-        except Exception as exc:
-            log.warning(
-                "workflow.execution_step.write_failed",
-                {
-                    "exec_id": exec_id,
-                    "step_index": step_count,
-                    "error": str(exc),
-                },
-            )
-        if step_count % _PROGRESS_FLUSH_EVERY_STEPS == 0:
-            _write_progress(
-                {
-                    "stepCount": step_count,
-                    "currentNodeId": step_dict.get("node_id"),
-                    "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
-                    "currentPhase": "running",
-                    "currentStepIndex": step_count,
-                    "loopProgress": loop_progress,
-                    "updatedAt": int(time.time() * 1000),
-                }
-            )
-
-    async def _flush_pending_step() -> None:
-        if pending_step_index is None or pending_step is None:
-            return
-        try:
-            await record_execution_step(exec_id, pending_step_index, pending_step)
-        except Exception as exc:
-            log.warning(
-                "workflow.pending_step.write_failed",
-                {
-                    "exec_id": exec_id,
-                    "step_index": pending_step_index,
-                    "error": str(exc),
-                },
-            )
 
     try:
         result: RunWorkflowResult = await asyncio.to_thread(
@@ -1284,10 +1225,9 @@ async def _run_workflow_execution_task(
         # ``record_execution_result`` backfills this compacted history into
         # append-only step rows, then stores only the summary row.
         final_history = compact_history_for_storage(result.history)
-        if status_value == "cancelled" and not final_history:
-            await _flush_pending_step()
         final_steps = result.steps
-        if pending_step_index is not None:
+        if pending_step_index is not None and pending_step is not None:
+            final_history.append(pending_step)
             final_steps = max(final_steps, pending_step_index)
         current_data.update(
             {
@@ -1319,15 +1259,18 @@ async def _run_workflow_execution_task(
     except Exception as exc:
         duration = time.time() - start_time
         current_data = dict(execution_summary)
+        final_history = [pending_step] if pending_step is not None else []
+        final_steps = max(step_count, pending_step_index or 0)
         current_data.update(
             {
                 "status": "cancelled" if cancel_event.is_set() else "error",
                 "finishedAt": int(time.time() * 1000),
                 "duration": duration,
                 "errorMessage": str(exc),
-                "executionLog": [],
-                "stepCount": step_count,
+                "executionLog": final_history,
+                "stepCount": final_steps,
                 "currentPhase": "cancelled" if cancel_event.is_set() else "error",
+                "currentStepIndex": final_steps,
                 "updatedAt": int(time.time() * 1000),
             }
         )
@@ -1521,19 +1464,13 @@ async def create_workflow(req: WorkflowCreateRequest):
         if strict_mapping_errors:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Workflow strict edge mapping failed: "
-                    f"{strict_mapping_errors[:5]}"
-                ),
+                detail=(f"Workflow strict edge mapping failed: {strict_mapping_errors[:5]}"),
             )
         schema_errors = _schema_lint_errors(workflow_model)
         if schema_errors:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Workflow schema lint failed: "
-                    f"{schema_errors[:5]}"
-                ),
+                detail=(f"Workflow schema lint failed: {schema_errors[:5]}"),
             )
 
         workflow_id = str(uuid.uuid4())
@@ -1632,19 +1569,13 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                 if strict_mapping_errors:
                     raise HTTPException(
                         status_code=400,
-                        detail=(
-                            "Workflow strict edge mapping failed: "
-                            f"{strict_mapping_errors[:5]}"
-                        ),
+                        detail=(f"Workflow strict edge mapping failed: {strict_mapping_errors[:5]}"),
                     )
                 schema_errors = _schema_lint_errors(workflow_model)
                 if schema_errors:
                     raise HTTPException(
                         status_code=400,
-                        detail=(
-                            "Workflow schema lint failed: "
-                            f"{schema_errors[:5]}"
-                        ),
+                        detail=(f"Workflow schema lint failed: {schema_errors[:5]}"),
                     )
                 workflow_json = req.workflow_json
             except Exception as e:
@@ -2455,9 +2386,7 @@ async def refresh_workflow_api_health_cache() -> Dict[str, int]:
     active_workflow_ids = [
         str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
         for key, service in zip(keys, services)
-        if isinstance(service, dict)
-        and service
-        and _summarize_capability_state(service.get("status")) == "running"
+        if isinstance(service, dict) and service and _summarize_capability_state(service.get("status")) == "running"
     ]
     semaphore = asyncio.Semaphore(_WORKFLOW_API_HEALTH_PROBE_CONCURRENCY)
 
@@ -2542,9 +2471,7 @@ async def _get_workflow_integration_status(
                 set_workflow_json_triggers(workflow_data.get("workflowJson") or {}, triggers),
             )
             statuses_by_id = {
-                item.get("triggerId"): item
-                for item in statuses
-                if isinstance(item, dict) and item.get("triggerId")
+                item.get("triggerId"): item for item in statuses if isinstance(item, dict) and item.get("triggerId")
             }
             trigger_items: List[WorkflowTriggerStatusItemResponse] = []
             for trigger in triggers:
