@@ -239,6 +239,41 @@ def test_adjudication_schema_migrates_to_latest_eight_columns(
     }
 
 
+def test_manifest_does_not_claim_non_runnable_probes_executed() -> None:
+    manifest = reporting_module.ReportWriter._manifest(
+        scan={
+            "scan_id": "scan_dynamic",
+            "dynamic_enabled": True,
+            "created_at": "2026-08-21T00:00:00+00:00",
+        },
+        snapshot=SimpleNamespace(
+            target_kind="directory_snapshot",
+            repository_identity="repo",
+            display_name="snapshot",
+            source_revision=None,
+            tree_digest="a" * 64,
+            file_count=44,
+        ),
+        threat_model={},
+        coverage={
+            "includePaths": ["."],
+            "excludePaths": [],
+            "limitations": [],
+            "deferred": [],
+        },
+        dynamic_runs=[{"status": "not_runnable"} for _ in range(8)],
+        completed_at="2026-08-21T00:10:00+00:00",
+        artifacts=[],
+    )
+
+    scope = manifest["scan"]["scope"]
+    assert scope["runtimeStatus"] == (
+        "Dynamic validation results: completed Docker probe pairs: 0; "
+        "inconclusive attempts: 0; non-runnable probes: 8."
+    )
+    assert scope["validationMode"].endswith("(no target execution)")
+
+
 class _FakeBackgroundManager:
     def __init__(self) -> None:
         self.tasks: dict[str, SimpleNamespace] = {}
@@ -792,6 +827,9 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
         "code-security-prober",
     )
     assert (await audit_probe_subject(prober)).success
+    assert (await audit_inventory(prober)).success
+    assert (await audit_read(prober, "app.py", start_line=1, end_line=2)).success
+    assert (await audit_search(prober, "eval")).success
     submitted_probe = await audit_submit_probe(
         prober,
         {
@@ -881,7 +919,7 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
     manifest = json.loads(
         (output / "scan-manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest["scan"]["scope"]["runtimeStatus"] != "Target code was not executed."
+    assert "completed Docker probe pairs: 1" in manifest["scan"]["scope"]["runtimeStatus"]
     sealed_paths = {item["path"] for item in manifest["scan"]["artifacts"]}
     assert "dynamic-validation.json" in sealed_paths
     assert f"poc/{candidate_id}/probe.sh" in sealed_paths

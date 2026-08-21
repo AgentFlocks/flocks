@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import tempfile
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -254,6 +255,7 @@ class ReportWriter:
                 snapshot,
                 threat_model_record["threat_model"],
                 coverage_document,
+                data["dynamic_runs"],
                 completed_at,
                 artifacts,
             )
@@ -882,6 +884,7 @@ class ReportWriter:
         snapshot,
         threat_model: dict[str, Any],
         coverage: dict[str, Any],
+        dynamic_runs: list[dict[str, Any]],
         completed_at: str,
         artifacts: list[dict[str, str]],
     ) -> dict[str, Any]:
@@ -903,22 +906,44 @@ class ReportWriter:
                 + [item["reason"] for item in coverage["deferred"]]
             )
         )[:100]
+        if scan["dynamic_enabled"]:
+            status_counts = Counter(run["status"] for run in dynamic_runs)
+            if dynamic_runs:
+                runtime_status = (
+                    "Dynamic validation results: completed Docker probe pairs: "
+                    f"{status_counts['completed']}; inconclusive attempts: "
+                    f"{status_counts['inconclusive']}; non-runnable probes: "
+                    f"{status_counts['not_runnable']}."
+                )
+            else:
+                runtime_status = (
+                    "Dynamic validation was enabled; no statically confirmed "
+                    "candidate required a probe."
+                )
+            if status_counts["completed"]:
+                validation_mode = (
+                    "Independent static source verification plus completed Docker probes"
+                )
+            elif status_counts["inconclusive"]:
+                validation_mode = (
+                    "Independent static source verification plus attempted Docker validation"
+                )
+            else:
+                validation_mode = (
+                    "Independent static source verification plus dynamic probe planning "
+                    "(no target execution)"
+                )
+        else:
+            runtime_status = "Target code was not executed."
+            validation_mode = "Independent static source verification"
         scope: dict[str, Any] = {
             "includePaths": coverage["includePaths"],
             "excludePaths": coverage["excludePaths"],
             "summary": (
                 f"Static review of {snapshot.file_count} immutable snapshot files."
             ),
-            "runtimeStatus": (
-                "Validated probes executed in network-isolated local Docker."
-                if scan["dynamic_enabled"]
-                else "Target code was not executed."
-            ),
-            "validationMode": (
-                "Independent static source verification plus Docker probes"
-                if scan["dynamic_enabled"]
-                else "Independent static source verification"
-            ),
+            "runtimeStatus": runtime_status,
+            "validationMode": validation_mode,
             "context": "Threat-model-guided standard source-code security audit.",
         }
         if limitations:

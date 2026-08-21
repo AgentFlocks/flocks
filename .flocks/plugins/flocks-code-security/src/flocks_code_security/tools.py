@@ -87,6 +87,7 @@ SOURCE_SUBMIT_ROLES = {"baseline"}
 THREAT_MODEL_CONSUMER_ROLES = {"baseline"}
 VERIFIER_ROLE = {"verifier"}
 PROBER_ROLE = {"prober"}
+SOURCE_READ_ROLES = THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | VERIFIER_ROLE | PROBER_ROLE
 EVIDENCE_ROLES = {
     "user_input",
     "entrypoint",
@@ -212,7 +213,7 @@ async def audit_inventory(
     limit: int = 500,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"threat_modeler", "baseline", "verifier"})
+        _require_agent_execution(ctx, SOURCE_READ_ROLES)
         output = await asyncio.to_thread(
             get_runtime().source.inventory,
             ctx.session_id,
@@ -231,7 +232,7 @@ async def audit_read(
     end_line: int | None = None,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"threat_modeler", "baseline", "verifier"})
+        _require_agent_execution(ctx, SOURCE_READ_ROLES)
         output = await asyncio.to_thread(
             get_runtime().source.read,
             ctx.session_id,
@@ -252,7 +253,7 @@ async def audit_search(
     max_results: int = 100,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"threat_modeler", "baseline", "verifier"})
+        _require_agent_execution(ctx, SOURCE_READ_ROLES)
         output = await asyncio.to_thread(
             get_runtime().source.search,
             ctx.session_id,
