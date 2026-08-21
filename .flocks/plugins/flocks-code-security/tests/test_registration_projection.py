@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 
 from flocks.agent.registry import Agent
+from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.session.callable_schema import resolve_callable_tool_infos
-from flocks.tool.registry import Tool, ToolRegistry, ToolResult
+from flocks.tool.registry import Tool, ToolContext, ToolRegistry, ToolResult
 
+from flocks_code_security import public_tool
 from flocks_code_security.agents import AGENTS_ROOT, register_agents
 from flocks_code_security.orchestration import (
     baseline_prompt,
@@ -17,6 +20,7 @@ from flocks_code_security.orchestration import (
     verification_prompt,
 )
 from flocks_code_security.projection import AGENT_TOOLS, code_security_tool_projection
+from flocks_code_security.public_tool import PUBLIC_TOOL_ACTIONS, register_public_tool
 from flocks_code_security.tools import (
     ROLE_AGENTS,
     RULESET_DIGEST,
@@ -149,9 +153,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
         assert agent.session_directory == "~/.flocks/workspace/code-security/runtime"
         assert agent.memory_enabled is False
         assert agent.require_dedicated_session is True
-        raw = yaml.safe_load(
-            (AGENTS_ROOT / name / "agent.yaml").read_text(encoding="utf-8")
-        )
+        raw = yaml.safe_load((AGENTS_ROOT / name / "agent.yaml").read_text(encoding="utf-8"))
         assert raw["tools"] == AGENT_TOOLS[name]
         assert set(agent.tools).issubset(AGENT_TOOLS[name])
 
@@ -183,16 +185,10 @@ def test_all_audit_tools_register() -> None:
         parameter_names = [parameter.name for parameter in info.parameters]
         assert len(parameter_names) == len(set(parameter_names))
     callable_infos, _enabled_count = resolve_callable_tool_infos(expected)
-    enabled_expected = {
-        name for name in expected if ToolRegistry.get(name).info.enabled
-    }
+    enabled_expected = {name for name in expected if ToolRegistry.get(name).info.enabled}
     assert {info.name for info in callable_infos} == enabled_expected
     run_workers = ToolRegistry.get("audit_run_workers")
-    phase = next(
-        parameter
-        for parameter in run_workers.info.parameters
-        if parameter.name == "phase"
-    )
+    phase = next(parameter for parameter in run_workers.info.parameters if parameter.name == "phase")
     assert phase.enum == [
         "threat_modeling",
         "baseline",
@@ -203,9 +199,7 @@ def test_all_audit_tools_register() -> None:
 
     threat_model_tool = ToolRegistry.get("audit_submit_threat_model").info
     threat_model_parameter = next(
-        parameter
-        for parameter in threat_model_tool.parameters
-        if parameter.name == "threat_model"
+        parameter for parameter in threat_model_tool.parameters if parameter.name == "threat_model"
     )
     evidence_schema = threat_model_parameter.json_schema["properties"]["evidence"]
     assert evidence_schema["minItems"] == 1
@@ -216,16 +210,11 @@ def test_all_audit_tools_register() -> None:
         "start_line",
         "end_line",
     ]
-    assert (
-        evidence_schema["items"]["properties"]["blob_digest"]["pattern"]
-        == "^[a-f0-9]{64}$"
-    )
+    assert evidence_schema["items"]["properties"]["blob_digest"]["pattern"] == "^[a-f0-9]{64}$"
 
     verdict_tool = ToolRegistry.get("audit_submit_verdict").info
     counter_evidence = next(
-        parameter
-        for parameter in verdict_tool.parameters
-        if parameter.name == "counter_evidence"
+        parameter for parameter in verdict_tool.parameters if parameter.name == "counter_evidence"
     ).json_schema
     assert counter_evidence["minItems"] == 1
     assert counter_evidence["maxItems"] == 50
@@ -233,9 +222,7 @@ def test_all_audit_tools_register() -> None:
 
     coverage_tool = ToolRegistry.get("audit_submit_coverage").info
     open_questions = next(
-        parameter
-        for parameter in coverage_tool.parameters
-        if parameter.name == "open_questions"
+        parameter for parameter in coverage_tool.parameters if parameter.name == "open_questions"
     ).json_schema
     assert open_questions["items"]["additionalProperties"] is False
     assert open_questions["items"]["required"] == [
@@ -249,9 +236,7 @@ def test_all_audit_tools_register() -> None:
         "security_hypothesis",
     ]
     category_rule = open_questions["items"]["allOf"][0]
-    assert category_rule["if"]["properties"]["category"]["const"] == (
-        "coverage_blocking"
-    )
+    assert category_rule["if"]["properties"]["category"]["const"] == ("coverage_blocking")
     assert category_rule["then"]["properties"]["blocking"]["const"] is True
     assert category_rule["else"]["properties"]["blocking"]["const"] is False
 
@@ -262,9 +247,7 @@ def test_all_audit_tools_register() -> None:
     ]
     decision_tool = ToolRegistry.get("audit_submit_adjudication").info
     decision_schema = next(
-        parameter.json_schema
-        for parameter in decision_tool.parameters
-        if parameter.name == "decision"
+        parameter.json_schema for parameter in decision_tool.parameters if parameter.name == "decision"
     )
     assert decision_schema["required"] == ["action"]
     assert (
@@ -312,3 +295,52 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     assert "single top-level candidate argument" in baseline
     assert "exact inventory paths" in baseline
     assert "relative_path, blob_digest, start_line, and end_line" in verifier
+
+
+def test_public_code_security_tool_registers_as_one_multi_action_entry() -> None:
+    register_public_tool()
+    tool = ToolRegistry.get("code_security_audit")
+
+    assert tool is not None
+    assert tool.info.always_load is False
+    assert tool.info.requires_confirmation is False
+    action = next(parameter for parameter in tool.info.parameters if parameter.name == "action")
+    dynamic = next(parameter for parameter in tool.info.parameters if parameter.name == "dynamic_enabled")
+    assert action.enum == PUBLIC_TOOL_ACTIONS
+    assert dynamic.default is False
+
+
+@pytest.mark.asyncio
+async def test_public_tool_caller_uses_authenticated_session_scope(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = SimpleNamespace(
+        owner_user_id="user-1",
+        owner_username="member",
+        project_id="project-1",
+        directory=str(workspace),
+    )
+    monkeypatch.setattr(public_tool.Session, "get_by_id", AsyncMock(return_value=session))
+    token = set_current_auth_user(AuthUser(id="user-1", username="member", role="member"))
+    try:
+        caller = await public_tool._caller(
+            ToolContext(
+                "session-1",
+                "message-1",
+                extra={
+                    "auth_user_id": "attacker",
+                    "is_admin": True,
+                    "workspace_dir": str(tmp_path),
+                },
+            )
+        )
+    finally:
+        reset_current_auth_user(token)
+
+    assert caller.subject == "user-1"
+    assert caller.is_admin is False
+    assert caller.workspace_ref == "project-1"
+    assert caller.authorized_root == workspace.resolve()

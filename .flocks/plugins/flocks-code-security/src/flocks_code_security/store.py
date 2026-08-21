@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import uuid
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as BinasciiError
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -25,10 +28,24 @@ THREAT_MODEL_REQUIRED_LIST_FIELDS = (
     "attackerCapabilities",
     "securityObjectives",
 )
+MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
+TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _pid_is_running(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return False
+    try:
+        os.kill(value, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class ScanStore:
@@ -111,7 +128,9 @@ class ScanStore:
                     background_task_id TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS worker_batches (
                     batch_id TEXT PRIMARY KEY,
@@ -223,36 +242,82 @@ class ScanStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS scan_phase_runs (
+                    phase_run_id TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    phase TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    duration_ms INTEGER,
+                    summary_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(scan_id, phase, ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS scan_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    phase_run_id TEXT REFERENCES scan_phase_runs(phase_run_id) ON DELETE SET NULL,
+                    event_type TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS scan_events_scan_seq
+                    ON scan_events(scan_id, seq);
+                CREATE INDEX IF NOT EXISTS scan_events_scan_created
+                    ON scan_events(scan_id, created_at);
+                CREATE INDEX IF NOT EXISTS scan_events_scan_type
+                    ON scan_events(scan_id, event_type);
                 """
             )
-            scan_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(scans)").fetchall()
-            }
+            scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)").fetchall()}
             if "dynamic_enabled" not in scan_columns:
-                connection.execute(
-                    "ALTER TABLE scans ADD COLUMN dynamic_enabled "
-                    "INTEGER NOT NULL DEFAULT 0"
-                )
+                connection.execute("ALTER TABLE scans ADD COLUMN dynamic_enabled INTEGER NOT NULL DEFAULT 0")
+            scan_column_definitions = (
+                ("owner_subject", "TEXT"),
+                ("request_source", "TEXT NOT NULL DEFAULT 'cli'"),
+                ("workspace_ref", "TEXT"),
+                ("idempotency_key", "TEXT"),
+                ("request_digest", "TEXT"),
+                ("current_phase", "TEXT"),
+                ("failure_code", "TEXT"),
+                ("failure_summary", "TEXT"),
+                ("finished_at", "TEXT"),
+                ("task_owner_pid", "INTEGER"),
+                ("output_dir", "TEXT"),
+            )
+            for column, definition in scan_column_definitions:
+                if column not in scan_columns:
+                    connection.execute(f"ALTER TABLE scans ADD COLUMN {column} {definition}")
+            work_unit_columns = {row["name"] for row in connection.execute("PRAGMA table_info(work_units)").fetchall()}
+            for column in ("started_at", "finished_at"):
+                if column not in work_unit_columns:
+                    connection.execute(f"ALTER TABLE work_units ADD COLUMN {column} TEXT")
+            connection.execute(
+                "UPDATE work_units SET started_at = created_at WHERE started_at IS NULL AND status != 'pending'"
+            )
+            connection.execute(
+                "UPDATE work_units SET finished_at = updated_at "
+                "WHERE finished_at IS NULL "
+                "AND status IN ('completed', 'failed', 'cancelled')"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS scans_owner_idempotency "
+                "ON scans(owner_subject, idempotency_key) "
+                "WHERE owner_subject IS NOT NULL AND idempotency_key IS NOT NULL"
+            )
             adjudication_columns = {
-                row["name"]
-                for row in connection.execute(
-                    "PRAGMA table_info(adjudications)"
-                ).fetchall()
+                row["name"] for row in connection.execute("PRAGMA table_info(adjudications)").fetchall()
             }
             if "dynamic_assessments_json" not in adjudication_columns:
-                connection.execute(
-                    "ALTER TABLE adjudications ADD COLUMN dynamic_assessments_json TEXT"
-                )
-            snapshot_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(snapshots)").fetchall()
-            }
+                connection.execute("ALTER TABLE adjudications ADD COLUMN dynamic_assessments_json TEXT")
+            snapshot_columns = {row["name"] for row in connection.execute("PRAGMA table_info(snapshots)").fetchall()}
             if "omitted_file_count" not in snapshot_columns:
-                connection.execute(
-                    "ALTER TABLE snapshots ADD COLUMN omitted_file_count "
-                    "INTEGER NOT NULL DEFAULT 0"
-                )
+                connection.execute("ALTER TABLE snapshots ADD COLUMN omitted_file_count INTEGER NOT NULL DEFAULT 0")
             for column, definition in (
                 ("target_kind", "TEXT NOT NULL DEFAULT 'directory_snapshot'"),
                 ("display_name", "TEXT NOT NULL DEFAULT 'snapshot'"),
@@ -260,27 +325,18 @@ class ScanStore:
                 ("exclude_patterns_json", "TEXT NOT NULL DEFAULT '[]'"),
             ):
                 if column not in snapshot_columns:
-                    connection.execute(
-                        f"ALTER TABLE snapshots ADD COLUMN {column} {definition}"
-                    )
-            evidence_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(evidence)").fetchall()
-            }
+                    connection.execute(f"ALTER TABLE snapshots ADD COLUMN {column} {definition}")
+            evidence_columns = {row["name"] for row in connection.execute("PRAGMA table_info(evidence)").fetchall()}
             if "ordinal" not in evidence_columns:
-                connection.execute(
-                    "ALTER TABLE evidence ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0"
-                )
+                connection.execute("ALTER TABLE evidence ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0")
                 connection.execute("UPDATE evidence SET ordinal = rowid")
             duplicate_candidates = connection.execute(
-                "SELECT candidate_id FROM verifications GROUP BY candidate_id "
-                "HAVING COUNT(*) > 1"
+                "SELECT candidate_id FROM verifications GROUP BY candidate_id HAVING COUNT(*) > 1"
             ).fetchall()
             for duplicate in duplicate_candidates:
                 candidate_id = duplicate["candidate_id"]
                 rows = connection.execute(
-                    "SELECT * FROM verifications WHERE candidate_id = ? "
-                    "ORDER BY created_at, verification_id",
+                    "SELECT * FROM verifications WHERE candidate_id = ? ORDER BY created_at, verification_id",
                     (candidate_id,),
                 ).fetchall()
                 serialized = [dict(row) for row in rows]
@@ -293,13 +349,11 @@ class ScanStore:
                     ),
                 )
                 connection.execute(
-                    "DELETE FROM verifications WHERE candidate_id = ? "
-                    "AND verification_id != ?",
+                    "DELETE FROM verifications WHERE candidate_id = ? AND verification_id != ?",
                     (candidate_id, rows[0]["verification_id"]),
                 )
             connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "verifications_one_per_candidate ON verifications(candidate_id)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS verifications_one_per_candidate ON verifications(candidate_id)"
             )
             connection.execute("DROP INDEX IF EXISTS verification_subject_once")
         self._restrict_database_files()
@@ -370,18 +424,12 @@ class ScanStore:
 
     def get_snapshot(self, snapshot_id: str) -> SnapshotRef | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
         if row is None:
             return None
         payload = dict(row)
-        payload["include_paths"] = tuple(
-            json.loads(payload.pop("include_paths_json"))
-        )
-        payload["exclude_patterns"] = tuple(
-            json.loads(payload.pop("exclude_patterns_json"))
-        )
+        payload["include_paths"] = tuple(json.loads(payload.pop("include_paths_json")))
+        payload["exclude_patterns"] = tuple(json.loads(payload.pop("exclude_patterns_json")))
         return SnapshotRef(**payload)
 
     def list_snapshot_files(self, snapshot_id: str) -> list[SnapshotFile]:
@@ -445,6 +493,12 @@ class ScanStore:
         mode: str,
         ruleset_digest: str,
         dynamic_enabled: bool = False,
+        owner_subject: str | None = None,
+        request_source: str = "cli",
+        workspace_ref: str | None = None,
+        idempotency_key: str | None = None,
+        request_digest: str | None = None,
+        task_owner_pid: int | None = None,
     ) -> str:
         scan_id = f"scan_{uuid.uuid4().hex}"
         now = _now()
@@ -452,8 +506,10 @@ class ScanStore:
             connection.execute(
                 "INSERT INTO scans ("
                 "scan_id, parent_session_id, snapshot_id, mode, "
-                "dynamic_enabled, status, ruleset_digest, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "dynamic_enabled, status, ruleset_digest, created_at, updated_at, "
+                "owner_subject, request_source, workspace_ref, idempotency_key, "
+                "request_digest, current_phase, task_owner_pid"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     parent_session_id,
@@ -464,6 +520,13 @@ class ScanStore:
                     ruleset_digest,
                     now,
                     now,
+                    owner_subject,
+                    request_source,
+                    workspace_ref,
+                    idempotency_key,
+                    request_digest,
+                    "snapshot",
+                    task_owner_pid,
                 ),
             )
         return scan_id
@@ -485,10 +548,18 @@ class ScanStore:
             raise ValueError("Unsupported work-unit status")
         work_unit_id = f"unit_{uuid.uuid4().hex}"
         now = _now()
+        started_at = now if status != "pending" else None
+        finished_at = now if status in {"completed", "failed", "cancelled"} else None
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, scan_id, {"running"})
             connection.execute(
-                "INSERT INTO work_units VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO work_units (
+                    work_unit_id, scan_id, phase, role, paths_json,
+                    session_id, background_task_id, status, created_at,
+                    updated_at, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     work_unit_id,
                     scan_id,
@@ -500,6 +571,8 @@ class ScanStore:
                     status,
                     now,
                     now,
+                    started_at,
+                    finished_at,
                 ),
             )
         return work_unit_id
@@ -530,8 +603,7 @@ class ScanStore:
             if phase == "probing" and not bool(scan["dynamic_enabled"]):
                 raise ValueError("Dynamic validation is not enabled for this scan")
             active = connection.execute(
-                "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = ? "
-                "AND status IN ('pending', 'running')",
+                "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = ? AND status IN ('pending', 'running')",
                 (scan_id, phase),
             ).fetchone()
             if active is not None:
@@ -558,16 +630,13 @@ class ScanStore:
                     scan_id,
                 )
                 prior = connection.execute(
-                    "SELECT 1 FROM worker_batches WHERE scan_id = ? "
-                    "AND phase = 'targeted_rescan'",
+                    "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = 'targeted_rescan'",
                     (scan_id,),
                 ).fetchone()
                 if prior is not None:
                     raise ValueError("A targeted rescan has already been created")
                 if len(units) != 1 or units[0].get("paths") != directive["paths"]:
-                    raise ValueError(
-                        "Targeted-rescan scope must exactly match the adjudication"
-                    )
+                    raise ValueError("Targeted-rescan scope must exactly match the adjudication")
             connection.execute(
                 "INSERT INTO worker_batches VALUES (?, ?, ?, ?, ?, ?)",
                 (batch_id, scan_id, phase, "pending", now, now),
@@ -605,9 +674,7 @@ class ScanStore:
                         (subject_id,),
                     ).fetchone()
                     if candidate is None or candidate["scan_id"] != scan_id:
-                        raise ValueError(
-                            "Work-unit subject does not belong to the scan"
-                        )
+                        raise ValueError("Work-unit subject does not belong to the scan")
                     if phase == "probing":
                         eligible = connection.execute(
                             """
@@ -619,12 +686,16 @@ class ScanStore:
                             (subject_id, scan_id),
                         ).fetchone()
                         if eligible is None:
-                            raise ValueError(
-                                "Probing requires a confirmed candidate without a dynamic record"
-                            )
+                            raise ValueError("Probing requires a confirmed candidate without a dynamic record")
                 work_unit_id = f"unit_{uuid.uuid4().hex}"
                 connection.execute(
-                    "INSERT INTO work_units VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    """
+                    INSERT INTO work_units (
+                        work_unit_id, scan_id, phase, role, paths_json,
+                        session_id, background_task_id, status, created_at,
+                        updated_at, started_at, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         work_unit_id,
                         scan_id,
@@ -636,6 +707,8 @@ class ScanStore:
                         "pending",
                         now,
                         now,
+                        None,
+                        None,
                     ),
                 )
                 connection.execute(
@@ -686,15 +759,10 @@ class ScanStore:
     def list_worker_batches(self, scan_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT batch_id FROM worker_batches WHERE scan_id = ? "
-                "ORDER BY created_at, batch_id",
+                "SELECT batch_id FROM worker_batches WHERE scan_id = ? ORDER BY created_at, batch_id",
                 (scan_id,),
             ).fetchall()
-        return [
-            batch
-            for row in rows
-            if (batch := self.get_worker_batch(row["batch_id"])) is not None
-        ]
+        return [batch for row in rows if (batch := self.get_worker_batch(row["batch_id"])) is not None]
 
     def set_work_unit_runtime(
         self,
@@ -731,8 +799,7 @@ class ScanStore:
             if status not in allowed.get(row["status"], set()):
                 raise ValueError("Unsupported worker batch status transition")
             cursor = connection.execute(
-                "UPDATE worker_batches SET status = ?, updated_at = ? "
-                "WHERE batch_id = ? AND status = ?",
+                "UPDATE worker_batches SET status = ?, updated_at = ? WHERE batch_id = ? AND status = ?",
                 (status, _now(), batch_id, row["status"]),
             )
             if cursor.rowcount != 1:
@@ -747,8 +814,7 @@ class ScanStore:
         with self._connect() as connection:
             if role == "threat_modeler":
                 row = connection.execute(
-                    "SELECT payload_json, evidence_json FROM threat_models "
-                    "WHERE work_unit_id = ?",
+                    "SELECT payload_json, evidence_json FROM threat_models WHERE work_unit_id = ?",
                     (work_unit_id,),
                 ).fetchone()
             elif role in {"baseline", "investigator"}:
@@ -763,8 +829,7 @@ class ScanStore:
                 ).fetchone()
                 if assignment is not None and assignment["subject_id"] is not None:
                     row = connection.execute(
-                        "SELECT 1 FROM verifications WHERE work_unit_id = ? "
-                        "AND candidate_id = ?",
+                        "SELECT 1 FROM verifications WHERE work_unit_id = ? AND candidate_id = ?",
                         (work_unit_id, assignment["subject_id"]),
                     ).fetchone()
                 else:
@@ -780,8 +845,7 @@ class ScanStore:
                 if assignment is None or assignment["subject_id"] is None:
                     return False
                 row = connection.execute(
-                    "SELECT 1 FROM dynamic_runs WHERE probe_work_unit_id = ? "
-                    "AND candidate_id = ?",
+                    "SELECT 1 FROM dynamic_runs WHERE probe_work_unit_id = ? AND candidate_id = ?",
                     (work_unit_id, assignment["subject_id"]),
                 ).fetchone()
             else:
@@ -962,11 +1026,7 @@ class ScanStore:
                 """,
                 (candidate_id,),
             ).fetchone()
-            if (
-                candidate is None
-                or candidate["scan_id"] != binding.scan_id
-                or candidate["verdict"] != "confirmed"
-            ):
+            if candidate is None or candidate["scan_id"] != binding.scan_id or candidate["verdict"] != "confirmed":
                 raise ValueError("Only statically confirmed candidates may have probes")
             try:
                 connection.execute(
@@ -1016,20 +1076,22 @@ class ScanStore:
 
     def cancel_scan_work(self, scan_id: str) -> list[str]:
         with self._lock, self._connect() as connection:
+            now = _now()
             task_rows = connection.execute(
                 "SELECT background_task_id FROM work_units WHERE scan_id = ? "
                 "AND status IN ('pending', 'running') AND background_task_id IS NOT NULL",
                 (scan_id,),
             ).fetchall()
             connection.execute(
-                "UPDATE work_units SET status = 'cancelled', updated_at = ? "
+                "UPDATE work_units SET status = 'cancelled', updated_at = ?, "
+                "finished_at = ? "
                 "WHERE scan_id = ? AND status IN ('pending', 'running')",
-                (_now(), scan_id),
+                (now, now, scan_id),
             )
             connection.execute(
                 "UPDATE worker_batches SET status = 'cancelled', updated_at = ? "
                 "WHERE scan_id = ? AND status IN ('pending', 'running')",
-                (_now(), scan_id),
+                (now, scan_id),
             )
         return [row["background_task_id"] for row in task_rows]
 
@@ -1039,13 +1101,11 @@ class ScanStore:
         scan_id: str,
     ) -> None:
         active = connection.execute(
-            "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
-            "AND status IN ('pending', 'running')",
+            "SELECT COUNT(*) FROM work_units WHERE scan_id = ? AND status IN ('pending', 'running')",
             (scan_id,),
         ).fetchone()[0]
         analysis_units = connection.execute(
-            "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
-            "AND role IN ('baseline', 'investigator')",
+            "SELECT COUNT(*) FROM work_units WHERE scan_id = ? AND role IN ('baseline', 'investigator')",
             (scan_id,),
         ).fetchone()[0]
         unverified = connection.execute(
@@ -1065,13 +1125,9 @@ class ScanStore:
         if not analysis_units:
             raise ValueError("At least one baseline analysis work unit is required")
         if unverified:
-            raise ValueError(
-                "Every candidate requires an independent verification verdict"
-            )
+            raise ValueError("Every candidate requires an independent verification verdict")
         if conflicts:
-            raise ValueError(
-                "Verification conflicts must be resolved before adjudication"
-            )
+            raise ValueError("Verification conflicts must be resolved before adjudication")
 
     @staticmethod
     def _require_dynamic_ready(
@@ -1080,10 +1136,13 @@ class ScanStore:
         *,
         scan: sqlite3.Row | None = None,
     ) -> None:
-        scan = scan or connection.execute(
-            "SELECT * FROM scans WHERE scan_id = ?",
-            (scan_id,),
-        ).fetchone()
+        scan = (
+            scan
+            or connection.execute(
+                "SELECT * FROM scans WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+        )
         if scan is None:
             raise ValueError("Scan not found")
         if not bool(scan["dynamic_enabled"]):
@@ -1101,9 +1160,7 @@ class ScanStore:
         ).fetchall()
         for row in rows:
             if row["status"] is None:
-                raise ValueError(
-                    "Every statically confirmed candidate requires a dynamic run record"
-                )
+                raise ValueError("Every statically confirmed candidate requires a dynamic run record")
             if row["status"] == "ready":
                 raise ValueError("Dynamic probe execution is still pending")
             if row["status"] not in {"not_runnable", "completed", "inconclusive"}:
@@ -1153,25 +1210,18 @@ class ScanStore:
     @staticmethod
     def _decode_adjudication(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        item["accepted_candidate_ids"] = json.loads(
-            item.pop("accepted_candidate_ids_json")
-        )
-        item["rejected_candidates"] = json.loads(
-            item.pop("rejected_candidates_json")
-        )
+        item["accepted_candidate_ids"] = json.loads(item.pop("accepted_candidate_ids_json"))
+        item["rejected_candidates"] = json.loads(item.pop("rejected_candidates_json"))
         raw_rescan = item.pop("rescan_json")
         item["rescan"] = json.loads(raw_rescan) if raw_rescan else None
         raw_assessments = item.pop("dynamic_assessments_json")
-        item["dynamic_assessments"] = (
-            json.loads(raw_assessments) if raw_assessments else None
-        )
+        item["dynamic_assessments"] = json.loads(raw_assessments) if raw_assessments else None
         return item
 
     def get_latest_adjudication(self, scan_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM adjudications WHERE scan_id = ? "
-                "ORDER BY adjudication_round DESC LIMIT 1",
+                "SELECT * FROM adjudications WHERE scan_id = ? ORDER BY adjudication_round DESC LIMIT 1",
                 (scan_id,),
             ).fetchone()
         return self._decode_adjudication(row) if row is not None else None
@@ -1182,8 +1232,7 @@ class ScanStore:
         scan_id: str,
     ) -> dict[str, Any]:
         row = connection.execute(
-            "SELECT * FROM adjudications WHERE scan_id = ? "
-            "AND adjudication_round = 1 AND action = 'targeted_rescan'",
+            "SELECT * FROM adjudications WHERE scan_id = ? AND adjudication_round = 1 AND action = 'targeted_rescan'",
             (scan_id,),
         ).fetchone()
         if row is None:
@@ -1215,12 +1264,8 @@ class ScanStore:
                 evidence["candidate_id"],
                 [],
             ).append(evidence)
-        verification_by_candidate = {
-            item["candidate_id"]: item for item in data["verifications"]
-        }
-        dynamic_by_candidate = {
-            item["candidate_id"]: item for item in data["dynamic_runs"]
-        }
+        verification_by_candidate = {item["candidate_id"]: item for item in data["verifications"]}
+        dynamic_by_candidate = {item["candidate_id"]: item for item in data["dynamic_runs"]}
         candidates: list[dict[str, Any]] = []
         for candidate in data["candidates"]:
             item = dict(candidate)
@@ -1228,12 +1273,8 @@ class ScanStore:
                 candidate["candidate_id"],
                 [],
             )
-            item["verification"] = verification_by_candidate.get(
-                candidate["candidate_id"]
-            )
-            item["dynamic_run"] = dynamic_by_candidate.get(
-                candidate["candidate_id"]
-            )
+            item["verification"] = verification_by_candidate.get(candidate["candidate_id"])
+            item["dynamic_run"] = dynamic_by_candidate.get(candidate["candidate_id"])
             candidates.append(item)
         return {
             "scan_id": scan_id,
@@ -1284,30 +1325,19 @@ class ScanStore:
                 frozenset(static_fields),
                 frozenset(dynamic_fields),
             }:
-                raise ValueError(
-                    "Final adjudication has unsupported fields"
-                )
+                raise ValueError("Final adjudication has unsupported fields")
             raw_accepted = decision["accepted_candidate_ids"]
             rejected = decision["rejected_candidates"]
-            if not isinstance(raw_accepted, list) or not all(
-                isinstance(item, str) and item for item in raw_accepted
-            ):
-                raise ValueError(
-                    "accepted_candidate_ids must be an array of identifiers"
-                )
+            if not isinstance(raw_accepted, list) or not all(isinstance(item, str) and item for item in raw_accepted):
+                raise ValueError("accepted_candidate_ids must be an array of identifiers")
             if len(raw_accepted) != len(set(raw_accepted)):
                 raise ValueError("accepted_candidate_ids contains duplicates")
             accepted = sorted(raw_accepted)
             if not isinstance(rejected, list):
                 raise ValueError("rejected_candidates must be an array")
             for item in rejected:
-                if (
-                    not isinstance(item, dict)
-                    or set(item) != {"candidate_id", "reason"}
-                ):
-                    raise ValueError(
-                        "Each rejected candidate requires only candidate_id and reason"
-                    )
+                if not isinstance(item, dict) or set(item) != {"candidate_id", "reason"}:
+                    raise ValueError("Each rejected candidate requires only candidate_id and reason")
                 candidate_id = item["candidate_id"]
                 reason = item["reason"]
                 if not isinstance(candidate_id, str) or not candidate_id:
@@ -1316,12 +1346,8 @@ class ScanStore:
                     raise ValueError("Every rejected candidate requires a reason")
                 if len(reason.strip()) > 4_000:
                     raise ValueError("Rejected-candidate reason is too long")
-                normalized_rejected.append(
-                    {"candidate_id": candidate_id, "reason": reason.strip()}
-                )
-            rejected_ids = [
-                item["candidate_id"] for item in normalized_rejected
-            ]
+                normalized_rejected.append({"candidate_id": candidate_id, "reason": reason.strip()})
+            rejected_ids = [item["candidate_id"] for item in normalized_rejected]
             if len(rejected_ids) != len(set(rejected_ids)):
                 raise ValueError("rejected_candidates contains duplicates")
             if set(accepted) & set(rejected_ids):
@@ -1339,8 +1365,7 @@ class ScanStore:
                         "rationale",
                     }:
                         raise ValueError(
-                            "Each dynamic assessment requires only candidate_id, "
-                            "conclusion, and rationale"
+                            "Each dynamic assessment requires only candidate_id, conclusion, and rationale"
                         )
                     candidate_id = item["candidate_id"]
                     conclusion = item["conclusion"]
@@ -1354,14 +1379,8 @@ class ScanStore:
                         "not_run",
                     }:
                         raise ValueError("Unsupported dynamic assessment conclusion")
-                    if (
-                        not isinstance(rationale, str)
-                        or not rationale.strip()
-                        or len(rationale.strip()) > 10_000
-                    ):
-                        raise ValueError(
-                            "Dynamic assessment rationale must contain 1 to 10000 characters"
-                        )
+                    if not isinstance(rationale, str) or not rationale.strip() or len(rationale.strip()) > 10_000:
+                        raise ValueError("Dynamic assessment rationale must contain 1 to 10000 characters")
                     normalized_assessments.append(
                         {
                             "candidate_id": candidate_id,
@@ -1369,26 +1388,20 @@ class ScanStore:
                             "rationale": rationale.strip(),
                         }
                     )
-                assessment_ids = [
-                    item["candidate_id"] for item in normalized_assessments
-                ]
+                assessment_ids = [item["candidate_id"] for item in normalized_assessments]
                 if len(assessment_ids) != len(set(assessment_ids)):
                     raise ValueError("dynamic_assessments contains duplicates")
                 normalized_assessments.sort(key=lambda item: item["candidate_id"])
         else:
             if set(decision) != {"action", "rescan"}:
-                raise ValueError(
-                    "Targeted rescan requires only the rescan direction"
-                )
+                raise ValueError("Targeted rescan requires only the rescan direction")
             raw_rescan = decision["rescan"]
             if not isinstance(raw_rescan, dict) or set(raw_rescan) != {
                 "reason",
                 "paths",
                 "questions",
             }:
-                raise ValueError(
-                    "Targeted rescan requires only reason, paths, and questions"
-                )
+                raise ValueError("Targeted rescan requires only reason, paths, and questions")
             reason = raw_rescan["reason"]
             paths = raw_rescan["paths"]
             questions = raw_rescan["questions"]
@@ -1400,24 +1413,14 @@ class ScanStore:
                 or not isinstance(questions, list)
                 or not 1 <= len(questions) <= 32
             ):
-                raise ValueError(
-                    "Targeted rescan requires between 1 and 32 paths and questions"
-                )
-            normalized_paths = sorted(
-                self._normalize_rescan_path(item) for item in paths
-            )
+                raise ValueError("Targeted rescan requires between 1 and 32 paths and questions")
+            normalized_paths = sorted(self._normalize_rescan_path(item) for item in paths)
             if len(normalized_paths) != len(set(normalized_paths)):
                 raise ValueError("Targeted-rescan paths contain duplicates")
             normalized_questions = []
             for question in questions:
-                if (
-                    not isinstance(question, str)
-                    or not question.strip()
-                    or len(question.strip()) > 1_000
-                ):
-                    raise ValueError(
-                        "Each targeted-rescan question must contain 1 to 1000 characters"
-                    )
+                if not isinstance(question, str) or not question.strip() or len(question.strip()) > 1_000:
+                    raise ValueError("Each targeted-rescan question must contain 1 to 1000 characters")
                 normalized_questions.append(question.strip())
             normalized_rescan = {
                 "reason": reason.strip(),
@@ -1434,13 +1437,9 @@ class ScanStore:
             dynamic_enabled = bool(scan["dynamic_enabled"])
             if action == "finalize":
                 if dynamic_enabled and normalized_assessments is None:
-                    raise ValueError(
-                        "Dynamic scans require one assessment per confirmed candidate"
-                    )
+                    raise ValueError("Dynamic scans require one assessment per confirmed candidate")
                 if not dynamic_enabled and normalized_assessments is not None:
-                    raise ValueError(
-                        "Static scans do not accept dynamic assessments"
-                    )
+                    raise ValueError("Static scans do not accept dynamic assessments")
             if adjudication_round == 2 and action != "finalize":
                 raise ValueError("The second adjudication must finalize the scan")
             if action == "finalize":
@@ -1450,41 +1449,21 @@ class ScanStore:
                     "WHERE c.scan_id = ? ORDER BY c.created_at, c.candidate_id",
                     (scan_id,),
                 ).fetchall()
-                candidate_ids = {
-                    row["candidate_id"] for row in candidate_rows
-                }
-                rejected_ids = [
-                    item["candidate_id"] for item in normalized_rejected
-                ]
+                candidate_ids = {row["candidate_id"] for row in candidate_rows}
+                rejected_ids = [item["candidate_id"] for item in normalized_rejected]
                 if set(accepted) | set(rejected_ids) != candidate_ids:
-                    raise ValueError(
-                        "Every scan candidate must be classified exactly once"
-                    )
-                verdict_by_candidate = {
-                    row["candidate_id"]: row["verdict"]
-                    for row in candidate_rows
-                }
+                    raise ValueError("Every scan candidate must be classified exactly once")
+                verdict_by_candidate = {row["candidate_id"]: row["verdict"] for row in candidate_rows}
                 invalid_accepts = [
-                    candidate_id
-                    for candidate_id in accepted
-                    if verdict_by_candidate.get(candidate_id) != "confirmed"
+                    candidate_id for candidate_id in accepted if verdict_by_candidate.get(candidate_id) != "confirmed"
                 ]
                 if invalid_accepts:
-                    raise ValueError(
-                        "Only independently confirmed candidates may be accepted"
-                    )
+                    raise ValueError("Only independently confirmed candidates may be accepted")
                 if dynamic_enabled:
-                    confirmed_ids = {
-                        row["candidate_id"]
-                        for row in candidate_rows
-                        if row["verdict"] == "confirmed"
-                    }
+                    confirmed_ids = {row["candidate_id"] for row in candidate_rows if row["verdict"] == "confirmed"}
                     assessments = normalized_assessments or []
                     if {item["candidate_id"] for item in assessments} != confirmed_ids:
-                        raise ValueError(
-                            "Every statically confirmed candidate requires exactly one "
-                            "dynamic assessment"
-                        )
+                        raise ValueError("Every statically confirmed candidate requires exactly one dynamic assessment")
                     run_statuses = {
                         row["candidate_id"]: row["status"]
                         for row in connection.execute(
@@ -1500,34 +1479,25 @@ class ScanStore:
                     for assessment in assessments:
                         status = run_statuses.get(assessment["candidate_id"])
                         if assessment["conclusion"] not in allowed_conclusions.get(status, set()):
-                            raise ValueError(
-                                "Dynamic assessment conclusion does not match run status"
-                            )
+                            raise ValueError("Dynamic assessment conclusion does not match run status")
             if normalized_rescan is not None:
                 snapshot_paths = {
                     row["relative_path"]
                     for row in connection.execute(
-                        "SELECT relative_path FROM snapshot_files "
-                        "WHERE snapshot_id = ?",
+                        "SELECT relative_path FROM snapshot_files WHERE snapshot_id = ?",
                         (scan["snapshot_id"],),
                     ).fetchall()
                 }
                 snapshot_paths.update(
                     row["relative_path"]
                     for row in connection.execute(
-                        "SELECT relative_path FROM snapshot_omissions "
-                        "WHERE snapshot_id = ?",
+                        "SELECT relative_path FROM snapshot_omissions WHERE snapshot_id = ?",
                         (scan["snapshot_id"],),
                     ).fetchall()
                 )
                 for path in normalized_rescan["paths"]:
-                    if not any(
-                        item == path or item.startswith(f"{path}/")
-                        for item in snapshot_paths
-                    ):
-                        raise ValueError(
-                            f"Targeted-rescan path is outside the snapshot: {path}"
-                        )
+                    if not any(item == path or item.startswith(f"{path}/") for item in snapshot_paths):
+                        raise ValueError(f"Targeted-rescan path is outside the snapshot: {path}")
             connection.execute(
                 "INSERT INTO adjudications ("
                 "scan_id, adjudication_round, action, "
@@ -1540,11 +1510,7 @@ class ScanStore:
                     action,
                     json.dumps(accepted, ensure_ascii=False),
                     json.dumps(normalized_rejected, ensure_ascii=False),
-                    (
-                        json.dumps(normalized_rescan, ensure_ascii=False)
-                        if normalized_rescan is not None
-                        else None
-                    ),
+                    (json.dumps(normalized_rescan, ensure_ascii=False) if normalized_rescan is not None else None),
                     (
                         json.dumps(normalized_assessments, ensure_ascii=False)
                         if normalized_assessments is not None
@@ -1565,8 +1531,7 @@ class ScanStore:
             self._require_analysis_ready(connection, scan_id)
             self._require_dynamic_ready(connection, scan_id)
             latest = connection.execute(
-                "SELECT action FROM adjudications WHERE scan_id = ? "
-                "ORDER BY adjudication_round DESC LIMIT 1",
+                "SELECT action FROM adjudications WHERE scan_id = ? ORDER BY adjudication_round DESC LIMIT 1",
                 (scan_id,),
             ).fetchone()
         if latest is None or latest["action"] != "finalize":
@@ -1602,24 +1567,446 @@ class ScanStore:
                 return
             if status not in allowed.get(row["status"], set()):
                 raise ValueError("Unsupported work-unit status transition")
+            now = _now()
+            started_at = now if status == "running" else None
+            finished_at = now if status in {"completed", "failed", "cancelled"} else None
             cursor = connection.execute(
-                "UPDATE work_units SET status = ?, updated_at = ? "
+                "UPDATE work_units SET status = ?, updated_at = ?, "
+                "started_at = COALESCE(started_at, ?), "
+                "finished_at = COALESCE(finished_at, ?) "
                 "WHERE work_unit_id = ? AND status = ?",
-                (status, _now(), work_unit_id, row["status"]),
+                (
+                    status,
+                    now,
+                    started_at,
+                    finished_at,
+                    work_unit_id,
+                    row["status"],
+                ),
             )
             if cursor.rowcount != 1:
                 raise ValueError("Work unit status changed concurrently")
 
     def get_scan(self, scan_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
+            row = connection.execute("SELECT * FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["dynamic_enabled"] = bool(item["dynamic_enabled"])
+        return item
+
+    def find_scan_by_idempotency(
+        self,
+        owner_subject: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
+                "SELECT * FROM scans WHERE owner_subject = ? AND idempotency_key = ?",
+                (owner_subject, idempotency_key),
             ).fetchone()
         if row is None:
             return None
         item = dict(row)
         item["dynamic_enabled"] = bool(item["dynamic_enabled"])
         return item
+
+    def set_scan_request_metadata(
+        self,
+        scan_id: str,
+        *,
+        owner_subject: str,
+        request_source: str,
+        workspace_ref: str | None,
+        idempotency_key: str | None,
+        request_digest: str,
+        task_owner_pid: int | None = None,
+    ) -> None:
+        try:
+            with self._lock, self._connect() as connection:
+                cursor = connection.execute(
+                    "UPDATE scans SET owner_subject = ?, request_source = ?, "
+                    "workspace_ref = ?, idempotency_key = ?, request_digest = ?, "
+                    "task_owner_pid = ?, current_phase = 'snapshot', updated_at = ? "
+                    "WHERE scan_id = ?",
+                    (
+                        owner_subject,
+                        request_source,
+                        workspace_ref,
+                        idempotency_key,
+                        request_digest,
+                        task_owner_pid,
+                        _now(),
+                        scan_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("Scan not found")
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Idempotency key already belongs to another scan") from exc
+
+    def set_current_phase(self, scan_id: str, phase: str | None) -> None:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE scans SET current_phase = ?, updated_at = ? WHERE scan_id = ?",
+                (phase, _now(), scan_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Scan not found")
+
+    def set_scan_output_dir(self, scan_id: str, output_dir: Path) -> None:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE scans SET output_dir = ?, updated_at = ? WHERE scan_id = ?",
+                (str(output_dir.resolve()), _now(), scan_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Scan not found")
+
+    def mark_scan_terminal(
+        self,
+        scan_id: str,
+        status: str,
+        *,
+        failure_code: str | None = None,
+        failure_summary: str | None = None,
+    ) -> bool:
+        if status not in TERMINAL_SCAN_STATUSES:
+            raise ValueError("Unsupported terminal scan status")
+        now = _now()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE scans SET status = ?, failure_code = ?, failure_summary = ?, "
+                "finished_at = COALESCE(finished_at, ?), updated_at = ? "
+                "WHERE scan_id = ? AND status IN ('running', 'reducing', 'cancelling')",
+                (status, failure_code, failure_summary, now, now, scan_id),
+            )
+            if cursor.rowcount == 1:
+                return True
+            existing = connection.execute(
+                "SELECT status FROM scans WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("Scan not found")
+            return False
+
+    def recover_interrupted_scans(self) -> list[str]:
+        now = _now()
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT scan_id, task_owner_pid FROM scans WHERE status IN ('running', 'reducing', 'cancelling')"
+            ).fetchall()
+            scan_ids = [str(row["scan_id"]) for row in rows if not _pid_is_running(row["task_owner_pid"])]
+            if scan_ids:
+                placeholders = ", ".join("?" for _ in scan_ids)
+                connection.execute(
+                    "UPDATE scans SET status = 'interrupted', failure_code = 'scan_interrupted', "
+                    "failure_summary = 'The audit process stopped before completion.', "
+                    "finished_at = ?, updated_at = ? "
+                    f"WHERE scan_id IN ({placeholders}) "
+                    "AND status IN ('running', 'reducing', 'cancelling')",
+                    (now, now, *scan_ids),
+                )
+        return scan_ids
+
+    def start_phase_run(
+        self,
+        scan_id: str,
+        phase: str,
+        *,
+        summary: dict[str, Any] | None = None,
+        ordinal: int | None = None,
+    ) -> dict[str, Any]:
+        now = _now()
+        with self._lock, self._connect() as connection:
+            self._require_scan_status(
+                connection,
+                scan_id,
+                {"running", "reducing"},
+            )
+            if ordinal is None:
+                ordinal = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM scan_phase_runs WHERE scan_id = ? AND phase = ?",
+                        (scan_id, phase),
+                    ).fetchone()[0]
+                )
+            existing = connection.execute(
+                "SELECT * FROM scan_phase_runs WHERE scan_id = ? AND phase = ? AND ordinal = ?",
+                (scan_id, phase, ordinal),
+            ).fetchone()
+            if existing is not None:
+                return self._decode_phase_run(existing)
+            phase_run_id = f"phase_{uuid.uuid4().hex}"
+            connection.execute(
+                "INSERT INTO scan_phase_runs VALUES (?, ?, ?, ?, 'running', ?, NULL, NULL, ?, ?, ?)",
+                (
+                    phase_run_id,
+                    scan_id,
+                    phase,
+                    ordinal,
+                    now,
+                    json.dumps(summary or {}, ensure_ascii=False, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE scans SET current_phase = ?, updated_at = ? WHERE scan_id = ?",
+                (phase, now, scan_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM scan_phase_runs WHERE phase_run_id = ?",
+                (phase_run_id,),
+            ).fetchone()
+        return self._decode_phase_run(row)
+
+    def finish_phase_run(
+        self,
+        phase_run_id: str,
+        status: str,
+        *,
+        summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"completed", "partial", "failed", "cancelled", "skipped"}:
+            raise ValueError("Unsupported phase status")
+        now = _now()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM scan_phase_runs WHERE phase_run_id = ?",
+                (phase_run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Phase run not found")
+            started_at = row["started_at"] or row["created_at"]
+            duration_ms = max(
+                0,
+                int((datetime.fromisoformat(now) - datetime.fromisoformat(started_at)).total_seconds() * 1000),
+            )
+            merged_summary = json.loads(row["summary_json"])
+            if summary:
+                merged_summary.update(summary)
+            connection.execute(
+                "UPDATE scan_phase_runs SET status = ?, finished_at = ?, duration_ms = ?, "
+                "summary_json = ?, updated_at = ? WHERE phase_run_id = ?",
+                (
+                    status,
+                    now,
+                    duration_ms,
+                    json.dumps(merged_summary, ensure_ascii=False, sort_keys=True),
+                    now,
+                    phase_run_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM scan_phase_runs WHERE phase_run_id = ?",
+                (phase_run_id,),
+            ).fetchone()
+        return self._decode_phase_run(updated)
+
+    def list_phase_runs(self, scan_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM scan_phase_runs WHERE scan_id = ? ORDER BY created_at, phase, ordinal",
+                (scan_id,),
+            ).fetchall()
+        return [self._decode_phase_run(row) for row in rows]
+
+    def append_scan_event(
+        self,
+        scan_id: str,
+        event_type: str,
+        title: str,
+        payload: dict[str, Any],
+        *,
+        level: str = "info",
+        phase_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        if level not in {"info", "warning", "error"}:
+            raise ValueError("Unsupported event level")
+        title = title.strip()
+        if not title or len(title) > 256:
+            raise ValueError("Event title must contain 1 to 256 characters")
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        if len(payload_json.encode("utf-8")) > MAX_EVENT_PAYLOAD_BYTES:
+            raise ValueError("Event payload exceeds 64 KiB")
+        created_at = _now()
+        with self._lock, self._connect() as connection:
+            self._require_scan_status(
+                connection,
+                scan_id,
+                {"running", "reducing", *TERMINAL_SCAN_STATUSES},
+            )
+            cursor = connection.execute(
+                "INSERT INTO scan_events (scan_id, phase_run_id, event_type, level, title, payload_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scan_id,
+                    phase_run_id,
+                    event_type,
+                    level,
+                    title,
+                    payload_json,
+                    created_at,
+                ),
+            )
+            seq = int(cursor.lastrowid)
+        return {
+            "seq": seq,
+            "scan_id": scan_id,
+            "phase_run_id": phase_run_id,
+            "type": event_type,
+            "level": level,
+            "title": title,
+            "summary": payload,
+            "created_at": created_at,
+        }
+
+    def list_scan_events(
+        self,
+        scan_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if after_seq < 0:
+            raise ValueError("after_seq must not be negative")
+        if limit < 1 or limit > 200:
+            raise ValueError("limit must be between 1 and 200")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM scan_events WHERE scan_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                (scan_id, after_seq, limit + 1),
+            ).fetchall()
+            latest = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(seq), 0) FROM scan_events WHERE scan_id = ?",
+                    (scan_id,),
+                ).fetchone()[0]
+            )
+        has_more = len(rows) > limit
+        items = [self._decode_scan_event(row) for row in rows[:limit]]
+        return {"items": items, "latest_seq": latest, "has_more": has_more}
+
+    def list_recent_scan_events(
+        self,
+        scan_id: str,
+        *,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if limit < 1 or limit > 200:
+            raise ValueError("limit must be between 1 and 200")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM scan_events WHERE scan_id = ? ORDER BY seq DESC LIMIT ?",
+                (scan_id, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [self._decode_scan_event(row) for row in reversed(rows[:limit])]
+        latest = items[-1]["seq"] if items else 0
+        return {"items": items, "latest_seq": latest, "has_more": has_more}
+
+    def list_scans(
+        self,
+        *,
+        owner_subject: str | None = None,
+        include_all: bool = False,
+        statuses: set[str] | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if not include_all:
+            if not owner_subject:
+                raise ValueError("owner_subject is required")
+            clauses.append("s.owner_subject = ?")
+            parameters.append(owner_subject)
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"s.status IN ({placeholders})")
+            parameters.extend(sorted(statuses))
+        if cursor:
+            cursor_created_at, cursor_scan_id = self._decode_scan_cursor(cursor)
+            clauses.append("(s.created_at < ? OR (s.created_at = ? AND s.scan_id < ?))")
+            parameters.extend([cursor_created_at, cursor_created_at, cursor_scan_id])
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"""
+            SELECT s.*, p.display_name, p.source_revision, p.tree_digest,
+                   p.file_count, p.total_bytes, p.omitted_file_count,
+                   (SELECT COUNT(*) FROM candidates c WHERE c.scan_id = s.scan_id) AS candidate_count
+            FROM scans s
+            JOIN snapshots p ON p.snapshot_id = s.snapshot_id
+            {where}
+            ORDER BY s.created_at DESC, s.scan_id DESC
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(query, (*parameters, limit + 1)).fetchall()
+        has_more = len(rows) > limit
+        items = [self._public_scan_row(row) for row in rows[:limit]]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = self._encode_scan_cursor(last["created_at"], last["scan_id"])
+        return {"items": items, "next_cursor": next_cursor}
+
+    def get_evidence_record(
+        self,
+        scan_id: str,
+        evidence_id: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT e.*, c.scan_id FROM evidence e "
+                "JOIN candidates c ON c.candidate_id = e.candidate_id "
+                "WHERE e.evidence_id = ? AND c.scan_id = ?",
+                (evidence_id, scan_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    @staticmethod
+    def _decode_phase_run(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["summary"] = json.loads(item.pop("summary_json"))
+        return item
+
+    @staticmethod
+    def _decode_scan_event(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["type"] = item.pop("event_type")
+        item["summary"] = json.loads(item.pop("payload_json"))
+        return item
+
+    @staticmethod
+    def _public_scan_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["dynamic_enabled"] = bool(item["dynamic_enabled"])
+        return item
+
+    @staticmethod
+    def _encode_scan_cursor(created_at: str, scan_id: str) -> str:
+        payload = json.dumps([created_at, scan_id], separators=(",", ":")).encode("utf-8")
+        return urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_scan_cursor(cursor: str) -> tuple[str, str]:
+        try:
+            padding = "=" * (-len(cursor) % 4)
+            payload = json.loads(urlsafe_b64decode(cursor + padding).decode("utf-8"))
+        except (BinasciiError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid scan cursor") from exc
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 2
+            or not all(isinstance(value, str) and value for value in payload)
+        ):
+            raise ValueError("Invalid scan cursor")
+        return payload[0], payload[1]
 
     def delete_scan(self, scan_id: str) -> None:
         with self._lock, self._connect() as connection:
@@ -1661,8 +2048,7 @@ class ScanStore:
                 raise ValueError("Only running scans may create session bindings")
             if work_unit_id is not None:
                 work_unit = connection.execute(
-                    "SELECT scan_id, role, status, session_id "
-                    "FROM work_units WHERE work_unit_id = ?",
+                    "SELECT scan_id, role, status, session_id FROM work_units WHERE work_unit_id = ?",
                     (work_unit_id,),
                 ).fetchone()
                 if work_unit is None:
@@ -1674,8 +2060,7 @@ class ScanStore:
                 if work_unit["session_id"] not in {None, session_id}:
                     raise ValueError("Work unit is already bound to another session")
             existing = connection.execute(
-                "SELECT scan_id, work_unit_id, snapshot_id, role "
-                "FROM session_bindings WHERE session_id = ?",
+                "SELECT scan_id, work_unit_id, snapshot_id, role FROM session_bindings WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
             expected = (scan_id, work_unit_id, snapshot_id, role)
@@ -1694,11 +2079,13 @@ class ScanStore:
                 (session_id, scan_id, work_unit_id, snapshot_id, role, _now()),
             )
             if work_unit_id is not None:
+                now = _now()
                 cursor = connection.execute(
                     "UPDATE work_units SET session_id = ?, status = 'running', "
-                    "updated_at = ? WHERE work_unit_id = ? "
+                    "updated_at = ?, started_at = COALESCE(started_at, ?) "
+                    "WHERE work_unit_id = ? "
                     "AND (session_id IS NULL OR session_id = ?)",
-                    (session_id, _now(), work_unit_id, session_id),
+                    (session_id, now, now, work_unit_id, session_id),
                 )
                 if cursor.rowcount != 1:
                     raise ValueError("Work unit is already bound to another session")
@@ -1782,23 +2169,13 @@ class ScanStore:
             values = payload.get(field)
             if not isinstance(values, list) or not values:
                 raise ValueError(f"Threat-model field {field} must not be empty")
-            if any(
-                not isinstance(item, str)
-                or not item.strip()
-                for item in values
-            ):
-                raise ValueError(
-                    f"Threat-model field {field} must contain non-empty strings"
-                )
+            if any(not isinstance(item, str) or not item.strip() for item in values):
+                raise ValueError(f"Threat-model field {field} must contain non-empty strings")
         assumptions = payload.get("assumptions")
         if not isinstance(assumptions, list) or any(
-            not isinstance(item, str)
-            or not item.strip()
-            for item in assumptions
+            not isinstance(item, str) or not item.strip() for item in assumptions
         ):
-            raise ValueError(
-                "Threat-model field assumptions must contain only non-empty strings"
-            )
+            raise ValueError("Threat-model field assumptions must contain only non-empty strings")
         if not isinstance(evidence, list) or not evidence:
             raise ValueError("Threat model requires at least one evidence reference")
 
@@ -1838,8 +2215,7 @@ class ScanStore:
                     connection,
                     binding.scan_id,
                 )
-                if work_unit is not None
-                and work_unit["phase"] == "targeted_rescan"
+                if work_unit is not None and work_unit["phase"] == "targeted_rescan"
                 else None
             )
             connection.execute(
@@ -1896,9 +2272,7 @@ class ScanStore:
                 json.loads(row["evidence_json"]),
             )
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Completed threat model failed contract validation: {exc}"
-            ) from exc
+            raise ValueError(f"Completed threat model failed contract validation: {exc}") from exc
         return row
 
     @staticmethod
@@ -1913,9 +2287,7 @@ class ScanStore:
             (binding.scan_id, binding.work_unit_id),
         ).fetchone()
         if accessed is None:
-            raise ValueError(
-                "Baseline workers must read the stored threat-model context first"
-            )
+            raise ValueError("Baseline workers must read the stored threat-model context first")
 
     @staticmethod
     def _require_scan_status(
@@ -1930,9 +2302,7 @@ class ScanStore:
         if scan is None:
             raise ValueError("Scan not found")
         if scan["status"] not in allowed_statuses:
-            raise ValueError(
-                f"Scan status {scan['status']!r} does not allow this operation"
-            )
+            raise ValueError(f"Scan status {scan['status']!r} does not allow this operation")
         return scan
 
     @staticmethod
@@ -1943,8 +2313,7 @@ class ScanStore:
         if binding.work_unit_id is None:
             raise ValueError("Worker operation requires a bound work unit")
         work_unit = connection.execute(
-            "SELECT scan_id, role, session_id, status FROM work_units "
-            "WHERE work_unit_id = ?",
+            "SELECT scan_id, role, session_id, status FROM work_units WHERE work_unit_id = ?",
             (binding.work_unit_id,),
         ).fetchone()
         if (
@@ -2087,17 +2456,10 @@ class ScanStore:
 
         def covered(relative_path: str, claims: list[str]) -> bool:
             return any(
-                claim == "."
-                or relative_path == claim
-                or relative_path.startswith(f"{claim}/")
-                for claim in claims
+                claim == "." or relative_path == claim or relative_path.startswith(f"{claim}/") for claim in claims
             )
 
-        inventoried_access = {
-            row["relative_path"]
-            for row in access_rows
-            if row["operation"] == "inventory"
-        }
+        inventoried_access = {row["relative_path"] for row in access_rows if row["operation"] == "inventory"}
         expected_inventory = {
             row["relative_path"]
             for row in [*file_rows, *omission_rows]
@@ -2106,14 +2468,11 @@ class ScanStore:
         missing_inventory = sorted(expected_inventory - inventoried_access)
         if missing_inventory:
             raise ValueError(
-                "Inventory coverage is not backed by audit_inventory access: "
-                + ", ".join(missing_inventory[:20])
+                "Inventory coverage is not backed by audit_inventory access: " + ", ".join(missing_inventory[:20])
             )
 
         search_access = {
-            (row["relative_path"], row["blob_digest"])
-            for row in access_rows
-            if row["operation"] == "search"
+            (row["relative_path"], row["blob_digest"]) for row in access_rows if row["operation"] == "search"
         }
         reads_by_file: dict[tuple[str, str], list[tuple[int, int]]] = {}
         for row in access_rows:
@@ -2162,8 +2521,7 @@ class ScanStore:
         )
         if missing_analysis:
             raise ValueError(
-                "Analysis coverage is not backed by complete snapshot source reads: "
-                + ", ".join(missing_analysis[:20])
+                "Analysis coverage is not backed by complete snapshot source reads: " + ", ".join(missing_analysis[:20])
             )
 
     def require_verifier_source_access(
@@ -2173,8 +2531,7 @@ class ScanStore:
         candidate_id: str,
     ) -> None:
         evidence = connection.execute(
-            "SELECT relative_path, blob_digest, start_line, end_line FROM evidence "
-            "WHERE candidate_id = ?",
+            "SELECT relative_path, blob_digest, start_line, end_line FROM evidence WHERE candidate_id = ?",
             (candidate_id,),
         ).fetchall()
         if not evidence:
@@ -2203,9 +2560,7 @@ class ScanStore:
 
     def get_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,)).fetchone()
         if not row:
             return None
         data = dict(row)
@@ -2297,9 +2652,7 @@ class ScanStore:
             raise ValueError("Coverage requires a bound work unit")
         work_unit_id = binding.work_unit_id
         payload = dict(payload)
-        payload["open_questions"] = normalize_open_questions(
-            payload.get("open_questions")
-        )
+        payload["open_questions"] = normalize_open_questions(payload.get("open_questions"))
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
@@ -2309,11 +2662,7 @@ class ScanStore:
                 "SELECT scan_id, role FROM work_units WHERE work_unit_id = ?",
                 (work_unit_id,),
             ).fetchone()
-            if (
-                work_unit is None
-                or work_unit["scan_id"] != binding.scan_id
-                or work_unit["role"] != binding.role
-            ):
+            if work_unit is None or work_unit["scan_id"] != binding.scan_id or work_unit["role"] != binding.role:
                 raise ValueError("Coverage work unit does not match the binding")
             connection.execute(
                 """
@@ -2360,8 +2709,7 @@ class ScanStore:
                     (scan_id,),
                 ).fetchone()[0],
                 "active_work_units": connection.execute(
-                    "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
-                    "AND status IN ('pending', 'running')",
+                    "SELECT COUNT(*) FROM work_units WHERE scan_id = ? AND status IN ('pending', 'running')",
                     (scan_id,),
                 ).fetchone()[0],
                 "adjudications": connection.execute(
@@ -2373,8 +2721,7 @@ class ScanStore:
                     (scan_id,),
                 ).fetchone()[0],
                 "ready_dynamic_runs": connection.execute(
-                    "SELECT COUNT(*) FROM dynamic_runs "
-                    "WHERE scan_id = ? AND status = 'ready'",
+                    "SELECT COUNT(*) FROM dynamic_runs WHERE scan_id = ? AND status = 'ready'",
                     (scan_id,),
                 ).fetchone()[0],
                 "terminal_dynamic_runs": connection.execute(
@@ -2399,8 +2746,7 @@ class ScanStore:
                 ),
             }
             batch_rows = connection.execute(
-                "SELECT batch_id, phase, status FROM worker_batches "
-                "WHERE scan_id = ? ORDER BY created_at, batch_id",
+                "SELECT batch_id, phase, status FROM worker_batches WHERE scan_id = ? ORDER BY created_at, batch_id",
                 (scan_id,),
             ).fetchall()
             threat_model_row = connection.execute(
@@ -2442,33 +2788,37 @@ class ScanStore:
             threat_model_status = "missing"
         integrity_status = "pending"
         integrity_errors: list[str] = []
+        integrity_artifacts: dict[str, str] = {}
         if threat_model_status == "invalid":
             integrity_status = "invalid"
             integrity_errors.append(
                 "Threat model failed contract validation"
-                + (
-                    f": {threat_model_validation_error}"
-                    if threat_model_validation_error
-                    else ""
-                )
+                + (f": {threat_model_validation_error}" if threat_model_validation_error else "")
             )
         elif scan["status"] == "completed":
             if threat_model_status == "completed":
-                integrity_status = "valid"
+                from flocks_code_security.artifact_integrity import (
+                    verify_artifact_bundle,
+                )
+
+                verified = verify_artifact_bundle(
+                    scan_id,
+                    Path(scan["output_dir"]) if scan.get("output_dir") else None,
+                )
+                integrity_status = verified.status
+                integrity_errors.extend(verified.errors)
+                integrity_artifacts = verified.digests
             else:
                 integrity_status = "invalid"
-                integrity_errors.append(
-                    "Completed scan does not have a valid completed threat model"
-                )
+                integrity_errors.append("Completed scan does not have a valid completed threat model")
         return {
             **scan,
             "counts": counts,
             "threat_model_status": threat_model_status,
             "integrity_status": integrity_status,
             "integrity_errors": integrity_errors,
-            "adjudication": (
-                dict(adjudication_row) if adjudication_row is not None else None
-            ),
+            "integrity_artifacts": integrity_artifacts,
+            "adjudication": (dict(adjudication_row) if adjudication_row is not None else None),
             "worker_batches": [dict(row) for row in batch_rows],
         }
 
@@ -2519,13 +2869,11 @@ class ScanStore:
                 (scan_id,),
             ).fetchone()
             adjudication_rows = connection.execute(
-                "SELECT * FROM adjudications WHERE scan_id = ? "
-                "ORDER BY adjudication_round",
+                "SELECT * FROM adjudications WHERE scan_id = ? ORDER BY adjudication_round",
                 (scan_id,),
             ).fetchall()
             dynamic_run_rows = connection.execute(
-                "SELECT * FROM dynamic_runs WHERE scan_id = ? "
-                "ORDER BY created_at, candidate_id",
+                "SELECT * FROM dynamic_runs WHERE scan_id = ? ORDER BY created_at, candidate_id",
                 (scan_id,),
             ).fetchall()
         candidates = []
@@ -2542,9 +2890,7 @@ class ScanStore:
         for row in coverage_rows:
             item = dict(row)
             item["payload"] = json.loads(item.pop("payload_json"))
-            item["payload"]["open_questions"] = normalize_open_questions(
-                item["payload"].get("open_questions")
-            )
+            item["payload"]["open_questions"] = normalize_open_questions(item["payload"].get("open_questions"))
             coverage.append(item)
         work_units = []
         for row in work_unit_rows:
@@ -2554,12 +2900,8 @@ class ScanStore:
         threat_model = None
         if threat_model_row is not None:
             threat_model = dict(threat_model_row)
-            threat_model["threat_model"] = json.loads(
-                threat_model.pop("payload_json")
-            )
-            threat_model["evidence"] = json.loads(
-                threat_model.pop("evidence_json")
-            )
+            threat_model["threat_model"] = json.loads(threat_model.pop("payload_json"))
+            threat_model["evidence"] = json.loads(threat_model.pop("evidence_json"))
         return {
             "scan": scan,
             "threat_model": threat_model,
@@ -2577,12 +2919,8 @@ class ScanStore:
                 }
                 for row in verification_conflict_rows
             ],
-            "adjudications": [
-                self._decode_adjudication(row) for row in adjudication_rows
-            ],
-            "dynamic_runs": [
-                self._decode_dynamic_run(row) for row in dynamic_run_rows
-            ],
+            "adjudications": [self._decode_adjudication(row) for row in adjudication_rows],
+            "dynamic_runs": [self._decode_dynamic_run(row) for row in dynamic_run_rows],
         }
 
     def transition_scan_status(
@@ -2603,10 +2941,12 @@ class ScanStore:
         placeholders = ", ".join("?" for _ in from_statuses)
         values = sorted(from_statuses)
         with self._lock, self._connect() as connection:
+            finished_at = _now() if to_status in TERMINAL_SCAN_STATUSES else None
             cursor = connection.execute(
-                f"UPDATE scans SET status = ?, updated_at = ? "
+                f"UPDATE scans SET status = ?, updated_at = ?, "
+                f"finished_at = COALESCE(?, finished_at) "
                 f"WHERE scan_id = ? AND status IN ({placeholders})",
-                (to_status, _now(), scan_id, *values),
+                (to_status, _now(), finished_at, scan_id, *values),
             )
             if cursor.rowcount != 1:
                 scan = connection.execute(
@@ -2615,9 +2955,7 @@ class ScanStore:
                 ).fetchone()
                 if scan is None:
                     raise ValueError("Scan not found")
-                raise ValueError(
-                    f"Scan status {scan['status']!r} cannot transition to {to_status!r}"
-                )
+                raise ValueError(f"Scan status {scan['status']!r} cannot transition to {to_status!r}")
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         with self._lock, self._connect() as connection:

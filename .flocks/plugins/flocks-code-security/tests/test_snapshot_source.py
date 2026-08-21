@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sqlite3
 import subprocess
@@ -59,6 +60,34 @@ def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
     assert runtime.source.inventory("worker")["languages"]["python"] == 1
 
 
+def test_evidence_context_rejects_snapshot_tampering(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("first\ntrusted\nlast\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target))
+    record = runtime.store.get_snapshot_file(snapshot.snapshot_id, "app.py")
+    evidence = {
+        "relative_path": "app.py",
+        "blob_digest": record.blob_digest,
+        "start_line": 2,
+        "end_line": 2,
+        "excerpt_hash": hashlib.sha256(b"trusted").hexdigest(),
+    }
+
+    context = runtime.source.evidence_context(snapshot.snapshot_id, evidence)
+    assert context["text"] == "first\ntrusted\nlast"
+
+    snapshot_file = Path(snapshot.root_path) / "app.py"
+    snapshot_file.chmod(0o600)
+    snapshot_file.write_text(
+        "first\nchanged\nlast\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="content.*mismatch"):
+        runtime.source.evidence_context(snapshot.snapshot_id, evidence)
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git is not installed")
 def test_snapshot_binds_clean_and_dirty_git_targets(tmp_path: Path) -> None:
     target = tmp_path / "target"
@@ -90,10 +119,10 @@ def test_snapshot_binds_clean_and_dirty_git_targets(tmp_path: Path) -> None:
     assert clean.target_kind == "git_revision"
     assert clean.source_revision == revision
     assert clean.display_name == "target"
-    assert {
-        item.relative_path
-        for item in runtime.store.list_snapshot_files(clean.snapshot_id)
-    } == {".gitignore", "app.py"}
+    assert {item.relative_path for item in runtime.store.list_snapshot_files(clean.snapshot_id)} == {
+        ".gitignore",
+        "app.py",
+    }
 
     (target / "app.py").write_text("safe = False\n", encoding="utf-8")
     (target / "new.py").write_text("new = True\n", encoding="utf-8")
@@ -101,18 +130,16 @@ def test_snapshot_binds_clean_and_dirty_git_targets(tmp_path: Path) -> None:
 
     assert dirty.target_kind == "git_worktree"
     assert dirty.source_revision == revision
-    assert {
-        item.relative_path
-        for item in runtime.store.list_snapshot_files(dirty.snapshot_id)
-    } == {".gitignore", "app.py", "new.py"}
+    assert {item.relative_path for item in runtime.store.list_snapshot_files(dirty.snapshot_id)} == {
+        ".gitignore",
+        "app.py",
+        "new.py",
+    }
 
     (target / "app.py").unlink()
     deleted = runtime.snapshots.create(str(target))
     assert deleted.target_kind == "git_worktree"
-    assert "app.py" not in {
-        item.relative_path
-        for item in runtime.store.list_snapshot_files(deleted.snapshot_id)
-    }
+    assert "app.py" not in {item.relative_path for item in runtime.store.list_snapshot_files(deleted.snapshot_id)}
 
 
 def test_snapshot_rejects_symbolic_links(tmp_path: Path) -> None:
@@ -153,10 +180,10 @@ def test_snapshot_preserves_posix_whitespace_and_backslash_names(
         include_paths=[" ", "back\\slash.py"],
     )
 
-    assert [
-        item.relative_path
-        for item in runtime.store.list_snapshot_files(snapshot.snapshot_id)
-    ] == [" ", "back\\slash.py"]
+    assert [item.relative_path for item in runtime.store.list_snapshot_files(snapshot.snapshot_id)] == [
+        " ",
+        "back\\slash.py",
+    ]
 
 
 def test_snapshot_rejects_source_mutation_during_copy(tmp_path: Path) -> None:
@@ -420,7 +447,4 @@ def test_duplicate_verdict_migration_preserves_conflict_fact(tmp_path: Path) -> 
     data = runtime.store.report_data(scan_id)
     assert len(data["verifications"]) == 1
     assert data["verification_conflicts"][0]["candidate_id"] == "candidate"
-    assert {
-        item["verdict"]
-        for item in data["verification_conflicts"][0]["verifications"]
-    } == {"confirmed", "rejected"}
+    assert {item["verdict"] for item in data["verification_conflicts"][0]["verifications"]} == {"confirmed", "rejected"}

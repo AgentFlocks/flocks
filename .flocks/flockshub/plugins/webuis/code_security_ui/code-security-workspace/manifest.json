@@ -1,0 +1,12 @@
+{
+  "id": "code-security-workspace",
+  "title": "代码审计工作区",
+  "titleEn": "Code Audit Workspace",
+  "route": "/contracts/webui/code-security-workspace",
+  "icon": "ShieldCheck",
+  "order": 10,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 1787300000000
+}

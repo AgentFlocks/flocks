@@ -357,18 +357,12 @@ async def test_dynamic_pipeline_attaches_runner_to_langfuse_phase(
         root_observation,
     )
 
-    dynamic_span = next(
-        item
-        for item in spans
-        if item[0]["name"] == "code-security.phase.dynamic_validation"
-    )
+    dynamic_span = next(item for item in spans if item[0]["name"] == "code-security.phase.dynamic_validation")
     assert dynamic_span[0]["parent"] is root_observation
     assert runner.observation_parents == [dynamic_span[1], dynamic_span[1]]
     assert result["counts"]["terminal_dynamic_runs"] == 1
     assert any(
-        observation is dynamic_span[1]
-        and output["output"]["status"] == "completed"
-        for observation, output in ended
+        observation is dynamic_span[1] and output["output"]["status"] == "completed" for observation, output in ended
     )
 
 
@@ -529,7 +523,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         model_id="model",
         agent_name="code-security",
     )
-    assert events == ["scan.adjudicated"]
+    assert events == ["adjudication.started", "scan.adjudicated"]
 
 
 @pytest.mark.asyncio

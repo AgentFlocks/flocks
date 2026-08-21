@@ -14635,6 +14635,27 @@
       "descriptionCn": "深信服 aTrust 零信任访问控制系统 OpenAPI V3 接入。"
     },
     {
+      "id": "code_security_ui",
+      "type": "webui",
+      "name": "Code Security Workspace",
+      "description": "Trusted code-security audit workspace with durable phases, events, evidence, and artifacts.",
+      "descriptionCn": "可信代码审计工作区，展示持久阶段、事件、证据和审计产物。",
+      "version": "1.0.0",
+      "category": "devtools",
+      "tags": [
+        "api-security",
+        "web-security",
+        "vulnerability"
+      ],
+      "useCases": [
+        "vulnerability-management",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/webuis/code_security_ui/manifest.json"
+    },
+    {
       "id": "soc_ui",
       "type": "webui",
       "name": "SOC Workspace WebUI",

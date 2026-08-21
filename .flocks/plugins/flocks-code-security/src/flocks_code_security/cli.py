@@ -9,13 +9,10 @@ from typing import Any
 from uuid import uuid4
 
 from flocks.config.config import Config
-from flocks.project.project import Project
 from flocks.provider.provider import Provider
 from flocks.session.callable_state import set_session_callable_tools
 from flocks.session.message import Message, MessageRole
-from flocks.session.session import Session
 from flocks.session.session_loop import SessionLoop
-from flocks.storage.storage import Storage
 from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 from flocks.utils.langfuse import (
     is_active as langfuse_is_active,
@@ -24,7 +21,7 @@ from flocks.utils.langfuse import (
     trace_scope,
 )
 
-from flocks_code_security.paths import outputs_root, runtime_dir
+from flocks_code_security.paths import outputs_root
 from flocks_code_security.dynamic_validation import DockerDynamicRunner
 from flocks_code_security.runtime import get_runtime
 from flocks_code_security.tools import (
@@ -48,15 +45,9 @@ def _require_enabled_audit_tools(*, dynamic_enabled: bool = False) -> None:
     required = (
         AUDIT_TOOL_NAMES
         if dynamic_enabled
-        else tuple(
-            name for name in AUDIT_TOOL_NAMES if name not in DYNAMIC_AGENT_TOOL_NAMES
-        )
+        else tuple(name for name in AUDIT_TOOL_NAMES if name not in DYNAMIC_AGENT_TOOL_NAMES)
     )
-    unavailable = [
-        name
-        for name in required
-        if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled
-    ]
+    unavailable = [name for name in required if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled]
     if unavailable:
         raise RuntimeError(
             "Code-security audit requires enabled tools: "
@@ -145,9 +136,7 @@ async def _resolve_model(model: str | None) -> tuple[str, str]:
         config=config,
     )
     if not available:
-        raise RuntimeError(
-            f"LLM is not available: {provider_id}/{model_id} ({reason})"
-        )
+        raise RuntimeError(f"LLM is not available: {provider_id}/{model_id} ({reason})")
     return provider_id, model_id
 
 
@@ -159,18 +148,11 @@ async def _wait_for_batch(
 ) -> dict[str, Any]:
     last_observed_status: tuple[str, tuple[tuple[str, int], ...]] | None = None
     while True:
-        output = _require_success(
-            await audit_wait_workers(ctx, batch_id, timeout_seconds=10)
-        )
+        output = _require_success(await audit_wait_workers(ctx, batch_id, timeout_seconds=10))
         status_counts = output.get("status_counts", {})
         current_status = (
             str(output.get("status") or ""),
-            tuple(
-                sorted(
-                    (str(name), int(count))
-                    for name, count in status_counts.items()
-                )
-            )
+            tuple(sorted((str(name), int(count)) for name, count in status_counts.items()))
             if isinstance(status_counts, dict)
             else (),
         )
@@ -250,12 +232,14 @@ class AuditOrchestrator:
         progress: ProgressCallback | None,
         dynamic_enabled: bool = False,
         dynamic_runner: DockerDynamicRunner | None = None,
+        prepared: dict[str, Any] | None = None,
     ) -> None:
         self.ctx = ctx
         self.target = target
         self.progress = progress
         self.dynamic_enabled = bool(dynamic_enabled)
         self.dynamic_runner = dynamic_runner
+        self.prepared = prepared
 
     async def _verify_remaining(
         self,
@@ -263,9 +247,7 @@ class AuditOrchestrator:
         status: dict[str, Any],
         scan_observation: Any,
     ) -> dict[str, Any]:
-        unverified = int(
-            status.get("counts", {}).get("unverified_candidates", 0)
-        )
+        unverified = int(status.get("counts", {}).get("unverified_candidates", 0))
         while unverified > 0:
             _verification_batch, status = await _run_phase(
                 self.ctx,
@@ -274,9 +256,7 @@ class AuditOrchestrator:
                 self.progress,
                 scan_observation,
             )
-            remaining = int(
-                status.get("counts", {}).get("unverified_candidates", 0)
-            )
+            remaining = int(status.get("counts", {}).get("unverified_candidates", 0))
             if remaining >= unverified:
                 raise RuntimeError("Verification phase made no progress")
             unverified = remaining
@@ -291,8 +271,12 @@ class AuditOrchestrator:
         if not self.dynamic_enabled:
             return status
         scope = _start_phase_observation(scan_observation, "dynamic_validation")
-        observation_parent = (
-            scan_observation if scope is None else scope.observation
+        observation_parent = scan_observation if scope is None else scope.observation
+        _emit(
+            self.progress,
+            "dynamic.started",
+            {"counts": status.get("counts", {})},
+            observation_parent=observation_parent,
         )
         try:
             status = await self._execute_dynamic_remaining(
@@ -301,6 +285,12 @@ class AuditOrchestrator:
                 observation_parent,
             )
         except BaseException as exc:
+            _emit(
+                self.progress,
+                "dynamic.cancelled" if isinstance(exc, asyncio.CancelledError) else "dynamic.failed",
+                {"error_type": type(exc).__name__},
+                observation_parent=observation_parent,
+            )
             _end_observation(
                 scope,
                 output={"status": "failed", "error_type": type(exc).__name__},
@@ -308,6 +298,12 @@ class AuditOrchestrator:
                 status_message=type(exc).__name__,
             )
             raise
+        _emit(
+            self.progress,
+            "dynamic.completed",
+            {"counts": status.get("counts", {})},
+            observation_parent=observation_parent,
+        )
         _end_observation(
             scope,
             output={"status": "completed", "counts": status.get("counts", {})},
@@ -321,9 +317,7 @@ class AuditOrchestrator:
         observation_parent: Any,
     ) -> dict[str, Any]:
         store = get_runtime().store
-        remaining = int(
-            status.get("counts", {}).get("confirmed_without_dynamic_record", 0)
-        )
+        remaining = int(status.get("counts", {}).get("confirmed_without_dynamic_record", 0))
         while remaining > 0:
             probe_batch, status = await _run_phase(
                 self.ctx,
@@ -352,10 +346,34 @@ class AuditOrchestrator:
         if runnable:
             runner = self.dynamic_runner or DockerDynamicRunner(store)
             self.dynamic_runner = runner
+            _emit(
+                self.progress,
+                "dynamic.preflight_started",
+                {"candidate_count": len(runnable)},
+                observation_parent=observation_parent,
+            )
             await runner.preflight(observation_parent=observation_parent)
+            _emit(
+                self.progress,
+                "dynamic.preflight_completed",
+                {"candidate_count": len(runnable)},
+                observation_parent=observation_parent,
+            )
+            _emit(
+                self.progress,
+                "dynamic.execution_started",
+                {"candidate_count": len(runnable)},
+                observation_parent=observation_parent,
+            )
             await runner.run_all(
                 runnable,
                 concurrency=2,
+                observation_parent=observation_parent,
+            )
+            _emit(
+                self.progress,
+                "dynamic.execution_completed",
+                {"candidate_count": len(runnable)},
                 observation_parent=observation_parent,
             )
         await asyncio.to_thread(store.assert_dynamic_runs_terminal, scan_id)
@@ -379,6 +397,37 @@ class AuditOrchestrator:
             scan_id,
         )
         expected_round = 1 if previous is None else 2
+        _emit(
+            self.progress,
+            "adjudication.started",
+            {"adjudication_round": expected_round},
+            observation_parent=scan_observation,
+        )
+        try:
+            return await self._execute_parent_adjudication(
+                scan_id,
+                scan_observation,
+                expected_round,
+            )
+        except BaseException as exc:
+            _emit(
+                self.progress,
+                "adjudication.failed",
+                {
+                    "adjudication_round": expected_round,
+                    "error_type": type(exc).__name__,
+                },
+                observation_parent=scan_observation,
+            )
+            raise
+
+    async def _execute_parent_adjudication(
+        self,
+        scan_id: str,
+        scan_observation: Any,
+        expected_round: int,
+    ) -> dict[str, Any]:
+        store = get_runtime().store
         await set_session_callable_tools(
             self.ctx.session_id,
             {
@@ -413,20 +462,13 @@ class AuditOrchestrator:
             agent_name="code-security",
         )
         if result.action == "error":
-            raise RuntimeError(
-                f"Parent adjudication failed: {result.error or 'model loop error'}"
-            )
+            raise RuntimeError(f"Parent adjudication failed: {result.error or 'model loop error'}")
         decision = await asyncio.to_thread(
             store.get_latest_adjudication,
             scan_id,
         )
-        if (
-            decision is None
-            or decision["adjudication_round"] != expected_round
-        ):
-            raise RuntimeError(
-                "Parent Agent did not submit the required audit adjudication"
-            )
+        if decision is None or decision["adjudication_round"] != expected_round:
+            raise RuntimeError("Parent Agent did not submit the required audit adjudication")
         _emit(
             self.progress,
             "scan.adjudicated",
@@ -439,16 +481,19 @@ class AuditOrchestrator:
         scan_id: str | None = None
         scan_scope = None
         try:
-            prepare_result = (
-                await audit_prepare(
-                    self.ctx,
-                    str(self.target),
-                    dynamic_enabled=True,
+            if self.prepared is not None:
+                prepared = self.prepared
+            else:
+                prepare_result = (
+                    await audit_prepare(
+                        self.ctx,
+                        str(self.target),
+                        dynamic_enabled=True,
+                    )
+                    if self.dynamic_enabled
+                    else await audit_prepare(self.ctx, str(self.target))
                 )
-                if self.dynamic_enabled
-                else await audit_prepare(self.ctx, str(self.target))
-            )
-            prepared = _require_success(prepare_result)
+                prepared = _require_success(prepare_result)
             scan_id = prepared["scan_id"]
             if langfuse_is_active():
                 try:
@@ -476,9 +521,7 @@ class AuditOrchestrator:
                     )
                 except Exception:
                     scan_scope = None
-            scan_observation = (
-                None if scan_scope is None else scan_scope.observation
-            )
+            scan_observation = None if scan_scope is None else scan_scope.observation
             _emit(
                 self.progress,
                 "scan.prepared",
@@ -494,9 +537,7 @@ class AuditOrchestrator:
                 scan_observation,
             )
             if status.get("threat_model_status") != "completed":
-                raise RuntimeError(
-                    "Threat-modeling phase did not produce a trusted model"
-                )
+                raise RuntimeError("Threat-modeling phase did not produce a trusted model")
 
             _baseline_batch, status = await _run_phase(
                 self.ctx,
@@ -557,20 +598,14 @@ class AuditOrchestrator:
             cancelled_output: dict[str, Any] | None = None
             if scan_id is not None:
                 try:
-                    cancelled = await asyncio.shield(
-                        audit_cancel(self.ctx, scan_id)
-                    )
+                    cancelled = await asyncio.shield(audit_cancel(self.ctx, scan_id))
                     if cancelled.success and isinstance(cancelled.output, dict):
                         cancelled_output = cancelled.output
                         _emit(
                             self.progress,
                             "scan.cancelled",
                             cancelled_output,
-                            observation_parent=(
-                                None
-                                if scan_scope is None
-                                else scan_scope.observation
-                            ),
+                            observation_parent=(None if scan_scope is None else scan_scope.observation),
                         )
                 except Exception:
                     pass
@@ -594,41 +629,29 @@ async def run_standard_audit(
     progress: ProgressCallback | None = None,
     dynamic_enabled: bool = False,
 ) -> dict[str, Any]:
-    """Run the trusted standard audit pipeline and follow it to finalization."""
-    target = target_path.expanduser().resolve()
-    if not target.is_dir():
-        raise ValueError(f"Audit target is not a directory: {target}")
+    """Run the trusted standard audit through the shared service layer."""
+    from flocks_code_security.service import (
+        AuditCaller,
+        StartScanRequest,
+        get_audit_service,
+    )
 
-    _require_enabled_audit_tools(dynamic_enabled=dynamic_enabled)
-    await Storage.init()
-    provider_id, model_id = await _resolve_model(model)
-    model_ref = {"providerID": provider_id, "modelID": model_id}
-    project = (await Project.from_directory(str(runtime_dir())))["project"]
-    parent = await Session.create(
-        project_id=project.id,
-        directory=str(runtime_dir()),
-        title=f"Code security audit: {target.name}",
-        agent="code-security",
-        provider=provider_id,
-        model=model_id,
-        model_pinned=True,
+    target = target_path.expanduser().resolve()
+    return await get_audit_service().run_scan(
+        StartScanRequest(
+            target_path=target,
+            model=model,
+            dynamic_enabled=dynamic_enabled,
+        ),
+        AuditCaller(
+            subject=f"cli:{uuid4().hex}",
+            source="cli",
+            is_admin=True,
+            workspace_ref=str(target),
+            authorized_root=target,
+        ),
+        progress=progress,
     )
-    ctx = ToolContext(
-        session_id=parent.id,
-        message_id=f"cli-audit-{uuid4().hex}",
-        agent="code-security",
-        extra={
-            "agent_execution_session": True,
-            "model": model_ref,
-            "suppress_parent_completion": True,
-        },
-    )
-    return await AuditOrchestrator(
-        ctx,
-        target,
-        progress,
-        dynamic_enabled=dynamic_enabled,
-    ).run()
 
 
 def scan_status(scan_id: str) -> dict[str, Any]:

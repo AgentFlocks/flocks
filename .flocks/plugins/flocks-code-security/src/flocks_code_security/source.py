@@ -102,14 +102,8 @@ class AuditSourceRepository:
         if work_unit is None or work_unit["scan_id"] != binding.scan_id:
             raise ValueError("Bound work unit not found")
         assigned = [normalize_relative_path(item, allow_root=True) for item in work_unit["paths"]]
-        snapshot_paths = {
-            item.relative_path
-            for item in self.store.list_snapshot_files(binding.snapshot_id)
-        }
-        omitted_paths = {
-            item.relative_path
-            for item in self.store.list_snapshot_omissions(binding.snapshot_id)
-        }
+        snapshot_paths = {item.relative_path for item in self.store.list_snapshot_files(binding.snapshot_id)}
+        omitted_paths = {item.relative_path for item in self.store.list_snapshot_omissions(binding.snapshot_id)}
 
         def exists_in_snapshot(path: str) -> bool:
             if path == ".":
@@ -207,9 +201,7 @@ class AuditSourceRepository:
                     "end_line": record.line_count,
                 }
             )
-            for line_number, line in enumerate(
-                data.decode("utf-8", errors="replace").splitlines(), start=1
-            ):
+            for line_number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), start=1):
                 comparable_line = line if case_sensitive else line.casefold()
                 if comparable_needle not in comparable_line:
                     continue
@@ -253,14 +245,8 @@ class AuditSourceRepository:
         for index, item in enumerate(evidence):
             if not isinstance(item, dict):
                 raise ValueError("Each evidence reference must be an object")
-            missing = [
-                field
-                for field in required_fields
-                if field not in item or item[field] in (None, "")
-            ]
-            unexpected = sorted(
-                set(item) - set(required_fields) - allowed_extra_fields
-            )
+            missing = [field for field in required_fields if field not in item or item[field] in (None, "")]
+            unexpected = sorted(set(item) - set(required_fields) - allowed_extra_fields)
             field_errors: list[str] = []
             if missing:
                 field_errors.append("missing " + ", ".join(missing))
@@ -276,13 +262,9 @@ class AuditSourceRepository:
             record = self._record(binding.snapshot_id, relative_path)
             if str(item.get("blob_digest") or "") != record.blob_digest:
                 raise ValueError(f"Evidence digest mismatch: {relative_path}")
-            if isinstance(item["start_line"], bool) or not isinstance(
-                item["start_line"], int
-            ):
+            if isinstance(item["start_line"], bool) or not isinstance(item["start_line"], int):
                 raise ValueError(f"evidence[{index}].start_line must be an integer")
-            if isinstance(item["end_line"], bool) or not isinstance(
-                item["end_line"], int
-            ):
+            if isinstance(item["end_line"], bool) or not isinstance(item["end_line"], int):
                 raise ValueError(f"evidence[{index}].end_line must be an integer")
             start_line = item["start_line"]
             end_line = item["end_line"]
@@ -315,9 +297,7 @@ class AuditSourceRepository:
         max_characters: int = 4_000,
     ) -> dict[str, Any]:
         """Read a persisted digest-bound evidence range for parent adjudication."""
-        relative_path = normalize_relative_path(
-            str(evidence.get("relative_path") or "")
-        )
+        relative_path = normalize_relative_path(str(evidence.get("relative_path") or ""))
         record = self._record(snapshot_id, relative_path)
         if record.is_binary:
             raise ValueError("Binary snapshot files cannot be used as evidence text")
@@ -335,10 +315,14 @@ class AuditSourceRepository:
             or end_line > record.line_count
         ):
             raise ValueError(f"Invalid evidence line range: {relative_path}")
-        lines = self._verified_bytes(snapshot_id, record).decode(
-            "utf-8",
-            errors="replace",
-        ).splitlines()
+        lines = (
+            self._verified_bytes(snapshot_id, record)
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+            .splitlines()
+        )
         text = "\n".join(lines[start_line - 1 : end_line])
         excerpt_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         persisted_hash = evidence.get("excerpt_hash")
@@ -355,23 +339,53 @@ class AuditSourceRepository:
             "text_truncated": len(text) > limit,
         }
 
+    def evidence_context(
+        self,
+        snapshot_id: str,
+        evidence: dict[str, Any],
+        *,
+        context_lines: int = 8,
+        max_bytes: int = 64 * 1024,
+    ) -> dict[str, Any]:
+        """Return bounded context only after verifying persisted evidence."""
+        verified = self.evidence_excerpt(snapshot_id, evidence, max_characters=20_000)
+        record = self._record(snapshot_id, verified["relative_path"])
+        lines = (
+            self._verified_bytes(snapshot_id, record)
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+            .splitlines()
+        )
+        padding = max(0, min(int(context_lines), 50))
+        start_line = max(1, int(verified["start_line"]) - padding)
+        end_line = min(len(lines), int(verified["end_line"]) + padding)
+        text = "\n".join(lines[start_line - 1 : end_line])
+        encoded = text.encode("utf-8")
+        limit = max(1, min(int(max_bytes), 64 * 1024))
+        truncated = len(encoded) > limit
+        if truncated:
+            text = encoded[:limit].decode("utf-8", errors="replace")
+        return {
+            "relative_path": verified["relative_path"],
+            "start_line": start_line,
+            "end_line": end_line,
+            "text": text,
+            "text_truncated": truncated,
+        }
+
     def _assigned_paths(self, binding: SessionBinding) -> list[str]:
         if binding.work_unit_id is None:
             raise ValueError("Source access requires a bound work unit")
         work_unit = self.store.get_work_unit(binding.work_unit_id)
         if work_unit is None or work_unit["scan_id"] != binding.scan_id:
             raise ValueError("Bound work unit not found")
-        return [
-            normalize_relative_path(item, allow_root=True)
-            for item in work_unit["paths"]
-        ]
+        return [normalize_relative_path(item, allow_root=True) for item in work_unit["paths"]]
 
     @staticmethod
     def _in_assigned_scope(path: str, assigned: list[str]) -> bool:
-        return any(
-            scope == "." or path == scope or path.startswith(f"{scope}/")
-            for scope in assigned
-        )
+        return any(scope == "." or path == scope or path.startswith(f"{scope}/") for scope in assigned)
 
     def _record(self, snapshot_id: str, relative_path: str) -> SnapshotFile:
         record = self.store.get_snapshot_file(snapshot_id, relative_path)
@@ -383,9 +397,7 @@ class AuditSourceRepository:
         snapshot = self.store.get_snapshot(snapshot_id)
         if snapshot is None:
             raise ValueError("Bound snapshot no longer exists")
-        root_descriptor = TargetSnapshotService._open_directory(
-            Path(snapshot.root_path)
-        )
+        root_descriptor = TargetSnapshotService._open_directory(Path(snapshot.root_path))
         descriptor: int | None = None
         try:
             descriptor = TargetSnapshotService._open_snapshot_file(

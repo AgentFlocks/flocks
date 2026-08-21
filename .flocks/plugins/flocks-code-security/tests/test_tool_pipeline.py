@@ -118,9 +118,7 @@ async def _complete_threat_model(
     )
     inventory = await audit_inventory(modeler)
     assert inventory.success
-    source_file = next(
-        item for item in inventory.output["files"] if not item["is_binary"]
-    )
+    source_file = next(item for item in inventory.output["files"] if not item["is_binary"])
     source = await audit_read(
         modeler,
         source_file["path"],
@@ -133,15 +131,9 @@ async def _complete_threat_model(
         {
             "summary": "A source-backed test application with a callable entry point.",
             "assets": ["Application integrity and process authority."],
-            "trustBoundaries": [
-                f"Caller input crosses into application code at {source_file['path']}:1."
-            ],
-            "attackerCapabilities": [
-                "A caller may control ordinary application input but not trusted configuration."
-            ],
-            "securityObjectives": [
-                "Untrusted input must not gain process execution authority."
-            ],
+            "trustBoundaries": [f"Caller input crosses into application code at {source_file['path']}:1."],
+            "attackerCapabilities": ["A caller may control ordinary application input but not trusted configuration."],
+            "securityObjectives": ["Untrusted input must not gain process execution authority."],
             "assumptions": ["Deployment exposure is not established by this fixture."],
             "evidence": [
                 {
@@ -160,14 +152,9 @@ async def _complete_threat_model(
 
 def _submit_final_adjudication(runtime, scan_id: str) -> dict:
     data = runtime.store.report_data(scan_id)
-    verdicts = {
-        item["candidate_id"]: item["verdict"]
-        for item in data["verifications"]
-    }
+    verdicts = {item["candidate_id"]: item["verdict"] for item in data["verifications"]}
     accepted = [
-        item["candidate_id"]
-        for item in data["candidates"]
-        if verdicts.get(item["candidate_id"]) == "confirmed"
+        item["candidate_id"] for item in data["candidates"] if verdicts.get(item["candidate_id"]) == "confirmed"
     ]
     rejected = [
         {
@@ -223,10 +210,7 @@ def test_adjudication_schema_migrates_to_latest_eight_columns(
     runtime = build_runtime(root)
 
     with runtime.store._connect() as connection:
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(adjudications)")
-        }
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(adjudications)")}
     assert columns == {
         "scan_id",
         "adjudication_round",
@@ -268,8 +252,7 @@ def test_manifest_does_not_claim_non_runnable_probes_executed() -> None:
 
     scope = manifest["scan"]["scope"]
     assert scope["runtimeStatus"] == (
-        "Dynamic validation results: completed Docker probe pairs: 0; "
-        "inconclusive attempts: 0; non-runnable probes: 8."
+        "Dynamic validation results: completed Docker probe pairs: 0; inconclusive attempts: 0; non-runnable probes: 8."
     )
     assert scope["validationMode"].endswith("(no target execution)")
 
@@ -414,10 +397,7 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
         },
     )
     assert wrong_evidence_shape.success is False
-    assert (
-        "relative_path, blob_digest, start_line, end_line"
-        in str(wrong_evidence_shape.error)
-    )
+    assert "relative_path, blob_digest, start_line, end_line" in str(wrong_evidence_shape.error)
 
     placeholder = await audit_submit_threat_model(
         modeler,
@@ -437,10 +417,7 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
     submitted = await audit_submit_threat_model(modeler, payload)
     assert submitted.success is True
     assert submitted.output["operation"] == "updated"
-    assert (
-        runtime.store.get_threat_model(scan_id)["threat_model"]["summary"]
-        == payload["summary"]
-    )
+    assert runtime.store.get_threat_model(scan_id)["threat_model"]["summary"] == payload["summary"]
 
     runtime.store.update_work_unit_status(work_unit_id, "completed")
     late_update = await audit_submit_threat_model(modeler, payload)
@@ -570,7 +547,7 @@ async def test_prepare_candidate_verify_finalize_pipeline(
                     "blob_digest": auxiliary.output["blob_digest"],
                     "start_line": 1,
                     "end_line": 2,
-                }
+                },
             ]
         ),
     )
@@ -606,9 +583,7 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert unbacked_verdict.success is False
     assert "independently read" in str(unbacked_verdict.error)
     assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
-    assert (
-        await audit_read(verifier, "aaa_helper.py", start_line=1, end_line=2)
-    ).success
+    assert (await audit_read(verifier, "aaa_helper.py", start_line=1, end_line=2)).success
     verdict = await audit_submit_verdict(
         verifier,
         candidate.output["candidate_id"],
@@ -628,16 +603,9 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert completed_status["integrity_errors"] == []
     output_path = Path(finalized.output["output_dir"])
     assert (output_path / "report.md").is_file()
-    assert (
-        (output_path / "findings.json")
-        .read_text(encoding="utf-8")
-        .count("code-injection.dynamic-eval")
-        == 1
-    )
+    assert (output_path / "findings.json").read_text(encoding="utf-8").count("code-injection.dynamic-eval") == 1
     assert (output_path / "report.sarif").is_file()
-    findings_document = json.loads(
-        (output_path / "findings.json").read_text(encoding="utf-8")
-    )
+    findings_document = json.loads((output_path / "findings.json").read_text(encoding="utf-8"))
     findings = findings_document["findings"]
     assert findings_document["documentType"] == "codex-security.findings"
     assert findings[0]["locations"][0]["path"] == "app.py"
@@ -648,17 +616,11 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert findings[0]["validation"]["conclusion"] == "confirmed"
     assert findings[0]["attackPath"]["dataflow"]["summary"]
     sarif = json.loads((output_path / "report.sarif").read_text(encoding="utf-8"))
-    assert sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"][
-        "artifactLocation"
-    ]["uri"] == "app.py"
+    assert sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "app.py"
     assert output_path.stat().st_mode & 0o777 == 0o700
     assert (output_path / "report.md").stat().st_mode & 0o777 == 0o600
-    manifest = json.loads(
-        (output_path / "scan-manifest.json").read_text(encoding="utf-8")
-    )
-    coverage_document = json.loads(
-        (output_path / "coverage.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((output_path / "scan-manifest.json").read_text(encoding="utf-8"))
+    coverage_document = json.loads((output_path / "coverage.json").read_text(encoding="utf-8"))
     validate_document("manifest", manifest)
     validate_document("findings", findings_document)
     validate_document("coverage", coverage_document)
@@ -666,20 +628,13 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert manifest["scan"]["status"] == "completed"
     assert manifest["scan"]["sealedAt"] == manifest["scan"]["completedAt"]
     assert manifest["scan"]["threatModel"]["trustBoundaries"]
-    assert any(
-        artifact["path"] == "adjudication.json"
-        for artifact in manifest["scan"]["artifacts"]
-    )
+    assert any(artifact["path"] == "adjudication.json" for artifact in manifest["scan"]["artifacts"])
     assert coverage_document["completeness"] == "complete"
     for artifact in manifest["scan"]["artifacts"]:
         contents = (output_path / artifact["path"]).read_bytes()
         assert hashlib.sha256(contents).hexdigest() == artifact["sha256"]
-    threat_model = json.loads(
-        (output_path / "threat-model.json").read_text(encoding="utf-8")
-    )
-    adjudication = json.loads(
-        (output_path / "adjudication.json").read_text(encoding="utf-8")
-    )
+    threat_model = json.loads((output_path / "threat-model.json").read_text(encoding="utf-8"))
+    adjudication = json.loads((output_path / "adjudication.json").read_text(encoding="utf-8"))
     assert threat_model["threatModel"]["trustBoundaries"]
     assert adjudication["adjudications"][-1]["action"] == "finalize"
     assert threat_model["evidence"][0]["relative_path"] in {
@@ -688,6 +643,11 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     }
     assert "result_status" not in manifest["scan"]
     assert (output_path / ".scan-manifest.final").exists() is False
+
+    (output_path / "report.md").write_text("tampered\n", encoding="utf-8")
+    tampered_status = runtime.store.scan_status(scan_id)
+    assert tampered_status["integrity_status"] == "invalid"
+    assert "report.md" in tampered_status["integrity_errors"][0]
 
 
 @pytest.mark.asyncio
@@ -916,9 +876,7 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
     validation = findings["findings"][0]["validation"]
     assert validation["dynamicConclusion"] == "reproduced"
     assert validation["pocRef"] == f"poc/{candidate_id}/probe.sh"
-    manifest = json.loads(
-        (output / "scan-manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((output / "scan-manifest.json").read_text(encoding="utf-8"))
     assert "completed Docker probe pairs: 1" in manifest["scan"]["scope"]["runtimeStatus"]
     sealed_paths = {item["path"] for item in manifest["scan"]["artifacts"]}
     assert "dynamic-validation.json" in sealed_paths
@@ -1004,9 +962,7 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
     output_path = Path(finalized.output["output_dir"])
-    coverage = json.loads(
-        (output_path / "coverage.json").read_text(encoding="utf-8")
-    )
+    coverage = json.loads((output_path / "coverage.json").read_text(encoding="utf-8"))
     assert coverage["completeness"] == "complete"
     assert coverage["deferred"] == []
     assert coverage["files"] == {
@@ -1087,16 +1043,8 @@ async def test_failed_coverage_is_sealed_as_deferred_work(
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
     assert finalized.output["status"] == "completed"
-    manifest = json.loads(
-        (Path(finalized.output["output_dir"]) / "scan-manifest.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    coverage = json.loads(
-        (Path(finalized.output["output_dir"]) / "coverage.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    manifest = json.loads((Path(finalized.output["output_dir"]) / "scan-manifest.json").read_text(encoding="utf-8"))
+    coverage = json.loads((Path(finalized.output["output_dir"]) / "coverage.json").read_text(encoding="utf-8"))
     assert manifest["scan"]["status"] == "completed"
     assert coverage["completeness"] == "partial"
     assert any(item.get("paths") == ["app.py"] for item in coverage["deferred"])
@@ -1417,11 +1365,7 @@ async def test_parent_rejection_removes_verifier_confirmed_candidate(
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success
     assert finalized.output["finding_count"] == 0
-    findings = json.loads(
-        (Path(finalized.output["output_dir"]) / "findings.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    findings = json.loads((Path(finalized.output["output_dir"]) / "findings.json").read_text(encoding="utf-8"))
     assert findings["findings"] == []
 
 
@@ -1549,17 +1493,17 @@ async def test_report_write_failure_does_not_publish_partial_bundle(
         )
     ).success
     runtime.store.update_work_unit_status(unit_id, "completed")
-    original_write_json = reporting_module.ReportWriter._write_json
+    original_write_bytes = reporting_module.ReportWriter._write_bytes
 
-    def fail_after_manifest(path: Path, payload) -> None:
+    def fail_while_writing_bundle(path: Path, contents: bytes) -> None:
         if path.name == "coverage.json":
             raise OSError("simulated report write failure")
-        original_write_json(path, payload)
+        original_write_bytes(path, contents)
 
     monkeypatch.setattr(
         reporting_module.ReportWriter,
-        "_write_json",
-        staticmethod(fail_after_manifest),
+        "_write_bytes",
+        staticmethod(fail_while_writing_bundle),
     )
     _submit_final_adjudication(runtime, scan_id)
     finalized = await audit_finalize(coordinator, scan_id)
@@ -1672,9 +1616,7 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.output["status"] == "completed"
     output_path = Path(finalized.output["output_dir"])
-    findings = json.loads((output_path / "findings.json").read_text(encoding="utf-8"))[
-        "findings"
-    ]
+    findings = json.loads((output_path / "findings.json").read_text(encoding="utf-8"))["findings"]
     assert len(findings) == 1
     assert len(findings[0]["extensions"]["candidateIds"]) == 2
     report = (output_path / "report.md").read_text(encoding="utf-8")
@@ -1748,10 +1690,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "trace_id": "a" * 32,
         "parent_span_id": "b" * 16,
     }
-    assert (
-        children[0].creation_kwargs["metadata"]["langfuse"]["root_trace_name"]
-        == "code-security.scan"
-    )
+    assert children[0].creation_kwargs["metadata"]["langfuse"]["root_trace_name"] == "code-security.scan"
     assert runtime.store.scan_status(scan_id)["threat_model_status"] == "running"
     threat_model_session = children[0].id
     modeler = _agent_context(
@@ -1853,10 +1792,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     )
     assert verification_batch.success is True
     verification_observability = children[2].creation_kwargs["metadata"]["langfuse"]
-    assert (
-        verification_observability["metadata"]["candidate_id"]
-        == candidate.output["candidate_id"]
-    )
+    assert verification_observability["metadata"]["candidate_id"] == candidate.output["candidate_id"]
     manager.tasks["task-3"].status = "error"
     failed_verification = await audit_wait_workers(
         coordinator,
@@ -1899,10 +1835,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     assert finalized.output["status"] == "completed"
     assert finalized.output["finding_count"] == 1
     assert finalized.output["finding_summaries"][0]["severity"] == "high"
-    assert (
-        finalized.output["finding_summaries"][0]["locations"][0]["path"]
-        == "app.py"
-    )
+    assert finalized.output["finding_summaries"][0]["locations"][0]["path"] == "app.py"
     assert finalized.output["coverage_completeness"] == "complete"
     assert finalized.output["pending_count"] == 0
 

@@ -77,21 +77,14 @@ class ReportWriter:
             evidence_by_candidate: dict[str, list[dict[str, Any]]] = {}
             for item in data["evidence"]:
                 evidence_by_candidate.setdefault(item["candidate_id"], []).append(item)
-            verdict_by_candidate = {
-                item["candidate_id"]: item for item in data["verifications"]
-            }
+            verdict_by_candidate = {item["candidate_id"]: item for item in data["verifications"]}
             adjudications = data["adjudications"]
             if not adjudications or adjudications[-1]["action"] != "finalize":
                 raise ValueError("A final parent-agent adjudication is required")
-            accepted_candidate_ids = set(
-                adjudications[-1]["accepted_candidate_ids"]
-            )
-            dynamic_runs = {
-                item["candidate_id"]: item for item in data["dynamic_runs"]
-            }
+            accepted_candidate_ids = set(adjudications[-1]["accepted_candidate_ids"])
+            dynamic_runs = {item["candidate_id"]: item for item in data["dynamic_runs"]}
             dynamic_assessments = {
-                item["candidate_id"]: item
-                for item in (adjudications[-1]["dynamic_assessments"] or [])
+                item["candidate_id"]: item for item in (adjudications[-1]["dynamic_assessments"] or [])
             }
 
             confirmed_groups: dict[str, list[dict[str, Any]]] = {}
@@ -102,9 +95,7 @@ class ReportWriter:
                 evidence = evidence_by_candidate.get(candidate_id, [])
                 verification = verdict_by_candidate.get(candidate_id)
                 if not evidence or verification is None:
-                    raise ValueError(
-                        "Canonical reduction requires evidence and one verification per candidate"
-                    )
+                    raise ValueError("Canonical reduction requires evidence and one verification per candidate")
                 verdict = verification["verdict"]
                 if candidate_id not in accepted_candidate_ids:
                     if verdict == "insufficient_evidence":
@@ -114,13 +105,9 @@ class ReportWriter:
                         outcomes[candidate_id] = "rejected"
                     continue
                 if verdict == "rejected":
-                    raise ValueError(
-                        "Parent adjudication accepted a verifier-rejected candidate"
-                    )
+                    raise ValueError("Parent adjudication accepted a verifier-rejected candidate")
                 if verdict == "insufficient_evidence":
-                    raise ValueError(
-                        "Parent adjudication accepted an insufficient-evidence candidate"
-                    )
+                    raise ValueError("Parent adjudication accepted an insufficient-evidence candidate")
                 if verdict != "confirmed":
                     raise ValueError(f"Unsupported persisted verification verdict: {verdict}")
 
@@ -178,6 +165,16 @@ class ReportWriter:
                 "adjudications": adjudications,
             }
             adjudication_bytes = canonical_json_bytes(adjudication_document)
+            threat_model_bytes = canonical_json_bytes(
+                {
+                    "scanId": scan_id,
+                    "snapshotId": snapshot.snapshot_id,
+                    "workUnitId": threat_model_record["work_unit_id"],
+                    "createdAt": threat_model_record["created_at"],
+                    "threatModel": threat_model_record["threat_model"],
+                    "evidence": threat_model_record["evidence"],
+                }
+            )
             supplemental_contents: dict[str, bytes] = {}
             if scan["dynamic_enabled"]:
                 dynamic_document = {
@@ -196,9 +193,7 @@ class ReportWriter:
                         for run in data["dynamic_runs"]
                     ],
                 }
-                supplemental_contents["dynamic-validation.json"] = canonical_json_bytes(
-                    dynamic_document
-                )
+                supplemental_contents["dynamic-validation.json"] = canonical_json_bytes(dynamic_document)
                 for candidate_id in sorted(accepted_candidate_ids):
                     assessment = dynamic_assessments.get(candidate_id)
                     verification = verdict_by_candidate.get(candidate_id)
@@ -213,9 +208,7 @@ class ReportWriter:
                     if run is None or run["status"] != "completed":
                         raise ValueError("Reproduced assessment requires completed run facts")
                     probe = run["probe"]
-                    probe_script = ("#!/bin/sh\n" + probe["attack"]["script"].rstrip() + "\n").encode(
-                        "utf-8"
-                    )
+                    probe_script = ("#!/bin/sh\n" + probe["attack"]["script"].rstrip() + "\n").encode("utf-8")
                     prefix = f"poc/{candidate_id}"
                     script_path = f"{prefix}/probe.sh"
                     supplemental_contents[script_path] = probe_script
@@ -239,17 +232,11 @@ class ReportWriter:
                 "findings.json": findings_bytes,
                 "coverage.json": coverage_bytes,
                 "adjudication.json": adjudication_bytes,
+                "threat-model.json": threat_model_bytes,
                 **receipts,
                 **supplemental_contents,
             }
-            artifacts = [
-                artifact_record(
-                    path,
-                    contents,
-                    "text/x-shellscript" if path.endswith(".sh") else "application/json",
-                )
-                for path, contents in sorted(artifact_contents.items())
-            ]
+            artifacts = self._artifact_records(artifact_contents)
             manifest = self._manifest(
                 scan,
                 snapshot,
@@ -259,6 +246,17 @@ class ReportWriter:
                 completed_at,
                 artifacts,
             )
+            artifact_contents.update(
+                {
+                    "report.md": self._markdown(
+                        manifest,
+                        findings_document,
+                        coverage_document,
+                    ).encode("utf-8"),
+                    "report.sarif": canonical_json_bytes(self._sarif(manifest, findings_document)),
+                }
+            )
+            manifest["scan"]["artifacts"] = self._artifact_records(artifact_contents)
             validate_bundle(
                 manifest,
                 findings_document,
@@ -271,44 +269,14 @@ class ReportWriter:
             target.parent.chmod(0o700)
             if target.exists():
                 raise ValueError("The audit output directory already exists")
-            staging = Path(
-                tempfile.mkdtemp(prefix=f".{scan_id}-", dir=target.parent)
-            )
+            staging = Path(tempfile.mkdtemp(prefix=f".{scan_id}-", dir=target.parent))
             staging.chmod(0o700)
-            for path, contents in receipts.items():
+            for path, contents in sorted(artifact_contents.items()):
                 self._write_bytes(staging / path, contents)
-            for path, contents in supplemental_contents.items():
-                self._write_bytes(staging / path, contents)
-            self._write_json(staging / "findings.json", findings_document)
-            self._write_json(staging / "coverage.json", coverage_document)
-            self._write_json(
-                staging / "threat-model.json",
-                {
-                    "scanId": scan_id,
-                    "snapshotId": snapshot.snapshot_id,
-                    "workUnitId": threat_model_record["work_unit_id"],
-                    "createdAt": threat_model_record["created_at"],
-                    "threatModel": threat_model_record["threat_model"],
-                    "evidence": threat_model_record["evidence"],
-                },
-            )
-            self._write_json(
-                staging / "adjudication.json",
-                adjudication_document,
-            )
-            self._write_bytes(
-                staging / "report.md",
-                self._markdown(manifest, findings_document, coverage_document).encode(
-                    "utf-8"
-                ),
-            )
-            self._write_json(
-                staging / "report.sarif",
-                self._sarif(manifest, findings_document),
-            )
             self._write_json(staging / "scan-manifest.json", manifest)
             staging.replace(target)
             published = True
+            self.store.set_scan_output_dir(scan_id, target)
             self.store.transition_scan_status(
                 scan_id,
                 from_statuses={"reducing"},
@@ -363,8 +331,7 @@ class ReportWriter:
         ranked = sorted(
             group,
             key=lambda item: (
-                (item.get("dynamic_assessment") or {}).get("conclusion")
-                != "reproduced",
+                (item.get("dynamic_assessment") or {}).get("conclusion") != "reproduced",
                 -len(item["evidence"]),
                 -float(item["candidate"]["payload"]["confidence"]),
                 item["candidate"]["candidate_id"],
@@ -408,9 +375,9 @@ class ReportWriter:
 
         code_evidence: list[dict[str, Any]] = []
         for key, (evidence, metadata) in evidence_by_key.items():
-            evidence_id = "evidence-" + hashlib.sha256(
-                "\0".join(str(part) for part in key).encode("utf-8")
-            ).hexdigest()[:16]
+            evidence_id = (
+                "evidence-" + hashlib.sha256("\0".join(str(part) for part in key).encode("utf-8")).hexdigest()[:16]
+            )
             source_file = self.store.get_snapshot_file(
                 snapshot_id,
                 evidence["relative_path"],
@@ -461,13 +428,9 @@ class ReportWriter:
             if (item.get("dynamic_assessment") or {}).get("conclusion") == "reproduced"
         )
         if reproduced_ids:
-            extensions["pocRefs"] = [
-                f"poc/{candidate_id}/probe.sh" for candidate_id in reproduced_ids
-            ]
+            extensions["pocRefs"] = [f"poc/{candidate_id}/probe.sh" for candidate_id in reproduced_ids]
         if len(group) > 1:
-            extensions["candidateIds"] = sorted(
-                item["candidate"]["candidate_id"] for item in group
-            )
+            extensions["candidateIds"] = sorted(item["candidate"]["candidate_id"] for item in group)
         if len(severity_conflicts) > 1:
             extensions["severityConflicts"] = severity_conflicts
         dynamic_assessment = selected.get("dynamic_assessment")
@@ -478,9 +441,7 @@ class ReportWriter:
                 "conclusion": "confirmed",
                 "evidenceRefs": evidence_refs,
                 "counterevidence": verification["counter_evidence"],
-                "limitations": [
-                    "Validated by static source review; target code was not executed."
-                ],
+                "limitations": ["Validated by static source review; target code was not executed."],
             }
         else:
             validation = {
@@ -492,9 +453,7 @@ class ReportWriter:
                 "counterevidence": verification["counter_evidence"],
             }
             if dynamic_assessment["conclusion"] == "reproduced":
-                validation["pocRef"] = (
-                    f"poc/{candidate['candidate_id']}/probe.sh"
-                )
+                validation["pocRef"] = f"poc/{candidate['candidate_id']}/probe.sh"
             else:
                 validation["limitations"] = [
                     "Dynamic validation did not reproduce the claimed effect."
@@ -544,28 +503,19 @@ class ReportWriter:
         deferred_candidate_ids: list[str],
     ) -> tuple[dict[str, Any], dict[str, bytes]]:
         scan_id = data["scan"]["scan_id"]
-        coverage_by_unit = {
-            item["work_unit_id"]: item["payload"] for item in data["coverage"]
-        }
+        coverage_by_unit = {item["work_unit_id"]: item["payload"] for item in data["coverage"]}
         snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
         snapshot_paths = {item.relative_path for item in snapshot_files}
 
         def covered(path: str, claims: list[str] | set[str]) -> bool:
-            return any(
-                claim == "."
-                or path == claim
-                or path.startswith(f"{claim}/")
-                for claim in claims
-            )
+            return any(claim == "." or path == claim or path.startswith(f"{claim}/") for claim in claims)
 
         candidates_by_unit: dict[str, list[dict[str, Any]]] = {}
         candidates_by_id: dict[str, dict[str, Any]] = {}
         for candidate in data["candidates"]:
             candidates_by_id[candidate["candidate_id"]] = candidate
             if candidate.get("work_unit_id"):
-                candidates_by_unit.setdefault(candidate["work_unit_id"], []).append(
-                    candidate
-                )
+                candidates_by_unit.setdefault(candidate["work_unit_id"], []).append(candidate)
 
         surfaces: list[dict[str, Any]] = []
         receipts: dict[str, bytes] = {}
@@ -573,30 +523,20 @@ class ReportWriter:
         open_questions: list[dict[str, Any]] = []
         limitations: list[dict[str, Any]] = []
         surface_by_unit: dict[str, str] = {}
-        analysis_units = [
-            item
-            for item in data["work_units"]
-            if item["role"] in {"baseline", "investigator"}
-        ]
+        analysis_units = [item for item in data["work_units"] if item["role"] in {"baseline", "investigator"}]
         for unit in analysis_units:
             paths = unit["paths"]
-            surface_id = "surface_" + hashlib.sha256(
-                "\0".join((unit["work_unit_id"], *paths)).encode("utf-8")
-            ).hexdigest()[:16]
+            surface_id = (
+                "surface_" + hashlib.sha256("\0".join((unit["work_unit_id"], *paths)).encode("utf-8")).hexdigest()[:16]
+            )
             surface_by_unit[unit["work_unit_id"]] = surface_id
             coverage = coverage_by_unit.get(unit["work_unit_id"])
             candidates = candidates_by_unit.get(unit["work_unit_id"], [])
             unit_outcomes = [outcomes[item["candidate_id"]] for item in candidates]
             needs_follow_up = unit["status"] != "completed" or coverage is None
             if coverage is not None:
-                blocking_questions = [
-                    question
-                    for question in coverage["open_questions"]
-                    if question["blocking"]
-                ]
-                needs_follow_up = needs_follow_up or bool(
-                    coverage["failed_paths"] or blocking_questions
-                )
+                blocking_questions = [question for question in coverage["open_questions"] if question["blocking"]]
+                needs_follow_up = needs_follow_up or bool(coverage["failed_paths"] or blocking_questions)
             if "reported" in unit_outcomes:
                 disposition = "reported"
             elif needs_follow_up or "deferred" in unit_outcomes:
@@ -611,8 +551,7 @@ class ReportWriter:
                 unit_not_applicable = sorted(
                     item.relative_path
                     for item in snapshot_files
-                    if item.size_bytes == 0
-                    and covered(item.relative_path, coverage["inventoried_paths"])
+                    if item.size_bytes == 0 and covered(item.relative_path, coverage["inventoried_paths"])
                 )
             receipt_path = f"artifacts/03_coverage/{surface_id}.json"
             receipt = {
@@ -630,10 +569,7 @@ class ReportWriter:
                 "openQuestions": (
                     []
                     if coverage is None
-                    else [
-                        public_open_question(question)
-                        for question in coverage["open_questions"]
-                    ]
+                    else [public_open_question(question) for question in coverage["open_questions"]]
                 ),
                 "candidateOutcomes": [
                     {
@@ -647,11 +583,7 @@ class ReportWriter:
             surfaces.append(
                 {
                     "id": surface_id,
-                    "label": (
-                        "Repository source"
-                        if paths == ["."]
-                        else "Source scope: " + ", ".join(paths)
-                    ),
+                    "label": ("Repository source" if paths == ["."] else "Source scope: " + ", ".join(paths)),
                     "disposition": disposition,
                     "receiptRefs": [receipt_path],
                     "riskArea": "Static source security review",
@@ -680,9 +612,7 @@ class ReportWriter:
             for failed_path in coverage["failed_paths"]:
                 deferred.append(
                     {
-                        "id": stable_id(
-                            "deferred", unit["work_unit_id"], "failed", failed_path
-                        ),
+                        "id": stable_id("deferred", unit["work_unit_id"], "failed", failed_path),
                         "reason": "Source path could not be fully analyzed",
                         "paths": [failed_path],
                         "surfaceIds": [surface_id],
@@ -711,13 +641,7 @@ class ReportWriter:
         for candidate_id in deferred_candidate_ids:
             candidate = candidates_by_id[candidate_id]
             surface_id = surface_by_unit.get(candidate.get("work_unit_id", ""))
-            paths = sorted(
-                {
-                    item["relative_path"]
-                    for item in data["evidence"]
-                    if item["candidate_id"] == candidate_id
-                }
-            )
+            paths = sorted({item["relative_path"] for item in data["evidence"] if item["candidate_id"] == candidate_id})
             row: dict[str, Any] = {
                 "id": stable_id("deferred", candidate_id),
                 "reason": "Independent verification found insufficient evidence",
@@ -737,25 +661,11 @@ class ReportWriter:
                 }
             )
 
-        inventoried_paths = {
-            path
-            for coverage in coverage_by_unit.values()
-            for path in coverage["inventoried_paths"]
-        }
-        analyzed_paths = {
-            path
-            for coverage in coverage_by_unit.values()
-            for path in coverage["analyzed_paths"]
-        }
-        failed_paths = {
-            path
-            for coverage in coverage_by_unit.values()
-            for path in coverage["failed_paths"]
-        }
+        inventoried_paths = {path for coverage in coverage_by_unit.values() for path in coverage["inventoried_paths"]}
+        analyzed_paths = {path for coverage in coverage_by_unit.values() for path in coverage["analyzed_paths"]}
+        failed_paths = {path for coverage in coverage_by_unit.values() for path in coverage["failed_paths"]}
         inventoried_files = {
-            item.relative_path
-            for item in snapshot_files
-            if covered(item.relative_path, inventoried_paths)
+            item.relative_path for item in snapshot_files if covered(item.relative_path, inventoried_paths)
         }
         not_applicable_paths = {
             item.relative_path
@@ -767,17 +677,11 @@ class ReportWriter:
             for item in snapshot_files
             if item.size_bytes > 0 and covered(item.relative_path, analyzed_paths)
         }
-        failed_files = {
-            item.relative_path
-            for item in snapshot_files
-            if covered(item.relative_path, failed_paths)
-        }
+        failed_files = {item.relative_path for item in snapshot_files if covered(item.relative_path, failed_paths)}
         uncovered = sorted(
             path
             for path in snapshot_paths
-            if path not in analyzed_files
-            and path not in not_applicable_paths
-            and path not in failed_files
+            if path not in analyzed_files and path not in not_applicable_paths and path not in failed_files
         )
         if uncovered:
             deferred.append(
@@ -797,6 +701,7 @@ class ReportWriter:
 
         deferred_by_id = {item["id"]: item for item in deferred}
         deferred = [deferred_by_id[key] for key in sorted(deferred_by_id)]
+
         def question_key(item: dict[str, Any]) -> tuple[Any, ...]:
             return (
                 item["category"],
@@ -804,6 +709,7 @@ class ReportWriter:
                 tuple(item.get("relatedPaths", [])),
                 item.get("followUpPrompt", ""),
             )
+
         open_questions = sorted(
             {question_key(item): item for item in open_questions}.values(),
             key=question_key,
@@ -835,8 +741,7 @@ class ReportWriter:
         scoped = include_paths != ["."]
         completeness = (
             "complete"
-            if not deferred
-            and all(item["disposition"] != "needs_follow_up" for item in surfaces)
+            if not deferred and all(item["disposition"] != "needs_follow_up" for item in surfaces)
             else "partial"
         )
         total_files = len(snapshot_files)
@@ -848,11 +753,7 @@ class ReportWriter:
             "mode": "scoped_path" if scoped else "repository",
             "completeness": completeness,
             "inventoryStrategy": (
-                "scoped_path"
-                if scoped
-                else "repository"
-                if snapshot.target_kind.startswith("git_")
-                else "directory"
+                "scoped_path" if scoped else "repository" if snapshot.target_kind.startswith("git_") else "directory"
             ),
             "includePaths": include_paths,
             "excludePaths": exclude_paths,
@@ -866,9 +767,7 @@ class ReportWriter:
                 "notApplicable": len(not_applicable_paths),
                 "failed": len(failed_files),
                 "effectiveCoveragePercent": (
-                    100
-                    if total_files == 0
-                    else round(effectively_covered * 100 / total_files, 2)
+                    100 if total_files == 0 else round(effectively_covered * 100 / total_files, 2)
                 ),
             },
         }
@@ -899,10 +798,7 @@ class ReportWriter:
             target["snapshotDigest"] = snapshot_digest(snapshot.tree_digest)
         limitations = list(
             dict.fromkeys(
-                [
-                    item["question"]
-                    for item in coverage.get("limitations", [])
-                ]
+                [item["question"] for item in coverage.get("limitations", [])]
                 + [item["reason"] for item in coverage["deferred"]]
             )
         )[:100]
@@ -916,22 +812,14 @@ class ReportWriter:
                     f"{status_counts['not_runnable']}."
                 )
             else:
-                runtime_status = (
-                    "Dynamic validation was enabled; no statically confirmed "
-                    "candidate required a probe."
-                )
+                runtime_status = "Dynamic validation was enabled; no statically confirmed candidate required a probe."
             if status_counts["completed"]:
-                validation_mode = (
-                    "Independent static source verification plus completed Docker probes"
-                )
+                validation_mode = "Independent static source verification plus completed Docker probes"
             elif status_counts["inconclusive"]:
-                validation_mode = (
-                    "Independent static source verification plus attempted Docker validation"
-                )
+                validation_mode = "Independent static source verification plus attempted Docker validation"
             else:
                 validation_mode = (
-                    "Independent static source verification plus dynamic probe planning "
-                    "(no target execution)"
+                    "Independent static source verification plus dynamic probe planning (no target execution)"
                 )
         else:
             runtime_status = "Target code was not executed."
@@ -939,9 +827,7 @@ class ReportWriter:
         scope: dict[str, Any] = {
             "includePaths": coverage["includePaths"],
             "excludePaths": coverage["excludePaths"],
-            "summary": (
-                f"Static review of {snapshot.file_count} immutable snapshot files."
-            ),
+            "summary": (f"Static review of {snapshot.file_count} immutable snapshot files."),
             "runtimeStatus": runtime_status,
             "validationMode": validation_mode,
             "context": "Threat-model-guided standard source-code security audit.",
@@ -1003,9 +889,7 @@ class ReportWriter:
         if hashlib.sha256(data).hexdigest() != evidence["blob_digest"]:
             raise ValueError("Snapshot evidence digest changed")
         lines = data.decode("utf-8", errors="replace").splitlines()
-        code = "\n".join(
-            lines[evidence["start_line"] - 1 : evidence["end_line"]]
-        )
+        code = "\n".join(lines[evidence["start_line"] - 1 : evidence["end_line"]])
         if hashlib.sha256(code.encode("utf-8")).hexdigest() != evidence["excerpt_hash"]:
             raise ValueError("Snapshot evidence excerpt changed")
         return code
@@ -1021,6 +905,20 @@ class ReportWriter:
     @staticmethod
     def _rfc3339_now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _artifact_records(contents: dict[str, bytes]) -> list[dict[str, str]]:
+        records = []
+        for path, value in sorted(contents.items()):
+            media_type = "application/json"
+            if path.endswith(".sh"):
+                media_type = "text/x-shellscript"
+            elif path.endswith(".md"):
+                media_type = "text/markdown"
+            elif path.endswith(".sarif"):
+                media_type = "application/sarif+json"
+            records.append(artifact_record(path, value, media_type))
+        return records
 
     @staticmethod
     def _write_bytes(path: Path, contents: bytes) -> None:
@@ -1107,10 +1005,7 @@ class ReportWriter:
         ):
             lines.extend([f"### {heading}", ""])
             values = scan["threatModel"].get(field, [])
-            lines.extend(
-                [f"- {ReportWriter._markdown_text(value)}" for value in values]
-                or ["- None recorded."]
-            )
+            lines.extend([f"- {ReportWriter._markdown_text(value)}" for value in values] or ["- None recorded."])
             lines.append("")
 
         lines.extend(
@@ -1212,32 +1107,19 @@ class ReportWriter:
             )
             if finding.get("remediationTests"):
                 lines.extend(["Regression tests:", ""])
-                lines.extend(
-                    f"- {ReportWriter._markdown_text(item)}"
-                    for item in finding["remediationTests"]
-                )
+                lines.extend(f"- {ReportWriter._markdown_text(item)}" for item in finding["remediationTests"])
                 lines.append("")
             if finding.get("preventiveControls"):
                 lines.extend(["Preventive controls:", ""])
-                lines.extend(
-                    f"- {ReportWriter._markdown_text(item)}"
-                    for item in finding["preventiveControls"]
-                )
+                lines.extend(f"- {ReportWriter._markdown_text(item)}" for item in finding["preventiveControls"])
                 lines.append("")
 
         lines.extend(["## Static Validation Limitations", ""])
         if limitations:
             for item in limitations:
                 follow_up = item.get("followUpPrompt")
-                suffix = (
-                    f" Follow-up: {ReportWriter._markdown_text(follow_up)}"
-                    if follow_up
-                    else ""
-                )
-                lines.append(
-                    f"- `{item['category']}`: "
-                    f"{ReportWriter._markdown_text(item['question'])}{suffix}"
-                )
+                suffix = f" Follow-up: {ReportWriter._markdown_text(follow_up)}" if follow_up else ""
+                lines.append(f"- `{item['category']}`: {ReportWriter._markdown_text(item['question'])}{suffix}")
         else:
             lines.append("No static validation limitations were recorded.")
         lines.extend(["", "## Deferred Work", ""])
@@ -1245,9 +1127,7 @@ class ReportWriter:
             for item in coverage["deferred"]:
                 paths = ", ".join(item.get("paths", []))
                 suffix = f" ({ReportWriter._markdown_text(paths)})" if paths else ""
-                lines.append(
-                    f"- `{item['id']}`: {ReportWriter._markdown_text(item['reason'])}{suffix}"
-                )
+                lines.append(f"- `{item['id']}`: {ReportWriter._markdown_text(item['reason'])}{suffix}")
         else:
             lines.append("No work was deferred.")
         lines.append("")
@@ -1305,23 +1185,17 @@ class ReportWriter:
                     "locations": [
                         {
                             "physicalLocation": {
-                                "artifactLocation": {
-                                    "uri": quote(location["path"], safe="/")
-                                },
+                                "artifactLocation": {"uri": quote(location["path"], safe="/")},
                                 "region": {
                                     "startLine": location["startLine"],
-                                    "endLine": location.get(
-                                        "endLine", location["startLine"]
-                                    ),
+                                    "endLine": location.get("endLine", location["startLine"]),
                                 },
                             },
                             "message": {"text": location.get("role", "source")},
                         }
                         for location in unique_locations.values()
                     ],
-                    "partialFingerprints": {
-                        "codexSecurity/v1": finding["fingerprints"]["primary"]
-                    },
+                    "partialFingerprints": {"codexSecurity/v1": finding["fingerprints"]["primary"]},
                     "properties": {
                         "category": finding["taxonomy"]["category"],
                         "confidence": finding["confidence"]["level"],

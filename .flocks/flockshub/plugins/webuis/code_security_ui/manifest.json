@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "code_security_ui",
+  "type": "webui",
+  "name": "Code Security Workspace",
+  "description": "Trusted code-security audit workspace with durable phases, events, evidence, and artifacts.",
+  "descriptionCn": "可信代码审计工作区，展示持久阶段、事件、证据和审计产物。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "devtools",
+  "tags": ["api-security", "web-security", "vulnerability"],
+  "useCases": ["vulnerability-management", "security-reporting"],
+  "domains": ["devops"],
+  "capabilities": ["file-analysis", "llm-agent"],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/webuis/code_security_ui"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": ["darwin", "linux", "windows"]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": ["code_security_audit"],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": ["code_security_audit"],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": ["Can start and cancel local code-security audits after explicit user actions."]
+  },
+  "entrypoints": ["workspace.json"],
+  "components": [],
+  "checksums": {}
+}

@@ -1,0 +1,21 @@
+{
+  "id": "code_security",
+  "version": "1.0.0",
+  "title": "代码审计",
+  "titleEn": "Code Security",
+  "icon": "ShieldCheck",
+  "order": 20,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "code-security-workspace",
+  "sections": [
+    {
+      "id": "audit",
+      "label": "代码审计",
+      "labelEn": "Code Audit",
+      "pageIds": ["code-security-workspace"],
+      "defaultPageId": "code-security-workspace",
+      "contentPadding": "none"
+    }
+  ]
+}

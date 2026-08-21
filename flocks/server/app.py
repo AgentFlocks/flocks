@@ -1229,6 +1229,7 @@ from flocks.server.routes.console_upgrade import router as console_upgrade_route
 from flocks.server.routes.flockspro_license import router as flockspro_license_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
+from flocks.server.routes.code_security import router as code_security_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -1292,6 +1293,7 @@ app.include_router(device_router, prefix="/api/devices", tags=["Device"])
 app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
 app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
+app.include_router(code_security_router, prefix="/api", tags=["CodeSecurity"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
