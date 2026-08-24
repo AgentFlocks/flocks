@@ -21,10 +21,10 @@ Treat tool results as the only authoritative business input. Never infer a works
 
 ## Evidence
 
-- Keep every material ID visible in the report as an evidence reference.
-- Use summary/card fields for ordinary authoring.
+- Keep every tool-returned `material_id` (`source_type:source_id`) visible in the report as an evidence reference.
+- Use the returned localized title, summary, and source-specific fields for ordinary authoring.
 - Call `situation_product_source_read` only for a specific ambiguity or factual conflict.
-- When a required original record is not embedded in the verified snapshot, stop with the conflict unresolved. Do not invent or choose a convenient fact.
+- The current backend resource interface does not normally include original records. If a required record is unavailable, stop with the conflict unresolved. Do not invent or choose a convenient fact.
 - Never expand qualifiers such as “疑似、声称、关联” into confirmed attribution.
 - Deterministic counts come from the verified material set; do not fabricate trend baselines.
 

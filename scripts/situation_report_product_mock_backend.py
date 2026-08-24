@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Development-only backend mock for the phase-one situation-report flow.
+"""Development-only backend mock for the current-resource report contract.
 
-This process implements only the backend-owned latest-state and snapshot-download
-contract.  ``/__mock__`` endpoints are test controls and are not part of the
-production integration contract.
+``/__mock__`` endpoints are test controls and are not part of the production
+integration contract.
 """
 
 from __future__ import annotations
@@ -46,8 +45,8 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _validate_content(resource: ResourceName, content: bytes) -> None:
-    if not content or len(content) > RESOURCE_LIMITS[resource]:
-        raise ValueError(f"{resource} snapshot is empty or exceeds its size limit")
+    if len(content) > RESOURCE_LIMITS[resource] or (resource != "materials" and not content):
+        raise ValueError(f"{resource} content is invalid or exceeds its size limit")
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -56,7 +55,7 @@ def _validate_content(resource: ResourceName, content: bytes) -> None:
         if not text.strip() or "#" not in text:
             raise ValueError(f"{resource} snapshot must be non-empty Markdown")
         return
-    count = 0
+    identities: set[str] = set()
     for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
@@ -66,9 +65,16 @@ def _validate_content(resource: ResourceName, content: bytes) -> None:
             raise ValueError(f"materials line {line_number} is invalid JSON") from exc
         if not isinstance(value, dict):
             raise ValueError(f"materials line {line_number} is not an object")
-        count += 1
-    if count == 0:
-        raise ValueError("materials snapshot has no records")
+        source_type = value.get("source_type")
+        source_id = value.get("source_id")
+        if source_type not in {"REPORT", "VULN", "DARKWEB", "TELEGRAM"}:
+            raise ValueError(f"materials line {line_number} has an invalid source_type")
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError(f"materials line {line_number} has an invalid source_id")
+        identity = f"{source_type}:{source_id}"
+        if identity in identities:
+            raise ValueError(f"materials line {line_number} duplicates {identity}")
+        identities.add(identity)
 
 
 class MockStateStore:
@@ -98,25 +104,17 @@ class MockStateStore:
     def _metadata(
         self,
         *,
-        resource: ResourceName,
         version: int,
         content: bytes,
         filename: str,
     ) -> dict[str, Any]:
-        value: dict[str, Any] = {
+        return {
             "exists": True,
             "version": version,
             "sizeBytes": len(content),
             "sha256": _sha256(content),
             "filename": filename,
         }
-        if resource == "template":
-            value.update(templateSnapshotID=f"mock-template-v{version}", format="markdown")
-        elif resource == "materials":
-            value.update(materialSnapshotID=f"mock-materials-v{version}", format="jsonl")
-        else:
-            value["source"] = "mock-event-import"
-        return value
 
     def _write_resource(
         self,
@@ -134,7 +132,6 @@ class MockStateStore:
             raise ValueError(f"immutable snapshot already exists: {filename}")
         destination.write_bytes(content)
         return self._metadata(
-            resource=resource,
             version=version,
             content=content,
             filename=filename,
@@ -188,11 +185,11 @@ class MockStateStore:
         _atomic_json(self._state_path(session_id), state)
         return metadata
 
-    def snapshot_path(self, session_id: str, resource: ResourceName, version: int) -> Path:
+    def current_path(self, session_id: str, resource: ResourceName) -> Path:
         state = self.ensure_session(session_id)
         metadata = state[resource]
-        if not metadata.get("exists") or int(metadata["version"]) != version:
-            raise HTTPException(status_code=404, detail="snapshot not found")
+        if not metadata.get("exists"):
+            raise HTTPException(status_code=404, detail=f"{resource} not found")
         path = self._session_dir(session_id) / "snapshots" / str(metadata["filename"])
         if not path.is_file():
             raise HTTPException(status_code=404, detail="snapshot file not found")
@@ -218,6 +215,11 @@ def create_app(*, state_dir: Path, template: Path, materials: Path, token: str) 
         if authorization is None or not hmac.compare_digest(authorization, expected):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
 
+    def validate_request_id(request_id: str | None) -> str:
+        if request_id is None or not request_id.strip():
+            raise HTTPException(status_code=400, detail="invalid X-Request-ID")
+        return request_id
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "mode": "development-mock"}
@@ -225,6 +227,7 @@ def create_app(*, state_dir: Path, template: Path, materials: Path, token: str) 
     @app.get("/internal/flocks/v1/report-sessions/{session_id}/state/latest")
     async def latest_state(
         session_id: str,
+        response: Response,
         known_report_version: int = Query(alias="knownReportVersion", ge=0),
         known_template_version: int = Query(alias="knownTemplateVersion", ge=0),
         known_material_version: int = Query(alias="knownMaterialVersion", ge=0),
@@ -232,38 +235,26 @@ def create_app(*, state_dir: Path, template: Path, materials: Path, token: str) 
         request_id: str | None = Header(default=None, alias="X-Request-ID"),
     ) -> dict[str, Any]:
         authorize(authorization)
-        if request_id is None or not SAFE_IDENTIFIER.fullmatch(request_id):
-            raise HTTPException(status_code=400, detail="invalid X-Request-ID")
+        request_id = validate_request_id(request_id)
+        response.headers["X-Request-ID"] = request_id
         state_value = store.ensure_session(session_id)
         known = {
             "report": known_report_version,
             "template": known_template_version,
             "materials": known_material_version,
         }
-        response: dict[str, Any] = {}
-        expires_at = int(time.time() * 1000) + 15 * 60 * 1000
+        response_value: dict[str, Any] = {"sessionId": session_id}
         for resource in ("report", "template", "materials"):
             current = state_value[resource]
             if not current.get("exists"):
-                response[resource] = {"exists": False, "changed": False}
+                response_value[resource] = {"exists": False, "version": None, "changed": False}
                 continue
             changed = int(current["version"]) != known[resource]
-            public = {
-                key: value
-                for key, value in current.items()
-                if key not in {"filename", "sizeBytes"}
+            response_value[resource] = {
+                "exists": True,
+                "version": int(current["version"]),
+                "changed": changed,
             }
-            public["changed"] = changed
-            if changed:
-                public["sizeBytes"] = current["sizeBytes"]
-                public["download"] = {
-                    "url": (
-                        f"/__mock__/downloads/{session_id}/{resource}/"
-                        f"{current['version']}"
-                    ),
-                    "expiresAt": expires_at,
-                }
-            response[resource] = public
         store.append_request_log(
             {
                 "timeMs": int(time.time() * 1000),
@@ -272,24 +263,33 @@ def create_app(*, state_dir: Path, template: Path, materials: Path, token: str) 
                 "knownReportVersion": known_report_version,
                 "knownTemplateVersion": known_template_version,
                 "knownMaterialVersion": known_material_version,
-                "returnedVersions": {
-                    name: value.get("version", 0) for name, value in state_value.items()
-                },
+                "returnedVersions": {name: value.get("version", 0) for name, value in state_value.items()},
             }
         )
-        return response
+        return response_value
 
-    @app.get("/__mock__/downloads/{session_id}/{resource}/{version}")
-    async def download_snapshot(
+    @app.get("/internal/flocks/v1/report-sessions/{session_id}/{resource}/download")
+    async def download_current_resource(
         session_id: str,
         resource: ResourceName,
-        version: int,
         authorization: str | None = Header(default=None),
+        request_id: str | None = Header(default=None, alias="X-Request-ID"),
     ) -> Response:
         authorize(authorization)
-        path = store.snapshot_path(session_id, resource, version)
+        request_id = validate_request_id(request_id)
+        path = store.current_path(session_id, resource)
+        metadata = store.ensure_session(session_id)[resource]
         media_type = "application/x-ndjson" if resource == "materials" else "text/markdown; charset=utf-8"
-        return Response(content=path.read_bytes(), media_type=media_type)
+        version_header = {
+            "report": "X-Report-Version",
+            "template": "X-Template-Version",
+            "materials": "X-Material-Version",
+        }[resource]
+        return Response(
+            content=path.read_bytes(),
+            media_type=media_type,
+            headers={version_header: str(metadata["version"]), "X-Request-ID": request_id},
+        )
 
     @app.get("/__mock__/report-sessions/{session_id}/state")
     async def inspect_mock_state(

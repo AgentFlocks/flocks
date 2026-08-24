@@ -13,21 +13,6 @@ SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 REPORT_REQUEST_SENTINEL = "SITUATION_REPORT_REQUEST_V1"
 
 
-class SnapshotDownload(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    url: str
-    expires_at: int = Field(alias="expiresAt", gt=0)
-
-    @field_validator("url")
-    @classmethod
-    def validate_url(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized or len(normalized) > 2048:
-            raise ValueError("download.url is required and must not exceed 2048 characters")
-        return normalized
-
-
 class ReportAction(BaseModel):
     """One report action embedded in exactly one text Part."""
 

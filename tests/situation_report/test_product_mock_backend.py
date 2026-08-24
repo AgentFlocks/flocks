@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -14,18 +13,26 @@ TOKEN = "unit-test-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "X-Request-ID": "req-mock-001"}
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 @pytest.fixture
 def contract_inputs(tmp_path: Path) -> tuple[Path, Path]:
     template = tmp_path / "contract-template.md"
     materials = tmp_path / "contract-materials.jsonl"
     template.write_text("# 契约测试模板\n\n## 摘要\n\n## 事件\n", encoding="utf-8")
     records = [
-        {"id": "contract-material-001", "summary": "仅用于 HTTP 契约单元测试"},
-        {"id": "contract-material-002", "summary": "不用于报告流程或效果结论"},
+        {
+            "pirs_id": "1",
+            "source_type": "REPORT",
+            "source_id": "contract-material-001",
+            "title": {"zh": "契约素材一", "en": None, "original": "契约素材一"},
+            "summary": {"zh": "仅用于 HTTP 契约单元测试", "en": None, "original": "仅用于 HTTP 契约单元测试"},
+        },
+        {
+            "pirs_id": "1",
+            "source_type": "VULN",
+            "source_id": "contract-material-002",
+            "title": {"zh": "契约素材二", "en": None, "original": "契约素材二"},
+            "summary": {"zh": "不用于报告流程或效果结论", "en": None, "original": "不用于报告流程或效果结论"},
+        },
     ]
     materials.write_text(
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
@@ -59,15 +66,21 @@ async def test_mock_serves_seed_snapshots_and_tracks_versions(
         )
         assert latest.status_code == 200, latest.text
         body = latest.json()
-        assert body["report"] == {"exists": False, "changed": False}
-        assert body["template"]["sha256"] == _sha256(template)
-        assert body["materials"]["sha256"] == _sha256(materials)
+        assert latest.headers["X-Request-ID"] == HEADERS["X-Request-ID"]
+        assert body["sessionId"] == "ses_mock_flow"
+        assert body["report"] == {"exists": False, "version": None, "changed": False}
+        assert set(body["template"]) == {"exists", "version", "changed"}
+        assert set(body["materials"]) == {"exists", "version", "changed"}
         assert body["template"]["changed"] is True
         assert body["materials"]["changed"] is True
 
         for resource, source in (("template", template), ("materials", materials)):
-            downloaded = await client.get(body[resource]["download"]["url"], headers=HEADERS)
+            downloaded = await client.get(
+                f"/internal/flocks/v1/report-sessions/ses_mock_flow/{resource}/download",
+                headers=HEADERS,
+            )
             assert downloaded.status_code == 200
+            assert downloaded.headers["X-Request-ID"] == HEADERS["X-Request-ID"]
             assert downloaded.content == source.read_bytes()
 
         unchanged = await client.get(
@@ -81,7 +94,6 @@ async def test_mock_serves_seed_snapshots_and_tracks_versions(
         )
         assert unchanged.status_code == 200
         assert unchanged.json()["template"]["changed"] is False
-        assert "download" not in unchanged.json()["template"]
 
         report = "# Mock 契约测试结果\n\n## 摘要\n仅验证报告资源版本流转。\n".encode()
         imported = await client.put(
@@ -105,7 +117,11 @@ async def test_mock_serves_seed_snapshots_and_tracks_versions(
         report_state = changed.json()["report"]
         assert report_state["changed"] is True
         assert report_state["version"] == 1
-        downloaded = await client.get(report_state["download"]["url"], headers=HEADERS)
+        downloaded = await client.get(
+            "/internal/flocks/v1/report-sessions/ses_mock_flow/report/download",
+            headers=HEADERS,
+        )
+        assert downloaded.headers["X-Report-Version"] == "1"
         assert downloaded.content == report
 
 
@@ -149,3 +165,24 @@ async def test_mock_requires_auth_and_rejects_version_overwrite(
             content=replacement,
         )
         assert overwrite.status_code == 409
+
+        missing_request_id = await client.get(
+            "/internal/flocks/v1/report-sessions/ses_mock_flow/template/download",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert missing_request_id.status_code == 400
+
+        empty_materials = await client.put(
+            "/__mock__/report-sessions/ses_mock_flow/resources/materials",
+            params={"version": 2},
+            headers=HEADERS,
+            content=b"",
+        )
+        assert empty_materials.status_code == 200
+        downloaded_empty = await client.get(
+            "/internal/flocks/v1/report-sessions/ses_mock_flow/materials/download",
+            headers=HEADERS,
+        )
+        assert downloaded_empty.status_code == 200
+        assert downloaded_empty.headers["X-Material-Version"] == "2"
+        assert downloaded_empty.content == b""

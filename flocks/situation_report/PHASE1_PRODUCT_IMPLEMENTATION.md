@@ -35,8 +35,8 @@
        &knownMaterialVersion=...
    ```
 
-8. changed 资源并行下载；全部格式与哈希校验通过后才切换 `index.json` 当前指针。失败保持旧状态。
-9. modify 使用同步后的后端报告并校验基线版本；regenerate 检查报告版本但不下载、不读取报告正文。
+8. modify 下载当前报告；所有操作每轮无条件下载当前模板和实时素材。Flocks 校验下载响应版本、格式和大小，自行计算 SHA-256 并固化本地不可变快照；全部成功后才切换 `index.json` 当前指针。
+9. modify 同时校验状态版本和 `X-Report-Version` 均等于请求的基线版本；regenerate 检查报告状态但不下载、不读取报告正文。
 10. A1 单 Agent 只通过受限工具读取本轮上下文和分页素材、写候选、执行校验。
 11. 输出先写不可变版本，再持久化一条不进入后续模型上下文的终态结果消息，最后发布 `situation.report.status`。终态 Event 返回结果消息的 `messageID/messagePartID` 以及原下载接口可接受的绝对输出路径；失败和取消也写对应终态消息。
 12. 后端调用原始 `/api/file/download?path=...`。没有 `sessionID` 下载参数、报告分支、专用 ETag 或版本响应头。
@@ -47,9 +47,9 @@
 ```text
 {productRoot}/projects/{sessionID}/
   index.json
-  input/backend-reports/{backendReportVersion}/report.md
-  templates/snapshots/{templateSnapshotID}/template.md
-  materials/snapshots/{materialSnapshotID}/materials.jsonl
+  input/backend-reports/{backendReportVersion}-{sha256Prefix}/report.md
+  templates/snapshots/{flocksTemplateSnapshotID}/template.md
+  materials/snapshots/{flocksMaterialSnapshotID}/materials.jsonl
   runs/{generationID}/
     request.json
     event_state.json
@@ -75,8 +75,8 @@
 | `contracts.py` | text 信封和 action 严格 Schema |
 | `session_state.py` | sessionID 状态创建、读取和原子保存 |
 | `project_workspace.py` | 报告 Session 的内部 Project 创建、回滚和绑定校验 |
-| `snapshots.py` | 下载安全、origin 限制、大小/哈希和格式校验 |
-| `backend_sync.py` | 每轮三资源 latest、并行下载和原子指针切换 |
+| `snapshots.py` | 后端 base URL 限制及模板、素材本地格式校验 |
+| `backend_sync.py` | 每轮三资源 latest、固定当前资源下载、响应头/大小/SHA 校验和原子指针切换 |
 | `policy.py` | 报告意图白名单和 `open_report_config(sessionID)` |
 | `workspace.py` | Agent 受限读取、分页素材、候选写入与校验 |
 | `output.py` | 不可变输出版本、current 指针和状态文件 |
@@ -94,7 +94,7 @@
 - `flocks/session/runner.py`：把 Agent YAML 的 `temperature` 和 `strict_tools` 传入本轮模型运行器；`strict_tools` 仅在该 Agent 上启用，确保运行时只暴露白名单工具。
 - `flocks/provider/options.py`、`flocks/provider/sdk/anthropic.py`：支持显式 `thinking.type=disabled`，并在关闭 thinking 时继续传递温度；发送 Anthropic 工具 Schema 前只在副本上递归移除 Cloudwise 不接受的 `default` 字段，不改变本地参数校验。
 
-Flocks 不打包或维护默认报告模板。模板由后端 latest 返回版本、快照 ID 和下载引用，产品运行时只保存对应 Session 实际拉取并校验通过的不可变快照。
+Flocks 不打包或维护默认报告模板。后端 latest 只返回当前版本；产品运行时每轮从固定接口下载模板和素材，并按响应头版本与实际内容 SHA-256 保存对应 Session 的本地不可变快照。
 
 Auth、Project API、Event 订阅和 File Download 均使用原始对外协议；业务后端不调用 Project API。
 后端创建报告 Session 时应传入业务标题；原自动标题逻辑检测到已有有效标题后会直接返回，无需修改 Session 生命周期。
@@ -105,7 +105,6 @@ Auth、Project API、Event 订阅和 File Download 均使用原始对外协议�
 SITUATION_REPORT_PRODUCT_ROOT          可选；默认位于 Config.get_data_path()；外置时同步配置 allowReadPaths
 SITUATION_REPORT_BACKEND_BASE_URL      后端内部 API 基址
 SITUATION_REPORT_BACKEND_TOKEN         Flocks 调后端的服务凭据
-SITUATION_REPORT_DOWNLOAD_ORIGINS      额外允许的下载 origin，逗号分隔
 SITUATION_REPORT_MODEL_CONCURRENCY     产品 Agent 全局模型并发，默认 2
 ```
 
@@ -124,16 +123,18 @@ SITUATION_REPORT_MODEL_CONCURRENCY     产品 Agent 全局模型并发，默认 
 
 `scripts/situation_report_product_mock_backend.py` 是独立的开发联调进程，不进入
 Flocks 生产调用链。它从命令行指定的模板和 JSONL 素材初始化每个新 Session，持久化
-不可变快照与资源版本，并实现后端正式提供的两个 HTTP 能力：
+版本化测试资源，并实现后端正式提供的四个 HTTP 接口：
 
 - `GET /internal/flocks/v1/report-sessions/{sessionID}/state/latest`
-- latest 返回的相对快照下载 URL
+- `GET /internal/flocks/v1/report-sessions/{sessionID}/report/download`
+- `GET /internal/flocks/v1/report-sessions/{sessionID}/template/download`
+- `GET /internal/flocks/v1/report-sessions/{sessionID}/materials/download`
 
 Mock 的 `/__mock__/...` 路由仅用于联调控制，不是正式后端契约。其中
 `PUT /__mock__/report-sessions/{sessionID}/resources/{report|template|materials}?version=N`
 用于模拟后端消费成功 Event 后保存报告，或用户只保存配置后升级模板/素材版本。
 
-启动时显式提供本地联调模板和 JSONL 素材；这些文件是 Mock 输入，不属于 Flocks 产品内置资源：
+启动时显式提供本地联调模板和符合 `PirsFeedItem` JSONL 合同的素材；这些文件是 Mock 输入，不属于 Flocks 产品内置资源：
 
 ```bash
 export SITUATION_REPORT_MOCK_TOKEN='<仅从开发环境密钥注入>'
@@ -162,8 +163,8 @@ SITUATION_REPORT_BACKEND_TOKEN=<与 Mock 相同的开发凭据>
 
 ## 测试边界
 
-- 流程测试使用调用方显式提供的 Markdown 模板和真实 JSONL 素材；产品包不提供默认模板或内置测试素材。
-- MockTransport 只模拟后端 HTTP 边界，不使用随意构造的素材冒充真实输入。
+- 产品单元测试使用明确标注的最小 Markdown/PirsFeedItem 契约夹具，只验证 HTTP、版本、原子切换和发布行为，不作为模型效果数据。
+- 真实流程和模型效果测试使用调用方明确提供的数据或真实业务后端资源；产品包不提供默认模板或内置业务素材，也不把契约夹具冒充真实输入。
 - 确定性候选报告只用于校验发布流程，不代表模型效果。
 - 线上模型只用于验证真实流程、工具调用、结构校验与发布闭环；当前不做主观效果评价或模型横评。
-- 需要覆盖：普通 Session/API 鉴权；报告 Session 内部 Project 1:1；普通 Session 不能误入产品 Agent；单 text 信封；每轮 latest；changed/unchanged；部分失败不切换；regenerate 不下载报告；成功/失败/取消终态消息与 Event 关联；Message API 可恢复终态；Event 无用户/Project；原 download 可读取输出；普通 prompt 回归。
+- 需要覆盖：普通 Session/API 鉴权；报告 Session 内部 Project 1:1；普通 Session 不能误入产品 Agent；单 text 信封；每轮 latest；模板/素材每轮下载；素材同版本正文变化；空素材；报告下载版本竞态；部分失败不切换；regenerate 不下载报告；成功/失败/取消终态消息与 Event 关联；Message API 可恢复终态；Event 无用户/Project；原 download 可读取输出；普通 prompt 回归。

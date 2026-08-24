@@ -1,4 +1,4 @@
-"""Synchronize report, template, and material state by Flocks Session ID."""
+"""Synchronize current report resources by Flocks Session ID."""
 
 from __future__ import annotations
 
@@ -6,18 +6,18 @@ import asyncio
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .contracts import ParsedReportPrompt, SAFE_IDENTIFIER, SnapshotDownload
+from .contracts import ParsedReportPrompt
 from .files import async_file_lock, atomic_write_json, read_json, session_root, utc_now
 from .session_state import ensure_session_state, load_session_state, save_session_state
 from .snapshots import (
     SnapshotDownloadError,
-    SnapshotDownloader,
     _validate_materials,
     _validate_template,
     _verify_file,
@@ -26,106 +26,74 @@ from .snapshots import (
 
 
 class BackendReportSyncError(RuntimeError):
-    """The backend latest-state contract could not be satisfied safely."""
+    """The backend current-resource contract could not be satisfied safely."""
 
 
-class LatestResourceBase(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+class LatestResource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
     exists: bool
     changed: bool
     version: Optional[int] = Field(default=None, ge=0)
-    sha256: Optional[str] = None
-    size_bytes: Optional[int] = Field(default=None, alias="sizeBytes", gt=0)
-    download: Optional[SnapshotDownload] = None
 
     @model_validator(mode="after")
-    def validate_common_state(self) -> "LatestResourceBase":
+    def validate_state(self) -> "LatestResource":
         if not self.exists:
-            if self.changed or any(
-                value is not None for value in (self.version, self.sha256, self.size_bytes, self.download)
-            ):
-                raise ValueError("A missing resource cannot carry version or download fields")
+            if self.changed or self.version is not None:
+                raise ValueError("A missing resource cannot be changed or carry a version")
             return self
-        if self.version is None or self.sha256 is None:
-            raise ValueError("An existing resource requires version and sha256")
-        if self.changed and (self.size_bytes is None or self.download is None):
-            raise ValueError("A changed resource requires sizeBytes and download")
-        normalized = self.sha256.lower()
-        if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
-            raise ValueError("Resource sha256 is invalid")
-        self.sha256 = normalized
-        return self
-
-
-class LatestReportResource(LatestResourceBase):
-    source: Optional[str] = None
-
-    @model_validator(mode="after")
-    def validate_report_limit(self) -> "LatestReportResource":
-        if self.size_bytes is not None and self.size_bytes > 10 * 1024 * 1024:
-            raise ValueError("Report resource is too large")
-        return self
-
-
-class LatestTemplateResource(LatestResourceBase):
-    snapshot_id: Optional[str] = Field(default=None, alias="templateSnapshotID")
-    format: Optional[Literal["markdown"]] = None
-
-    @model_validator(mode="after")
-    def validate_template_state(self) -> "LatestTemplateResource":
-        if self.exists and (self.snapshot_id is None or self.format is None):
-            raise ValueError("An existing template requires snapshot ID and format")
-        if self.snapshot_id is not None and not SAFE_IDENTIFIER.fullmatch(self.snapshot_id):
-            raise ValueError("templateSnapshotID is invalid")
-        if self.exists and (self.version is None or self.version < 1):
-            raise ValueError("An existing template requires a positive version")
-        if self.size_bytes is not None and self.size_bytes > 5 * 1024 * 1024:
-            raise ValueError("Template resource is too large")
-        return self
-
-
-class LatestMaterialResource(LatestResourceBase):
-    snapshot_id: Optional[str] = Field(default=None, alias="materialSnapshotID")
-    format: Optional[Literal["jsonl"]] = None
-
-    @model_validator(mode="after")
-    def validate_material_state(self) -> "LatestMaterialResource":
-        if self.exists and (self.snapshot_id is None or self.format is None):
-            raise ValueError("Existing materials require snapshot ID and format")
-        if self.snapshot_id is not None and not SAFE_IDENTIFIER.fullmatch(self.snapshot_id):
-            raise ValueError("materialSnapshotID is invalid")
-        if self.exists and (self.version is None or self.version < 1):
-            raise ValueError("Existing materials require a positive version")
-        if self.size_bytes is not None and self.size_bytes > 64 * 1024 * 1024:
-            raise ValueError("Material resource is too large")
+        if self.version is None or self.version < 1:
+            raise ValueError("An existing resource requires a positive version")
         return self
 
 
 class LatestReportStateResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    report: LatestReportResource
-    template: LatestTemplateResource
-    materials: LatestMaterialResource
+    session_id: str = Field(alias="sessionId")
+    report: LatestResource
+    template: LatestResource
+    materials: LatestResource
+
+
+@dataclass(frozen=True)
+class DownloadedResource:
+    resource: Literal["report", "template", "materials"]
+    version: int
+    path: Path
+    size_bytes: int
+    sha256: str
+
+
+RESOURCE_DOWNLOADS: dict[str, tuple[str, str, int]] = {
+    "report": ("report/download", "X-Report-Version", 10 * 1024 * 1024),
+    "template": ("template/download", "X-Template-Version", 5 * 1024 * 1024),
+    "materials": ("materials/download", "X-Material-Version", 64 * 1024 * 1024),
+}
 
 
 class BackendReportSynchronizer:
-    def __init__(
-        self,
-        client_factory: Optional[Callable[[], httpx.AsyncClient]] = None,
-        downloader: Optional[SnapshotDownloader] = None,
-    ) -> None:
+    def __init__(self, client_factory: Optional[Callable[[], httpx.AsyncClient]] = None) -> None:
         self._client_factory = client_factory
-        self._downloader = downloader or SnapshotDownloader(client_factory)
 
     def _client(self) -> httpx.AsyncClient:
         if self._client_factory is not None:
             return self._client_factory()
-        return httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
-            follow_redirects=False,
-        )
+        return httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0), follow_redirects=False)
+
+    @staticmethod
+    def _headers(request_id: str) -> dict[str, str]:
+        token = os.getenv("SITUATION_REPORT_BACKEND_TOKEN", "").strip()
+        if not token:
+            raise BackendReportSyncError("SITUATION_REPORT_BACKEND_TOKEN is not configured")
+        return {"X-Request-ID": request_id, "Authorization": f"Bearer {token}"}
+
+    @staticmethod
+    def _url(path: str) -> str:
+        try:
+            return resolve_download_url(path)
+        except SnapshotDownloadError as exc:
+            raise BackendReportSyncError(f"Backend resource URL is invalid: {exc}") from exc
 
     async def get_latest(
         self,
@@ -136,11 +104,7 @@ class BackendReportSynchronizer:
         known_material_version: int,
         request_id: str,
     ) -> LatestReportStateResponse:
-        url = resolve_download_url(f"/internal/flocks/v1/report-sessions/{session_id}/state/latest")
-        headers = {"X-Request-ID": request_id}
-        token = os.getenv("SITUATION_REPORT_BACKEND_TOKEN", "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        url = self._url(f"/internal/flocks/v1/report-sessions/{session_id}/state/latest")
         params = {
             "knownReportVersion": known_report_version,
             "knownTemplateVersion": known_template_version,
@@ -148,30 +112,72 @@ class BackendReportSynchronizer:
         }
         try:
             async with self._client() as client:
-                response = await client.get(url, params=params, headers=headers)
+                response = await client.get(url, params=params, headers=self._headers(request_id))
                 response.raise_for_status()
-                return LatestReportStateResponse.model_validate(response.json())
+                if response.headers.get("X-Request-ID") != request_id:
+                    raise BackendReportSyncError("Latest-state response did not echo X-Request-ID")
+                latest = LatestReportStateResponse.model_validate(response.json())
+                if latest.session_id != session_id:
+                    raise BackendReportSyncError("Latest-state response sessionId does not match the request")
+                return latest
+        except BackendReportSyncError:
+            raise
         except (httpx.HTTPError, ValueError) as exc:
             raise BackendReportSyncError(f"Latest backend report state check failed: {exc}") from exc
 
-    async def download_changed(
+    async def download_current(
         self,
         *,
-        latest: LatestResourceBase,
+        session_id: str,
+        resource: Literal["report", "template", "materials"],
+        request_id: str,
         destination: Path,
-    ) -> None:
-        if latest.download is None or latest.size_bytes is None or latest.sha256 is None:
-            raise BackendReportSyncError("Changed resource download fields are missing")
+    ) -> DownloadedResource:
+        endpoint, version_header, size_limit = RESOURCE_DOWNLOADS[resource]
+        url = self._url(f"/internal/flocks/v1/report-sessions/{session_id}/{endpoint}")
+        temporary = destination.with_name(f".{destination.name}.download")
+        digest = hashlib.sha256()
+        size = 0
         try:
-            await self._downloader.download(
-                url=latest.download.url,
-                expires_at=latest.download.expires_at,
-                expected_size=latest.size_bytes,
-                expected_sha256=latest.sha256,
-                destination=destination,
-            )
-        except SnapshotDownloadError as exc:
-            raise BackendReportSyncError(str(exc)) from exc
+            async with self._client() as client:
+                async with client.stream("GET", url, headers=self._headers(request_id)) as response:
+                    response.raise_for_status()
+                    if response.headers.get("X-Request-ID") != request_id:
+                        raise BackendReportSyncError(f"{resource} response did not echo X-Request-ID")
+                    try:
+                        version = int(response.headers.get(version_header) or "")
+                    except ValueError as exc:
+                        raise BackendReportSyncError(f"{resource} response has an invalid {version_header}") from exc
+                    if version < 1:
+                        raise BackendReportSyncError(f"{resource} response has an invalid {version_header}")
+                    media_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                    expected = "application/x-ndjson" if resource == "materials" else "text/markdown"
+                    if media_type != expected:
+                        raise BackendReportSyncError(f"{resource} response Content-Type must be {expected}")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with temporary.open("wb") as handle:
+                        os.chmod(temporary, 0o600)
+                        async for chunk in response.aiter_bytes():
+                            size += len(chunk)
+                            if size > size_limit:
+                                raise BackendReportSyncError(f"{resource} response exceeds its size limit")
+                            digest.update(chunk)
+                            handle.write(chunk)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+            directory_fd = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return DownloadedResource(resource, version, destination, size, digest.hexdigest())
+        except BackendReportSyncError:
+            raise
+        except (httpx.HTTPError, OSError) as exc:
+            raise BackendReportSyncError(f"Current {resource} download failed: {exc}") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _file_metadata(path: Path) -> dict[str, Any]:
@@ -185,48 +191,35 @@ def _file_metadata(path: Path) -> dict[str, Any]:
     return {"sizeBytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
 
 
-def _validate_version(*, name: str, known_version: int, latest: LatestResourceBase) -> int:
-    if not latest.exists or latest.version is None or latest.sha256 is None:
+def _validate_latest_version(*, name: str, known_version: int, latest: LatestResource) -> int:
+    if not latest.exists or latest.version is None:
         raise BackendReportSyncError(f"Backend {name} does not exist")
     if latest.version < known_version:
         raise BackendReportSyncError(f"Backend {name} version moved backwards")
-    if latest.changed and latest.version <= known_version:
-        raise BackendReportSyncError(f"Backend {name} marked a non-newer version as changed")
-    if not latest.changed and latest.version != known_version:
+    if latest.changed != (latest.version != known_version):
         raise BackendReportSyncError(f"Backend {name} changed flag does not match its version")
     return latest.version
 
 
-def _verified_active_resource(
-    *,
-    root: Path,
-    current: Any,
-    name: str,
-    version: int,
-    snapshot_id: str,
-    sha256: str,
-) -> tuple[Path, str]:
-    if not isinstance(current, dict):
-        raise BackendReportSyncError(f"Local {name} state is missing")
-    if (
-        int(current.get("version") or 0) != version
-        or current.get("snapshotID") != snapshot_id
-        or current.get("sha256") != sha256
-    ):
-        raise BackendReportSyncError(f"Local {name} metadata does not match backend latest")
-    relative = Path(str(current.get("path") or ""))
-    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-        raise BackendReportSyncError(f"Local {name} path is invalid")
-    path = root / relative
+def _local_snapshot_id(*, name: str, version: int, sha256: str) -> str:
+    return f"{name}-v{version}-{sha256[:16]}"
+
+
+def _commit_download(*, downloaded: DownloadedResource, destination: Path) -> None:
+    if destination.exists():
+        try:
+            _verify_file(destination, expected_size=downloaded.size_bytes, expected_sha256=downloaded.sha256)
+        except (OSError, SnapshotDownloadError) as exc:
+            raise BackendReportSyncError("Existing local resource snapshot is inconsistent") from exc
+        downloaded.path.unlink(missing_ok=True)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(downloaded.path, destination)
+    directory_fd = os.open(destination.parent, os.O_RDONLY)
     try:
-        _verify_file(
-            path,
-            expected_size=int(current.get("sizeBytes") or 0),
-            expected_sha256=sha256,
-        )
-    except (OSError, SnapshotDownloadError) as exc:
-        raise BackendReportSyncError(f"Local {name} verification failed: {exc}") from exc
-    return path, str(relative)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _resource_payload(
@@ -258,13 +251,14 @@ async def initialize_report_action(
     prompt: ParsedReportPrompt,
     synchronizer: Optional[BackendReportSynchronizer] = None,
 ) -> Path:
-    """Check all backend versions, then atomically initialize one A1 run."""
+    """Download current resources, then atomically initialize one A1 run."""
 
     ensure_session_state(session_id)
     action = prompt.action
     root = session_root(session_id)
-    request_path = root / "runs" / action.generation_id / "request.json"
-    context_path = root / "runs" / action.generation_id / "preprocessing" / "generation_context_001.json"
+    run_dir = root / "runs" / action.generation_id
+    request_path = run_dir / "request.json"
+    context_path = run_dir / "preprocessing" / "generation_context_001.json"
     request_payload = {
         "schemaVersion": 1,
         "requestID": action.request_id,
@@ -287,8 +281,8 @@ async def initialize_report_action(
 
         state = load_session_state(session_id)
         current = dict(state.report_state or {})
-        if action.operation == "generate" and current.get("firstGenerationID") not in {None, action.generation_id}:
-            raise BackendReportSyncError("generate is only valid for the Session's first generation")
+        if action.operation == "generate" and current.get("currentFlocksReportVersion"):
+            raise BackendReportSyncError("generate is not valid after the Session's initial report was published")
         if action.operation != "generate" and not current:
             raise BackendReportSyncError("Report Session configuration is not initialized")
 
@@ -307,14 +301,16 @@ async def initialize_report_action(
             request_id=action.request_id,
         )
 
-        template_version = _validate_version(
+        state_template_version = _validate_latest_version(
             name="template", known_version=known_template_version, latest=latest.template
         )
-        material_version = _validate_version(
+        state_material_version = _validate_latest_version(
             name="materials", known_version=known_material_version, latest=latest.materials
         )
         if latest.report.exists:
-            report_version = _validate_version(name="report", known_version=known_report_version, latest=latest.report)
+            report_version = _validate_latest_version(
+                name="report", known_version=known_report_version, latest=latest.report
+            )
         elif action.operation == "generate" and not latest.report.changed:
             report_version = 0
         else:
@@ -324,110 +320,94 @@ async def initialize_report_action(
         if action.operation == "modify" and report_version != action.base_backend_report_version:
             raise BackendReportSyncError("Backend report version changed after the modification request was created")
 
-        template = latest.template
-        materials = latest.materials
-        if template.snapshot_id is None or template.sha256 is None:
-            raise BackendReportSyncError("Backend template metadata is incomplete")
-        if materials.snapshot_id is None or materials.sha256 is None:
-            raise BackendReportSyncError("Backend material metadata is incomplete")
-
-        template_relative = f"templates/snapshots/{template.snapshot_id}/template.md"
-        material_relative = f"materials/snapshots/{materials.snapshot_id}/materials.jsonl"
-        template_path = root / template_relative
-        material_path = root / material_relative
-        downloads: list[Any] = []
-
-        if template.changed:
-            if template_path.exists():
-                _verify_file(
-                    template_path,
-                    expected_size=int(template.size_bytes or 0),
-                    expected_sha256=template.sha256,
-                )
-            else:
-                downloads.append(resolved_sync.download_changed(latest=template, destination=template_path))
-        else:
-            template_path, template_relative = _verified_active_resource(
-                root=root,
-                current=current.get("template"),
-                name="template",
-                version=template_version,
-                snapshot_id=template.snapshot_id,
-                sha256=template.sha256,
-            )
-
-        if materials.changed:
-            if material_path.exists():
-                _verify_file(
-                    material_path,
-                    expected_size=int(materials.size_bytes or 0),
-                    expected_sha256=materials.sha256,
-                )
-            else:
-                downloads.append(resolved_sync.download_changed(latest=materials, destination=material_path))
-        else:
-            material_path, material_relative = _verified_active_resource(
-                root=root,
-                current=current.get("materials"),
-                name="materials",
-                version=material_version,
-                snapshot_id=materials.snapshot_id,
-                sha256=materials.sha256,
-            )
-
-        report_path: Optional[Path] = None
-        report_relative: Optional[str] = None
+        staging_dir = run_dir / "preprocessing" / "downloads"
+        tasks: list[tuple[str, Any]] = [
+            (
+                "template",
+                resolved_sync.download_current(
+                    session_id=session_id,
+                    resource="template",
+                    request_id=action.request_id,
+                    destination=staging_dir / "template.md",
+                ),
+            ),
+            (
+                "materials",
+                resolved_sync.download_current(
+                    session_id=session_id,
+                    resource="materials",
+                    request_id=action.request_id,
+                    destination=staging_dir / "materials.jsonl",
+                ),
+            ),
+        ]
         if action.operation == "modify":
-            if latest.report.sha256 is None:
-                raise BackendReportSyncError("Backend report metadata is incomplete")
-            if latest.report.changed:
-                report_relative = f"input/backend-reports/{report_version}/report.md"
-                report_path = root / report_relative
-                if report_path.exists():
-                    if _file_metadata(report_path)["sha256"] != latest.report.sha256:
-                        raise BackendReportSyncError("Existing immutable backend report is inconsistent")
-                else:
-                    downloads.append(resolved_sync.download_changed(latest=latest.report, destination=report_path))
-            else:
-                report_relative = str(current.get("syncedBackendReportPath") or "output/report.md")
-                report_path = root / report_relative
-                if not report_path.is_file():
-                    raise BackendReportSyncError("No local report baseline is available for modification")
-
-        if downloads:
-            results = await asyncio.gather(*downloads, return_exceptions=True)
-            failures = [result for result in results if isinstance(result, BaseException)]
-            if failures:
-                first = failures[0]
-                if isinstance(first, BackendReportSyncError):
-                    raise first
-                raise BackendReportSyncError(
-                    f"Backend resource download failed: {type(first).__name__}: {first}"
-                ) from first
+            tasks.insert(
+                0,
+                (
+                    "report",
+                    resolved_sync.download_current(
+                        session_id=session_id,
+                        resource="report",
+                        request_id=action.request_id,
+                        destination=staging_dir / "report.md",
+                    ),
+                ),
+            )
+        results = await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
+        failures = [value for value in results if isinstance(value, BaseException)]
+        if failures:
+            first = failures[0]
+            if isinstance(first, BackendReportSyncError):
+                raise first
+            raise BackendReportSyncError(
+                f"Backend resource download failed: {type(first).__name__}: {first}"
+            ) from first
+        downloaded = {name: value for (name, _), value in zip(tasks, results) if isinstance(value, DownloadedResource)}
+        template_download = downloaded["template"]
+        material_download = downloaded["materials"]
+        if template_download.version < max(state_template_version, known_template_version):
+            raise BackendReportSyncError("Downloaded template version moved backwards")
+        if material_download.version < max(state_material_version, known_material_version):
+            raise BackendReportSyncError("Downloaded material version moved backwards")
+        template_version = template_download.version
+        material_version = material_download.version
 
         try:
-            _validate_template(template_path)
-            template_size = template_path.stat().st_size
-            _verify_file(template_path, expected_size=template_size, expected_sha256=template.sha256)
-            material_count = _validate_materials(material_path)
-            material_size = material_path.stat().st_size
-            _verify_file(material_path, expected_size=material_size, expected_sha256=materials.sha256)
+            _validate_template(template_download.path)
+            material_count = _validate_materials(material_download.path)
         except (OSError, SnapshotDownloadError) as exc:
             raise BackendReportSyncError(f"Downloaded resource validation failed: {exc}") from exc
 
+        template_snapshot_id = _local_snapshot_id(
+            name="template", version=template_version, sha256=template_download.sha256
+        )
+        material_snapshot_id = _local_snapshot_id(
+            name="materials", version=material_version, sha256=material_download.sha256
+        )
+        template_relative = f"templates/snapshots/{template_snapshot_id}/template.md"
+        material_relative = f"materials/snapshots/{material_snapshot_id}/materials.jsonl"
+        template_path = root / template_relative
+        material_path = root / material_relative
+
         base_report: Optional[dict[str, Any]] = None
         if action.operation == "modify":
-            assert report_path is not None and report_relative is not None and latest.report.sha256 is not None
-            report_metadata = _file_metadata(report_path)
-            if report_metadata["sha256"] != latest.report.sha256:
-                raise BackendReportSyncError("Local base report does not match backend latest SHA-256")
+            report_download = downloaded["report"]
+            if report_download.version != action.base_backend_report_version:
+                raise BackendReportSyncError(
+                    "Downloaded report version changed after the modification request was created"
+                )
+            report_version = report_download.version
+            report_relative = f"input/backend-reports/{report_version}-{report_download.sha256[:16]}/report.md"
+            report_path = root / report_relative
+            report_metadata = _file_metadata(report_download.path)
+            _commit_download(downloaded=report_download, destination=report_path)
             current["syncedBackendReportVersion"] = report_version
             current["syncedBackendReportPath"] = report_relative
-            base_report = {
-                "backendReportVersion": report_version,
-                "path": report_relative,
-                **report_metadata,
-            }
+            base_report = {"backendReportVersion": report_version, "path": report_relative, **report_metadata}
+
+        _commit_download(downloaded=template_download, destination=template_path)
+        _commit_download(downloaded=material_download, destination=material_path)
 
         language = action.language if action.operation == "generate" else current.get("language")
         if language not in {"zh-CN", "en-US"}:
@@ -439,23 +419,23 @@ async def initialize_report_action(
                 "observedBackendReportVersion": report_version,
                 "templateVersion": template_version,
                 "materialVersion": material_version,
-                "templateSnapshotID": template.snapshot_id,
-                "materialSnapshotID": materials.snapshot_id,
+                "templateSnapshotID": template_snapshot_id,
+                "materialSnapshotID": material_snapshot_id,
                 "template": _resource_payload(
                     version=template_version,
-                    snapshot_id=template.snapshot_id,
+                    snapshot_id=template_snapshot_id,
                     format="markdown",
                     path=template_relative,
-                    size_bytes=template_size,
-                    sha256=template.sha256,
+                    size_bytes=template_download.size_bytes,
+                    sha256=template_download.sha256,
                 ),
                 "materials": _resource_payload(
                     version=material_version,
-                    snapshot_id=materials.snapshot_id,
+                    snapshot_id=material_snapshot_id,
                     format="jsonl",
                     path=material_relative,
-                    size_bytes=material_size,
-                    sha256=materials.sha256,
+                    size_bytes=material_download.size_bytes,
+                    sha256=material_download.sha256,
                     record_count=material_count,
                 ),
             }

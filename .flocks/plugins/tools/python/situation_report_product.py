@@ -125,7 +125,7 @@ async def situation_product_material_read(
         ToolParameter(
             name="material_id",
             type=ParameterType.STRING,
-            description="Exact id of one declared material.",
+            description="Exact source_type:source_id identity returned for one declared material.",
             required=True,
         ),
         ToolParameter(

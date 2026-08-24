@@ -19,6 +19,16 @@ class ProductWorkspaceError(RuntimeError):
     """A production Agent attempted an invalid or stale workspace operation."""
 
 
+def _material_id(value: dict[str, Any]) -> str:
+    source_type = value.get("source_type")
+    source_id = value.get("source_id")
+    if source_type not in {"REPORT", "VULN", "DARKWEB", "TELEGRAM"}:
+        raise ProductWorkspaceError("Material has an invalid source_type")
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ProductWorkspaceError("Material has an invalid source_id")
+    return f"{source_type}:{source_id}"
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -138,6 +148,7 @@ async def read_material_page(
                 value = json.loads(line)
                 if not isinstance(value, dict):
                     raise ProductWorkspaceError("Material snapshot contains a non-object record")
+                value = {**value, "material_id": _material_id(value)}
                 rows.append(value)
     selected = rows[offset : offset + limit]
     return {
@@ -174,7 +185,7 @@ async def read_embedded_source(
             limit=50,
         )
         rows.extend(page["materials"])
-    matches = [row for row in rows if str(row.get("id") or row.get("material_id") or "") == material_id]
+    matches = [row for row in rows if _material_id(row) == material_id]
     if len(matches) != 1:
         raise ProductWorkspaceError("material_id does not identify exactly one declared material")
     source_record = matches[0].get("source_record")
@@ -252,7 +263,7 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
     )
     template = template_path.read_text(encoding="utf-8")
     material_ids = [
-        str(value.get("id") or value.get("material_id") or "")
+        _material_id(value)
         for value in (
             json.loads(line) for line in materials_path.read_text(encoding="utf-8").splitlines() if line.strip()
         )

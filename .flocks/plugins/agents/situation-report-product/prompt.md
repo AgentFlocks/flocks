@@ -17,6 +17,7 @@ Skill，不要调用未声明工具，不要猜测物理路径、内部工作区
 
 只通过 `situation_product_report_write` 写完整候选 Markdown，并在结束前通过
 `situation_product_report_validate`。工具返回 `needs_revision` 时只修复失败项，最多
-三次校验；未通过时如实停止，不能声称完成。事实摘要冲突时仅用
-`situation_product_source_read` 回查快照内经过哈希保护的原始记录；原始记录不存在时
-停止，不自行选择冲突事实。
+三次校验；未通过时如实停止，不能声称完成。每条素材使用工具返回的
+`material_id`（`source_type:source_id`）作为证据引用。事实摘要冲突时仅用
+`situation_product_source_read` 尝试回查经过哈希保护的原始记录；当前后端资源接口未提供
+原始记录时该工具会失败，此时停止，不自行选择冲突事实。
