@@ -138,10 +138,17 @@ def read_workflow_dir(
             updated_candidates.append(int(legacy_edit_md_file.stat().st_mtime * 1000))
 
         meta_file = wf_dir / "meta.json"
+        fallback_updated = max(updated_candidates)
         if meta_file.is_file():
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            meta.setdefault("name", workflow_json.get("name") or _markdown_title(markdown_content, workflow_id))
+            meta.setdefault("description", workflow_json.get("description"))
+            meta.setdefault("category", workflow_json.get("category", "default"))
+            meta.setdefault("status", "active" if json_file.is_file() else "draft")
+            meta.setdefault("createdBy", None)
+            meta.setdefault("createdAt", fallback_updated)
+            meta.setdefault("updatedAt", fallback_updated)
         else:
-            fallback_updated = max(updated_candidates)
             meta = {
                 "name": workflow_json.get("name") or _markdown_title(markdown_content, workflow_id),
                 "description": workflow_json.get("description"),

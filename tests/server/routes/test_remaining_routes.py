@@ -207,6 +207,36 @@ class TestWorkflowRoutes:
         assert resp.json()["id"] == wf_id
 
     @pytest.mark.asyncio
+    async def test_get_workflow_backfills_missing_timestamps_from_legacy_meta(
+        self,
+        client: AsyncClient,
+        isolated_workflow_filesystem,
+    ):
+        """Legacy plugin workflows with incomplete meta.json still load."""
+        workflow_id = "legacy-plugin-workflow"
+        wf_dir = isolated_workflow_filesystem["project_root"] / workflow_id
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "workflow.json").write_text(json.dumps(_WORKFLOW_JSON), encoding="utf-8")
+        (wf_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "id": workflow_id,
+                    "name": "Legacy Plugin Workflow",
+                    "description": "old plugin workflow meta without timestamps",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        resp = await client.get(f"/api/workflow/{workflow_id}")
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        assert data["id"] == workflow_id
+        assert data["createdAt"] > 0
+        assert data["updatedAt"] >= data["createdAt"]
+
+    @pytest.mark.asyncio
     async def test_get_unknown_workflow_returns_404(self, client: AsyncClient):
         """GET for a non-existent workflow returns 404."""
         resp = await client.get("/api/workflow/wf_nonexistent_id")
