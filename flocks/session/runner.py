@@ -19,7 +19,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import httpcore
 import httpx
@@ -28,7 +28,7 @@ from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
 from flocks.session.message import Message, MessageInfo, MessageRole, TextPart
-from flocks.session.prompt import SessionPrompt
+from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
     DEFAULT_MAX_TOOL_STEPS,
@@ -1418,6 +1418,7 @@ class SessionRunner:
         # Resolve agent
         agent_name = last_user.agent or self.agent_name
         agent = await Agent.get(agent_name) or await Agent.get("rex")
+        self._turn_permission_ruleset = self._permission_ruleset_for_agent(agent)
 
         # Track session agent (Flocks compatibility)
         try:
@@ -1509,24 +1510,19 @@ class SessionRunner:
         self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
         prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
 
-        async def sandbox_prompt_factory() -> Optional[str]:
-            return await self._build_sandbox_prompt(agent)
-
-        async def channel_context_prompt_factory() -> Optional[str]:
-            return await self._build_channel_context_prompt()
-
-        async def device_asset_prompt_factory() -> Optional[str]:
-            return await self._build_device_asset_hint()
-
-        try:
-            from flocks.tool.device.store import device_revision as get_device_revision
-
-            current_device_revision = get_device_revision()
-        except Exception:
-            current_device_revision = None
-
         prompts_started_at = time.perf_counter()
-        system_prompts = await SessionPrompt.build_system_prompts(
+        minimal_prompt = await SessionPrompt._is_builtin_system_subagent_session(
+            session_id=self.session.id,
+            agent_name=agent.name,
+        )
+        turn_prompt_context = await self._build_turn_prompt_context(
+            agent=agent,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+            minimal_prompt=minimal_prompt,
+        )
+        system_prompts = await SessionPrompt.build_system_prompt_blocks(
             session_id=self.session.id,
             session_directory=self.session.directory,
             agent_name=agent.name,
@@ -1539,56 +1535,14 @@ class SessionRunner:
                 plan_file=self._turn_plan_file,
             ),
             prompt_tool_names=prompt_tool_names,
-            tool_revision=ToolRegistry.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
             static_cache=self._static_cache,
-            sandbox_prompt_factory=sandbox_prompt_factory,
-            channel_context_prompt_factory=channel_context_prompt_factory,
-            tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
-            device_asset_prompt_factory=device_asset_prompt_factory,
-            device_revision=current_device_revision,
+            turn_context=turn_prompt_context,
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
         self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
 
         await self._run_session_start_hook(agent)
-
-        if self._turn_additional_context:
-            system_prompts.append(self._turn_additional_context)
-
-        if self._should_use_text_tool_call_mode() and tools:
-            text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
-            if text_tool_catalog:
-                system_prompts.append(text_tool_catalog)
-
-        # If the last assistant message only contains tool results and no text,
-        # force a direct answer to avoid repeated tool calls.
-        last_assistant_msg = None
-        for msg in reversed(messages):
-            if msg.role == MessageRole.ASSISTANT:
-                last_assistant_msg = msg
-                break
-        if last_assistant_msg:
-            parts = await Message.parts(last_assistant_msg.id, self.session.id)
-            has_text = any(getattr(p, "type", None) == "text" and getattr(p, "text", "").strip() for p in parts)
-            has_tool_result = any(
-                getattr(p, "type", None) == "tool" and
-                getattr(getattr(p, "state", None), "status", None) in ("completed", "error", "running")
-                for p in parts
-            )
-            if has_tool_result and not has_text:
-                from flocks.session.prompt_strings import PROMPT_TOOL_RESULTS_AVAILABLE
-                system_prompts.append(PROMPT_TOOL_RESULTS_AVAILABLE)
-            
-            if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
-                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
-                log.warn("runner.repeated_tool_calls_detected", {
-                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
-                    "exact_count": state.get("exact_count", 0),
-                    "step": self._step,
-                })
-                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
-                system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
 
         # Convert messages to chat format with error handling
         try:
@@ -2100,6 +2054,133 @@ class SessionRunner:
                 "error": str(exc),
             })
     
+    async def _build_turn_prompt_context(
+        self,
+        *,
+        agent: AgentInfo,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+        minimal_prompt: bool = False,
+    ) -> TurnPromptContext:
+        """Collect cached runtime values before deterministic prompt assembly."""
+        if minimal_prompt:
+            return await self._add_turn_prompt_tail(
+                TurnPromptContext(minimal_prompt=True),
+                messages=messages,
+                last_user=last_user,
+                tools=tools,
+            )
+
+        from flocks.config import Config
+        from flocks.project.instance import Instance
+
+        try:
+            from flocks.tool.device.store import device_revision
+
+            current_device_revision = device_revision()
+        except Exception:
+            current_device_revision = None
+
+        current_tool_revision = ToolRegistry.revision()
+        try:
+            config = await Config.get()
+            config_data = config.model_dump(by_alias=True, exclude_none=True)
+            config_instructions = tuple(config.instructions or ())
+        except Exception as exc:
+            log.debug("runner.prompt_context.config_error", {"error": str(exc)})
+            config_data = None
+            config_instructions = ()
+
+        worktree = Instance.get_worktree()
+        sandbox_context, channel_context, device_asset_hint = await asyncio.gather(
+            self._build_sandbox_prompt(agent, config_data=config_data),
+            self._build_channel_context_prompt(),
+            self._build_device_asset_hint(),
+        )
+        source_context = TurnPromptContext(
+            tool_catalog=self._build_tool_catalog_prompt(agent),
+            device_asset_hint=device_asset_hint,
+            sandbox_context=sandbox_context,
+            channel_context=channel_context,
+            worktree=worktree,
+            config_instructions=config_instructions,
+            tool_revision=current_tool_revision,
+            device_revision=current_device_revision,
+            minimal_prompt=False,
+        )
+
+        return await self._add_turn_prompt_tail(
+            source_context,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+        )
+
+    async def _add_turn_prompt_tail(
+        self,
+        source_context: TurnPromptContext,
+        *,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+    ) -> TurnPromptContext:
+        """Add uncached per-step context and reminders to a source snapshot."""
+        text_tool_catalog = None
+        if self._should_use_text_tool_call_mode() and tools:
+            text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
+
+        tool_results_reminder = None
+        repeated_tool_calls_reminder = None
+        last_assistant_msg = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.role == MessageRole.ASSISTANT
+            ),
+            None,
+        )
+        if last_assistant_msg is not None:
+            parts = await Message.parts(last_assistant_msg.id, self.session.id)
+            has_text = any(
+                getattr(part, "type", None) == "text"
+                and getattr(part, "text", "").strip()
+                for part in parts
+            )
+            has_tool_result = any(
+                getattr(part, "type", None) == "tool"
+                and getattr(getattr(part, "state", None), "status", None)
+                in ("completed", "error", "running")
+                for part in parts
+            )
+            if has_tool_result and not has_text:
+                from flocks.session.prompt_strings import (
+                    PROMPT_TOOL_RESULTS_AVAILABLE,
+                )
+
+                tool_results_reminder = PROMPT_TOOL_RESULTS_AVAILABLE
+
+            if has_tool_result and self._should_warn_about_tool_loop(
+                last_user_id=last_user.id,
+            ):
+                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
+                log.warn("runner.repeated_tool_calls_detected", {
+                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
+                    "exact_count": state.get("exact_count", 0),
+                    "step": self._step,
+                })
+                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
+
+                repeated_tool_calls_reminder = PROMPT_REPEATED_TOOL_CALLS
+
+        return replace(
+            source_context,
+            additional_context=self._turn_additional_context,
+            text_tool_catalog=text_tool_catalog,
+            tool_results_reminder=tool_results_reminder,
+            repeated_tool_calls_reminder=repeated_tool_calls_reminder,
+        )
+
     async def _build_device_asset_hint(self) -> Optional[str]:
         """Return concise device-aware tool guidance plus enabled device summary."""
         try:
@@ -2142,15 +2223,22 @@ class SessionRunner:
             "如果同类设备有多个候选，不要猜测，先询问用户选择。"
         )
 
-    async def _build_sandbox_prompt(self, agent: AgentInfo) -> Optional[str]:
+    async def _build_sandbox_prompt(
+        self,
+        agent: AgentInfo,
+        *,
+        config_data: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """Build sandbox context prompt when sandboxing is active."""
         try:
-            from flocks.config import Config
             from flocks.session.core.session_state import get_main_session_id
             from flocks.sandbox.system_prompt import build_sandbox_system_prompt
 
-            cfg = await Config.get()
-            config_data = cfg.model_dump(by_alias=True, exclude_none=True)
+            if config_data is None:
+                from flocks.config import Config
+
+                config = await Config.get()
+                config_data = config.model_dump(by_alias=True, exclude_none=True)
             session_key = self.session.id
             main_session_key = get_main_session_id() or self.session.id
             return await build_sandbox_system_prompt(
@@ -2662,14 +2750,26 @@ class SessionRunner:
 
     def _build_system_message_content(
         self,
-        system_prompts: List[str],
+        system_prompts: List[SystemPromptBlock] | List[str],
     ) -> str | list[dict[str, Any]]:
         """Format system prompts for the active provider.
 
         Anthropic supports structured system blocks, which lets us place a
         conservative cache breakpoint before the dynamic runtime tail.
         """
-        prompt_parts = [prompt for prompt in system_prompts if prompt and prompt.strip()]
+        typed_blocks = [
+            block
+            for block in system_prompts
+            if isinstance(block, SystemPromptBlock) and block.content.strip()
+        ]
+        if typed_blocks:
+            prompt_parts = [block.content for block in typed_blocks]
+        else:
+            prompt_parts = [
+                prompt
+                for prompt in system_prompts
+                if isinstance(prompt, str) and prompt.strip()
+            ]
         if not prompt_parts:
             return ""
 
@@ -2677,7 +2777,19 @@ class SessionRunner:
         if "anthropic" not in provider_lower:
             return "\n\n".join(prompt_parts)
 
-        cache_break_index = max(0, len(prompt_parts) - 3)
+        if typed_blocks:
+            first_runtime_tail = next(
+                (
+                    index
+                    for index, block in enumerate(typed_blocks)
+                    if block.cache_scope == "runtime_tail"
+                ),
+                len(typed_blocks),
+            )
+            cache_break_index = max(0, first_runtime_tail - 1)
+        else:
+            # Compatibility for callers still passing plain strings.
+            cache_break_index = max(0, len(prompt_parts) - 3)
         blocks: list[dict[str, Any]] = []
         for index, prompt in enumerate(prompt_parts):
             block: dict[str, Any] = {
@@ -2692,7 +2804,7 @@ class SessionRunner:
     async def _to_chat_messages(
         self,
         messages: List[MessageInfo],
-        system_prompts: List[str],
+        system_prompts: List[SystemPromptBlock] | List[str],
     ) -> List[ChatMessage]:
         """
         Convert messages to chat format with tool calls.
@@ -3843,13 +3955,50 @@ class SessionRunner:
         except Exception as _tr_err:
             log.debug("runner.observability.trace_end_failed", {"error": str(_tr_err)})
 
+    def _permission_ruleset_for_agent(self, agent: AgentInfo) -> List[Any]:
+        """Combine agent and session rules in effective priority order."""
+        from flocks.permission.helpers import merge
+        from flocks.permission.rule import (
+            PermissionLevel,
+            PermissionRule,
+            PermissionScope,
+        )
+
+        session_rules = []
+        for rule in getattr(self.session, "permission", None) or []:
+            session_rules.append(PermissionRule(
+                permission=rule.permission,
+                level=PermissionLevel(rule.action),
+                scope=PermissionScope.PATTERN,
+                pattern=rule.pattern,
+            ))
+        return merge(list(getattr(agent, "permission", None) or []), session_rules)
+
+    async def _effective_permission_ruleset(self) -> List[Any]:
+        ruleset = getattr(self, "_turn_permission_ruleset", None)
+        if ruleset is not None:
+            return ruleset
+        agent_name = getattr(self.session, "agent", None) or getattr(
+            self,
+            "agent_name",
+            None,
+        )
+        if not agent_name:
+            return []
+        agent = await Agent.get(agent_name) or await Agent.get("rex")
+        return self._permission_ruleset_for_agent(agent)
+
     async def _handle_permission(self, request) -> None:
         """Handle permission request."""
-        if self.callbacks.on_permission_request:
-            allowed = await self.callbacks.on_permission_request(request)
-            if not allowed:
-                raise PermissionError(f"Permission denied: {request.permission}")
-            return
+        from flocks.permission.next import PermissionNext
+
+        patterns = list(getattr(request, "patterns", None) or [])
+        ruleset = await self._effective_permission_ruleset()
+        configured_action = PermissionNext.evaluate_request(
+            request.permission,
+            patterns,
+            ruleset,
+        )
 
         tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
         if self.callbacks.event_publish_callback:
@@ -3858,15 +4007,24 @@ class SessionRunner:
                 "step": self._step,
                 "toolName": getattr(request, "permission", ""),
                 "alwaysLoad": tool_metadata.always_load,
-                "patterns": list(getattr(request, "patterns", None) or []),
+                "patterns": patterns,
             })
+
+        if configured_action == "deny":
+            raise PermissionError(f"Permission denied: {request.permission}")
+        if configured_action == "allow":
+            return
+
+        if self.callbacks.on_permission_request:
+            allowed = await self.callbacks.on_permission_request(request)
+            if not allowed:
+                raise PermissionError(f"Permission denied: {request.permission}")
+            return
 
         from flocks.permission.interactive import legacy_tool_permission_prompt_required
 
-        if not legacy_tool_permission_prompt_required():
+        if configured_action is None and not legacy_tool_permission_prompt_required():
             return
-
-        from flocks.permission.next import PermissionNext
 
         metadata = dict(getattr(request, "metadata", None) or {})
         metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
@@ -3875,13 +4033,13 @@ class SessionRunner:
         reply = await PermissionNext.ask(
             session_id=self.session.id,
             permission=request.permission,
-            patterns=list(getattr(request, "patterns", None) or []),
-            ruleset=[],
+            patterns=patterns,
+            ruleset=ruleset,
             metadata=metadata,
             always=list(getattr(request, "always", None) or []),
             tool={"name": request.permission},
         )
-        if reply in {"deny", "reject", "never"}:
+        if reply in {"deny", "deny_session", "reject", "never"}:
             raise PermissionError(f"Permission denied: {request.permission}")
 
 

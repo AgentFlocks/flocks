@@ -38,7 +38,7 @@ def test_inspect_host_extracts_verdict_into_lightweight_result(tmp_path: Path) -
                 assert kwargs["host"] == "10.0.0.8"
                 assert kwargs["username"] == "root"
                 return {"success": True, "output": "FLOCKS_SSH_OK\n"}
-            assert args == ("task",)
+            assert args == ("delegate_task",)
             assert kwargs["subagent_type"] == "host-forensics-fast"
             assert "- host: 10.0.0.8" in kwargs["prompt"]
             assert "- username: root" in kwargs["prompt"]
@@ -130,7 +130,7 @@ def test_inspect_host_retries_once_on_timeout(tmp_path: Path) -> None:
         def run_safe(self, *args, **kwargs) -> dict:
             if args == ("ssh_host_cmd",):
                 return {"success": True, "output": "FLOCKS_SSH_OK\n"}
-            assert args == ("task",)
+            assert args == ("delegate_task",)
             self.task_calls += 1
             if self.task_calls == 1:
                 return {
