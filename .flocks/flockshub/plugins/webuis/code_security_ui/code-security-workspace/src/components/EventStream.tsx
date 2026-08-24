@@ -7,7 +7,8 @@ import {
   type CSSProperties,
 } from "react";
 
-import { formatTime, phaseLabels, shortId } from "../labels";
+import { Icon } from "../icons";
+import { formatTime, phaseLabels, phaseStatusLabels, shortId } from "../labels";
 import type { AuditEvent } from "../types";
 
 const ROW_HEIGHT = 72;
@@ -15,42 +16,50 @@ const VIEWPORT_HEIGHT = 360;
 
 export function EventStream({
   events,
+  selectedPhase,
   hasOlder,
   loadingOlder,
   onLoadOlder,
 }: {
   events: AuditEvent[];
+  selectedPhase?: string;
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<void>;
 }) {
   const [level, setLevel] = useState("all");
-  const [phase, setPhase] = useState("all");
+  const [phase, setPhase] = useState(selectedPhase || "all");
   const [worker, setWorker] = useState("all");
   const [autoFollow, setAutoFollow] = useState(true);
   const [unseen, setUnseen] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const previousFirstSeq = useRef(events[0]?.seq);
   const previousLastSeq = useRef(events[events.length - 1]?.seq);
-  const layoutFirstSeq = useRef(events[0]?.seq);
+  const layoutLastSeq = useRef(events[events.length - 1]?.seq);
   const previousScrollHeight = useRef(0);
   const viewport = useRef<HTMLDivElement>(null);
-  const phaseOptions = useMemo(
-    () => uniqueEventValues(events, "phase"),
-    [events],
-  );
+  const phaseOptions = useMemo(() => {
+    const values = uniqueEventValues(events, "phase");
+    if (selectedPhase && !values.includes(selectedPhase)) {
+      values.push(selectedPhase);
+      values.sort();
+    }
+    return values;
+  }, [events, selectedPhase]);
   const workerOptions = useMemo(
     () => uniqueEventValues(events, "work_unit_id", "worker", "batch_id"),
     [events],
   );
   const filtered = useMemo(
     () =>
-      events.filter(
-        (event) =>
-          (level === "all" || event.level === level) &&
-          (phase === "all" || event.summary.phase === phase) &&
-          (worker === "all" || eventWorker(event) === worker),
-      ),
+      events
+        .filter(
+          (event) =>
+            (level === "all" || event.level === level) &&
+            (phase === "all" || event.summary.phase === phase) &&
+            (worker === "all" || eventWorker(event) === worker),
+        )
+        .sort(compareEventsNewestFirst),
     [events, level, phase, worker],
   );
 
@@ -71,7 +80,7 @@ export function EventStream({
     if (prepended) return;
     if (!added) return;
     if (autoFollow && viewport.current) {
-      viewport.current.scrollTop = viewport.current.scrollHeight;
+      viewport.current.scrollTop = 0;
     } else {
       setUnseen((value) => value + added);
     }
@@ -79,18 +88,19 @@ export function EventStream({
 
   useLayoutEffect(() => {
     const element = viewport.current;
-    const firstSeq = events[0]?.seq;
+    const lastSeq = events[events.length - 1]?.seq;
     if (!element) return;
     if (
-      layoutFirstSeq.current !== undefined &&
-      firstSeq !== undefined &&
-      firstSeq < layoutFirstSeq.current
+      !autoFollow &&
+      layoutLastSeq.current !== undefined &&
+      lastSeq !== undefined &&
+      lastSeq > layoutLastSeq.current
     ) {
       element.scrollTop += element.scrollHeight - previousScrollHeight.current;
     }
-    layoutFirstSeq.current = firstSeq;
+    layoutLastSeq.current = lastSeq;
     previousScrollHeight.current = element.scrollHeight;
-  }, [events, filtered.length]);
+  }, [autoFollow, events, filtered.length]);
 
   const virtual = filtered.length > 100;
   const start = virtual
@@ -103,23 +113,26 @@ export function EventStream({
       )
     : filtered.length;
   const visible = filtered.slice(start, end);
+  const phaseFilterLabel =
+    phase === "all" ? "全部阶段" : phaseLabels[phase] || phase;
 
   const returnToLatest = () => {
     setAutoFollow(true);
     setUnseen(0);
-    if (viewport.current)
-      viewport.current.scrollTop = viewport.current.scrollHeight;
+    if (viewport.current) viewport.current.scrollTop = 0;
   };
 
   return (
     <section className="cs-events" aria-labelledby="event-title">
       <div className="cs-subsection-heading cs-events__heading">
         <div>
-          <h3 id="event-title">实时事件</h3>
-          <span>已加载 {events.length} 条可信事件</span>
+          <h3 id="event-title">阶段事件</h3>
+          <span>
+            {phaseFilterLabel} · 显示 {filtered.length} / {events.length} 条
+          </span>
         </div>
         <div className="cs-event-filters">
-          <label>
+          <label className="cs-event-filter cs-event-filter--phase">
             <span className="cs-visually-hidden">按阶段筛选事件</span>
             <select
               value={phase}
@@ -134,7 +147,7 @@ export function EventStream({
             </select>
           </label>
           {workerOptions.length > 0 && (
-            <label>
+            <label className="cs-event-filter cs-event-filter--worker">
               <span className="cs-visually-hidden">按工作单元筛选事件</span>
               <select
                 value={worker}
@@ -149,7 +162,7 @@ export function EventStream({
               </select>
             </label>
           )}
-          <label>
+          <label className="cs-event-filter cs-event-filter--level">
             <span className="cs-visually-hidden">按级别筛选事件</span>
             <select
               value={level}
@@ -180,11 +193,9 @@ export function EventStream({
         onScroll={(event) => {
           const element = event.currentTarget;
           setScrollTop(element.scrollTop);
-          const atBottom =
-            element.scrollHeight - element.scrollTop - element.clientHeight <
-            24;
-          setAutoFollow(atBottom);
-          if (atBottom) setUnseen(0);
+          const atLatest = element.scrollTop < 24;
+          setAutoFollow(atLatest);
+          if (atLatest) setUnseen(0);
         }}
         tabIndex={0}
         aria-label="审计事件列表"
@@ -208,7 +219,7 @@ export function EventStream({
           visible.map((event) => <EventRow key={event.seq} event={event} />)
         )}
         {!filtered.length && (
-          <p className="cs-inline-empty">当前筛选下还没有事件。</p>
+          <p className="cs-inline-empty">当前阶段与筛选条件下还没有事件。</p>
         )}
       </div>
       {!autoFollow && unseen > 0 && (
@@ -246,6 +257,12 @@ function eventWorker(event: AuditEvent): string {
   return "";
 }
 
+function compareEventsNewestFirst(left: AuditEvent, right: AuditEvent): number {
+  const timeDifference =
+    Date.parse(right.created_at) - Date.parse(left.created_at);
+  return timeDifference || right.seq - left.seq;
+}
+
 function EventRow({
   event,
   style,
@@ -255,6 +272,7 @@ function EventRow({
 }) {
   const phase =
     typeof event.summary.phase === "string" ? event.summary.phase : "";
+  const metric = eventMetric(event);
   return (
     <article
       className={`cs-event-row cs-event-row--${event.level}`}
@@ -264,22 +282,104 @@ function EventRow({
       <span className="cs-event-row__marker" aria-hidden="true" />
       <div>
         <strong>{event.title}</strong>
-        <p>
-          {phaseLabels[phase] || phase || event.type} · seq {event.seq}
-        </p>
+        <p>{phaseLabels[phase] || phase || event.type}</p>
       </div>
+      <span className="cs-event-row__metric" aria-label={metric.label}>
+        {metric.text}
+      </span>
       <button
         type="button"
         className="cs-copy-button"
         aria-label={`复制事件 ${event.seq} 摘要`}
+        title={`复制事件 #${event.seq} 摘要`}
         onClick={() =>
           navigator.clipboard?.writeText(
             `${event.title}\n${JSON.stringify(event.summary)}`,
           )
         }
       >
-        {shortId(String(event.seq), 8)}
+        <Icon name="copy" />
       </button>
     </article>
   );
+}
+
+function eventMetric(event: AuditEvent): { text: string; label: string } {
+  const statusCounts = numericRecord(event.summary.status_counts);
+  const totalWorkers = Object.values(statusCounts).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  if (totalWorkers > 0) {
+    const failed = statusCounts.failed || 0;
+    const completed = statusCounts.completed || 0;
+    const running = statusCounts.running || 0;
+    const cancelled = statusCounts.cancelled || 0;
+    if (failed > 0) return workerMetric(`${failed} 失败`, failed, "执行失败");
+    if (completed > 0) {
+      return workerMetric(
+        `${completed}/${totalWorkers} 已完成`,
+        totalWorkers,
+        `${completed} 个已完成`,
+      );
+    }
+    if (running > 0)
+      return workerMetric(`${running} 运行中`, running, "运行中");
+    if (cancelled > 0)
+      return workerMetric(`${cancelled} 已取消`, cancelled, "已取消");
+  }
+
+  const launchedWorkers = numericValue(event.summary.launched_workers);
+  if (launchedWorkers !== null) {
+    return workerMetric(`${launchedWorkers} 已启动`, launchedWorkers, "已启动");
+  }
+
+  const counts = numericRecord(event.summary.counts);
+  const candidates = counts.candidates;
+  const verifications = counts.verifications;
+  if (candidates !== undefined && verifications) {
+    return {
+      text: `${verifications}/${candidates} 已验证`,
+      label: `${candidates} 个候选问题中已有 ${verifications} 个验证记录`,
+    };
+  }
+  if (candidates !== undefined) {
+    return { text: `${candidates} 候选`, label: `${candidates} 个候选问题` };
+  }
+
+  const findingCount = numericValue(event.summary.finding_count);
+  if (findingCount !== null) {
+    return { text: `${findingCount} 漏洞`, label: `${findingCount} 个最终漏洞` };
+  }
+
+  const status =
+    typeof event.summary.status === "string" ? event.summary.status : "";
+  if (status && phaseStatusLabels[status]) {
+    return { text: phaseStatusLabels[status], label: phaseStatusLabels[status] };
+  }
+
+  const levelLabels = { info: "信息", warning: "警告", error: "错误" };
+  return { text: levelLabels[event.level], label: `${levelLabels[event.level]}事件` };
+}
+
+function numericRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, number] =>
+        typeof entry[1] === "number" && Number.isFinite(entry[1]),
+    ),
+  );
+}
+
+function numericValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function workerMetric(
+  text: string,
+  count: number,
+  status: string,
+): { text: string; label: string } {
+  return { text, label: `${count} 个 Worker ${status}` };
 }

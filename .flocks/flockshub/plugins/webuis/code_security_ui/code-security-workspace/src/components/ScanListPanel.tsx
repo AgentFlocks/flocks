@@ -260,7 +260,9 @@ export function ScanListPanel({
                   </span>
                   <span className="cs-scan-item__meta">
                     {scan.lifecycle_status === "completed"
-                      ? `${scan.candidate_count || 0} 个候选`
+                      ? scan.final_finding_count == null
+                        ? "最终漏洞待确认"
+                        : `${scan.final_finding_count} 个最终漏洞`
                       : phaseLabels[scan.current_phase || ""] || "等待阶段信息"}
                     {scan.dynamic_enabled && (
                       <span className="cs-mode-tag">动态</span>

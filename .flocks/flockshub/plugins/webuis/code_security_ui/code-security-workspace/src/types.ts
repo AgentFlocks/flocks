@@ -14,7 +14,8 @@ export type PhaseStatus =
   | "partial"
   | "failed"
   | "cancelled"
-  | "skipped";
+  | "skipped"
+  | "not_runnable";
 
 export interface ProjectSummary {
   id: string;
@@ -35,6 +36,8 @@ export interface ScanSummary {
   finished_at?: string | null;
   failure_summary?: string | null;
   candidate_count?: number;
+  final_finding_count?: number | null;
+  final_finding_basis?: string | null;
 }
 
 export interface ScanPage {
@@ -67,6 +70,15 @@ export interface AuditEvent {
   created_at: string;
 }
 
+export interface WorkerCandidateSummary {
+  candidate_id: string;
+  title?: string | null;
+  severity?: string | null;
+  verdict?: string | null;
+  rationale?: string | null;
+  rationale_truncated?: boolean;
+}
+
 export interface WorkerRun {
   work_unit_id: string;
   phase: string;
@@ -79,6 +91,8 @@ export interface WorkerRun {
   paths: string[];
   paths_truncated: boolean;
   candidate_ids: string[];
+  candidate_summaries?: WorkerCandidateSummary[];
+  activity_counts?: Record<string, number>;
   record_counts: Record<string, number>;
 }
 

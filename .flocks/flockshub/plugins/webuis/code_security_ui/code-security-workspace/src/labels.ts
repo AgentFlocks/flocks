@@ -4,7 +4,7 @@ export const phaseLabels: Record<string, string> = {
   snapshot: "准备源码快照",
   threat_modeling: "威胁建模",
   baseline: "基线扫描",
-  verification: "独立验证",
+  verification: "静态验证",
   dynamic_validation: "动态验证",
   adjudication: "父 Agent 裁决",
   targeted_rescan: "定向复扫",
@@ -29,12 +29,18 @@ export const phaseStatusLabels: Record<string, string> = {
   failed: "执行失败",
   cancelled: "已取消",
   skipped: "已跳过",
+  not_runnable: "无法动态执行",
 };
 
 export function statusIcon(status: string): IconName {
   if (status === "completed") return "check";
   if (status === "failed") return "error";
-  if (status === "partial" || status === "interrupted") return "warning";
+  if (
+    status === "partial" ||
+    status === "interrupted" ||
+    status === "not_runnable"
+  )
+    return "warning";
   if (status === "cancelled" || status === "skipped") return "skip";
   if (status === "running" || status === "preparing" || status === "cancelling")
     return "activity";

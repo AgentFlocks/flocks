@@ -274,6 +274,113 @@ def test_scan_listing_is_owner_scoped_and_cursor_based(tmp_path: Path) -> None:
     assert second_page["items"][0]["scan_id"] != first_page["items"][0]["scan_id"]
 
 
+def test_final_finding_metric_prefers_dynamic_reproductions() -> None:
+    metric = service_module._final_finding_metric(
+        lifecycle_status="completed",
+        integrity_status="valid",
+        dynamic_enabled=True,
+        finding_summary={"total": 6, "dynamic_reproduced": 2},
+        dynamic_summary={
+            "status": "completed",
+            "ready": 0,
+            "completed": 4,
+            "inconclusive": 1,
+            "not_runnable": 1,
+        },
+    )
+
+    assert metric == {
+        "final_finding_count": 2,
+        "final_finding_basis": "动态验证复现",
+    }
+
+
+def test_final_finding_metric_uses_static_results_when_no_probe_was_runnable() -> None:
+    metric = service_module._final_finding_metric(
+        lifecycle_status="completed",
+        integrity_status="valid",
+        dynamic_enabled=True,
+        finding_summary={"total": 5, "dynamic_reproduced": 0},
+        dynamic_summary={
+            "status": "not_runnable",
+            "ready": 0,
+            "completed": 0,
+            "inconclusive": 0,
+            "not_runnable": 5,
+        },
+    )
+
+    assert metric == {
+        "final_finding_count": 5,
+        "final_finding_basis": "静态验证确认",
+    }
+
+
+def test_dynamic_summary_distinguishes_unrunnable_probes_from_success() -> None:
+    service = object.__new__(AuditService)
+    service.store = SimpleNamespace(
+        report_data=lambda _scan_id: {
+            "dynamic_runs": [
+                {"status": "not_runnable"},
+                {"status": "not_runnable"},
+            ]
+        }
+    )
+
+    summary = service._dynamic_summary(
+        {"scan_id": "scan_test", "status": "completed", "counts": {}},
+        enabled=True,
+    )
+
+    assert summary == {
+        "status": "not_runnable",
+        "ready": 0,
+        "completed": 0,
+        "inconclusive": 0,
+        "not_runnable": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_scan_listing_exposes_the_final_finding_metric() -> None:
+    service = object.__new__(AuditService)
+    service.store = SimpleNamespace(
+        list_scans=lambda **_kwargs: {
+            "items": [
+                {
+                    "scan_id": "scan_completed",
+                    "status": "completed",
+                    "current_phase": "finalization",
+                    "dynamic_enabled": True,
+                    "created_at": "2026-08-21T00:00:00+00:00",
+                    "updated_at": "2026-08-21T00:10:00+00:00",
+                }
+            ],
+            "next_cursor": None,
+        },
+        scan_status=lambda _scan_id: {
+            "integrity_status": "valid",
+            "integrity_artifacts": {"findings.json": "trusted"},
+        },
+    )
+    service._finding_summary = lambda *_args, **_kwargs: {
+        "total": 6,
+        "dynamic_reproduced": 2,
+    }
+    service._dynamic_summary = lambda *_args, **_kwargs: {
+        "status": "completed",
+        "ready": 0,
+        "completed": 4,
+        "inconclusive": 1,
+        "not_runnable": 1,
+    }
+
+    page = await service.list_scans(AuditCaller(subject="admin", source="webui", is_admin=True))
+
+    assert page["items"][0]["final_finding_count"] == 2
+    assert page["items"][0]["final_finding_basis"] == "动态验证复现"
+
+
 @pytest.mark.asyncio
 async def test_scan_listing_maps_an_invalid_cursor_to_a_stable_error(tmp_path: Path) -> None:
     service = object.__new__(AuditService)
@@ -511,6 +618,55 @@ async def test_scan_start_requires_admin_and_an_authorized_workspace(
     assert escaped.value.status_code == 403
 
 
+def test_target_validation_allows_source_projects_in_the_flocks_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flocks_root = tmp_path / ".flocks"
+    workspace_root = flocks_root / "workspace"
+    source_project = workspace_root / "code-security" / "aiemail"
+    source_project.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        service_module.WorkspaceManager,
+        "get_instance",
+        lambda: SimpleNamespace(get_workspace_dir=lambda: workspace_root),
+    )
+
+    assert AuditService._validate_target(source_project) == source_project.resolve()
+
+
+def test_target_validation_still_rejects_flocks_runtime_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flocks_root = tmp_path / ".flocks"
+    workspace_root = flocks_root / "workspace"
+    runtime_parent = workspace_root / "code-security"
+    (runtime_parent / "data").mkdir(parents=True)
+    (runtime_parent / "runtime").mkdir()
+    (workspace_root / "outputs").mkdir()
+    (flocks_root / "data" / "repository").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        service_module.WorkspaceManager,
+        "get_instance",
+        lambda: SimpleNamespace(get_workspace_dir=lambda: workspace_root),
+    )
+
+    for target in (
+        workspace_root,
+        runtime_parent,
+        runtime_parent / "data",
+        runtime_parent / "runtime",
+        workspace_root / "outputs",
+        flocks_root / "data" / "repository",
+    ):
+        with pytest.raises(AuditServiceError) as rejected:
+            AuditService._validate_target(target)
+        assert rejected.value.code == "unsafe_target_scope"
+
+
 @pytest.mark.asyncio
 async def test_completed_scan_with_invalid_integrity_has_invalid_result_state(
     monkeypatch: pytest.MonkeyPatch,
@@ -606,6 +762,169 @@ def test_legacy_worker_history_projects_completed_phases() -> None:
     assert phases[1]["worker_status_counts"] == {"completed": 2}
 
 
+def test_public_worker_projection_exposes_distinct_verification_results() -> None:
+    rationale = "x" * (service_module.MAX_WORKER_RATIONALE_CHARS + 1)
+    service = object.__new__(AuditService)
+    service.store = SimpleNamespace(
+        report_data=lambda _scan_id: {
+            "candidates": [
+                {
+                    "candidate_id": "candidate-1",
+                    "work_unit_id": "unit-baseline",
+                    "payload": {
+                        "title": "Path traversal in file download",
+                        "severity": "high",
+                    },
+                }
+            ],
+            "verifications": [
+                {
+                    "candidate_id": "candidate-1",
+                    "work_unit_id": "unit-verifier",
+                    "verdict": "confirmed",
+                    "rationale": rationale,
+                }
+            ],
+            "coverage": [],
+            "dynamic_runs": [],
+            "source_access_counts": {"unit-verifier": {"inventory": 1, "search": 8, "read": 3}},
+        },
+        list_worker_batches=lambda _scan_id: [
+            {
+                "units": [
+                    {
+                        "work_unit_id": "unit-verifier",
+                        "phase": "verification",
+                        "role": "verifier",
+                        "subject_id": "candidate-1",
+                        "status": "completed",
+                        "created_at": "2026-08-21T00:00:00+00:00",
+                        "updated_at": "2026-08-21T00:00:03+00:00",
+                        "started_at": "2026-08-21T00:00:01+00:00",
+                        "finished_at": "2026-08-21T00:00:03+00:00",
+                        "paths": ["."],
+                    },
+                    {
+                        "work_unit_id": "unit-queued",
+                        "phase": "verification",
+                        "role": "verifier",
+                        "subject_id": "candidate-2",
+                        "status": "running",
+                        "created_at": "2026-08-21T00:00:00+00:00",
+                        "updated_at": "2026-08-21T00:00:00+00:00",
+                        "started_at": None,
+                        "finished_at": None,
+                        "paths": ["."],
+                    },
+                ]
+            }
+        ],
+    )
+
+    workers = service._public_workers("scan-test")
+    worker = workers[0]
+
+    assert worker["activity_counts"] == {"inventory": 1, "search": 8, "read": 3}
+    assert worker["elapsed_ms"] == 2_000
+    assert worker["candidate_summaries"] == [
+        {
+            "candidate_id": "candidate-1",
+            "title": "Path traversal in file download",
+            "severity": "high",
+            "verdict": "confirmed",
+            "rationale": "x" * service_module.MAX_WORKER_RATIONALE_CHARS,
+            "rationale_truncated": True,
+        }
+    ]
+    assert workers[1]["started_at"] is None
+    assert workers[1]["elapsed_ms"] is None
+
+
+def test_public_worker_projection_marks_an_unrunnable_probe() -> None:
+    service = object.__new__(AuditService)
+    service.store = SimpleNamespace(
+        report_data=lambda _scan_id: {
+            "candidates": [],
+            "verifications": [],
+            "coverage": [],
+            "dynamic_runs": [
+                {
+                    "candidate_id": "candidate-1",
+                    "probe_work_unit_id": "unit-prober",
+                    "status": "not_runnable",
+                }
+            ],
+            "source_access_counts": {},
+        },
+        list_worker_batches=lambda _scan_id: [
+            {
+                "units": [
+                    {
+                        "work_unit_id": "unit-prober",
+                        "phase": "probing",
+                        "role": "prober",
+                        "subject_id": "candidate-1",
+                        "status": "completed",
+                        "created_at": "2026-08-21T00:00:00+00:00",
+                        "updated_at": "2026-08-21T00:00:03+00:00",
+                        "started_at": "2026-08-21T00:00:01+00:00",
+                        "finished_at": "2026-08-21T00:00:03+00:00",
+                        "paths": ["."],
+                    }
+                ]
+            }
+        ],
+    )
+
+    workers = service._public_workers("scan-test")
+
+    assert workers[0]["status"] == "not_runnable"
+    assert workers[0]["record_counts"] == {"dynamic_runs": 1}
+
+
+def test_finding_summary_counts_only_dynamically_reproduced_findings(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "findings.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "severity": {"level": "high"},
+                        "validation": {"dynamicConclusion": "reproduced"},
+                    },
+                    {
+                        "severity": {"level": "medium"},
+                        "validation": {"dynamicConclusion": "not_reproduced"},
+                    },
+                    {
+                        "severity": {"level": "low"},
+                        "validation": {"conclusion": "confirmed"},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = object.__new__(AuditService)
+    service._artifact_file = lambda _scan_id, _kind: artifact
+
+    summary = service._finding_summary(
+        "scan-test",
+        verified_artifacts={"findings.json": "trusted-digest"},
+    )
+
+    assert summary == {
+        "total": 3,
+        "critical": 0,
+        "high": 1,
+        "medium": 1,
+        "low": 1,
+        "dynamic_reproduced": 1,
+    }
+
+
 def test_verified_artifact_response_uses_the_bytes_that_were_hashed(tmp_path: Path) -> None:
     artifact = tmp_path / "report.md"
     trusted = b"trusted report"
@@ -679,3 +998,53 @@ def test_work_unit_records_started_and_finished_times(tmp_path: Path) -> None:
     assert completed is not None
     assert completed["started_at"] == running["started_at"]
     assert completed["finished_at"] is not None
+
+
+def test_work_unit_timing_can_be_synchronized_to_background_task(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="verification",
+        role="verifier",
+        paths=["."],
+    )
+    store.bind_session(
+        session_id="worker-1",
+        scan_id=scan_id,
+        snapshot_id="snapshot_test",
+        role="verifier",
+        work_unit_id=work_unit_id,
+    )
+    store.set_work_unit_runtime(
+        work_unit_id,
+        session_id="worker-1",
+        background_task_id="task-1",
+        started_at=None,
+    )
+
+    queued = store.get_work_unit(work_unit_id)
+    assert queued is not None
+    assert queued["started_at"] is None
+
+    store.set_work_unit_timing(
+        work_unit_id,
+        started_at="2026-08-21T00:00:02+00:00",
+        finished_at="2026-08-21T00:00:07+00:00",
+    )
+
+    work_unit = store.get_work_unit(work_unit_id)
+    assert work_unit is not None
+    assert work_unit["started_at"] == "2026-08-21T00:00:02+00:00"
+    assert work_unit["finished_at"] == "2026-08-21T00:00:07+00:00"
+
+    with pytest.raises(ValueError, match="timezone"):
+        store.set_work_unit_timing(
+            work_unit_id,
+            started_at="2026-08-21T00:00:08",
+        )

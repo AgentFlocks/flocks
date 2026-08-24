@@ -10,7 +10,7 @@ const tabs = [
   { id: "overview", label: "概览" },
   { id: "threat_model", label: "威胁模型" },
   { id: "candidate_index", label: "候选问题" },
-  { id: "verification_index", label: "独立验证" },
+  { id: "verification_index", label: "静态验证" },
   { id: "dynamic_validation", label: "动态验证" },
   { id: "adjudication", label: "父 Agent 裁决" },
   { id: "coverage", label: "覆盖度" },

@@ -33,6 +33,45 @@ import type {
 } from "./types";
 import styles from "./styles";
 
+export interface FinalFindingMetric {
+  count: number | null;
+  basis: string;
+}
+
+export function deriveFinalFindingMetric(
+  detail: ScanDetail,
+): FinalFindingMetric {
+  if (detail.scan.lifecycle_status !== "completed") {
+    return { count: null, basis: "审计完成后确定" };
+  }
+  if (detail.scan.integrity_status !== "valid") {
+    return { count: null, basis: "最终结果不可用" };
+  }
+
+  const dynamicExecutionCount = ["completed", "inconclusive"].reduce(
+    (total, key) => {
+      const value = detail.dynamicValidation?.[key];
+      return total + (typeof value === "number" ? value : 0);
+    },
+    0,
+  );
+  const usesDynamicResult =
+    detail.scan.dynamic_enabled &&
+    detail.dynamicValidation?.status !== "skipped" &&
+    dynamicExecutionCount > 0;
+  const value = usesDynamicResult
+    ? detail.findingSummary.dynamic_reproduced
+    : detail.findingSummary.total;
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return { count: null, basis: "最终结果不可用" };
+  }
+  return {
+    count: Math.max(0, Math.trunc(value)),
+    basis: usesDynamicResult ? "动态验证复现" : "静态验证确认",
+  };
+}
+
 export default function Page() {
   useWorkspaceStyles();
   const user = useSdkUser();
@@ -161,7 +200,10 @@ export default function Page() {
   );
 
   const selectScan = useCallback(
-    (scanId: string) => applySelection(scanId, true),
+    (scanId: string) => {
+      if (scanId === selectedIdRef.current) return;
+      applySelection(scanId, true);
+    },
     [applySelection],
   );
 
@@ -542,6 +584,8 @@ export default function Page() {
     );
   }
 
+  const finalFindingMetric = detail ? deriveFinalFindingMetric(detail) : null;
+
   return (
     <main className="code-security-workspace">
       <div
@@ -732,6 +776,16 @@ export default function Page() {
               events={events}
               workers={detail.workers || []}
               currentPhase={detail.scan.current_phase}
+              snapshotBoundary={detail.target}
+              artifactBundle={{
+                artifacts: detail.artifacts,
+                integrityStatus: detail.scan.integrity_status,
+              }}
+              dynamicValidationStatus={String(
+                detail.dynamicValidation?.status || "",
+              )}
+              finalFindingCount={finalFindingMetric?.count}
+              finalFindingBasis={finalFindingMetric?.basis}
               hasOlderEvents={hasOlderEvents}
               loadingOlderEvents={loadingOlderEvents}
               onLoadOlderEvents={loadOlderEvents}
@@ -776,6 +830,7 @@ export default function Page() {
 }
 
 function summaryFromDetail(detail: ScanDetail): ScanSummary {
+  const finalFindingMetric = deriveFinalFindingMetric(detail);
   return {
     scan_id: detail.scan.scan_id,
     display_name: detail.target.display_name,
@@ -786,6 +841,8 @@ function summaryFromDetail(detail: ScanDetail): ScanSummary {
     finished_at: detail.scan.finished_at,
     failure_summary: detail.scan.failure_summary,
     candidate_count: detail.counts.candidates,
+    final_finding_count: finalFindingMetric.count,
+    final_finding_basis: finalFindingMetric.basis,
   };
 }
 

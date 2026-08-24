@@ -3,7 +3,9 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import Page from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/Page";
+import Page, {
+  deriveFinalFindingMetric,
+} from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/Page";
 import { ArtifactInspector } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/ArtifactInspector";
 import { ElapsedTime } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/ElapsedTime";
 import { PhaseWorkspace } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/PhaseWorkspace";
@@ -44,7 +46,14 @@ const scanDetail = {
     elapsedMs: 120000,
   },
   counts: { candidates: 1, verifications: 0 },
-  findingSummary: { total: 0, critical: 0, high: 0, medium: 0, low: 0 },
+  findingSummary: {
+    total: 0,
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    dynamic_reproduced: 0,
+  },
   coverageSummary: {
     completeness: "partial",
     deferred_count: 1,
@@ -105,6 +114,17 @@ const scanDetail = {
       paths: ["src/path.ts", "src/router.ts"],
       paths_truncated: false,
       candidate_ids: ["candidate-1"],
+      candidate_summaries: [
+        {
+          candidate_id: "candidate-1",
+          title: "路由参数可能触发路径穿越",
+          severity: "high",
+          verdict: "confirmed",
+          rationale: "用户输入在进入文件读取前没有经过规范化处理。",
+          rationale_truncated: false,
+        },
+      ],
+      activity_counts: { inventory: 1, search: 8, read: 3 },
       record_counts: { verifications: 1 },
     },
   ],
@@ -198,7 +218,12 @@ describe("code security workspace contract page", () => {
                 type: "phase.started",
                 level: "info",
                 title: "独立验证 Worker 已开始",
-                summary: { phase: "verification" },
+                summary: {
+                  phase: "verification",
+                  work_unit_id: "unit_verifier_1",
+                  status: "running",
+                  status_counts: { running: 1 },
+                },
                 created_at: "2026-08-21T06:22:00Z",
               },
             ],
@@ -277,12 +302,81 @@ describe("code security workspace contract page", () => {
     expect(workspaceStyle?.textContent).toContain(".code-security-workspace");
     expect(screen.getAllByText("运行中").length).toBeGreaterThan(0);
     expect(screen.getAllByText("已跳过").length).toBeGreaterThan(0);
-    expect(screen.getByText("独立验证员")).toBeInTheDocument();
+    expect(screen.getByText("静态验证员")).toBeInTheDocument();
+    expect(screen.getByText("路由参数可能触发路径穿越")).toBeInTheDocument();
+    expect(screen.getByText("已确认")).toBeInTheDocument();
     expect(screen.getByText("2 个路径")).toBeInTheDocument();
+    expect(screen.getByText("12 条")).toBeInTheDocument();
+    expect(screen.getByLabelText("源码访问记录统计")).toHaveTextContent(
+      "搜索 8",
+    );
+    await userEvent.click(screen.getByText("查看验证结论"));
+    const rationale = screen.getByText(
+      "用户输入在进入文件读取前没有经过规范化处理。",
+    );
+    expect(rationale).toBeVisible();
+    expect(
+      screen.getByRole("region", { name: "验证结论详情" }),
+    ).toHaveAttribute("tabindex", "0");
+    expect(rationale.closest("details")).toHaveClass("cs-worker-rationale");
+    expect(workspaceStyle?.textContent).toContain(
+      ".cs-worker-list { align-items: start;",
+    );
+    expect(workspaceStyle?.textContent).toContain(
+      "max-height: min(240px, 35vh)",
+    );
+    expect(
+      screen.queryByRole("heading", { name: "阶段耗时" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "阶段事件" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("可信执行过程")).not.toBeInTheDocument();
+    expect(screen.getByText("静态验证 · 显示 1 / 2 条")).toBeInTheDocument();
+    expect(screen.getByText("独立验证 Worker 已开始")).toBeInTheDocument();
+    expect(screen.getByText("1 运行中")).toHaveAccessibleName(
+      "1 个 Worker 运行中",
+    );
+    expect(screen.queryByText("seq 2")).not.toBeInTheDocument();
+    expect(
+      screen.getByLabelText("按阶段筛选事件").closest("label"),
+    ).toHaveClass("cs-event-filter--phase");
+    expect(
+      screen.getByLabelText("按工作单元筛选事件").closest("label"),
+    ).toHaveClass("cs-event-filter--worker");
+    expect(
+      screen.getByLabelText("按级别筛选事件").closest("label"),
+    ).toHaveClass("cs-event-filter--level");
+    expect(workspaceStyle?.textContent).toContain(
+      ".cs-events__heading > div:first-child",
+    );
+    expect(workspaceStyle?.textContent).not.toContain(
+      ".cs-events__heading > div { display: grid;",
+    );
+    expect(screen.queryByText("不可变源码快照已创建")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: /动态验证阶段/ }));
     expect(screen.getByText("启动审计时未启用动态验证。")).toBeInTheDocument();
-    expect(screen.getByText("独立验证 Worker 已开始")).toBeInTheDocument();
-    expect(screen.getByText("不使用不可解释的总体百分比")).toBeInTheDocument();
+    expect(screen.getByText("动态验证 · 显示 0 / 2 条")).toBeInTheDocument();
+    expect(
+      screen.queryByText("独立验证 Worker 已开始"),
+    ).not.toBeInTheDocument();
+    await userEvent.selectOptions(
+      screen.getByLabelText("按阶段筛选事件"),
+      "all",
+    );
+    expect(screen.getByText("全部阶段 · 显示 2 / 2 条")).toBeInTheDocument();
+    const latestEvent = screen.getByText("独立验证 Worker 已开始");
+    const earlierEvent = screen.getByText("不可变源码快照已创建");
+    expect(
+      latestEvent.compareDocumentPosition(earlierEvent) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(
+      screen.queryByText("不使用不可解释的总体百分比"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByLabelText("最终漏洞数，审计完成后确定"),
+    ).toBeInTheDocument();
     expect(apiGet).toHaveBeenCalledWith(
       "/api/code-security/v1/scans/scan_demo/events",
       { params: { recent: true, limit: 200 } },
@@ -291,6 +385,126 @@ describe("code security workspace contract page", () => {
     expect(
       document.head.querySelector("style[data-flocks-code-security-workspace]"),
     ).toBeNull();
+  });
+
+  it("keeps the current audit visible when its selected history card is clicked again", async () => {
+    const pushState = vi.spyOn(window.history, "pushState");
+    render(<Page />);
+
+    expect(
+      await screen.findByRole("heading", { name: "flocks" }),
+    ).toBeInTheDocument();
+    const selectedCard = screen.getByRole("button", {
+      name: "flocks · 运行中",
+    });
+    const detailRequestsBeforeClick = apiGet.mock.calls.filter(
+      ([path]) => path === "/api/code-security/v1/scans/scan_demo",
+    ).length;
+
+    await userEvent.click(selectedCard);
+
+    expect(selectedCard).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "flocks" })).toBeInTheDocument();
+    const detailRequestsAfterClick = apiGet.mock.calls.filter(
+      ([path]) => path === "/api/code-security/v1/scans/scan_demo",
+    ).length;
+    expect(detailRequestsAfterClick).toBe(detailRequestsBeforeClick);
+    expect(pushState).not.toHaveBeenCalled();
+    pushState.mockRestore();
+  });
+
+  it("uses the static confirmation count when dynamic validation was skipped", () => {
+    expect(
+      deriveFinalFindingMetric({
+        ...scanDetail,
+        scan: {
+          ...scanDetail.scan,
+          lifecycle_status: "completed",
+          integrity_status: "valid",
+        },
+        findingSummary: {
+          ...scanDetail.findingSummary,
+          total: 6,
+        },
+      }),
+    ).toEqual({ count: 6, basis: "静态验证确认" });
+  });
+
+  it("uses the reproduced count when dynamic validation produced results", () => {
+    expect(
+      deriveFinalFindingMetric({
+        ...scanDetail,
+        scan: {
+          ...scanDetail.scan,
+          lifecycle_status: "completed",
+          integrity_status: "valid",
+          dynamic_enabled: true,
+        },
+        findingSummary: {
+          ...scanDetail.findingSummary,
+          total: 6,
+          dynamic_reproduced: 2,
+        },
+        dynamicValidation: {
+          status: "completed",
+          ready: 0,
+          completed: 4,
+          inconclusive: 1,
+          not_runnable: 1,
+        },
+      }),
+    ).toEqual({ count: 2, basis: "动态验证复现" });
+  });
+
+  it("falls back to static confirmation when dynamic validation has no runs", () => {
+    expect(
+      deriveFinalFindingMetric({
+        ...scanDetail,
+        scan: {
+          ...scanDetail.scan,
+          lifecycle_status: "completed",
+          integrity_status: "valid",
+          dynamic_enabled: true,
+        },
+        findingSummary: {
+          ...scanDetail.findingSummary,
+          total: 5,
+        },
+        dynamicValidation: {
+          status: "completed",
+          ready: 0,
+          completed: 0,
+          inconclusive: 0,
+          not_runnable: 0,
+        },
+      }),
+    ).toEqual({ count: 5, basis: "静态验证确认" });
+  });
+
+  it("falls back to static confirmation when every probe is not runnable", () => {
+    expect(
+      deriveFinalFindingMetric({
+        ...scanDetail,
+        scan: {
+          ...scanDetail.scan,
+          lifecycle_status: "completed",
+          integrity_status: "valid",
+          dynamic_enabled: true,
+        },
+        findingSummary: {
+          ...scanDetail.findingSummary,
+          total: 5,
+          dynamic_reproduced: 0,
+        },
+        dynamicValidation: {
+          status: "not_runnable",
+          ready: 0,
+          completed: 0,
+          inconclusive: 0,
+          not_runnable: 5,
+        },
+      }),
+    ).toEqual({ count: 5, basis: "静态验证确认" });
   });
 
   it("uses flat white actions for creating an audit and downloading its report", async () => {
@@ -322,6 +536,8 @@ describe("code security workspace contract page", () => {
       expect(button).toHaveClass("cs-button--secondary");
       expect(button).not.toHaveClass("cs-button--primary");
     }
+    expect(screen.getByText("0 个最终漏洞")).toBeInTheDocument();
+    expect(screen.queryByText("1 个候选")).not.toBeInTheDocument();
   });
 
   it("confirms and deletes a terminal audit from the history list", async () => {
@@ -831,6 +1047,46 @@ describe("code security workspace contract page", () => {
     );
   });
 
+  it("shows a field-level message from the server error envelope", async () => {
+    const user = userEvent.setup();
+    apiPost.mockRejectedValueOnce({
+      message: "Request failed with status code 400",
+      response: {
+        data: {
+          error: "HTTPException",
+          message: {
+            code: "target_not_directory",
+            message: "Target path is not a directory",
+            requestId: "req-target",
+          },
+        },
+      },
+    });
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await user.click(screen.getByRole("button", { name: "启动静态审计" }));
+
+    await screen.findAllByText("目标目录不存在或不是文件夹，请检查相对路径。");
+    const summary = screen
+      .getAllByRole("alert")
+      .find((element) => element.classList.contains("cs-form-errors"));
+    expect(summary).toBeDefined();
+    expect(summary).toHaveFocus();
+    expect(
+      screen.getAllByText("目标目录不存在或不是文件夹，请检查相对路径。")
+        .length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.queryByText("Request failed with status code 400"),
+    ).not.toBeInTheDocument();
+    expect(document.getElementById("audit-targetPath")).toHaveAttribute(
+      "aria-describedby",
+      expect.stringContaining("audit-targetPath-error"),
+    );
+  });
+
   it("removes stale destructive actions while another audit is loading", async () => {
     const user = userEvent.setup();
     const baseImplementation = apiGet.getMockImplementation();
@@ -898,7 +1154,171 @@ describe("code security workspace contract page", () => {
       screen
         .getAllByRole("tab")
         .map((tab) => tab.querySelector("strong")?.textContent),
-    ).toEqual(["准备源码快照", "独立验证", "定向复扫", "独立验证"]);
+    ).toEqual(["准备源码快照", "静态验证", "定向复扫", "静态验证"]);
+  });
+
+  it("shows the immutable snapshot boundary instead of an empty worker panel", () => {
+    render(
+      <PhaseWorkspace
+        phases={[
+          {
+            phase_run_id: "phase_snapshot",
+            phase: "snapshot",
+            ordinal: 1,
+            status: "completed",
+            started_at: "2026-08-21T06:20:00Z",
+            finished_at: "2026-08-21T06:20:01Z",
+          },
+        ]}
+        events={[]}
+        workers={[]}
+        currentPhase="snapshot"
+        snapshotBoundary={{
+          display_name: "aiemail",
+          source_revision: "7378a1ad42be9a4ccblbf07a466b2dc71fed332c",
+          tree_digest: "8b3497cabf08a673c2f54c44e0f68bc10bd1d2ee",
+          file_count: 44,
+          total_bytes: 128_000,
+          omitted_file_count: 0,
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "快照可信边界" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("后续审计仅基于此不可变源码快照"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("纳入文件").nextElementSibling).toHaveTextContent(
+      "44",
+    );
+    expect(screen.getByText("快照大小").nextElementSibling).toHaveTextContent(
+      "125 KB",
+    );
+    expect(screen.getByText("遗漏文件").nextElementSibling).toHaveTextContent(
+      "0",
+    );
+    expect(
+      screen.getByTitle("7378a1ad42be9a4ccblbf07a466b2dc71fed332c"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTitle("8b3497cabf08a673c2f54c44e0f68bc10bd1d2ee"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "阶段事件" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows packaging results instead of empty operational details", () => {
+    render(
+      <PhaseWorkspace
+        phases={[
+          {
+            phase_run_id: "phase_finalization",
+            phase: "finalization",
+            ordinal: 8,
+            status: "completed",
+            started_at: "2026-08-21T06:20:00Z",
+            finished_at: "2026-08-21T06:20:01Z",
+          },
+        ]}
+        events={[
+          {
+            seq: 1,
+            scan_id: "scan_demo",
+            phase_run_id: "phase_finalization",
+            type: "scan.finalized",
+            level: "info",
+            title: "最终产物已完成完整性校验",
+            summary: {},
+            created_at: "2026-08-21T06:20:01Z",
+          },
+        ]}
+        workers={[]}
+        currentPhase="finalization"
+        artifactBundle={{
+          integrityStatus: "valid",
+          artifacts: [
+            {
+              kind: "report_markdown",
+              state: "sealed",
+              size_bytes: 1_024,
+            },
+            { kind: "sarif", state: "sealed", size_bytes: 2_048 },
+            { kind: "candidate_index", state: "available" },
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "封装结果" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("已封装产物").nextElementSibling).toHaveTextContent(
+      "2 个",
+    );
+    expect(screen.getByText("已封装大小").nextElementSibling).toHaveTextContent(
+      "3 KB",
+    );
+    expect(screen.getByText("完整性").nextElementSibling).toHaveTextContent(
+      "校验通过",
+    );
+    expect(screen.getByText("最终报告").nextElementSibling).toHaveTextContent(
+      "已封装",
+    );
+    expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "阶段事件" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows an unrunnable dynamic phase without presenting it as success", () => {
+    render(
+      <PhaseWorkspace
+        phases={[
+          {
+            phase_run_id: "phase_dynamic",
+            phase: "dynamic_validation",
+            ordinal: 1,
+            status: "completed",
+            started_at: "2026-08-21T06:20:00Z",
+            finished_at: "2026-08-21T06:20:01Z",
+          },
+        ]}
+        events={[]}
+        workers={
+          [
+            {
+              work_unit_id: "unit-prober",
+              phase: "dynamic_validation",
+              role: "prober",
+              status: "completed",
+              started_at: "2026-08-21T06:20:00Z",
+              finished_at: "2026-08-21T06:20:01Z",
+              elapsed_ms: 1_000,
+              path_count: 1,
+              paths: ["."],
+              paths_truncated: false,
+              candidate_ids: ["candidate-1"],
+              record_counts: { dynamic_runs: 1 },
+            },
+          ] as any
+        }
+        currentPhase="dynamic_validation"
+        dynamicValidationStatus="not_runnable"
+      />,
+    );
+
+    expect(screen.getAllByLabelText("动态验证阶段：无法动态执行")).toHaveLength(
+      1,
+    );
+    expect(screen.getByLabelText("阶段状态：无法动态执行")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Worker 状态：无法动态执行"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("已完成")).not.toBeInTheDocument();
   });
 
   it("shows legacy workers even when phase projection is absent", () => {
@@ -906,13 +1326,18 @@ describe("code security workspace contract page", () => {
       <PhaseWorkspace
         phases={[]}
         events={[]}
-        workers={scanDetail.workers as any}
+        workers={
+          [
+            { ...scanDetail.workers[0], started_at: null, elapsed_ms: null },
+          ] as any
+        }
         currentPhase={null}
       />,
     );
 
-    expect(screen.getByText("独立验证员")).toBeInTheDocument();
+    expect(screen.getByText("静态验证员")).toBeInTheDocument();
     expect(screen.getByText("1 个")).toBeInTheDocument();
+    expect(screen.getByLabelText("Worker 状态：等待中")).toBeInTheDocument();
   });
 
   it("keeps a terminal elapsed time fixed when a legacy finish time is absent", () => {

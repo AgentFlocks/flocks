@@ -888,12 +888,17 @@ class ScanStore:
         *,
         session_id: str,
         background_task_id: str,
+        started_at: str | None,
     ) -> None:
+        if started_at is not None:
+            parsed = datetime.fromisoformat(started_at)
+            if parsed.tzinfo is None:
+                raise ValueError("Work-unit timestamps must include a timezone")
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
-                "UPDATE work_units SET background_task_id = ?, updated_at = ? "
+                "UPDATE work_units SET background_task_id = ?, started_at = ?, updated_at = ? "
                 "WHERE work_unit_id = ? AND session_id = ? AND status = 'running'",
-                (background_task_id, _now(), work_unit_id, session_id),
+                (background_task_id, started_at, _now(), work_unit_id, session_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("Work unit is not bound to the worker session")
@@ -1680,6 +1685,32 @@ class ScanStore:
         item = dict(row)
         item["paths"] = json.loads(item.pop("paths_json"))
         return item
+
+    def set_work_unit_timing(
+        self,
+        work_unit_id: str,
+        *,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> None:
+        if started_at is None and finished_at is None:
+            return
+        for value in (started_at, finished_at):
+            if value is None:
+                continue
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                raise ValueError("Work-unit timestamps must include a timezone")
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE work_units SET "
+                "started_at = COALESCE(?, started_at), "
+                "finished_at = COALESCE(?, finished_at) "
+                "WHERE work_unit_id = ?",
+                (started_at, finished_at, work_unit_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Work unit not found")
 
     def update_work_unit_status(self, work_unit_id: str, status: str) -> None:
         if status not in {"pending", "running", "completed", "failed", "cancelled"}:
@@ -3201,6 +3232,12 @@ class ScanStore:
                 "SELECT * FROM dynamic_runs WHERE scan_id = ? ORDER BY created_at, candidate_id",
                 (scan_id,),
             ).fetchall()
+            source_access_count_rows = connection.execute(
+                "SELECT work_unit_id, operation, COUNT(*) AS count "
+                "FROM source_access WHERE scan_id = ? "
+                "GROUP BY work_unit_id, operation ORDER BY work_unit_id, operation",
+                (scan_id,),
+            ).fetchall()
         candidates = []
         for row in candidate_rows:
             item = dict(row)
@@ -3227,6 +3264,9 @@ class ScanStore:
             threat_model = dict(threat_model_row)
             threat_model["threat_model"] = json.loads(threat_model.pop("payload_json"))
             threat_model["evidence"] = json.loads(threat_model.pop("evidence_json"))
+        source_access_counts: dict[str, dict[str, int]] = {}
+        for row in source_access_count_rows:
+            source_access_counts.setdefault(row["work_unit_id"], {})[row["operation"]] = row["count"]
         return {
             "scan": scan,
             "knowledge_base": self.get_knowledge_base_metadata(scan_id),
@@ -3236,6 +3276,7 @@ class ScanStore:
             "verifications": verifications,
             "coverage": coverage,
             "work_units": work_units,
+            "source_access_counts": source_access_counts,
             "omissions": [dict(row) for row in omission_rows],
             "verification_conflicts": [
                 {

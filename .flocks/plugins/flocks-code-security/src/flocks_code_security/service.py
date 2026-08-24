@@ -20,6 +20,7 @@ from flocks.project.project import Project
 from flocks.session.session import Session
 from flocks.storage.storage import Storage
 from flocks.tool.registry import ToolContext
+from flocks.workspace.manager import WorkspaceManager
 
 from flocks_code_security.cli import (
     AuditOrchestrator,
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 PUBLIC_SCHEMA_VERSION = "flocks.code-security.tool.v1"
 MAX_PROJECTED_EVENT_BYTES = 60 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
+MAX_WORKER_RATIONALE_CHARS = 2_000
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 PUBLIC_SCAN_STATUSES = {"running", *TERMINAL_SCAN_STATUSES}
 PUBLIC_PHASES = {
@@ -157,6 +159,34 @@ def _effective_finished_at(scan: dict[str, Any]) -> str | None:
         if isinstance(updated_at, str) and updated_at:
             return updated_at
     return None
+
+
+def _final_finding_metric(
+    *,
+    lifecycle_status: str,
+    integrity_status: str,
+    dynamic_enabled: bool,
+    finding_summary: dict[str, Any],
+    dynamic_summary: dict[str, Any],
+) -> dict[str, Any]:
+    if lifecycle_status != "completed":
+        return {"final_finding_count": None, "final_finding_basis": "审计完成后确定"}
+    if integrity_status != "valid":
+        return {"final_finding_count": None, "final_finding_basis": "最终结果不可用"}
+
+    dynamic_execution_count = 0
+    for key in ("completed", "inconclusive"):
+        value = dynamic_summary.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            dynamic_execution_count += value
+    uses_dynamic_result = dynamic_enabled and dynamic_summary.get("status") != "skipped" and dynamic_execution_count > 0
+    value = finding_summary.get("dynamic_reproduced" if uses_dynamic_result else "total")
+    if not isinstance(value, int) or isinstance(value, bool):
+        return {"final_finding_count": None, "final_finding_basis": "最终结果不可用"}
+    return {
+        "final_finding_count": max(0, value),
+        "final_finding_basis": "动态验证复现" if uses_dynamic_result else "静态验证确认",
+    }
 
 
 def _remove_owned_tree(path: Path | None, *, root: Path, expected_name: str) -> None:
@@ -773,6 +803,36 @@ class AuditService:
             item["finished_at"] = _effective_finished_at(item)
             item["lifecycle_status"] = _public_lifecycle(item.pop("status"))
             item["current_phase"] = _public_phase(item.get("current_phase"))
+            metric = _final_finding_metric(
+                lifecycle_status=item["lifecycle_status"],
+                integrity_status="pending",
+                dynamic_enabled=bool(item["dynamic_enabled"]),
+                finding_summary={},
+                dynamic_summary={},
+            )
+            if item["lifecycle_status"] == "completed":
+                status = self.store.scan_status(item["scan_id"])
+                integrity_status = str(status.get("integrity_status") or "pending")
+                integrity_artifacts = status.get("integrity_artifacts", {})
+                finding_summary: dict[str, Any] = {}
+                dynamic_summary: dict[str, Any] = {}
+                if integrity_status == "valid":
+                    finding_summary = self._finding_summary(
+                        item["scan_id"],
+                        verified_artifacts=integrity_artifacts,
+                    )
+                    dynamic_summary = self._dynamic_summary(
+                        status,
+                        enabled=bool(item["dynamic_enabled"]),
+                    )
+                metric = _final_finding_metric(
+                    lifecycle_status=item["lifecycle_status"],
+                    integrity_status=integrity_status,
+                    dynamic_enabled=bool(item["dynamic_enabled"]),
+                    finding_summary=finding_summary,
+                    dynamic_summary=dynamic_summary,
+                )
+            item.update(metric)
             item.pop("parent_session_id", None)
             item.pop("snapshot_id", None)
             item.pop("ruleset_digest", None)
@@ -1232,12 +1292,24 @@ class AuditService:
         if not target.is_dir():
             raise AuditServiceError("target_not_directory", "Audit target is not a directory")
         broad_targets = {Path("/").resolve(), Path.home().resolve()}
+        flocks_root = (Path.home() / ".flocks").resolve()
+        workspace_root = WorkspaceManager.get_instance().get_workspace_dir().expanduser().resolve()
         protected_roots = {
-            (Path.home() / ".flocks").resolve(),
             data_dir().resolve(),
+            runtime_dir().resolve(),
             outputs_root().resolve(),
         }
-        if target in broad_targets or any(target == root or target.is_relative_to(root) for root in protected_roots):
+        inside_flocks = target == flocks_root or target.is_relative_to(flocks_root)
+        inside_source_workspace = target != workspace_root and target.is_relative_to(workspace_root)
+        overlaps_runtime = any(
+            target == root or target.is_relative_to(root) or root.is_relative_to(target) for root in protected_roots
+        )
+        if (
+            target in broad_targets
+            or target == workspace_root
+            or (inside_flocks and not inside_source_workspace)
+            or overlaps_runtime
+        ):
             raise AuditServiceError(
                 "unsafe_target_scope", "Audit target is too broad or belongs to Flocks runtime data"
             )
@@ -1384,7 +1456,14 @@ class AuditService:
         *,
         verified_artifacts: dict[str, str] | None = None,
     ) -> dict[str, int]:
-        summary = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
+        summary = {
+            "total": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "dynamic_reproduced": 0,
+        }
         path = self._artifact_file(scan_id, "findings")
         if path is None or path.name not in (verified_artifacts or {}):
             return summary
@@ -1402,6 +1481,9 @@ class AuditService:
             level = severity.get("level") if isinstance(severity, dict) else None
             if level in summary and level != "total":
                 summary[level] += 1
+            validation = finding.get("validation")
+            if isinstance(validation, dict) and validation.get("dynamicConclusion") == "reproduced":
+                summary["dynamic_reproduced"] += 1
         return summary
 
     def _coverage_summary(
@@ -1449,6 +1531,8 @@ class AuditService:
                 run_counts[run_status] += 1
         if run_counts["ready"]:
             lifecycle = "running"
+        elif run_counts["not_runnable"] and not run_counts["completed"] and not run_counts["inconclusive"]:
+            lifecycle = "not_runnable"
         elif counts.get("confirmed_without_dynamic_record"):
             lifecycle = "waiting_for_probe_plan"
         elif status.get("status") == "completed":
@@ -1463,6 +1547,7 @@ class AuditService:
         """Return bounded work-unit metadata without session or task identifiers."""
         data = self.store.report_data(scan_id)
         candidate_ids: dict[str, set[str]] = {}
+        candidate_summaries: dict[str, dict[str, Any]] = {}
         record_counts: dict[str, dict[str, int]] = {}
 
         def record(work_unit_id: Any, kind: str, candidate_id: Any = None) -> None:
@@ -1475,16 +1560,44 @@ class AuditService:
 
         for item in data["candidates"]:
             record(item.get("work_unit_id"), "candidates", item.get("candidate_id"))
+            candidate_id = item.get("candidate_id")
+            payload = item.get("payload")
+            if isinstance(candidate_id, str) and isinstance(payload, dict):
+                candidate_summaries[candidate_id] = {
+                    "candidate_id": candidate_id,
+                    "title": payload.get("title") if isinstance(payload.get("title"), str) else None,
+                    "severity": payload.get("severity") if isinstance(payload.get("severity"), str) else None,
+                    "verdict": None,
+                    "rationale": None,
+                    "rationale_truncated": False,
+                }
         for item in data["verifications"]:
             record(item.get("work_unit_id"), "verifications", item.get("candidate_id"))
+            candidate_id = item.get("candidate_id")
+            summary = candidate_summaries.get(candidate_id) if isinstance(candidate_id, str) else None
+            if summary is not None:
+                rationale = item.get("rationale")
+                rationale = rationale if isinstance(rationale, str) else None
+                summary.update(
+                    {
+                        "verdict": item.get("verdict") if isinstance(item.get("verdict"), str) else None,
+                        "rationale": rationale[:MAX_WORKER_RATIONALE_CHARS] if rationale else None,
+                        "rationale_truncated": bool(rationale and len(rationale) > MAX_WORKER_RATIONALE_CHARS),
+                    }
+                )
         for item in data["coverage"]:
             record(item.get("work_unit_id"), "coverage")
+        dynamic_statuses: dict[str, set[str]] = {}
         for item in data["dynamic_runs"]:
+            probe_work_unit_id = item.get("probe_work_unit_id")
             record(
-                item.get("probe_work_unit_id"),
+                probe_work_unit_id,
                 "dynamic_runs",
                 item.get("candidate_id"),
             )
+            run_status = item.get("status")
+            if isinstance(probe_work_unit_id, str) and isinstance(run_status, str):
+                dynamic_statuses.setdefault(probe_work_unit_id, set()).add(run_status)
 
         workers: list[dict[str, Any]] = []
         for batch in self.store.list_worker_batches(scan_id):
@@ -1496,11 +1609,14 @@ class AuditService:
                 if isinstance(subject_id, str) and subject_id:
                     related.add(subject_id)
                 worker_status = str(item.get("status") or "pending")
+                if item.get("role") == "prober" and dynamic_statuses.get(work_unit_id) == {"not_runnable"}:
+                    worker_status = "not_runnable"
                 started_at = item.get("started_at")
-                if not started_at and worker_status != "pending":
+                terminal_statuses = {"completed", "failed", "cancelled", "not_runnable"}
+                if not started_at and worker_status in terminal_statuses:
                     started_at = item.get("created_at")
                 finished_at = item.get("finished_at")
-                if not finished_at and worker_status in {"completed", "failed", "cancelled"}:
+                if not finished_at and worker_status in terminal_statuses:
                     finished_at = item.get("updated_at")
                 workers.append(
                     {
@@ -1515,6 +1631,12 @@ class AuditService:
                         "paths": paths[:50],
                         "paths_truncated": len(paths) > 50,
                         "candidate_ids": sorted(related),
+                        "candidate_summaries": [
+                            candidate_summaries[candidate_id]
+                            for candidate_id in sorted(related)
+                            if candidate_id in candidate_summaries
+                        ],
+                        "activity_counts": data.get("source_access_counts", {}).get(work_unit_id, {}),
                         "record_counts": record_counts.get(work_unit_id, {}),
                     }
                 )
@@ -1536,7 +1658,7 @@ class AuditService:
 
         phases: list[dict[str, Any]] = []
         phase_ordinals: dict[str, int] = {}
-        terminal_worker_statuses = {"completed", "failed", "cancelled"}
+        terminal_worker_statuses = {"completed", "failed", "cancelled", "not_runnable"}
         for phase, phase_workers in groups:
             ordinal = phase_ordinals.get(phase, 0) + 1
             phase_ordinals[phase] = ordinal
@@ -1553,6 +1675,8 @@ class AuditService:
                 status = "completed"
             elif status_counts.get("completed"):
                 status = "partial"
+            elif status_counts.get("not_runnable") == len(phase_workers):
+                status = "not_runnable"
             elif status_counts.get("failed"):
                 status = "failed"
             else:

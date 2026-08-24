@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { createIdempotencyKey, createScan } from "../api";
+import { createIdempotencyKey, createScan, readApiFailure } from "../api";
 import { Icon } from "../icons";
 import type { NewAuditValues, ProjectSummary, ScanDetail } from "../types";
 
@@ -14,6 +14,13 @@ const EMPTY_VALUES: NewAuditValues = {
   maxFileBytes: 1_048_576,
   dynamicEnabled: false,
   dynamicConfirmed: false,
+};
+const CREATE_ERROR_MESSAGES: Record<string, string> = {
+  unsafe_target_scope:
+    "目标目录属于 Flocks 运行数据，不能作为审计目标。请选择源码项目目录。",
+  target_not_directory: "目标目录不存在或不是文件夹，请检查相对路径。",
+  target_not_authorized: "目标目录不在所选工作区内，请重新选择。",
+  workspace_not_found: "所选工作区不可用，请刷新后重新选择。",
 };
 
 export function NewAuditDrawer({
@@ -140,6 +147,7 @@ export function NewAuditDrawer({
   ) => {
     setValues((current) => ({ ...current, [key]: value }));
     setErrors((current) => ({ ...current, [key]: "" }));
+    setSubmitError("");
   };
   const setDynamicEnabled = (enabled: boolean) => {
     setValues((current) => ({
@@ -152,6 +160,7 @@ export function NewAuditDrawer({
       dynamicEnabled: "",
       dynamicConfirmed: "",
     }));
+    setSubmitError("");
   };
   const validatePath = () => {
     const path = values.targetPath.trim();
@@ -196,10 +205,28 @@ export function NewAuditDrawer({
       attemptRef.current = null;
       onCreated(detail);
     } catch (reason: any) {
-      const detail = reason?.response?.data?.detail;
-      setSubmitError(
-        `${detail?.message || reason?.message || "创建审计失败"}${detail?.requestId ? ` · Request ID: ${detail.requestId}` : ""}`,
-      );
+      const failure = readApiFailure(reason, "创建审计失败");
+      const message =
+        (failure.code && CREATE_ERROR_MESSAGES[failure.code]) ||
+        failure.message;
+      const field =
+        failure.code === "workspace_not_found"
+          ? "workspaceId"
+          : failure.code?.startsWith("target_") ||
+              failure.code === "unsafe_target_scope"
+            ? "targetPath"
+            : null;
+      if (field) {
+        setErrors((current) => ({ ...current, [field]: message }));
+        setSubmitError(
+          failure.requestId ? `请求 ID：${failure.requestId}` : "",
+        );
+      } else {
+        setSubmitError(
+          `${message}${failure.requestId ? ` · 请求 ID：${failure.requestId}` : ""}`,
+        );
+      }
+      window.setTimeout(() => errorRef.current?.focus(), 0);
     } finally {
       setSubmitting(false);
     }
@@ -291,13 +318,15 @@ export function NewAuditDrawer({
                 onChange={(event) => set("targetPath", event.target.value)}
                 onBlur={validatePath}
                 aria-invalid={Boolean(errors.targetPath)}
-                aria-describedby="audit-target-help"
+                aria-describedby={`audit-target-help${errors.targetPath ? " audit-targetPath-error" : ""}`}
               />
               <small id="audit-target-help">
                 相对于所选工作区，例如 <code>packages/api</code>。
               </small>
               {errors.targetPath && (
-                <small role="alert">{errors.targetPath}</small>
+                <small id="audit-targetPath-error" role="alert">
+                  {errors.targetPath}
+                </small>
               )}
             </label>
           </fieldset>

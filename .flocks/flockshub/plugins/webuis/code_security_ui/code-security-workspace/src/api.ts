@@ -11,6 +11,12 @@ import type {
 
 const BASE = "/api/code-security/v1";
 
+export interface ApiFailure {
+  code?: string;
+  message: string;
+  requestId?: string;
+}
+
 function getApi(): any {
   const sdk = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__;
   if (!sdk?.api)
@@ -142,4 +148,21 @@ export function createIdempotencyKey(): string {
   if (globalThis.crypto?.randomUUID)
     return `ui-${globalThis.crypto.randomUUID()}`;
   return `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+export function readApiFailure(reason: any, fallback: string): ApiFailure {
+  const data = reason?.response?.data;
+  const raw = data?.detail ?? data?.message;
+  const detail = raw && typeof raw === "object" ? raw : data;
+  const message =
+    (typeof raw === "string" && raw) ||
+    (typeof detail?.message === "string" && detail.message) ||
+    reason?.message ||
+    fallback;
+  return {
+    code: typeof detail?.code === "string" ? detail.code : undefined,
+    message,
+    requestId:
+      typeof detail?.requestId === "string" ? detail.requestId : undefined,
+  };
 }

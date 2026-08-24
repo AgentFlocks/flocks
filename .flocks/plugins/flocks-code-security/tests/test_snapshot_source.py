@@ -58,6 +58,9 @@ def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
     assert first_read["text"] == "user = input()\nprint(user)"
     assert runtime.source.search("worker", "input")["matches"][0]["relative_path"] == "app.py"
     assert runtime.source.inventory("worker")["languages"]["python"] == 1
+    assert runtime.store.report_data(scan_id)["source_access_counts"] == {
+        work_unit_id: {"inventory": 2, "read": 2, "search": 2}
+    }
 
 
 def test_evidence_context_rejects_snapshot_tampering(tmp_path: Path) -> None:

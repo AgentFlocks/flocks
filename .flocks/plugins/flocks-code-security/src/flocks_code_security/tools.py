@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -1368,7 +1369,15 @@ async def _launch_worker(
             unit["work_unit_id"],
             session_id=child.id,
             background_task_id=task.id,
+            started_at=_background_timestamp(getattr(task, "started_at", None)),
         )
+        task_started_at = _background_timestamp(getattr(task, "started_at", None))
+        if task_started_at is not None:
+            await asyncio.to_thread(
+                runtime.store.set_work_unit_timing,
+                unit["work_unit_id"],
+                started_at=task_started_at,
+            )
     except BaseException:
         manager.cancel(task_id=task.id)
         raise
@@ -1381,16 +1390,24 @@ async def _refresh_worker_batch(batch_id: str) -> dict[str, Any]:
         raise ValueError("Worker batch not found")
     manager = _background_manager()
     for unit in batch["units"]:
-        if unit["status"] not in {"pending", "running"}:
-            continue
         task_id = unit.get("background_task_id")
         task = manager.get_task(task_id) if task_id else None
-        if task is None:
-            if (
-                unit["status"] == "running"
-                or task_id
-                or batch_id not in LAUNCHING_BATCH_IDS
+        if task is not None:
+            task_started_at = _background_timestamp(getattr(task, "started_at", None))
+            task_finished_at = _background_timestamp(getattr(task, "completed_at", None))
+            if (task_started_at is not None and task_started_at != unit.get("started_at")) or (
+                task_finished_at is not None and task_finished_at != unit.get("finished_at")
             ):
+                await asyncio.to_thread(
+                    runtime.store.set_work_unit_timing,
+                    unit["work_unit_id"],
+                    started_at=task_started_at,
+                    finished_at=task_finished_at,
+                )
+        if unit["status"] not in {"pending", "running"}:
+            continue
+        if task is None:
+            if unit["status"] == "running" or task_id or batch_id not in LAUNCHING_BATCH_IDS:
                 await asyncio.to_thread(
                     runtime.store.update_work_unit_status,
                     unit["work_unit_id"],
@@ -1447,6 +1464,12 @@ async def _refresh_worker_batch(batch_id: str) -> dict[str, Any]:
         )
         refreshed["status"] = batch_status
     return refreshed
+
+
+def _background_timestamp(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return datetime.fromtimestamp(value / 1_000, timezone.utc).isoformat()
 
 
 async def _public_batch_status(batch_id: str) -> dict[str, Any]:

@@ -437,6 +437,12 @@ class _FakeBackgroundManager:
         return 1
 
 
+def test_background_task_timestamps_are_projected_as_utc() -> None:
+    assert tools_module._background_timestamp(1_000) == "1970-01-01T00:00:01+00:00"
+    assert tools_module._background_timestamp(-1) is None
+    assert tools_module._background_timestamp(True) is None
+
+
 @pytest.mark.asyncio
 async def test_threat_model_without_baseline_cannot_be_finalized(
     tmp_path: Path,
