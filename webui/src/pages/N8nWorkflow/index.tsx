@@ -6,7 +6,7 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
-import { n8nAPI, type N8nBuildRun, type N8nWorkflowRecord } from '@/api/n8n';
+import { n8nAPI, type N8nBuildRun, type N8nConnection, type N8nWorkflowRecord } from '@/api/n8n';
 import { extractErrorMessage } from '@/utils/error';
 import N8nBuildPanel from '@/pages/WorkflowCreate/N8nBuildPanel';
 
@@ -59,14 +59,21 @@ function N8nWorkflowList() {
   const navigate = useNavigate();
   const toast = useToast();
   const [records, setRecords] = useState<N8nWorkflowRecord[]>([]);
+  const [connections, setConnections] = useState<N8nConnection[]>([]);
+  const [connectionFilter, setConnectionFilter] = useState('');
+  const [sourceFilter, setSourceFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadRecords = useCallback(async () => {
     try {
-      const response = await n8nAPI.listWorkflowRecords();
+      const [response, connectionResponse] = await Promise.all([
+        n8nAPI.listWorkflowRecords(500),
+        n8nAPI.listConnections(),
+      ]);
       setRecords(response.data);
+      setConnections(connectionResponse.data);
       setError(null);
     } catch (err) {
       setError(extractErrorMessage(err));
@@ -79,13 +86,27 @@ function N8nWorkflowList() {
     void loadRecords();
   }, [loadRecords]);
 
-  const handleSyncAll = async () => {
+  const filteredRecords = useMemo(() => records.filter((record) => {
+    if (connectionFilter && record.connectionId !== connectionFilter) return false;
+    if (sourceFilter && record.source !== sourceFilter) return false;
+    return true;
+  }), [connectionFilter, records, sourceFilter]);
+
+  const handleSyncAll = async (includeExternal = false) => {
     if (refreshing) return;
     setRefreshing(true);
     try {
-      const response = await n8nAPI.discoverWorkflowRecords();
-      setRecords(response.data);
-      toast.success(t('n8n.syncSuccess'));
+      const response = await n8nAPI.syncWorkflowRecords({
+        connectionIds: connectionFilter ? [connectionFilter] : undefined,
+        includeExternal,
+      });
+      setRecords(response.data.records);
+      toast.success(t('n8n.syncSuccess'), t('n8n.syncSummary', {
+        created: response.data.created,
+        updated: response.data.updated,
+        missing: response.data.missing,
+        failed: response.data.connectionsFailed,
+      }));
       setError(null);
     } catch (err) {
       const message = extractErrorMessage(err);
@@ -123,14 +144,43 @@ function N8nWorkflowList() {
           <ArrowLeft className="h-4 w-4" />
           {t('n8n.backToFlocks')}
         </Link>
+        <select
+          value={connectionFilter}
+          onChange={(event) => setConnectionFilter(event.target.value)}
+          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 outline-none hover:bg-gray-50"
+        >
+          <option value="">{t('n8n.allConnections')}</option>
+          {connections.map((connection) => (
+            <option key={connection.id} value={connection.id}>{connection.name}</option>
+          ))}
+        </select>
+        <select
+          value={sourceFilter}
+          onChange={(event) => setSourceFilter(event.target.value)}
+          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 outline-none hover:bg-gray-50"
+        >
+          <option value="">{t('n8n.allSources')}</option>
+          <option value="flocks_created">{t('n8n.sourceFlocksCreated')}</option>
+          <option value="discovered">{t('n8n.sourceDiscovered')}</option>
+          <option value="external">{t('n8n.sourceExternal')}</option>
+        </select>
         <button
           type="button"
-          onClick={() => void handleSyncAll()}
+          onClick={() => void handleSyncAll(false)}
           disabled={refreshing}
           className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
         >
           <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
           {t('n8n.syncAll')}
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSyncAll(true)}
+          disabled={refreshing}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+        >
+          <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+          {t('n8n.syncExternal')}
         </button>
         <button
           type="button"
@@ -145,7 +195,7 @@ function N8nWorkflowList() {
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {error ? (
           <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>
-        ) : records.length === 0 ? (
+        ) : filteredRecords.length === 0 ? (
           <EmptyState
             icon={<Workflow className="h-16 w-16" />}
             title={t('n8n.emptyTitle')}
@@ -167,6 +217,8 @@ function N8nWorkflowList() {
               <thead className="bg-gray-50 text-left text-xs font-semibold text-gray-500">
                 <tr>
                   <th className="px-4 py-3">{t('n8n.name')}</th>
+                  <th className="px-4 py-3">{t('n8n.connection')}</th>
+                  <th className="px-4 py-3">{t('n8n.source')}</th>
                   <th className="px-4 py-3">{t('n8n.remoteStatus')}</th>
                   <th className="px-4 py-3">{t('n8n.testStatus')}</th>
                   <th className="px-4 py-3">{t('n8n.webhookUrl')}</th>
@@ -174,13 +226,21 @@ function N8nWorkflowList() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 text-sm">
-                {records.map((record) => (
+                {filteredRecords.map((record) => (
                   <tr key={record.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
                       <button type="button" onClick={() => navigate(`/workflows/n8n/${record.id}`)} className="text-left">
                         <span className="block font-semibold text-gray-900">{record.name}</span>
                         <span className="block font-mono text-xs text-gray-400">{record.n8nWorkflowId}</span>
                       </button>
+                    </td>
+                    <td className="max-w-[220px] truncate px-4 py-3">
+                      <span className="block text-gray-700">{record.connectionName || record.connectionId}</span>
+                      <span className="block truncate font-mono text-xs text-gray-400">{record.n8nBaseUrl}</span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="block text-gray-700">{t(`n8n.sourceValue.${record.source}`, record.source)}</span>
+                      <span className="block text-xs text-gray-400">{t(`n8n.ownershipValue.${record.ownership}`, record.ownership)}</span>
                     </td>
                     <td className="px-4 py-3"><span className={`rounded border px-2 py-1 text-xs ${statusClass(record.remoteStatus)}`}>{record.remoteStatus}</span></td>
                     <td className="px-4 py-3"><span className={`rounded border px-2 py-1 text-xs ${statusClass(record.testStatus)}`}>{record.testStatus}</span></td>
@@ -194,10 +254,12 @@ function N8nWorkflowList() {
                           <ExternalLink className="h-3 w-3" />
                           {t('n8n.openN8n')}
                         </a>
-                        <button type="button" onClick={() => void handleCleanup(record)} className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
-                          <Trash2 className="h-3 w-3" />
-                          {t('n8n.cleanup')}
-                        </button>
+                        {record.ownership === 'managed' && record.source !== 'external' && (
+                          <button type="button" onClick={() => void handleCleanup(record)} className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
+                            <Trash2 className="h-3 w-3" />
+                            {t('n8n.cleanup')}
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -310,13 +372,18 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
 
   const facts = [
     [t('n8n.recordId'), record.id],
+    [t('n8n.connection'), record.connectionName || record.connectionId],
+    [t('n8n.n8nBaseUrl'), record.n8nBaseUrl],
     [t('n8n.n8nWorkflowId'), record.n8nWorkflowId],
     [t('n8n.source'), record.source],
+    [t('n8n.ownership'), record.ownership],
     [t('n8n.webhookMethod'), record.webhookMethod || '-'],
     [t('n8n.latestExecutionId'), record.latestExecutionId || '-'],
     [t('n8n.lastSyncedAt'), record.lastSyncedAt || '-'],
     [t('n8n.lastTestedAt'), record.lastTestedAt || '-'],
   ];
+
+  const canManageRemote = record.ownership === 'managed' && record.source !== 'external';
 
   return (
     <div className="flex h-full flex-col bg-gray-50">
@@ -330,18 +397,22 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
           <Activity className="h-4 w-4" />
           {t('n8n.sync')}
         </button>
-        <button type="button" disabled={busy !== null} onClick={() => void applyAction('retry')} className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">
-          <FlaskConical className="h-4 w-4" />
-          {t('n8n.retryTest')}
-        </button>
+        {canManageRemote && (
+          <button type="button" disabled={busy !== null} onClick={() => void applyAction('retry')} className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+            <FlaskConical className="h-4 w-4" />
+            {t('n8n.retryTest')}
+          </button>
+        )}
         <a href={record.workflowUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">
           <ExternalLink className="h-4 w-4" />
           {t('n8n.openN8n')}
         </a>
-        <button type="button" disabled={busy !== null} onClick={() => void applyAction('cleanup')} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50">
-          <Trash2 className="h-4 w-4" />
-          {t('n8n.cleanup')}
-        </button>
+        {canManageRemote && (
+          <button type="button" disabled={busy !== null} onClick={() => void applyAction('cleanup')} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50">
+            <Trash2 className="h-4 w-4" />
+            {t('n8n.cleanup')}
+          </button>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="mx-auto grid max-w-6xl gap-4 lg:grid-cols-[360px,1fr]">

@@ -44,8 +44,12 @@ def get_n8n_output_dir(*, today: Optional[datetime] = None) -> Path:
 class N8nConnectionState(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    id: str = "default"
+    name: str = "Default n8n"
     base_url: str = Field(DEFAULT_N8N_BASE_URL, alias="baseUrl")
     api_key_secret_ref: str = Field(DEFAULT_N8N_SECRET_REF, alias="apiKeySecretRef")
+    is_default: bool = Field(False, alias="isDefault")
+    status: str = "unknown"
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     last_health_status: Optional[str] = Field(None, alias="lastHealthStatus")
     last_health_error: Optional[str] = Field(None, alias="lastHealthError")
@@ -56,6 +60,7 @@ class N8nBuildRunState(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     run_id: str = Field(alias="runId")
+    connection_id: str = Field("default", alias="connectionId")
     record_id: Optional[str] = Field(None, alias="recordId")
     status: str = "queued"
     current_step: str = Field("queued", alias="currentStep")
@@ -83,7 +88,10 @@ class N8nWorkflowRecord(BaseModel):
     id: str
     name: str
     engine: str = "n8n"
-    source: str = "generated"
+    connection_id: str = Field("default", alias="connectionId")
+    connection_name: Optional[str] = Field(None, alias="connectionName")
+    source: str = "flocks_created"
+    ownership: str = "managed"
     n8n_workflow_id: str = Field(alias="n8nWorkflowId")
     n8n_base_url: str = Field(DEFAULT_N8N_BASE_URL, alias="n8nBaseUrl")
     api_key_secret_ref: str = Field(DEFAULT_N8N_SECRET_REF, alias="apiKeySecretRef")
@@ -117,28 +125,114 @@ class N8nStateStore:
         self.root = root or get_state_dir()
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "build_runs").mkdir(parents=True, exist_ok=True)
+        (self.root / "connections").mkdir(parents=True, exist_ok=True)
         (self.root / "records").mkdir(parents=True, exist_ok=True)
 
     @property
     def connection_path(self) -> Path:
         return self.root / "connection.json"
 
+    def connection_file_path(self, connection_id: str) -> Path:
+        clean = "".join(ch for ch in str(connection_id) if ch.isalnum() or ch in {"-", "_"})
+        return self.root / "connections" / f"{clean or 'default'}.json"
+
     def load_connection(self) -> N8nConnectionState:
+        connections = self.list_connections()
+        for connection in connections:
+            if connection.is_default:
+                return connection
+        if connections:
+            connections[0].is_default = True
+            return self.save_connection(connections[0])
         if not self.connection_path.is_file():
-            return N8nConnectionState()
+            return self.save_connection(N8nConnectionState(id="default", isDefault=True))
         try:
             data = json.loads(self.connection_path.read_text(encoding="utf-8"))
-            return N8nConnectionState.model_validate(data)
+            state = N8nConnectionState.model_validate(data)
+            state.id = state.id or "default"
+            state.name = state.name or "Default n8n"
+            state.is_default = True
+            return self.save_connection(state)
         except Exception:
-            return N8nConnectionState()
+            return self.save_connection(N8nConnectionState(id="default", isDefault=True))
+
+    def load_connection_by_id(self, connection_id: str) -> Optional[N8nConnectionState]:
+        path = self.connection_file_path(connection_id)
+        if not path.is_file():
+            return None
+        try:
+            return N8nConnectionState.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:
+            return None
+
+    def list_connections(self) -> List[N8nConnectionState]:
+        rows: List[N8nConnectionState] = []
+        for path in sorted((self.root / "connections").glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                rows.append(N8nConnectionState.model_validate(json.loads(path.read_text(encoding="utf-8"))))
+            except Exception:
+                continue
+        rows.sort(key=lambda item: (not item.is_default, item.name.lower(), item.id))
+        return rows
+
+    def new_connection_id(self) -> str:
+        return f"conn-{uuid.uuid4().hex[:12]}"
 
     def save_connection(self, state: N8nConnectionState) -> N8nConnectionState:
+        state.id = state.id or "default"
+        state.name = state.name.strip() if state.name else "n8n"
+        state.base_url = state.base_url.strip().rstrip("/") or DEFAULT_N8N_BASE_URL
+        state.api_key_secret_ref = state.api_key_secret_ref.strip() or DEFAULT_N8N_SECRET_REF
         state.updated_at = utc_now_iso()
+        if state.is_default:
+            for other in self.list_connections():
+                if other.id == state.id or not other.is_default:
+                    continue
+                other.is_default = False
+                self.connection_file_path(other.id).write_text(
+                    json.dumps(other.model_dump(by_alias=True), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        elif not self.list_connections():
+            state.is_default = True
+        self.connection_file_path(state.id).write_text(
+            json.dumps(state.model_dump(by_alias=True), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if state.is_default:
+            self.connection_path.write_text(
+                json.dumps(state.model_dump(by_alias=True), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return state
+
+    def delete_connection(self, connection_id: str) -> bool:
+        path = self.connection_file_path(connection_id)
+        if not path.is_file():
+            return False
+        was_default = False
+        existing = self.load_connection_by_id(connection_id)
+        if existing:
+            was_default = existing.is_default
+        path.unlink()
+        if was_default:
+            connections = self.list_connections()
+            if connections:
+                connections[0].is_default = True
+                self.save_connection(connections[0])
+            elif self.connection_path.is_file():
+                self.connection_path.unlink()
+        return True
+
+    def save_legacy_connection(self, state: N8nConnectionState) -> N8nConnectionState:
+        state.id = "default"
+        state.name = state.name or "Default n8n"
+        state.is_default = True
         self.connection_path.write_text(
             json.dumps(state.model_dump(by_alias=True), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return state
+        return self.save_connection(state)
 
     def new_run_id(self) -> str:
         return uuid.uuid4().hex

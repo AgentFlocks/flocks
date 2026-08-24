@@ -53,8 +53,9 @@ class FakeSecrets:
 
 
 class FakeN8nClient:
-    def __init__(self):
+    def __init__(self, workflows=None):
         self.deleted: list[str] = []
+        self.workflows = workflows
 
     def create_workflow(self, payload):
         return {"status": 200, "body": {"id": "wf-route-1", "active": False, "name": payload.get("name")}}
@@ -72,6 +73,8 @@ class FakeN8nClient:
         return {"status": 200, "body": {"id": workflow_id, "active": True}}
 
     def list_workflows(self, *, limit: int = 100, cursor: str | None = None):
+        if self.workflows is not None:
+            return {"status": 200, "body": {"data": self.workflows}}
         return {
             "status": 200,
             "body": {
@@ -119,6 +122,7 @@ async def test_n8n_connection_saves_secret_without_returning_plaintext(client, n
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["baseUrl"] == "http://localhost:5678"
+    assert data["id"] == "default"
     assert data["apiKeySecretRef"] == "N8N_API_KEY"
     assert data["apiKeyConfigured"] is True
     assert "n8n-secret-value" not in response.text
@@ -171,18 +175,22 @@ async def test_n8n_build_run_auto_registers_workflow_record(client, monkeypatch:
     assert response.status_code == 200, response.text
     run = response.json()
     assert run["status"] == "test_passed"
-    assert run["recordId"] == "n8n-wf-route-1"
+    assert run["connectionId"] == "default"
+    assert run["recordId"] == "n8n-default-wf-route-1"
 
     listed = await client.get("/api/integrations/n8n/workflows")
     assert listed.status_code == 200, listed.text
     records = listed.json()
-    assert records[0]["id"] == "n8n-wf-route-1"
+    assert records[0]["id"] == "n8n-default-wf-route-1"
+    assert records[0]["connectionId"] == "default"
+    assert records[0]["source"] == "flocks_created"
+    assert records[0]["ownership"] == "managed"
     assert records[0]["name"] == "flocks-test-route"
     assert records[0]["remoteStatus"] == "active"
     assert records[0]["testStatus"] == "test_passed"
     assert records[0]["latestExecutionId"] == "exec-route-1"
 
-    detail = await client.get("/api/integrations/n8n/workflows/n8n-wf-route-1")
+    detail = await client.get("/api/integrations/n8n/workflows/n8n-default-wf-route-1")
     assert detail.status_code == 200, detail.text
     assert detail.json()["webhookPath"] == "flocks-test-route"
 
@@ -227,8 +235,7 @@ async def test_n8n_workflow_record_sync_retry_and_cleanup(client, monkeypatch: p
     assert opened.json()["url"].endswith("/workflow/manual-1")
 
     cleaned = await client.post(f"/api/integrations/n8n/workflows/{record_id}/cleanup")
-    assert cleaned.status_code == 200, cleaned.text
-    assert cleaned.json()["remoteStatus"] == "cleaned"
+    assert cleaned.status_code == 403, cleaned.text
 
 
 @pytest.mark.asyncio
@@ -273,7 +280,153 @@ async def test_n8n_discover_registers_flocks_prefixed_remote_workflows(client, m
     assert response.status_code == 200, response.text
     records = response.json()
     assert [record["name"] for record in records] == ["flocks-test-discovered"]
-    assert records[0]["id"] == "n8n-wf-discovered-1"
+    assert records[0]["id"] == "n8n-default-wf-discovered-1"
+    assert records[0]["connectionId"] == "default"
+    assert records[0]["source"] == "discovered"
+    assert records[0]["ownership"] == "readonly"
     assert records[0]["remoteStatus"] == "active"
     assert records[0]["webhookUrl"] == "http://localhost:5678/webhook/flocks-test-discovered"
     assert records[0]["webhookMethod"] == "POST"
+
+
+@pytest.mark.asyncio
+async def test_n8n_global_sync_keeps_same_workflow_id_separate_per_connection(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_A_KEY", "n8n-a-secret")
+    n8n_route_state["secrets"].set("N8N_B_KEY", "n8n-b-secret")
+    first = await client.post(
+        "/api/integrations/n8n/connections",
+        json={
+            "name": "n8n A",
+            "baseUrl": "http://n8n-a.local",
+            "apiKeySecretRef": "N8N_A_KEY",
+            "isDefault": True,
+        },
+    )
+    second = await client.post(
+        "/api/integrations/n8n/connections",
+        json={
+            "name": "n8n B",
+            "baseUrl": "http://n8n-b.local",
+            "apiKeySecretRef": "N8N_B_KEY",
+        },
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    first_connection = first.json()
+    second_connection = second.json()
+
+    def client_for(base_url: str, _secret_ref: str):
+        if base_url == "http://n8n-a.local":
+            return FakeN8nClient(
+                workflows=[
+                    {
+                        "id": "same-id",
+                        "name": "flocks-from-a",
+                        "active": True,
+                        "nodes": [],
+                    }
+                ]
+            )
+        return FakeN8nClient(
+            workflows=[
+                {
+                    "id": "same-id",
+                    "name": "flocks-from-b",
+                    "active": False,
+                    "nodes": [],
+                }
+            ]
+        )
+
+    monkeypatch.setattr(n8n_routes, "_client_for", client_for)
+
+    response = await client.post("/api/integrations/n8n/sync", json={})
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["connectionsSuccess"] >= 2
+    records = sorted(data["records"], key=lambda item: item["connectionId"])
+    same_id_records = [record for record in records if record["n8nWorkflowId"] == "same-id"]
+    assert len(same_id_records) == 2
+    assert {record["connectionId"] for record in same_id_records} == {first_connection["id"], second_connection["id"]}
+    assert {record["name"] for record in same_id_records} == {"flocks-from-a", "flocks-from-b"}
+
+
+@pytest.mark.asyncio
+async def test_n8n_global_sync_does_not_let_second_connection_steal_legacy_record(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.integrations.n8n.state import N8nStateStore, N8nWorkflowRecord
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_A_KEY", "n8n-a-secret")
+    n8n_route_state["secrets"].set("N8N_B_KEY", "n8n-b-secret")
+    first = await client.post(
+        "/api/integrations/n8n/connections",
+        json={
+            "name": "n8n A",
+            "baseUrl": "http://n8n-a.local",
+            "apiKeySecretRef": "N8N_A_KEY",
+            "isDefault": True,
+        },
+    )
+    second = await client.post(
+        "/api/integrations/n8n/connections",
+        json={
+            "name": "n8n B",
+            "baseUrl": "http://n8n-b.local",
+            "apiKeySecretRef": "N8N_B_KEY",
+        },
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    second_connection = second.json()
+
+    store = N8nStateStore()
+    store.save_record(
+        N8nWorkflowRecord(
+            id="n8n-same-id",
+            name="legacy-from-a",
+            connectionId="default",
+            connectionName="n8n A",
+            source="flocks_created",
+            ownership="managed",
+            n8nWorkflowId="same-id",
+            n8nBaseUrl="http://n8n-a.local",
+            apiKeySecretRef="N8N_A_KEY",
+            workflowUrl="http://n8n-a.local/workflow/same-id",
+        )
+    )
+
+    def client_for(base_url: str, _secret_ref: str):
+        return FakeN8nClient(
+            workflows=[
+                {
+                    "id": "same-id",
+                    "name": "flocks-from-b" if base_url == "http://n8n-b.local" else "legacy-from-a",
+                    "active": True,
+                    "nodes": [],
+                }
+            ]
+        )
+
+    monkeypatch.setattr(n8n_routes, "_client_for", client_for)
+
+    response = await client.post("/api/integrations/n8n/sync", json={})
+
+    assert response.status_code == 200, response.text
+    records = response.json()["records"]
+    legacy = next(record for record in records if record["id"] == "n8n-same-id")
+    second_record = next(record for record in records if record["connectionId"] == second_connection["id"])
+    assert legacy["connectionId"] == "default"
+    assert legacy["n8nBaseUrl"] == "http://n8n-a.local"
+    assert second_record["id"] != legacy["id"]
+    assert second_record["name"] == "flocks-from-b"

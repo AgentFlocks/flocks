@@ -46,17 +46,23 @@ router = APIRouter()
 class N8nConnectionUpdate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    name: Optional[str] = None
     base_url: str = Field(DEFAULT_N8N_BASE_URL, alias="baseUrl")
     api_key_secret_ref: str = Field(DEFAULT_N8N_SECRET_REF, alias="apiKeySecretRef")
     api_key: Optional[str] = Field(None, alias="apiKey")
     clear_api_key: bool = Field(False, alias="clearApiKey")
+    is_default: bool = Field(False, alias="isDefault")
 
 
 class N8nConnectionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    id: str
+    name: str
     base_url: str = Field(alias="baseUrl")
     api_key_secret_ref: str = Field(alias="apiKeySecretRef")
+    is_default: bool = Field(False, alias="isDefault")
+    status: str = "unknown"
     api_key_configured: bool = Field(alias="apiKeyConfigured")
     api_key_masked: Optional[str] = Field(None, alias="apiKeyMasked")
     updated_at: Optional[str] = Field(None, alias="updatedAt")
@@ -68,6 +74,7 @@ class N8nConnectionResponse(BaseModel):
 class N8nHealthCheckRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    connection_id: Optional[str] = Field(None, alias="connectionId")
     base_url: Optional[str] = Field(None, alias="baseUrl")
     api_key_secret_ref: Optional[str] = Field(None, alias="apiKeySecretRef")
 
@@ -75,6 +82,7 @@ class N8nHealthCheckRequest(BaseModel):
 class N8nBuildRunCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    connection_id: Optional[str] = Field(None, alias="connectionId")
     user_request: str = Field("", alias="userRequest")
     ir: Dict[str, Any]
     base_url: Optional[str] = Field(None, alias="baseUrl")
@@ -89,7 +97,9 @@ class N8nWorkflowRecordCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     name: str
+    connection_id: Optional[str] = Field(None, alias="connectionId")
     source: str = "manual"
+    ownership: str = "managed"
     n8n_workflow_id: str = Field(alias="n8nWorkflowId")
     n8n_base_url: str = Field(DEFAULT_N8N_BASE_URL, alias="n8nBaseUrl")
     api_key_secret_ref: str = Field(DEFAULT_N8N_SECRET_REF, alias="apiKeySecretRef")
@@ -116,10 +126,19 @@ class N8nWorkflowRecordUpdateRequest(BaseModel):
 class N8nWorkflowDiscoverRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    connection_id: Optional[str] = Field(None, alias="connectionId")
     base_url: Optional[str] = Field(None, alias="baseUrl")
     api_key_secret_ref: Optional[str] = Field(None, alias="apiKeySecretRef")
     prefix: str = "flocks-"
     include_all: bool = Field(False, alias="includeAll")
+
+
+class N8nSyncRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    connection_ids: Optional[List[str]] = Field(None, alias="connectionIds")
+    include_external: bool = Field(False, alias="includeExternal")
+    prefix: str = "flocks-"
 
 
 def _store() -> N8nStateStore:
@@ -129,8 +148,12 @@ def _store() -> N8nStateStore:
 def _connection_response(state: N8nConnectionState) -> N8nConnectionResponse:
     key = resolve_n8n_api_key(secret_ref=state.api_key_secret_ref)
     return N8nConnectionResponse(
+        id=state.id,
+        name=state.name,
         baseUrl=state.base_url,
         apiKeySecretRef=state.api_key_secret_ref,
+        isDefault=state.is_default,
+        status=state.status,
         apiKeyConfigured=bool(key),
         apiKeyMasked=redact_secret(key),
         updatedAt=state.updated_at,
@@ -147,8 +170,47 @@ def _client_for(base_url: str, secret_ref: str) -> N8nClient:
     return N8nClient(N8nConfig(base_url=base_url, api_key=key))
 
 
-def _record_id_for(workflow_id: str) -> str:
+def _client_for_connection(connection: N8nConnectionState) -> N8nClient:
+    return _client_for(connection.base_url, connection.api_key_secret_ref)
+
+
+def _record_id_for(workflow_id: str, connection_id: str = "default") -> str:
+    clean_connection = "".join(ch for ch in str(connection_id or "default") if ch.isalnum() or ch in {"-", "_"})
+    clean_workflow = "".join(ch for ch in str(workflow_id) if ch.isalnum() or ch in {"-", "_"})
+    return f"n8n-{clean_connection}-{clean_workflow}"
+
+
+def _load_connection_or_404(store: N8nStateStore, connection_id: Optional[str]) -> N8nConnectionState:
+    if not connection_id:
+        return store.load_connection()
+    connection = store.load_connection_by_id(connection_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n connection not found")
+    return connection
+
+
+def _legacy_record_id_for(workflow_id: str) -> str:
     return f"n8n-{workflow_id}"
+
+
+def _load_existing_record_for_workflow(
+    store: N8nStateStore,
+    workflow_id: str,
+    connection: N8nConnectionState,
+) -> Optional[N8nWorkflowRecord]:
+    scoped = store.load_record(_record_id_for(workflow_id, connection.id))
+    if scoped:
+        return scoped
+    legacy = store.load_record(_legacy_record_id_for(workflow_id))
+    if not legacy:
+        return None
+    legacy_base_url = (legacy.n8n_base_url or "").rstrip("/")
+    connection_base_url = (connection.base_url or "").rstrip("/")
+    if legacy.connection_id == connection.id or (legacy.connection_id == "default" and connection.id == "default"):
+        return legacy
+    if connection.id == "default" and legacy_base_url == connection_base_url:
+        return legacy
+    return None
 
 
 def _remote_status_from_workflow(workflow: Dict[str, Any]) -> str:
@@ -190,35 +252,43 @@ def _upsert_discovered_record(
     store: N8nStateStore,
     workflow: Dict[str, Any],
     *,
-    base_url: str,
-    secret_ref: str,
+    connection: N8nConnectionState,
+    source: str,
+    ownership: str,
 ) -> Optional[N8nWorkflowRecord]:
     workflow_id = workflow.get("id")
     if workflow_id is None:
         return None
     workflow_id_text = str(workflow_id)
-    record_id = _record_id_for(workflow_id_text)
-    existing = store.load_record(record_id)
+    record_id = _record_id_for(workflow_id_text, connection.id)
+    existing = _load_existing_record_for_workflow(store, workflow_id_text, connection)
     webhook_path, webhook_method = _extract_webhook_info(workflow)
-    workflow_url = f"{base_url}/workflow/{workflow_id_text}"
+    workflow_url = f"{connection.base_url}/workflow/{workflow_id_text}"
     record = existing or N8nWorkflowRecord(
         id=record_id,
         name=str(workflow.get("name") or workflow_id_text),
-        source="discovered",
+        connectionId=connection.id,
+        connectionName=connection.name,
+        source=source,
+        ownership=ownership,
         n8nWorkflowId=workflow_id_text,
-        n8nBaseUrl=base_url,
-        apiKeySecretRef=secret_ref,
+        n8nBaseUrl=connection.base_url,
+        apiKeySecretRef=connection.api_key_secret_ref,
         workflowUrl=workflow_url,
     )
     record.name = str(workflow.get("name") or record.name)
-    record.n8n_base_url = base_url
-    record.api_key_secret_ref = secret_ref
+    record.connection_id = connection.id
+    record.connection_name = connection.name
+    record.source = record.source if record.source == "flocks_created" else source
+    record.ownership = record.ownership if record.ownership == "managed" else ownership
+    record.n8n_base_url = connection.base_url
+    record.api_key_secret_ref = connection.api_key_secret_ref
     record.workflow_url = workflow_url
     record.remote_status = _remote_status_from_workflow(workflow)
     record.webhook_path = webhook_path or record.webhook_path
     record.webhook_method = webhook_method or record.webhook_method
     if webhook_path:
-        record.webhook_url = f"{base_url}/webhook/{webhook_path}"
+        record.webhook_url = f"{connection.base_url}/webhook/{webhook_path}"
     record.last_synced_at = utc_now_iso()
     record.error = None
     return store.save_record(record)
@@ -234,21 +304,33 @@ def _promote_run_to_record(
     if not run.n8n_workflow_id:
         raise N8nClientError("n8n workflow id is missing")
     workflow_id = run.n8n_workflow_id
-    record_id = _record_id_for(workflow_id)
-    existing = store.load_record(record_id)
+    connection = store.load_connection_by_id(run.connection_id) or N8nConnectionState(
+        id=run.connection_id,
+        name=run.connection_id,
+        baseUrl=run.base_url,
+        apiKeySecretRef=run.api_key_secret_ref,
+    )
+    record_id = _record_id_for(workflow_id, connection.id)
+    existing = _load_existing_record_for_workflow(store, workflow_id, connection)
     tests_attempted = bool(run.test_results)
     test_success = tests_attempted and all(item.get("success") for item in run.test_results)
     record = existing or N8nWorkflowRecord(
         id=record_id,
         name=parsed_ir.name,
-        source="generated",
+        connectionId=connection.id,
+        connectionName=connection.name,
+        source="flocks_created",
+        ownership="managed",
         n8nWorkflowId=workflow_id,
         n8nBaseUrl=run.base_url,
         apiKeySecretRef=run.api_key_secret_ref,
         workflowUrl=run.workflow_url or f"{run.base_url}/workflow/{workflow_id}",
     )
     record.name = parsed_ir.name
-    record.source = "generated"
+    record.connection_id = connection.id
+    record.connection_name = connection.name
+    record.source = "flocks_created"
+    record.ownership = "managed"
     record.n8n_base_url = run.base_url
     record.api_key_secret_ref = run.api_key_secret_ref
     record.workflow_url = run.workflow_url or f"{run.base_url}/workflow/{workflow_id}"
@@ -288,15 +370,95 @@ async def update_connection(
 ):
     store = _store()
     state = N8nConnectionState(
+        id="default",
+        name=request.name or "Default n8n",
         baseUrl=request.base_url.strip().rstrip("/") or DEFAULT_N8N_BASE_URL,
         apiKeySecretRef=request.api_key_secret_ref.strip() or DEFAULT_N8N_SECRET_REF,
+        isDefault=True,
     )
     if request.clear_api_key:
         delete_n8n_api_key(state.api_key_secret_ref)
     if request.api_key and request.api_key.strip():
         store_n8n_api_key(state.api_key_secret_ref, request.api_key)
-    store.save_connection(state)
+    store.save_legacy_connection(state)
     return _connection_response(state)
+
+
+@router.get("/connections", response_model=List[N8nConnectionResponse])
+async def list_connections(_admin: object = Depends(require_admin)):
+    store = _store()
+    return [_connection_response(connection) for connection in store.list_connections() or [store.load_connection()]]
+
+
+@router.post("/connections", response_model=N8nConnectionResponse)
+async def create_connection(
+    request: N8nConnectionUpdate,
+    _admin: object = Depends(require_admin),
+):
+    store = _store()
+    state = N8nConnectionState(
+        id=store.new_connection_id(),
+        name=(request.name or "n8n").strip() or "n8n",
+        baseUrl=request.base_url,
+        apiKeySecretRef=request.api_key_secret_ref,
+        isDefault=request.is_default,
+    )
+    if request.api_key and request.api_key.strip():
+        store_n8n_api_key(state.api_key_secret_ref, request.api_key)
+    return _connection_response(store.save_connection(state))
+
+
+@router.put("/connections/{connection_id}", response_model=N8nConnectionResponse)
+async def update_connection_by_id(
+    connection_id: str,
+    request: N8nConnectionUpdate,
+    _admin: object = Depends(require_admin),
+):
+    store = _store()
+    existing = store.load_connection_by_id(connection_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n connection not found")
+    old_secret_ref = existing.api_key_secret_ref
+    existing.name = (request.name or existing.name or "n8n").strip() or "n8n"
+    existing.base_url = request.base_url
+    existing.api_key_secret_ref = request.api_key_secret_ref
+    existing.is_default = request.is_default or existing.is_default
+    if request.clear_api_key:
+        delete_n8n_api_key(old_secret_ref)
+        if existing.api_key_secret_ref != old_secret_ref:
+            delete_n8n_api_key(existing.api_key_secret_ref)
+    if request.api_key and request.api_key.strip():
+        store_n8n_api_key(existing.api_key_secret_ref, request.api_key)
+    return _connection_response(store.save_connection(existing))
+
+
+@router.delete("/connections/{connection_id}")
+async def delete_connection(
+    connection_id: str,
+    force: bool = Query(False),
+    _admin: object = Depends(require_admin),
+):
+    store = _store()
+    records = [record for record in store.list_records(limit=1000) if record.connection_id == connection_id]
+    if records and not force:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection still has workflow records")
+    deleted = store.delete_connection(connection_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n connection not found")
+    if records:
+        for record in records:
+            record.remote_status = "connection_missing"
+            record.error = "n8n connection was deleted"
+            store.save_record(record)
+    return {"success": True}
+
+
+@router.post("/connections/{connection_id}/check")
+async def health_check_connection(
+    connection_id: str,
+    _admin: object = Depends(require_admin),
+):
+    return await health_check(N8nHealthCheckRequest(connectionId=connection_id), _admin)
 
 
 @router.post("/health-check")
@@ -305,7 +467,7 @@ async def health_check(
     _admin: object = Depends(require_admin),
 ):
     store = _store()
-    state = store.load_connection()
+    state = _load_connection_or_404(store, request.connection_id if request else None)
     base_url = (request.base_url if request and request.base_url else state.base_url).rstrip("/")
     secret_ref = request.api_key_secret_ref if request and request.api_key_secret_ref else state.api_key_secret_ref
     try:
@@ -320,6 +482,7 @@ async def health_check(
         state.base_url = base_url
         state.api_key_secret_ref = secret_ref
         state.last_health_status = "ok"
+        state.status = "healthy"
         state.last_health_error = None
         state.last_checked_at = utc_now_iso()
         store.save_connection(state)
@@ -335,6 +498,7 @@ async def health_check(
         state.base_url = base_url
         state.api_key_secret_ref = secret_ref
         state.last_health_status = "error"
+        state.status = "unhealthy"
         state.last_health_error = str(exc)
         state.last_checked_at = utc_now_iso()
         store.save_connection(state)
@@ -355,11 +519,12 @@ def _write_run_artifacts(run: N8nBuildRunState) -> None:
 
 def _build_run_sync(request: N8nBuildRunCreateRequest) -> N8nBuildRunState:
     store = _store()
-    connection = store.load_connection()
+    connection = _load_connection_or_404(store, request.connection_id)
     base_url = (request.base_url or connection.base_url or DEFAULT_N8N_BASE_URL).rstrip("/")
     secret_ref = request.api_key_secret_ref or connection.api_key_secret_ref or DEFAULT_N8N_SECRET_REF
     run = N8nBuildRunState(
         runId=store.new_run_id(),
+        connectionId=connection.id,
         status="running",
         currentStep="render",
         userRequest=request.user_request,
@@ -473,9 +638,16 @@ async def list_build_runs(
 @router.get("/workflows", response_model=List[N8nWorkflowRecord])
 async def list_n8n_workflows(
     limit: int = Query(100, ge=1, le=500),
+    connection_id: Optional[str] = Query(None, alias="connectionId"),
+    source: Optional[str] = None,
     _admin: object = Depends(require_admin),
 ):
-    return _store().list_records(limit=limit)
+    records = _store().list_records(limit=limit)
+    if connection_id:
+        records = [record for record in records if record.connection_id == connection_id]
+    if source:
+        records = [record for record in records if record.source == source]
+    return records
 
 
 @router.post("/workflows", response_model=N8nWorkflowRecord)
@@ -484,12 +656,16 @@ async def create_n8n_workflow_record(
     _admin: object = Depends(require_admin),
 ):
     store = _store()
-    base_url = request.n8n_base_url.rstrip("/") or DEFAULT_N8N_BASE_URL
+    connection = _load_connection_or_404(store, request.connection_id)
+    base_url = (request.n8n_base_url or connection.base_url).rstrip("/") or DEFAULT_N8N_BASE_URL
     workflow_url = request.workflow_url or f"{base_url}/workflow/{request.n8n_workflow_id}"
     record = N8nWorkflowRecord(
-        id=_record_id_for(request.n8n_workflow_id),
+        id=_record_id_for(request.n8n_workflow_id, connection.id),
         name=request.name.strip() or request.n8n_workflow_id,
+        connectionId=connection.id,
+        connectionName=connection.name,
         source=request.source,
+        ownership=request.ownership,
         n8nWorkflowId=request.n8n_workflow_id,
         n8nBaseUrl=base_url,
         apiKeySecretRef=request.api_key_secret_ref,
@@ -505,37 +681,155 @@ async def create_n8n_workflow_record(
     return store.save_record(record)
 
 
+async def _sync_connection(
+    store: N8nStateStore,
+    connection: N8nConnectionState,
+    *,
+    prefix: str = "flocks-",
+    include_external: bool = False,
+) -> Dict[str, Any]:
+    client = _client_for_connection(connection)
+    seen: set[str] = set()
+    created = 0
+    updated = 0
+    external = 0
+    cursor: Optional[str] = None
+    truncated = False
+    for _ in range(20):
+        response = await asyncio.to_thread(client.list_workflows, limit=100, cursor=cursor)
+        body = response.get("body") if isinstance(response.get("body"), dict) else {}
+        rows = body.get("data") if isinstance(body, dict) else []
+        if not isinstance(rows, list):
+            cursor = None
+            break
+        for workflow in rows:
+            if not isinstance(workflow, dict):
+                continue
+            workflow_id = workflow.get("id")
+            if workflow_id is None:
+                continue
+            workflow_id_text = str(workflow_id)
+            seen.add(workflow_id_text)
+            existing = _load_existing_record_for_workflow(store, workflow_id_text, connection)
+            name = str(workflow.get("name") or "")
+            should_import = bool(existing) or name.startswith(prefix) or include_external
+            if not should_import:
+                continue
+            source = existing.source if existing else ("discovered" if name.startswith(prefix) else "external")
+            ownership = existing.ownership if existing else ("readonly" if source == "external" else "readonly")
+            if source == "flocks_created":
+                ownership = "managed"
+            saved = _upsert_discovered_record(
+                store,
+                workflow,
+                connection=connection,
+                source=source,
+                ownership=ownership,
+            )
+            if not saved:
+                continue
+            if existing:
+                updated += 1
+            else:
+                created += 1
+            if saved.source == "external":
+                external += 1
+        cursor = body.get("nextCursor") if isinstance(body.get("nextCursor"), str) else None
+        if not cursor:
+            break
+    if cursor:
+        truncated = True
+
+    missing = 0
+    if not truncated:
+        for record in store.list_records(limit=1000):
+            if record.connection_id != connection.id or not record.n8n_workflow_id:
+                continue
+            if record.n8n_workflow_id not in seen and record.remote_status not in {"cleaned", "connection_missing"}:
+                record.remote_status = "missing_remote"
+                record.last_synced_at = utc_now_iso()
+                store.save_record(record)
+                missing += 1
+    connection.status = "healthy"
+    connection.last_health_status = "ok"
+    connection.last_health_error = None
+    connection.last_checked_at = utc_now_iso()
+    store.save_connection(connection)
+    return {
+        "connectionId": connection.id,
+        "connectionName": connection.name,
+        "success": True,
+        "created": created,
+        "updated": updated,
+        "missing": missing,
+        "external": external,
+        "truncated": truncated,
+    }
+
+
+@router.post("/sync")
+async def sync_n8n_workflows(
+    request: Optional[N8nSyncRequest] = None,
+    _admin: object = Depends(require_admin),
+):
+    store = _store()
+    requested_ids = set(request.connection_ids or []) if request and request.connection_ids else None
+    connections = store.list_connections() or [store.load_connection()]
+    if requested_ids is not None:
+        connections = [connection for connection in connections if connection.id in requested_ids]
+    report: Dict[str, Any] = {
+        "status": "completed",
+        "connectionsTotal": len(connections),
+        "connectionsSuccess": 0,
+        "connectionsFailed": 0,
+        "created": 0,
+        "updated": 0,
+        "missing": 0,
+        "external": 0,
+        "errors": [],
+        "connections": [],
+    }
+    for connection in connections:
+        try:
+            item = await _sync_connection(
+                store,
+                connection,
+                prefix=(request.prefix if request else "flocks-") or "flocks-",
+                include_external=bool(request.include_external) if request else False,
+            )
+            report["connectionsSuccess"] += 1
+            for key in ("created", "updated", "missing", "external"):
+                report[key] += int(item.get(key) or 0)
+            report["connections"].append(item)
+        except Exception as exc:
+            connection.status = "unhealthy"
+            connection.last_health_status = "error"
+            connection.last_health_error = str(exc)
+            connection.last_checked_at = utc_now_iso()
+            store.save_connection(connection)
+            report["connectionsFailed"] += 1
+            error = {"connectionId": connection.id, "connectionName": connection.name, "error": str(exc)}
+            report["errors"].append(error)
+            report["connections"].append({**error, "success": False})
+    if report["connectionsFailed"]:
+        report["status"] = "partial" if report["connectionsSuccess"] else "failed"
+    report["records"] = [record.model_dump(by_alias=True) for record in store.list_records(limit=500)]
+    return report
+
+
 @router.post("/workflows/discover", response_model=List[N8nWorkflowRecord])
 async def discover_n8n_workflow_records(
     request: Optional[N8nWorkflowDiscoverRequest] = None,
     _admin: object = Depends(require_admin),
 ):
     store = _store()
-    connection = store.load_connection()
-    base_url = ((request.base_url if request and request.base_url else connection.base_url) or DEFAULT_N8N_BASE_URL).rstrip("/")
-    secret_ref = (request.api_key_secret_ref if request and request.api_key_secret_ref else connection.api_key_secret_ref) or DEFAULT_N8N_SECRET_REF
+    connection = _load_connection_or_404(store, request.connection_id if request else None)
+    if request and (request.base_url or request.api_key_secret_ref):
+        connection.base_url = (request.base_url or connection.base_url or DEFAULT_N8N_BASE_URL).rstrip("/")
+        connection.api_key_secret_ref = (request.api_key_secret_ref or connection.api_key_secret_ref) or DEFAULT_N8N_SECRET_REF
     prefix = (request.prefix if request else "flocks-") or "flocks-"
     include_all = bool(request.include_all) if request else False
-    client = _client_for(base_url, secret_ref)
-
-    cursor: Optional[str] = None
-    for _ in range(20):
-        response = await asyncio.to_thread(client.list_workflows, limit=100, cursor=cursor)
-        body = response.get("body") if isinstance(response.get("body"), dict) else {}
-        rows = body.get("data") if isinstance(body, dict) else []
-        if not isinstance(rows, list):
-            break
-        for workflow in rows:
-            if not isinstance(workflow, dict):
-                continue
-            workflow_id = workflow.get("id")
-            name = str(workflow.get("name") or "")
-            existing = store.load_record(_record_id_for(str(workflow_id))) if workflow_id is not None else None
-            if include_all or existing or name.startswith(prefix):
-                _upsert_discovered_record(store, workflow, base_url=base_url, secret_ref=secret_ref)
-        cursor = body.get("nextCursor") if isinstance(body.get("nextCursor"), str) else None
-        if not cursor:
-            break
+    await _sync_connection(store, connection, prefix=prefix, include_external=include_all)
     return store.list_records(limit=500)
 
 
@@ -577,12 +871,22 @@ async def sync_n8n_workflow_record(record_id: str, _admin: object = Depends(requ
     record = store.load_record(record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
+    connection = store.load_connection_by_id(record.connection_id)
+    if not connection:
+        record.remote_status = "connection_missing"
+        record.error = "n8n connection is missing"
+        record.last_synced_at = utc_now_iso()
+        return store.save_record(record)
     try:
         workflow = await asyncio.to_thread(
-            _client_for(record.n8n_base_url, record.api_key_secret_ref).get_workflow,
+            _client_for_connection(connection).get_workflow,
             record.n8n_workflow_id,
         )
         body = workflow.get("body") if isinstance(workflow.get("body"), dict) else {}
+        record.connection_name = connection.name
+        record.n8n_base_url = connection.base_url
+        record.api_key_secret_ref = connection.api_key_secret_ref
+        record.workflow_url = f"{connection.base_url}/workflow/{record.n8n_workflow_id}"
         record.remote_status = _remote_status_from_workflow(body)
         record.last_synced_at = utc_now_iso()
         record.error = None
@@ -612,6 +916,11 @@ async def retry_n8n_workflow_tests(record_id: str, _admin: object = Depends(requ
     record = store.load_record(record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
+    if record.ownership == "readonly" or record.source == "external":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="readonly n8n workflow records cannot be re-tested")
+    connection = store.load_connection_by_id(record.connection_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
     if not record.webhook_path and not record.webhook_url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n webhook path is missing")
     if not record.test_cases:
@@ -622,7 +931,7 @@ async def retry_n8n_workflow_tests(record_id: str, _admin: object = Depends(requ
     if not webhook_path and record.webhook_url:
         webhook_path = record.webhook_url.rstrip("/").split("/webhook/")[-1]
     assert webhook_path is not None
-    client = _client_for(record.n8n_base_url, record.api_key_secret_ref)
+    client = _client_for_connection(connection)
     try:
         record.test_results = [
             result.to_dict()
@@ -653,10 +962,15 @@ async def cleanup_n8n_workflow(record_id: str, _admin: object = Depends(require_
     record = store.load_record(record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
+    if record.ownership != "managed" or record.source not in {"flocks_created", "generated"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="only Flocks-managed n8n workflow records can be cleaned remotely")
+    connection = store.load_connection_by_id(record.connection_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
     try:
         result = await asyncio.to_thread(
             cleanup_workflows,
-            _client_for(record.n8n_base_url, record.api_key_secret_ref),
+            _client_for_connection(connection),
             [record.n8n_workflow_id],
         )
         if all(item.get("success") for item in result):
@@ -689,8 +1003,11 @@ async def retry_build_run_tests(run_id: str, _admin: object = Depends(require_ad
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n build run not found")
     if not run.n8n_workflow_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n workflow id is missing")
+    connection = store.load_connection_by_id(run.connection_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
     parsed_ir = N8nIR.model_validate(run.ir)
-    client = _client_for(run.base_url, run.api_key_secret_ref)
+    client = _client_for_connection(connection)
     webhook_path = slugify_webhook_path(str(parsed_ir.trigger.path or parsed_ir.name))
     run.current_step = "test"
     run.test_results = [
@@ -719,7 +1036,10 @@ async def cleanup_build_run(run_id: str, _admin: object = Depends(require_admin)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n build run not found")
     if not run.n8n_workflow_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n workflow id is missing")
-    client = _client_for(run.base_url, run.api_key_secret_ref)
+    connection = store.load_connection_by_id(run.connection_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    client = _client_for_connection(connection)
     run.current_step = "cleanup"
     run.cleanup = await asyncio.to_thread(cleanup_workflows, client, [run.n8n_workflow_id])
     run.status = "cleaned" if all(item.get("success") for item in run.cleanup) else "cleanup_failed"

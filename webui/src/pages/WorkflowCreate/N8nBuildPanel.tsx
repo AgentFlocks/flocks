@@ -62,7 +62,11 @@ function statusClass(status?: string | null): string {
 export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nBuildPanelProps) {
   const { t } = useTranslation('workflow');
   const toast = useToast();
+  const [connections, setConnections] = useState<N8nConnection[]>([]);
+  const [selectedConnectionId, setSelectedConnectionId] = useState<string>('new');
   const [connection, setConnection] = useState<N8nConnection | null>(null);
+  const [connectionName, setConnectionName] = useState('Default n8n');
+  const [isDefaultConnection, setIsDefaultConnection] = useState(true);
   const [baseUrl, setBaseUrl] = useState('http://localhost:5678');
   const [apiKeySecretRef, setApiKeySecretRef] = useState('N8N_API_KEY');
   const [apiKey, setApiKey] = useState('');
@@ -73,16 +77,25 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
   const [error, setError] = useState<string | null>(null);
 
   const latestRun = runs[0] ?? null;
+  const isNewConnection = selectedConnectionId === 'new';
 
   const loadState = useCallback(async () => {
     try {
       const [conn, runList] = await Promise.all([
-        n8nAPI.getConnection(),
+        n8nAPI.listConnections(),
         n8nAPI.listBuildRuns(8),
       ]);
-      setConnection(conn.data);
-      setBaseUrl(conn.data.baseUrl);
-      setApiKeySecretRef(conn.data.apiKeySecretRef);
+      const connectionList = conn.data;
+      const activeConnection = connectionList.find((item) => item.isDefault) || connectionList[0] || null;
+      setConnections(connectionList);
+      setConnection(activeConnection);
+      if (activeConnection) {
+        setSelectedConnectionId(activeConnection.id);
+        setConnectionName(activeConnection.name);
+        setIsDefaultConnection(activeConnection.isDefault);
+        setBaseUrl(activeConnection.baseUrl);
+        setApiKeySecretRef(activeConnection.apiKeySecretRef);
+      }
       setRuns(runList.data);
       setError(null);
     } catch (err) {
@@ -93,6 +106,26 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
   useEffect(() => {
     void loadState();
   }, [loadState]);
+
+  useEffect(() => {
+    if (selectedConnectionId === 'new') {
+      setConnection(null);
+      setConnectionName('n8n');
+      setIsDefaultConnection(connections.length === 0);
+      setBaseUrl('http://localhost:5678');
+      setApiKeySecretRef('N8N_API_KEY');
+      setApiKey('');
+      return;
+    }
+    const next = connections.find((item) => item.id === selectedConnectionId) || null;
+    if (!next) return;
+    setConnection(next);
+    setConnectionName(next.name);
+    setIsDefaultConnection(next.isDefault);
+    setBaseUrl(next.baseUrl);
+    setApiKeySecretRef(next.apiKeySecretRef);
+    setApiKey('');
+  }, [connections, selectedConnectionId]);
 
   const parsedIr = useMemo(() => {
     try {
@@ -106,12 +139,25 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
     setBusy('save');
     setError(null);
     try {
-      const response = await n8nAPI.updateConnection({
+      const payload = {
+        name: connectionName,
         baseUrl,
         apiKeySecretRef,
         apiKey: apiKey.trim() || undefined,
-      });
+        isDefault: isDefaultConnection,
+      };
+      const response = isNewConnection
+        ? await n8nAPI.createConnection(payload)
+        : await n8nAPI.updateConnectionById(selectedConnectionId, payload);
       setConnection(response.data);
+      setSelectedConnectionId(response.data.id);
+      setConnections((current) => {
+        const existing = current.some((item) => item.id === response.data.id);
+        const next = existing
+          ? current.map((item) => (item.id === response.data.id ? response.data : item))
+          : [response.data, ...current];
+        return next.map((item) => ({ ...item, isDefault: response.data.isDefault ? item.id === response.data.id : item.isDefault }));
+      });
       setApiKey('');
       toast.success(t('create.n8n.connectionSaved'));
     } catch (err) {
@@ -127,22 +173,37 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
     setBusy('health');
     setError(null);
     try {
+      let activeConnection = connection;
       if (
         apiKey.trim()
         || !connection
         || connection.baseUrl !== baseUrl
         || connection.apiKeySecretRef !== apiKeySecretRef
+        || connection.name !== connectionName
       ) {
-        const saved = await n8nAPI.updateConnection({
+        const payload = {
+          name: connectionName,
           baseUrl,
           apiKeySecretRef,
           apiKey: apiKey.trim() || undefined,
-        });
+          isDefault: isDefaultConnection,
+        };
+        const saved = isNewConnection
+          ? await n8nAPI.createConnection(payload)
+          : await n8nAPI.updateConnectionById(selectedConnectionId, payload);
+        activeConnection = saved.data;
         setConnection(saved.data);
+        setSelectedConnectionId(saved.data.id);
+        setConnections((current) => {
+          const existing = current.some((item) => item.id === saved.data.id);
+          return existing ? current.map((item) => (item.id === saved.data.id ? saved.data : item)) : [saved.data, ...current];
+        });
         setApiKey('');
       }
-      const response = await n8nAPI.healthCheck({ baseUrl, apiKeySecretRef });
+      const response = await n8nAPI.healthCheck({ connectionId: activeConnection?.id, baseUrl, apiKeySecretRef });
       setConnection(response.data.connection);
+      setConnections((current) => current.map((item) => (item.id === response.data.connection.id ? response.data.connection : item)));
+      setIsDefaultConnection(response.data.connection.isDefault);
       if (response.data.success) {
         toast.success(t('create.n8n.healthOk'));
       } else {
@@ -182,6 +243,7 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
     setError(null);
     try {
       const response = await n8nAPI.createBuildRun({
+        connectionId: connection?.id || (selectedConnectionId !== 'new' ? selectedConnectionId : undefined),
         userRequest,
         ir: parsedIr,
         baseUrl,
@@ -202,6 +264,31 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
       const message = extractErrorMessage(err);
       setError(message);
       toast.error(t('create.n8n.buildFailed'), message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDeleteConnection = async () => {
+    if (isNewConnection || !connection) return;
+    if (!window.confirm(t('create.n8n.confirmDeleteConnection', { name: connection.name }))) return;
+    setBusy('deleteConnection');
+    setError(null);
+    try {
+      await n8nAPI.deleteConnection(connection.id);
+      const nextConnections = connections.filter((item) => item.id !== connection.id);
+      setConnections(nextConnections);
+      const next = nextConnections.find((item) => item.isDefault) || nextConnections[0] || null;
+      if (next) {
+        setSelectedConnectionId(next.id);
+      } else {
+        setSelectedConnectionId('new');
+      }
+      toast.success(t('create.n8n.connectionDeleted'));
+    } catch (err) {
+      const message = extractErrorMessage(err);
+      setError(message);
+      toast.error(t('create.n8n.connectionDeleteFailed'), message);
     } finally {
       setBusy(null);
     }
@@ -246,6 +333,30 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
           </div>
 
           <label className="block">
+            <span className="text-xs font-medium text-gray-600">{t('create.n8n.connection')}</span>
+            <select
+              value={selectedConnectionId}
+              onChange={(event) => setSelectedConnectionId(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-200 px-3 py-2 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+            >
+              {connections.map((item) => (
+                <option key={item.id} value={item.id}>{item.name} - {item.baseUrl}</option>
+              ))}
+              <option value="new">{t('create.n8n.newConnection')}</option>
+            </select>
+          </label>
+
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">{t('create.n8n.connectionName')}</span>
+            <input
+              value={connectionName}
+              onChange={(event) => setConnectionName(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-200 px-3 py-2 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+              placeholder="Production n8n"
+            />
+          </label>
+
+          <label className="block">
             <span className="text-xs font-medium text-gray-600">{t('create.n8n.baseUrl')}</span>
             <input
               value={baseUrl}
@@ -276,7 +387,17 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
             />
           </label>
 
-          <div className="grid grid-cols-2 gap-2">
+          <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-600">
+            <input
+              type="checkbox"
+              checked={isDefaultConnection}
+              onChange={(event) => setIsDefaultConnection(event.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500"
+            />
+            {t('create.n8n.setDefault')}
+          </label>
+
+          <div className="grid grid-cols-3 gap-2">
             <button
               type="button"
               onClick={() => void handleSave()}
@@ -294,6 +415,15 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
             >
               <Activity className="h-3.5 w-3.5" />
               {busy === 'health' ? t('create.n8n.checking') : t('create.n8n.check')}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDeleteConnection()}
+              disabled={busy !== null || isNewConnection}
+              className="inline-flex items-center justify-center gap-1.5 rounded-md border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {busy === 'deleteConnection' ? t('create.n8n.deleting') : t('create.n8n.deleteConnection')}
             </button>
           </div>
         </section>

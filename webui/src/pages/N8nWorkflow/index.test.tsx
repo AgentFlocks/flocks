@@ -9,9 +9,11 @@ const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
+  listConnections: vi.fn(),
   listWorkflowRecords: vi.fn(),
   getWorkflowRecord: vi.fn(),
   discoverWorkflowRecords: vi.fn(),
+  syncWorkflowRecords: vi.fn(),
   syncWorkflowRecord: vi.fn(),
   retryWorkflowRecordTests: vi.fn(),
   cleanupWorkflowRecord: vi.fn(),
@@ -34,8 +36,16 @@ vi.mock('react-i18next', () => ({
         'n8n.backToFlocks': '返回 Flocks 工作流',
         'n8n.backToCenter': '返回 n8n 工作流',
         'n8n.syncAll': '同步状态',
+        'n8n.syncExternal': '同步外部',
+        'n8n.syncSummary': `新增 ${options?.created || 0}，更新 ${options?.updated || 0}，失联 ${options?.missing || 0}，失败连接 ${options?.failed || 0}`,
+        'n8n.allConnections': '全部连接',
+        'n8n.allSources': '全部来源',
         'n8n.create': '创建 n8n',
+        'n8n.emptyTitle': '暂无 n8n 工作流',
+        'n8n.emptyDescription': '暂无说明',
         'n8n.name': '名称',
+        'n8n.connection': 'n8n 连接',
+        'n8n.n8nBaseUrl': 'n8n 地址',
         'n8n.remoteStatus': 'n8n 状态',
         'n8n.testStatus': '测试状态',
         'n8n.webhookUrl': 'Webhook URL',
@@ -52,6 +62,10 @@ vi.mock('react-i18next', () => ({
         'n8n.recordId': '记录 ID',
         'n8n.n8nWorkflowId': 'n8n ID',
         'n8n.source': '来源',
+        'n8n.ownership': '权限',
+        'n8n.sourceFlocksCreated': 'Flocks 托管',
+        'n8n.sourceDiscovered': '可发现',
+        'n8n.sourceExternal': '外部只读',
         'n8n.webhookMethod': 'Webhook 方法',
         'n8n.latestExecutionId': '最近执行 ID',
         'n8n.lastSyncedAt': '最近同步',
@@ -76,8 +90,10 @@ vi.mock('react-i18next', () => ({
 vi.mock('@/api/n8n', () => ({
   n8nAPI: {
     listWorkflowRecords: mocks.listWorkflowRecords,
+    listConnections: mocks.listConnections,
     getWorkflowRecord: mocks.getWorkflowRecord,
     discoverWorkflowRecords: mocks.discoverWorkflowRecords,
+    syncWorkflowRecords: mocks.syncWorkflowRecords,
     syncWorkflowRecord: mocks.syncWorkflowRecord,
     retryWorkflowRecordTests: mocks.retryWorkflowRecordTests,
     cleanupWorkflowRecord: mocks.cleanupWorkflowRecord,
@@ -137,7 +153,10 @@ const record = {
   id: 'n8n-wf-1',
   name: 'hello n8n',
   engine: 'n8n',
-  source: 'generated',
+  connectionId: 'default',
+  connectionName: 'Default n8n',
+  source: 'flocks_created',
+  ownership: 'managed',
   n8nWorkflowId: 'wf-1',
   n8nBaseUrl: 'http://localhost:5678',
   apiKeySecretRef: 'N8N_API_KEY',
@@ -179,9 +198,37 @@ describe('N8nWorkflowPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mocks.listConnections.mockResolvedValue({
+      data: [
+        {
+          id: 'default',
+          name: 'Default n8n',
+          baseUrl: 'http://localhost:5678',
+          apiKeySecretRef: 'N8N_API_KEY',
+          isDefault: true,
+          status: 'healthy',
+          apiKeyConfigured: true,
+        },
+      ],
+    });
     mocks.listWorkflowRecords.mockResolvedValue({ data: [record] });
     mocks.getWorkflowRecord.mockResolvedValue({ data: record });
     mocks.discoverWorkflowRecords.mockResolvedValue({ data: [record] });
+    mocks.syncWorkflowRecords.mockResolvedValue({
+      data: {
+        status: 'completed',
+        connectionsTotal: 1,
+        connectionsSuccess: 1,
+        connectionsFailed: 0,
+        created: 1,
+        updated: 0,
+        missing: 0,
+        external: 0,
+        errors: [],
+        connections: [],
+        records: [record],
+      },
+    });
     mocks.syncWorkflowRecord.mockResolvedValue({ data: { ...record, lastSyncedAt: '2026-08-20T00:01:00Z' } });
     mocks.retryWorkflowRecordTests.mockResolvedValue({ data: { ...record, lastTestedAt: '2026-08-20T00:02:00Z' } });
     mocks.cleanupWorkflowRecord.mockResolvedValue({ data: { ...record, remoteStatus: 'cleaned' } });
@@ -209,12 +256,12 @@ describe('N8nWorkflowPage', () => {
     mocks.listWorkflowRecords.mockResolvedValue({ data: [] });
     renderPage('/workflows/n8n');
 
-    expect(await screen.findByText('n8n.emptyTitle')).toBeInTheDocument();
+    expect(await screen.findByText('暂无 n8n 工作流')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '同步状态' }));
 
-    await waitFor(() => expect(mocks.discoverWorkflowRecords).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.syncWorkflowRecords).toHaveBeenCalledWith({ connectionIds: undefined, includeExternal: false }));
     expect(await screen.findByText('hello n8n')).toBeInTheDocument();
-    expect(mocks.toastSuccess).toHaveBeenCalledWith('同步完成');
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('同步完成', '新增 1，更新 0，失联 0，失败连接 0');
   });
 
   it('shows detail actions for sync, retry test, open n8n, and cleanup', async () => {
