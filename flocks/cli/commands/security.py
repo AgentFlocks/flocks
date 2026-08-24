@@ -108,6 +108,8 @@ def _load_plugin_cli() -> tuple[AuditRunner, StatusReader]:
     try:
         try:
             from flocks_code_security.entrypoint import register
+        except ModuleNotFoundError:
+            raise
         except Exception as load_error:
             raise RuntimeError(
                 f"Failed to load the flocks-code-security plugin: {load_error}"

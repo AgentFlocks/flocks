@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import os
 from types import SimpleNamespace
@@ -13,6 +14,52 @@ from flocks.cli.main import app
 
 
 runner = CliRunner()
+
+
+def test_plugin_cli_falls_back_to_source_when_plugin_is_missing(monkeypatch) -> None:
+    from flocks.tool.registry import ToolRegistry
+
+    real_import = builtins.__import__
+    entrypoint_imports = 0
+    registrations = 0
+
+    async def run_audit(*_args, **_kwargs):
+        return {}
+
+    def scan_status(_scan_id):
+        return {}
+
+    def register() -> None:
+        nonlocal registrations
+        registrations += 1
+
+    def import_with_missing_installed_plugin(name, *args, **kwargs):
+        nonlocal entrypoint_imports
+        if name == "flocks_code_security.entrypoint":
+            entrypoint_imports += 1
+            if entrypoint_imports == 1:
+                raise ModuleNotFoundError(
+                    "No module named 'flocks_code_security'",
+                    name="flocks_code_security",
+                )
+            return SimpleNamespace(register=register)
+        if name == "flocks_code_security.cli":
+            return SimpleNamespace(
+                run_standard_audit=run_audit,
+                scan_status=scan_status,
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(ToolRegistry, "init", lambda: None)
+    monkeypatch.setattr(builtins, "__import__", import_with_missing_installed_plugin)
+    monkeypatch.setattr(security_cmd.sys, "path", list(security_cmd.sys.path))
+
+    loaded_runner, loaded_status = security_cmd._load_plugin_cli()
+
+    assert loaded_runner is run_audit
+    assert loaded_status is scan_status
+    assert entrypoint_imports == 2
+    assert registrations == 1
 
 
 def test_security_help_is_registered_on_main_cli() -> None:
