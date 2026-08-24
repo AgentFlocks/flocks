@@ -1,4 +1,5 @@
 import { Icon } from "../icons";
+import { useCodeSecurityI18n } from "../i18n";
 import { lifecycleLabels, phaseStatusLabels, statusIcon } from "../labels";
 
 export function StatusBadge({
@@ -8,11 +9,18 @@ export function StatusBadge({
   status: string;
   context?: string;
 }) {
-  const label = lifecycleLabels[status] || phaseStatusLabels[status] || status;
+  const { t } = useCodeSecurityI18n();
+  const label = t(
+    lifecycleLabels[status] || phaseStatusLabels[status] || status,
+  );
+  const localizedContext = t(context);
   return (
     <span
       className={`cs-status cs-status--${status}`}
-      aria-label={`${context}：${label}`}
+      aria-label={t("{{context}}：{{label}}", {
+        context: localizedContext,
+        label,
+      })}
     >
       <Icon name={statusIcon(status)} />
       <span>{label}</span>

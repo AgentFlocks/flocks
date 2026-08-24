@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Icon } from "../icons";
+import { useCodeSecurityI18n } from "../i18n";
 import { lifecycleLabels, phaseLabels, relativeTime } from "../labels";
 import type { ScanSummary } from "../types";
 import { StatusBadge } from "./StatusBadge";
@@ -36,6 +37,7 @@ export function ScanListPanel({
   onDelete: (scan: ScanSummary, opener: HTMLButtonElement) => void;
   onPrefetch?: (scanId: string) => void;
 }) {
+  const { t } = useCodeSecurityI18n();
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [overlayLayout, setOverlayLayout] = useState(
@@ -169,7 +171,7 @@ export function ScanListPanel({
     <aside
       ref={panelRef}
       className={`cs-scan-panel${open ? " is-open" : ""}`}
-      aria-label="审计历史"
+      aria-label={t("审计历史")}
       aria-hidden={hidden ? true : undefined}
       aria-modal={modal ? true : undefined}
       role={modal ? "dialog" : undefined}
@@ -177,9 +179,9 @@ export function ScanListPanel({
     >
       <div className="cs-panel-heading">
         <div>
-          <p className="cs-eyebrow">代码安全</p>
+          <p className="cs-eyebrow">{t("代码安全")}</p>
           <h2 ref={titleRef} tabIndex={-1}>
-            审计记录
+            {t("审计记录")}
           </h2>
         </div>
         <div className="cs-panel-heading__actions">
@@ -188,7 +190,7 @@ export function ScanListPanel({
             className="cs-icon-button cs-scan-panel__close"
             type="button"
             onClick={onClose}
-            aria-label="关闭审计列表"
+            aria-label={t("关闭审计列表")}
           >
             <Icon name="close" />
           </button>
@@ -201,36 +203,36 @@ export function ScanListPanel({
           onClick={onNewAudit}
         >
           <Icon name="plus" />
-          新建审计
+          {t("新建审计")}
         </button>
       )}
       <label className="cs-search">
-        <span className="cs-visually-hidden">搜索审计记录</span>
+        <span className="cs-visually-hidden">{t("搜索审计记录")}</span>
         <Icon name="search" />
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="搜索目标或 scan_id"
+          placeholder={t("搜索目标或 scan_id")}
         />
       </label>
       <label className="cs-filter-label">
-        <span>状态筛选</span>
+        <span>{t("状态筛选")}</span>
         <select
           value={status}
           onChange={(event) => setStatus(event.target.value)}
         >
-          <option value="all">全部状态</option>
-          <option value="running">运行中</option>
-          <option value="completed">已完成</option>
-          <option value="failed">失败</option>
-          <option value="cancelled">已取消</option>
-          <option value="interrupted">已中断</option>
+          <option value="all">{t("全部状态")}</option>
+          <option value="running">{t("运行中")}</option>
+          <option value="completed">{t("已完成")}</option>
+          <option value="failed">{t("失败")}</option>
+          <option value="cancelled">{t("已取消")}</option>
+          <option value="interrupted">{t("已中断")}</option>
         </select>
       </label>
       <nav
         ref={listRef}
         className="cs-scan-list"
-        aria-label="扫描列表"
+        aria-label={t("扫描列表")}
         onScroll={(event) => {
           const element = event.currentTarget;
           setScrollTop(element.scrollTop);
@@ -280,7 +282,7 @@ export function ScanListPanel({
                     onSelect(scan.scan_id);
                     if (overlayLayout) onClose();
                   }}
-                  aria-label={`${scan.display_name} · ${lifecycleLabels[scan.lifecycle_status] || scan.lifecycle_status}`}
+                  aria-label={`${scan.display_name} · ${t(lifecycleLabels[scan.lifecycle_status] || scan.lifecycle_status)}`}
                   aria-current={
                     selectedId === scan.scan_id ? "page" : undefined
                   }
@@ -291,11 +293,16 @@ export function ScanListPanel({
                   <span className="cs-scan-item__meta">
                     {scan.lifecycle_status === "completed"
                       ? scan.final_finding_count == null
-                        ? "最终漏洞待确认"
-                        : `${scan.final_finding_count} 个最终漏洞`
-                      : phaseLabels[scan.current_phase || ""] || "等待阶段信息"}
+                        ? t("漏洞待确认")
+                        : t("{{count}} 个漏洞", {
+                            count: scan.final_finding_count,
+                          })
+                      : t(
+                          phaseLabels[scan.current_phase || ""] ||
+                            "等待阶段信息",
+                        )}
                     {scan.dynamic_enabled && (
-                      <span className="cs-mode-tag">动态</span>
+                      <span className="cs-mode-tag">{t("动态")}</span>
                     )}
                   </span>
                   <span className="cs-scan-item__bottom">
@@ -303,7 +310,7 @@ export function ScanListPanel({
                       {scan.scan_id.slice(0, 16)}
                     </code>
                     <time dateTime={scan.created_at}>
-                      {relativeTime(scan.created_at)}
+                      {relativeTime(scan.created_at, t)}
                     </time>
                   </span>
                 </button>
@@ -316,13 +323,15 @@ export function ScanListPanel({
                       disabled={!canDelete}
                       aria-label={
                         canDelete
-                          ? `删除审计 ${scan.display_name}`
-                          : `审计 ${scan.display_name} 仍在运行，需先取消后才能删除`
+                          ? t("删除审计 {{name}}", { name: scan.display_name })
+                          : t("审计 {{name}} 仍在运行，需先取消后才能删除", {
+                              name: scan.display_name,
+                            })
                       }
                       title={
                         canDelete
-                          ? "删除审计"
-                          : "请先取消审计，待其停止后再删除"
+                          ? t("删除审计")
+                          : t("请先取消审计，待其停止后再删除")
                       }
                       onClick={(event) => onDelete(scan, event.currentTarget)}
                     >
@@ -335,7 +344,7 @@ export function ScanListPanel({
           })}
         </div>
         {!filtered.length && (
-          <p className="cs-inline-empty">没有匹配的审计记录</p>
+          <p className="cs-inline-empty">{t("没有匹配的审计记录")}</p>
         )}
         {hasMore && (
           <button
@@ -344,7 +353,7 @@ export function ScanListPanel({
             onClick={() => void onLoadMore()}
             disabled={loadingMore}
           >
-            {loadingMore ? "正在加载…" : "加载更多审计记录"}
+            {t(loadingMore ? "正在加载…" : "加载更多审计记录")}
           </button>
         )}
       </nav>

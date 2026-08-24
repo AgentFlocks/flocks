@@ -2,17 +2,25 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { getArtifact, getEvidence } from "../api";
 import { Icon } from "../icons";
-import { shortId } from "../labels";
+import { useCodeSecurityI18n, type Translator } from "../i18n";
+import {
+  coverageStatusLabels,
+  formatFileSize,
+  integrityStatusLabels,
+  severityLabels,
+  shortId,
+  verdictLabels,
+} from "../labels";
 import type { ArtifactContent, EvidenceContent, ScanDetail } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
 const tabs = [
   { id: "overview", label: "概览" },
   { id: "threat_model", label: "威胁模型" },
-  { id: "candidate_index", label: "候选问题" },
+  { id: "candidate_index", label: "候选漏洞" },
   { id: "verification_index", label: "静态验证" },
   { id: "dynamic_validation", label: "动态验证" },
-  { id: "adjudication", label: "父 Agent 裁决" },
+  { id: "adjudication", label: "主智能体裁决" },
   { id: "coverage", label: "覆盖度" },
   { id: "report_markdown", label: "最终报告" },
 ];
@@ -30,6 +38,7 @@ export function ArtifactInspector({
   open: boolean;
   onClose: () => void;
 }) {
+  const { t } = useCodeSecurityI18n();
   const [content, setContent] = useState<{
     scanId: string;
     artifact: ArtifactContent;
@@ -50,8 +59,14 @@ export function ArtifactInspector({
     [detail.artifacts],
   );
   const visible = wideLayout || open;
+  const dynamicValidationDisabled =
+    activeTab === "dynamic_validation" && !detail.scan.dynamic_enabled;
   const activeState =
-    activeTab === "overview" ? "available" : states.get(activeTab) || "pending";
+    activeTab === "overview"
+      ? "available"
+      : dynamicValidationDisabled
+        ? "disabled"
+        : states.get(activeTab) || "pending";
   const blockedByIntegrity = activeState === "invalid";
   const activeContent =
     content?.scanId === detail.scan.scan_id &&
@@ -108,6 +123,12 @@ export function ArtifactInspector({
       return;
     }
     if (!visible) return;
+    if (dynamicValidationDisabled) {
+      setContent(null);
+      setLoading(false);
+      setError("");
+      return;
+    }
     if (blockedByIntegrity) {
       setContent(null);
       setLoading(false);
@@ -142,13 +163,20 @@ export function ArtifactInspector({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, blockedByIntegrity, detail.scan.scan_id, refreshKey, visible]);
+  }, [
+    activeTab,
+    blockedByIntegrity,
+    detail.scan.scan_id,
+    dynamicValidationDisabled,
+    refreshKey,
+    visible,
+  ]);
 
   return (
     <aside
       ref={inspectorRef}
       className={`cs-inspector${open ? " is-open" : ""}`}
-      aria-label="中间产物检查器"
+      aria-label={t("中间产物检查器")}
       aria-hidden={!wideLayout && !open ? true : undefined}
       aria-modal={!wideLayout && open ? true : undefined}
       role={!wideLayout && open ? "dialog" : undefined}
@@ -156,38 +184,46 @@ export function ArtifactInspector({
     >
       <div className="cs-inspector__header">
         <div>
-          <p className="cs-eyebrow">Artifact Inspector</p>
+          <p className="cs-eyebrow">{t("产物检查器")}</p>
           <h2 ref={titleRef} tabIndex={-1}>
-            审计产物
+            {t("审计产物")}
           </h2>
         </div>
         <div className="cs-inspector__actions">
-          {activeTab !== "overview" && !blockedByIntegrity && (
-            <button
-              className="cs-inspector__refresh"
-              type="button"
-              onClick={() => setRefreshKey((value) => value + 1)}
-              disabled={loading}
-            >
-              {loading ? "刷新中…" : "刷新"}
-            </button>
-          )}
+          {activeTab !== "overview" &&
+            !blockedByIntegrity &&
+            !dynamicValidationDisabled && (
+              <button
+                className="cs-inspector__refresh"
+                type="button"
+                onClick={() => setRefreshKey((value) => value + 1)}
+                disabled={loading}
+              >
+                {t(loading ? "刷新中…" : "刷新")}
+              </button>
+            )}
           <button
             className="cs-icon-button cs-inspector__close"
             type="button"
             onClick={onClose}
-            aria-label="关闭产物检查器"
+            aria-label={t("关闭产物检查器")}
           >
             <Icon name="close" />
           </button>
         </div>
       </div>
-      <div className="cs-artifact-tabs" role="tablist" aria-label="审计产物">
+      <div
+        className="cs-artifact-tabs"
+        role="tablist"
+        aria-label={t("审计产物")}
+      >
         {tabs.map((tab) => {
           const state =
             tab.id === "overview"
               ? "available"
-              : states.get(tab.id) || "pending";
+              : tab.id === "dynamic_validation" && !detail.scan.dynamic_enabled
+                ? "disabled"
+                : states.get(tab.id) || "pending";
           return (
             <button
               key={tab.id}
@@ -197,15 +233,19 @@ export function ArtifactInspector({
               className={activeTab === tab.id ? "is-selected" : ""}
               onClick={() => onTabChange(tab.id)}
             >
-              <span>{tab.label}</span>
+              <span>{t(tab.label)}</span>
               <span className={`cs-artifact-state cs-artifact-state--${state}`}>
-                {state === "sealed"
-                  ? "已封装"
-                  : state === "invalid"
-                    ? "校验失败"
-                    : state === "pending"
-                      ? "等待"
-                      : "可查看"}
+                {t(
+                  state === "sealed"
+                    ? "已完成"
+                    : state === "invalid"
+                      ? "校验失败"
+                      : state === "disabled"
+                        ? "未启用"
+                        : state === "pending"
+                          ? "等待中"
+                          : "可查看",
+                )}
               </span>
             </button>
           );
@@ -214,24 +254,30 @@ export function ArtifactInspector({
       <div className="cs-inspector__body" role="tabpanel">
         {activeTab === "overview" ? (
           <Overview detail={detail} />
+        ) : dynamicValidationDisabled ? (
+          <DynamicValidationDisabled />
         ) : loading && !activeContent ? (
           <InspectorSkeleton />
         ) : error && !activeContent ? (
           <div className="cs-error-state" role="alert">
             <Icon name="warning" />
-            <h3>{blockedByIntegrity ? "产物未通过校验" : "产物暂不可用"}</h3>
-            <p>{error}</p>
+            <h3>{t(blockedByIntegrity ? "产物未通过校验" : "产物暂不可用")}</h3>
+            <p>{t(error)}</p>
             <p>
-              {blockedByIntegrity
-                ? "结构化中间数据仍可从其他标签查看；最终报告需要重新发起审计后生成。"
-                : "扫描继续运行时，可稍后点击“刷新”读取最新版本。"}
+              {t(
+                blockedByIntegrity
+                  ? "结构化中间数据仍可从其他标签查看；最终报告需要重新发起审计后生成。"
+                  : "扫描继续运行时，可稍后点击“刷新”读取最新版本。",
+              )}
             </p>
           </div>
         ) : activeContent ? (
           <>
             {error && (
               <p className="cs-artifact-refresh-error" role="alert">
-                刷新失败，仍显示上一次成功读取的内容：{error}
+                {t("刷新失败，仍显示上一次成功读取的内容：{{error}}", {
+                  error: t(error),
+                })}
               </p>
             )}
             <ArtifactBody
@@ -249,74 +295,77 @@ export function ArtifactInspector({
 }
 
 function Overview({ detail }: { detail: ScanDetail }) {
+  const { language, t } = useCodeSecurityI18n();
   const finalArtifacts = detail.artifacts.filter(
     (artifact) => artifact.state === "sealed",
   );
   return (
     <div className="cs-overview">
       <section>
-        <h3>四项独立状态</h3>
+        <h3>{t("执行状态")}</h3>
         <dl className="cs-state-list">
           <div>
-            <dt>执行状态</dt>
+            <dt>{t("执行状态")}</dt>
             <dd>
               <StatusBadge status={detail.scan.lifecycle_status} />
             </dd>
           </div>
           <div>
-            <dt>产物完整性</dt>
+            <dt>{t("产物完整性")}</dt>
             <dd>
               <span className="cs-value-tag">
-                {detail.scan.integrity_status}
+                {t(
+                  integrityStatusLabels[detail.scan.integrity_status] || "未知",
+                )}
               </span>
             </dd>
           </div>
           <div>
-            <dt>覆盖度</dt>
+            <dt>{t("覆盖度")}</dt>
             <dd>
               <span
                 className={`cs-value-tag cs-value-tag--${detail.scan.coverage_status}`}
               >
-                {detail.scan.coverage_status}
+                {t(coverageStatusLabels[detail.scan.coverage_status] || "未知")}
               </span>
             </dd>
           </div>
           <div>
-            <dt>候选问题</dt>
+            <dt>{t("候选漏洞")}</dt>
             <dd>{detail.counts.candidates || 0}</dd>
           </div>
         </dl>
         <p className="cs-helper">
-          执行完成不等同于不存在漏洞，覆盖度也不等同于产物完整性。
+          {t("执行完成不等同于不存在漏洞，覆盖度也不等同于产物完整性。")}
         </p>
         {detail.scan.integrity_status === "invalid" && (
           <div className="cs-callout cs-callout--warning" role="alert">
-            <strong>最终产物未通过完整性校验</strong>
+            <strong>{t("最终产物未通过完整性校验")}</strong>
             {(detail.scan.integrity_errors || []).map((message) => (
-              <span key={message}>{formatIntegrityError(message)}</span>
+              <span key={message}>{formatIntegrityError(message, t)}</span>
             ))}
           </div>
         )}
       </section>
       <section>
-        <h3>快照可信边界</h3>
+        <h3>{t("快照可信边界")}</h3>
         <dl className="cs-definition-list">
           <div>
-            <dt>源码文件</dt>
-            <dd>{detail.target.file_count.toLocaleString("zh-CN")}</dd>
+            <dt>{t("源码文件")}</dt>
+            <dd>{detail.target.file_count.toLocaleString(language)}</dd>
           </div>
           <div>
-            <dt>遗漏文件</dt>
-            <dd>{detail.target.omitted_file_count.toLocaleString("zh-CN")}</dd>
+            <dt>{t("遗漏文件")}</dt>
+            <dd>{detail.target.omitted_file_count.toLocaleString(language)}</dd>
           </div>
           <div>
-            <dt>Revision</dt>
+            <dt>{t("版本")}</dt>
             <dd>
               <code>{shortId(detail.target.source_revision, 14)}</code>
             </dd>
           </div>
           <div>
-            <dt>Tree digest</dt>
+            <dt>{t("目录摘要")}</dt>
             <dd>
               <code title={detail.target.tree_digest}>
                 {shortId(detail.target.tree_digest, 18)}
@@ -327,7 +376,7 @@ function Overview({ detail }: { detail: ScanDetail }) {
       </section>
       {finalArtifacts.length > 0 && (
         <section>
-          <h3>已封装产物</h3>
+          <h3>{t("已完成产物")}</h3>
           <div className="cs-download-list">
             {finalArtifacts.map((artifact) => (
               <a
@@ -337,10 +386,13 @@ function Overview({ detail }: { detail: ScanDetail }) {
               >
                 <Icon name="download" />
                 <span>
-                  <strong>{artifact.kind}</strong>
-                  <small>
-                    {artifact.size_bytes?.toLocaleString("zh-CN")} bytes
-                  </small>
+                  <strong>
+                    {t(
+                      tabs.find((tab) => tab.id === artifact.kind)?.label ||
+                        artifact.kind,
+                    )}
+                  </strong>
+                  <small>{formatFileSize(artifact.size_bytes, language)}</small>
                 </span>
               </a>
             ))}
@@ -360,14 +412,9 @@ function ArtifactBody({
   content: unknown;
   detail: ScanDetail;
 }) {
+  const { t } = useCodeSecurityI18n();
   if (kind === "dynamic_validation" && !detail.scan.dynamic_enabled) {
-    return (
-      <div className="cs-empty-state cs-empty-state--compact">
-        <Icon name="flask" />
-        <h3>动态验证未启用</h3>
-        <p>本次审计仅执行静态分析。若需要运行受限探测，请发起新的动态审计。</p>
-      </div>
-    );
+    return <DynamicValidationDisabled />;
   }
   if (kind === "candidate_index")
     return <CandidateList content={content} scanId={detail.scan.scan_id} />;
@@ -377,21 +424,34 @@ function ArtifactBody({
   if (content == null || (Array.isArray(content) && !content.length)) {
     return (
       <div className="cs-inline-empty">
-        该产物尚未产生。扫描继续运行时会自动更新。
+        {t("该产物尚未产生。扫描继续运行时会自动更新。")}
       </div>
     );
   }
   return <StructuredValue value={content} />;
 }
 
+function DynamicValidationDisabled() {
+  const { t } = useCodeSecurityI18n();
+  return (
+    <div className="cs-empty-state cs-empty-state--compact">
+      <Icon name="flask" />
+      <h3>{t("动态验证未启用")}</h3>
+      <p>
+        {t("本次审计仅执行静态分析。若需要运行受限探测，请发起新的动态审计。")}
+      </p>
+    </div>
+  );
+}
+
 function MarkdownReport({ content }: { content: string }) {
-  const Markdown = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__
-    ?.Markdown;
+  const { t } = useCodeSecurityI18n();
+  const Markdown = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.Markdown;
   if (!Markdown) {
     return <pre className="cs-report-fallback">{content}</pre>;
   }
   return (
-    <article className="cs-report-markdown" aria-label="最终审计报告">
+    <article className="cs-report-markdown" aria-label={t("最终审计报告")}>
       <Markdown content={content} />
     </article>
   );
@@ -404,6 +464,7 @@ function CandidateList({
   content: unknown;
   scanId: string;
 }) {
+  const { t } = useCodeSecurityI18n();
   const candidates = Array.isArray(content) ? content : [];
   const [evidence, setEvidence] = useState<EvidenceContent | null>(null);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
@@ -445,8 +506,8 @@ function CandidateList({
     return (
       <div className="cs-empty-state cs-empty-state--compact">
         <Icon name="search" />
-        <h3>当前阶段尚未发现候选问题</h3>
-        <p>扫描仍可能在其他范围继续运行。</p>
+        <h3>{t("当前阶段尚未发现候选漏洞")}</h3>
+        <p>{t("扫描仍可能在其他范围继续运行。")}</p>
       </div>
     );
   }
@@ -459,7 +520,7 @@ function CandidateList({
         >
           <div className="cs-subsection-heading">
             <div>
-              <h3 id="evidence-viewer-title">代码证据</h3>
+              <h3 id="evidence-viewer-title">{t("代码证据")}</h3>
               {evidence && (
                 <code>
                   {evidence.relative_path}:{evidence.start_line}-
@@ -471,7 +532,7 @@ function CandidateList({
               className="cs-icon-button"
               type="button"
               onClick={closeEvidence}
-              aria-label="关闭代码证据"
+              aria-label={t("关闭代码证据")}
             >
               <Icon name="close" />
             </button>
@@ -480,7 +541,7 @@ function CandidateList({
             <InspectorSkeleton />
           ) : evidenceError ? (
             <p className="cs-callout cs-callout--warning" role="alert">
-              {evidenceError}
+              {t(evidenceError)}
             </p>
           ) : evidence ? (
             <>
@@ -488,7 +549,7 @@ function CandidateList({
                 <code>{evidence.excerpt}</code>
               </pre>
               {evidence.truncated && (
-                <p className="cs-helper">证据已按 64 KiB 上限截断。</p>
+                <p className="cs-helper">{t("证据已按 64 KiB 上限截断。")}</p>
               )}
             </>
           ) : null}
@@ -508,18 +569,28 @@ function CandidateList({
               <span
                 className={`cs-severity cs-severity--${payload.severity || "unknown"}`}
               >
-                {String(payload.severity || "待定")}
+                {t(
+                  severityLabels[
+                    String(payload.severity || "").toLowerCase()
+                  ] || String(payload.severity || "待定"),
+                )}
               </span>
               <span className="cs-value-tag">
-                {finalFinding ? "最终漏洞" : "候选问题"}
+                {t(finalFinding ? "漏洞" : "候选漏洞")}
               </span>
             </div>
-            <h3>{String(payload.title || "未命名候选问题")}</h3>
+            <h3>{String(payload.title || t("未命名候选漏洞"))}</h3>
             <p>{String(payload.summary || "")}</p>
             <dl>
               <div>
-                <dt>验证状态</dt>
-                <dd>{String(item.verification_status || "pending")}</dd>
+                <dt>{t("验证状态")}</dt>
+                <dd>
+                  {t(
+                    verdictLabels[
+                      String(item.verification_status || "pending")
+                    ] || String(item.verification_status || "pending"),
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>CWE</dt>
@@ -529,7 +600,10 @@ function CandidateList({
               </div>
             </dl>
             {evidenceRefs.length > 0 && (
-              <div className="cs-evidence-links" aria-label="候选问题代码证据">
+              <div
+                className="cs-evidence-links"
+                aria-label={t("候选漏洞代码证据")}
+              >
                 {evidenceRefs.map((rawEvidence, evidenceIndex) => {
                   const reference = asRecord(rawEvidence);
                   return (
@@ -540,8 +614,11 @@ function CandidateList({
                         openEvidence(String(reference.evidence_id))
                       }
                     >
-                      查看证据 · {String(reference.relative_path)}:
-                      {String(reference.start_line)}
+                      {t("查看证据 · {{path}}:{{start}}-{{end}}", {
+                        path: String(reference.relative_path),
+                        start: String(reference.start_line),
+                        end: String(reference.end_line || reference.start_line),
+                      })}
                     </button>
                   );
                 })}
@@ -555,6 +632,7 @@ function CandidateList({
 }
 
 function StructuredValue({ value }: { value: unknown }) {
+  const { t } = useCodeSecurityI18n();
   if (Array.isArray(value)) {
     return (
       <div className="cs-structured-list">
@@ -574,7 +652,7 @@ function StructuredValue({ value }: { value: unknown }) {
               {child && typeof child === "object" ? (
                 <StructuredValue value={child} />
               ) : (
-                formatScalar(child)
+                formatScalar(child, t)
               )}
             </dd>
           </div>
@@ -582,12 +660,13 @@ function StructuredValue({ value }: { value: unknown }) {
       </dl>
     );
   }
-  return <p>{formatScalar(value)}</p>;
+  return <p>{formatScalar(value, t)}</p>;
 }
 
 function InspectorSkeleton() {
+  const { t } = useCodeSecurityI18n();
   return (
-    <div className="cs-skeleton-stack" aria-label="正在加载产物">
+    <div className="cs-skeleton-stack" aria-label={t("正在加载产物")}>
       <span />
       <span />
       <span />
@@ -605,19 +684,22 @@ function humanize(value: string): string {
   return value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ");
 }
 
-function formatIntegrityError(message: string): string {
+function formatIntegrityError(message: string, t: Translator): string {
   const missingPrefix = "Required sealed artifacts are missing:";
   if (message.startsWith(missingPrefix)) {
-    return `完整性清单未封装以下必需产物：${message.slice(missingPrefix.length).trim()}。`;
+    return t("完整性清单未封装以下必需产物：{{artifacts}}。", {
+      artifacts: message.slice(missingPrefix.length).trim(),
+    });
   }
   if (message === "Completed scan output is missing")
-    return "已完成扫描的产物目录不存在。";
-  if (message === "Scan manifest is missing") return "产物完整性清单不存在。";
+    return t("已完成扫描的产物目录不存在。");
+  if (message === "Scan manifest is missing")
+    return t("产物完整性清单不存在。");
   return message;
 }
 
-function formatScalar(value: unknown): string {
+function formatScalar(value: unknown, t: Translator): string {
   if (value == null || value === "") return "—";
-  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "boolean") return t(value ? "是" : "否");
   return String(value);
 }

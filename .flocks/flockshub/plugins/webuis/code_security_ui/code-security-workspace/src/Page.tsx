@@ -24,7 +24,8 @@ import { PhaseWorkspace } from "./components/PhaseWorkspace";
 import { ScanListPanel } from "./components/ScanListPanel";
 import { StatusBadge } from "./components/StatusBadge";
 import { Icon } from "./icons";
-import { phaseLabels, shortId } from "./labels";
+import { useCodeSecurityI18n } from "./i18n";
+import { lifecycleLabels, phaseLabels, shortId } from "./labels";
 import type {
   AuditEvent,
   ProjectSummary,
@@ -83,6 +84,7 @@ export function deriveFinalFindingMetric(
 
 export default function Page() {
   useWorkspaceStyles();
+  const { t } = useCodeSecurityI18n();
   const user = useSdkUser();
   const canCreate = user?.role === "admin";
   const initialParams = new URLSearchParams(window.location.search);
@@ -241,91 +243,97 @@ export default function Page() {
     [applySelection],
   );
 
-  const loadSelected = useCallback((scanId: string, afterSeq = 0) => {
-    const load = async () => {
-      const detailRequest = getScan(scanId).then((nextDetail) => {
-        const displayDetail =
+  const loadSelected = useCallback(
+    (scanId: string, afterSeq = 0) => {
+      const load = async () => {
+        const detailRequest = getScan(scanId).then((nextDetail) => {
+          const displayDetail =
+            authoritativeDetailsRef.current.get(scanId) || nextDetail;
+          if (!deletedScanIdsRef.current.has(scanId)) {
+            setScans((current) =>
+              mergeScans(current, [summaryFromDetail(displayDetail)]),
+            );
+          }
+          if (selectedIdRef.current === scanId) {
+            hasPresentedDetailRef.current = true;
+            setDetail(displayDetail);
+            setLoading(false);
+          }
+          return nextDetail;
+        });
+        const eventsRequest = afterSeq
+          ? getEvents(scanId, afterSeq)
+          : getRecentEvents(scanId);
+        const [nextDetail, page] = await Promise.all([
+          detailRequest,
+          eventsRequest,
+        ]);
+        if (deletedScanIdsRef.current.has(scanId)) {
+          return { detail: nextDetail, hasMore: false };
+        }
+        const resolvedDetail =
           authoritativeDetailsRef.current.get(scanId) || nextDetail;
-        if (!deletedScanIdsRef.current.has(scanId)) {
-          setScans((current) =>
-            mergeScans(current, [summaryFromDetail(displayDetail)]),
+        const eventItems: AuditEvent[] = page.items;
+        const previous = scanViewCacheRef.current.get(scanId);
+        const nextEvents = mergeAuditEvents(
+          afterSeq ? previous?.events || [] : [],
+          eventItems,
+        );
+        const nextHasOlderEvents = afterSeq
+          ? previous?.hasOlderEvents || false
+          : page.hasMore;
+        const deliveredSeq = eventItems.length
+          ? eventItems[eventItems.length - 1].seq
+          : afterSeq;
+        const nextLatestSeq = Math.max(previous?.latestSeq || 0, deliveredSeq);
+        rememberScanView(scanViewCacheRef.current, scanId, {
+          detail: resolvedDetail,
+          events: nextEvents,
+          hasOlderEvents: nextHasOlderEvents,
+          latestSeq: nextLatestSeq,
+        });
+        if (selectedIdRef.current !== scanId)
+          return { detail: nextDetail, hasMore: false };
+        hasPresentedDetailRef.current = true;
+        setDetail(resolvedDetail);
+        setLoading(false);
+        setLoadingEvents(false);
+        if (!afterSeq) setHasOlderEvents(page.hasMore);
+        latestSeqRef.current = Math.max(latestSeqRef.current, deliveredSeq);
+        setEvents(nextEvents);
+        if (eventItems.length) {
+          setLiveMessage(
+            t("{{phase}}新增 {{count}} 条事件。", {
+              phase: t(
+                phaseLabels[resolvedDetail.scan.current_phase || ""] ||
+                  "代码审计",
+              ),
+              count: eventItems.length,
+            }),
           );
         }
-        if (selectedIdRef.current === scanId) {
-          hasPresentedDetailRef.current = true;
-          setDetail(displayDetail);
-          setLoading(false);
-        }
-        return nextDetail;
-      });
-      const eventsRequest = afterSeq
-        ? getEvents(scanId, afterSeq)
-        : getRecentEvents(scanId);
-      const [nextDetail, page] = await Promise.all([
-        detailRequest,
-        eventsRequest,
-      ]);
-      if (deletedScanIdsRef.current.has(scanId)) {
-        return { detail: nextDetail, hasMore: false };
-      }
-      const resolvedDetail =
-        authoritativeDetailsRef.current.get(scanId) || nextDetail;
-      const eventItems: AuditEvent[] = page.items;
-      const previous = scanViewCacheRef.current.get(scanId);
-      const nextEvents = mergeAuditEvents(
-        afterSeq ? previous?.events || [] : [],
-        eventItems,
-      );
-      const nextHasOlderEvents = afterSeq
-        ? previous?.hasOlderEvents || false
-        : page.hasMore;
-      const deliveredSeq = eventItems.length
-        ? eventItems[eventItems.length - 1].seq
-        : afterSeq;
-      const nextLatestSeq = Math.max(
-        previous?.latestSeq || 0,
-        deliveredSeq,
-      );
-      rememberScanView(scanViewCacheRef.current, scanId, {
-        detail: resolvedDetail,
-        events: nextEvents,
-        hasOlderEvents: nextHasOlderEvents,
-        latestSeq: nextLatestSeq,
-      });
-      if (selectedIdRef.current !== scanId)
-        return { detail: nextDetail, hasMore: false };
-      hasPresentedDetailRef.current = true;
-      setDetail(resolvedDetail);
-      setLoading(false);
-      setLoadingEvents(false);
-      if (!afterSeq) setHasOlderEvents(page.hasMore);
-      latestSeqRef.current = Math.max(latestSeqRef.current, deliveredSeq);
-      setEvents(nextEvents);
-      if (eventItems.length) {
-        setLiveMessage(
-          `${phaseLabels[resolvedDetail.scan.current_phase || ""] || "代码审计"}新增 ${eventItems.length} 条事件。`,
-        );
-      }
-      return {
-        detail: resolvedDetail,
-        hasMore: Boolean(
-          (afterSeq && page.hasMore) ||
-          deliveredSeq !== Number(resolvedDetail.scan.latest_event_seq || 0),
-        ),
+        return {
+          detail: resolvedDetail,
+          hasMore: Boolean(
+            (afterSeq && page.hasMore) ||
+            deliveredSeq !== Number(resolvedDetail.scan.latest_event_seq || 0),
+          ),
+        };
       };
-    };
 
-    if (afterSeq) return load();
-    const existing = initialLoadTasksRef.current.get(scanId);
-    if (existing) return existing;
-    let running: Promise<{ detail: ScanDetail; hasMore: boolean }>;
-    running = load().finally(() => {
-      if (initialLoadTasksRef.current.get(scanId) === running)
-        initialLoadTasksRef.current.delete(scanId);
-    });
-    initialLoadTasksRef.current.set(scanId, running);
-    return running;
-  }, []);
+      if (afterSeq) return load();
+      const existing = initialLoadTasksRef.current.get(scanId);
+      if (existing) return existing;
+      let running: Promise<{ detail: ScanDetail; hasMore: boolean }>;
+      running = load().finally(() => {
+        if (initialLoadTasksRef.current.get(scanId) === running)
+          initialLoadTasksRef.current.delete(scanId);
+      });
+      initialLoadTasksRef.current.set(scanId, running);
+      return running;
+    },
+    [t],
+  );
 
   const prefetchScan = useCallback(
     (scanId: string) => {
@@ -400,13 +408,13 @@ export default function Page() {
       setError(
         reason?.response?.data?.detail?.message ||
           reason?.message ||
-          "无法加载更多审计记录",
+          t("无法加载更多审计记录"),
       );
     } finally {
       loadingMoreScansRef.current = false;
       setLoadingMoreScans(false);
     }
-  }, [scanCursor]);
+  }, [scanCursor, t]);
 
   const scheduleListRefresh = useCallback((scanId: string) => {
     queuedScanRefreshRef.current.add(scanId);
@@ -460,7 +468,7 @@ export default function Page() {
         setError(
           reason?.response?.data?.detail?.message ||
             reason?.message ||
-            "无法加载代码审计工作区",
+            t("无法加载代码审计工作区"),
         );
         setLoading(false);
       });
@@ -471,12 +479,12 @@ export default function Page() {
           setError(
             reason?.response?.data?.detail?.message ||
               reason?.message ||
-              "无法加载可审计项目列表",
+              t("无法加载可审计项目列表"),
           ),
         );
     }
     return () => window.clearTimeout(timer);
-  }, [canCreate, reloadList, replaceSelection]);
+  }, [canCreate, reloadList, replaceSelection, t]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -507,14 +515,14 @@ export default function Page() {
           setError(
             reason?.response?.data?.detail?.message ||
               reason?.message ||
-              "无法加载扫描详情",
+              t("无法加载扫描详情"),
           );
         }
       })
       .finally(() => {
         if (selectedIdRef.current === selectedId) setLoading(false);
       });
-  }, [loadSelected, refreshChangedScan, selectedId]);
+  }, [loadSelected, refreshChangedScan, selectedId, t]);
 
   useEffect(() => {
     if (typeof EventSource === "undefined") return undefined;
@@ -570,7 +578,7 @@ export default function Page() {
       setError(
         reason?.response?.data?.detail?.message ||
           reason?.message ||
-          "无法加载更早的可信事件",
+          t("无法加载更早的可信事件"),
       );
     } finally {
       if (selectedIdRef.current === scanId) setLoadingOlderEvents(false);
@@ -602,7 +610,7 @@ export default function Page() {
     if (
       !detail ||
       detail.scan.scan_id !== selectedIdRef.current ||
-      !window.confirm("确定取消本次审计吗？已产生的中间数据会保留。")
+      !window.confirm(t("确定取消本次审计吗？已产生的中间数据会保留。"))
     )
       return;
     setCancelling(true);
@@ -617,14 +625,13 @@ export default function Page() {
           detail: nextDetail,
         });
       }
-      if (selectedIdRef.current === scanId)
-        setDetail(nextDetail);
+      if (selectedIdRef.current === scanId) setDetail(nextDetail);
       await reloadList();
     } catch (reason: any) {
       setError(
         reason?.response?.data?.detail?.message ||
           reason?.message ||
-          "取消审计失败",
+          t("取消审计失败"),
       );
     } finally {
       setCancelling(false);
@@ -638,7 +645,7 @@ export default function Page() {
       setError(
         reason?.response?.data?.detail?.message ||
           reason?.message ||
-          "审计已创建，但扫描列表刷新失败",
+          t("审计已创建，但扫描列表刷新失败"),
       ),
     );
   };
@@ -657,7 +664,9 @@ export default function Page() {
       const remaining = scans.filter((scan) => scan.scan_id !== target.scan_id);
       setScans(remaining);
       setDeleteTarget(null);
-      setLiveMessage(`已删除 ${target.display_name} 的审计记录。`);
+      setLiveMessage(
+        t("已删除 {{name}} 的审计记录。", { name: target.display_name }),
+      );
 
       if (selectedIdRef.current === target.scan_id) {
         refreshQueuedRef.current.delete(target.scan_id);
@@ -697,7 +706,7 @@ export default function Page() {
       setDeleteError(
         reason?.response?.data?.detail?.message ||
           reason?.message ||
-          "删除审计失败",
+          t("删除审计失败"),
       );
     } finally {
       setDeleting(false);
@@ -709,7 +718,9 @@ export default function Page() {
       <WorkspaceSkeleton />
     ) : (
       <main className="code-security-workspace" aria-busy="true">
-        <span className="cs-visually-hidden">正在加载代码审计工作区</span>
+        <span className="cs-visually-hidden">
+          {t("正在加载代码审计工作区")}
+        </span>
       </main>
     );
   }
@@ -744,7 +755,7 @@ export default function Page() {
         <button
           type="button"
           className="cs-scan-panel-scrim"
-          aria-label="关闭审计列表"
+          aria-label={t("关闭审计列表")}
           onClick={closeScanPanel}
         />
       )}
@@ -758,15 +769,15 @@ export default function Page() {
             <Icon name="warning" />
             <span>
               {connection === "failed"
-                ? "实时连接仍未恢复，当前内容可继续查看。"
-                : "实时连接已中断，正在重连。当前内容仍可查看。"}
+                ? t("实时连接仍未恢复，当前内容可继续查看。")
+                : t("实时连接已中断，正在重连。当前内容仍可查看。")}
             </span>
             {connection === "failed" && selectedId && (
               <button
                 type="button"
                 onClick={() => loadSelected(selectedId, latestSeqRef.current)}
               >
-                立即重试
+                {t("立即重试")}
               </button>
             )}
           </div>
@@ -775,7 +786,7 @@ export default function Page() {
           <div className="cs-page-error" role="alert">
             <span>{error}</span>
             <button type="button" onClick={() => setError("")}>
-              关闭
+              {t("关闭")}
             </button>
           </div>
         )}
@@ -789,7 +800,7 @@ export default function Page() {
           <>
             <header className="cs-scan-header">
               <div className="cs-mobile-scan-select">
-                <label htmlFor="mobile-scan-select">切换审计</label>
+                <label htmlFor="mobile-scan-select">{t("切换审计")}</label>
                 <select
                   id="mobile-scan-select"
                   value={detail.scan.scan_id}
@@ -797,7 +808,11 @@ export default function Page() {
                 >
                   {scans.map((scan) => (
                     <option key={scan.scan_id} value={scan.scan_id}>
-                      {scan.display_name} · {scan.lifecycle_status}
+                      {scan.display_name} ·{" "}
+                      {t(
+                        lifecycleLabels[scan.lifecycle_status] ||
+                          scan.lifecycle_status,
+                      )}
                     </option>
                   ))}
                 </select>
@@ -808,7 +823,7 @@ export default function Page() {
                     onClick={loadMoreScans}
                     disabled={loadingMoreScans}
                   >
-                    {loadingMoreScans ? "正在加载…" : "加载更多审计记录"}
+                    {loadingMoreScans ? t("正在加载…") : t("加载更多审计记录")}
                   </button>
                 )}
               </div>
@@ -816,7 +831,7 @@ export default function Page() {
                 className="cs-icon-button cs-scan-drawer-trigger"
                 type="button"
                 onClick={openScanPanel}
-                aria-label="打开审计列表"
+                aria-label={t("打开审计列表")}
               >
                 <Icon name="panel" />
               </button>
@@ -827,13 +842,17 @@ export default function Page() {
                   </h1>
                   <StatusBadge status={detail.scan.lifecycle_status} />
                   <span className="cs-mode-tag">
-                    {detail.scan.dynamic_enabled ? "动态审计" : "静态审计"}
+                    {detail.scan.dynamic_enabled
+                      ? t("动态审计")
+                      : t("静态审计")}
                   </span>
                 </div>
                 <div className="cs-header-meta">
                   <span>
-                    {phaseLabels[detail.scan.current_phase || ""] ||
-                      "等待阶段信息"}
+                    {t(
+                      phaseLabels[detail.scan.current_phase || ""] ||
+                        "等待阶段信息",
+                    )}
                   </span>
                   <ElapsedTime
                     startedAt={detail.scan.started_at}
@@ -859,7 +878,7 @@ export default function Page() {
                     onClick={openDrawer}
                   >
                     <Icon name="plus" />
-                    新建审计
+                    {t("新建审计")}
                   </button>
                 )}
                 {detail.scan.can_cancel && (
@@ -869,7 +888,7 @@ export default function Page() {
                     onClick={handleCancel}
                     disabled={cancelling}
                   >
-                    {cancelling ? "正在取消…" : "取消审计"}
+                    {cancelling ? t("正在取消…") : t("取消审计")}
                   </button>
                 )}
                 {detail.scan.lifecycle_status === "completed" &&
@@ -879,7 +898,7 @@ export default function Page() {
                       href={`/api/code-security/v1/scans/${detail.scan.scan_id}/downloads/report.md`}
                     >
                       <Icon name="download" />
-                      下载报告
+                      {t("下载报告")}
                     </a>
                   )}
                 <button
@@ -888,7 +907,7 @@ export default function Page() {
                   onClick={openInspector}
                 >
                   <Icon name="panel" />
-                  查看产物
+                  {t("查看产物")}
                 </button>
               </div>
             </header>
@@ -899,7 +918,7 @@ export default function Page() {
               >
                 <Icon name="error" />
                 <div>
-                  <h2 id="failure-title">审计未正常完成</h2>
+                  <h2 id="failure-title">{t("审计未正常完成")}</h2>
                   <p>{detail.scan.failure_summary}</p>
                   <code>{detail.scan.failure_code}</code>
                 </div>
@@ -907,6 +926,7 @@ export default function Page() {
             )}
             <PhaseWorkspace
               key={detail.scan.scan_id}
+              scanId={detail.scan.scan_id}
               phases={detail.phaseRuns}
               events={events}
               workers={detail.workers || []}
@@ -944,7 +964,7 @@ export default function Page() {
         <button
           type="button"
           className="cs-inspector-scrim"
-          aria-label="关闭产物检查器"
+          aria-label={t("关闭产物检查器")}
           onClick={closeInspector}
         />
       )}
@@ -1036,14 +1056,17 @@ function EmptyWorkspace({
   canCreate: boolean;
   onNewAudit: () => void;
 }) {
+  const { t } = useCodeSecurityI18n();
   return (
     <section className="cs-empty-state">
       <span className="cs-empty-state__icon">
         <Icon name="shield" />
       </span>
-      <h1>还没有代码审计</h1>
+      <h1>{t("还没有代码审计")}</h1>
       <p>
-        创建一次基于不可变源码快照的安全审计，查看威胁模型、验证过程和最终报告。
+        {t(
+          "创建一次基于不可变源码快照的安全审计，查看威胁模型、验证过程和最终报告。",
+        )}
       </p>
       {canCreate ? (
         <button
@@ -1052,20 +1075,21 @@ function EmptyWorkspace({
           onClick={onNewAudit}
         >
           <Icon name="plus" />
-          新建审计
+          {t("新建审计")}
         </button>
       ) : (
-        <p className="cs-helper">当前版本仅允许管理员启动审计。</p>
+        <p className="cs-helper">{t("当前版本仅允许管理员启动审计。")}</p>
       )}
     </section>
   );
 }
 
 function WorkspaceSkeleton() {
+  const { t } = useCodeSecurityI18n();
   return (
     <main
       className="code-security-workspace cs-workspace-skeleton"
-      aria-label="正在加载代码审计工作区"
+      aria-label={t("正在加载代码审计工作区")}
     >
       <aside>
         <span />
@@ -1089,10 +1113,11 @@ function WorkspaceSkeleton() {
 }
 
 function ScanDetailSkeleton() {
+  const { t } = useCodeSecurityI18n();
   return (
     <section
       className="cs-skeleton-stack cs-detail-skeleton"
-      aria-label="正在加载扫描详情"
+      aria-label={t("正在加载扫描详情")}
       aria-busy="true"
     >
       <span />

@@ -8,11 +8,19 @@ import {
 } from "react";
 
 import { Icon } from "../icons";
+import { useCodeSecurityI18n, type Translator } from "../i18n";
 import { formatTime, phaseLabels, phaseStatusLabels, shortId } from "../labels";
 import type { AuditEvent } from "../types";
 
 const ROW_HEIGHT = 72;
 const VIEWPORT_HEIGHT = 360;
+
+interface GroupedEvent {
+  event: AuditEvent;
+  count: number;
+  oldestCreatedAt: string;
+  signature: string | null;
+}
 
 export function EventStream({
   events,
@@ -29,6 +37,7 @@ export function EventStream({
   loadingOlder: boolean;
   onLoadOlder: () => Promise<void>;
 }) {
+  const { t } = useCodeSecurityI18n();
   const [level, setLevel] = useState("all");
   const [phase, setPhase] = useState(selectedPhase || "all");
   const [worker, setWorker] = useState("all");
@@ -64,6 +73,7 @@ export function EventStream({
         .sort(compareEventsNewestFirst),
     [events, level, phase, worker],
   );
+  const grouped = useMemo(() => groupRepeatedProgress(filtered), [filtered]);
 
   useEffect(() => {
     const firstSeq = events[0]?.seq;
@@ -102,21 +112,22 @@ export function EventStream({
     }
     layoutLastSeq.current = lastSeq;
     previousScrollHeight.current = element.scrollHeight;
-  }, [autoFollow, events, filtered.length]);
+  }, [autoFollow, events, grouped.length]);
 
-  const virtual = filtered.length > 100;
+  const virtual = grouped.length > 100;
   const start = virtual
     ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 4)
     : 0;
   const end = virtual
     ? Math.min(
-        filtered.length,
+        grouped.length,
         start + Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT) + 8,
       )
-    : filtered.length;
-  const visible = filtered.slice(start, end);
-  const phaseFilterLabel =
-    phase === "all" ? "全部阶段" : phaseLabels[phase] || phase;
+    : grouped.length;
+  const visible = grouped.slice(start, end);
+  const phaseFilterLabel = t(
+    phase === "all" ? "全部阶段" : phaseLabels[phase] || phase,
+  );
 
   const returnToLatest = () => {
     setAutoFollow(true);
@@ -132,36 +143,52 @@ export function EventStream({
     >
       <div className="cs-subsection-heading cs-events__heading">
         <div>
-          <h3 id="event-title">阶段事件</h3>
+          <h3 id="event-title">{t("阶段事件")}</h3>
           <span>
             {loading
-              ? `${phaseFilterLabel} · 正在加载事件…`
-              : `${phaseFilterLabel} · 显示 ${filtered.length} / ${events.length} 条`}
+              ? t("{{phase}} · 正在加载事件…", { phase: phaseFilterLabel })
+              : grouped.length < filtered.length
+                ? t(
+                    "{{phase}} · 显示 {{groups}} 组（{{filtered}} 条）/ {{total}} 条",
+                    {
+                      phase: phaseFilterLabel,
+                      groups: grouped.length,
+                      filtered: filtered.length,
+                      total: events.length,
+                    },
+                  )
+                : t("{{phase}} · 显示 {{visible}} / {{total}} 条", {
+                    phase: phaseFilterLabel,
+                    visible: filtered.length,
+                    total: events.length,
+                  })}
           </span>
         </div>
         <div className="cs-event-filters">
           <label className="cs-event-filter cs-event-filter--phase">
-            <span className="cs-visually-hidden">按阶段筛选事件</span>
+            <span className="cs-visually-hidden">{t("按阶段筛选事件")}</span>
             <select
               value={phase}
               onChange={(event) => setPhase(event.target.value)}
             >
-              <option value="all">全部阶段</option>
+              <option value="all">{t("全部阶段")}</option>
               {phaseOptions.map((value) => (
                 <option key={value} value={value}>
-                  {phaseLabels[value] || value}
+                  {t(phaseLabels[value] || value)}
                 </option>
               ))}
             </select>
           </label>
           {workerOptions.length > 0 && (
             <label className="cs-event-filter cs-event-filter--worker">
-              <span className="cs-visually-hidden">按工作单元筛选事件</span>
+              <span className="cs-visually-hidden">
+                {t("按工作单元筛选事件")}
+              </span>
               <select
                 value={worker}
                 onChange={(event) => setWorker(event.target.value)}
               >
-                <option value="all">全部 Worker</option>
+                <option value="all">{t("全部工作单元")}</option>
                 {workerOptions.map((value) => (
                   <option key={value} value={value}>
                     {shortId(value, 14)}
@@ -171,15 +198,15 @@ export function EventStream({
             </label>
           )}
           <label className="cs-event-filter cs-event-filter--level">
-            <span className="cs-visually-hidden">按级别筛选事件</span>
+            <span className="cs-visually-hidden">{t("按级别筛选事件")}</span>
             <select
               value={level}
               onChange={(event) => setLevel(event.target.value)}
             >
-              <option value="all">全部级别</option>
-              <option value="info">信息</option>
-              <option value="warning">警告</option>
-              <option value="error">错误</option>
+              <option value="all">{t("全部级别")}</option>
+              <option value="info">{t("信息")}</option>
+              <option value="warning">{t("警告")}</option>
+              <option value="error">{t("错误")}</option>
             </select>
           </label>
         </div>
@@ -191,7 +218,7 @@ export function EventStream({
           onClick={() => void onLoadOlder()}
           disabled={loadingOlder}
         >
-          {loadingOlder ? "正在加载更早事件…" : "加载更早事件"}
+          {t(loadingOlder ? "正在加载更早事件…" : "加载更早事件")}
         </button>
       )}
       <div
@@ -206,17 +233,17 @@ export function EventStream({
           if (atLatest) setUnseen(0);
         }}
         tabIndex={0}
-        aria-label="审计事件列表"
+        aria-label={t("审计事件列表")}
       >
         {virtual ? (
           <div
             className="cs-event-virtual"
-            style={{ height: filtered.length * ROW_HEIGHT }}
+            style={{ height: grouped.length * ROW_HEIGHT }}
           >
-            {visible.map((event, index) => (
+            {visible.map((group, index) => (
               <EventRow
-                key={event.seq}
-                event={event}
+                key={group.event.seq}
+                group={group}
                 style={{
                   transform: `translateY(${(start + index) * ROW_HEIGHT}px)`,
                 }}
@@ -224,13 +251,17 @@ export function EventStream({
             ))}
           </div>
         ) : (
-          visible.map((event) => <EventRow key={event.seq} event={event} />)
+          visible.map((group) => (
+            <EventRow key={group.event.seq} group={group} />
+          ))
         )}
         {!filtered.length && (
           <p className="cs-inline-empty" role={loading ? "status" : undefined}>
-            {loading
-              ? "正在加载审计事件…"
-              : "当前阶段与筛选条件下还没有事件。"}
+            {t(
+              loading
+                ? "正在加载审计事件…"
+                : "当前阶段与筛选条件下还没有事件。",
+            )}
           </p>
         )}
       </div>
@@ -240,7 +271,7 @@ export function EventStream({
           type="button"
           onClick={returnToLatest}
         >
-          有 {unseen} 条新事件 · 回到最新
+          {t("有 {{count}} 条新事件 · 回到最新", { count: unseen })}
         </button>
       )}
     </section>
@@ -275,26 +306,105 @@ function compareEventsNewestFirst(left: AuditEvent, right: AuditEvent): number {
   return timeDifference || right.seq - left.seq;
 }
 
+function groupRepeatedProgress(events: AuditEvent[]): GroupedEvent[] {
+  const groups: GroupedEvent[] = [];
+  events.forEach((event) => {
+    const signature = progressSignature(event);
+    const previous = groups[groups.length - 1];
+    if (signature && previous?.signature === signature) {
+      previous.count += 1;
+      previous.oldestCreatedAt = event.created_at;
+      return;
+    }
+    groups.push({
+      event,
+      count: 1,
+      oldestCreatedAt: event.created_at,
+      signature,
+    });
+  });
+  return groups;
+}
+
+function progressSignature(event: AuditEvent): string | null {
+  if (event.type !== "phase.progress" || event.level !== "info") return null;
+  const statusCounts = Object.entries(
+    numericRecord(event.summary.status_counts),
+  ).sort(([left], [right]) => left.localeCompare(right));
+  const workers = Array.isArray(event.summary.workers)
+    ? event.summary.workers
+        .flatMap((value) => {
+          if (!value || typeof value !== "object") return [];
+          const record = value as Record<string, unknown>;
+          const id =
+            typeof record.work_unit_id === "string" ? record.work_unit_id : "";
+          const status = typeof record.status === "string" ? record.status : "";
+          const session =
+            typeof record.session_id === "string" ? record.session_id : "";
+          const candidate =
+            typeof record.candidate_id === "string" ? record.candidate_id : "";
+          return id && status
+            ? [`${id}\u0000${status}\u0000${session}\u0000${candidate}`]
+            : [];
+        })
+        .sort()
+    : [];
+  return JSON.stringify({
+    type: event.type,
+    title: event.title,
+    phase: event.summary.phase,
+    batch: eventWorker(event),
+    status: event.summary.status,
+    statusCounts,
+    workers,
+  });
+}
+
 function EventRow({
-  event,
+  group,
   style,
 }: {
-  event: AuditEvent;
+  group: GroupedEvent;
   style?: CSSProperties;
 }) {
+  const { language, t } = useCodeSecurityI18n();
+  const { event } = group;
   const phase =
     typeof event.summary.phase === "string" ? event.summary.phase : "";
-  const metric = eventMetric(event);
+  const metric = eventMetric(event, t);
+  const title = t(event.title.replace(/父 Agent\s*/g, "主智能体"));
+  const formattedTime = (value: string) => formatTime(value, language);
   return (
     <article
       className={`cs-event-row cs-event-row--${event.level}`}
       style={style}
     >
-      <time dateTime={event.created_at}>{formatTime(event.created_at)}</time>
+      <time dateTime={event.created_at}>{formattedTime(event.created_at)}</time>
       <span className="cs-event-row__marker" aria-hidden="true" />
       <div>
-        <strong>{event.title}</strong>
-        <p>{phaseLabels[phase] || phase || event.type}</p>
+        <strong>{title}</strong>
+        <p>
+          <span>{t(phaseLabels[phase] || phase || event.type)}</span>
+          {group.count > 1 && (
+            <span
+              className="cs-event-row__group"
+              aria-label={t(
+                "已合并 {{count}} 条相同状态事件，时间范围 {{start}} 至 {{end}}",
+                {
+                  count: group.count,
+                  start: formattedTime(group.oldestCreatedAt),
+                  end: formattedTime(event.created_at),
+                },
+              )}
+            >
+              {t("合并 {{count}} 条 · {{start}}–{{end}}", {
+                count: group.count,
+                start: formattedTime(group.oldestCreatedAt),
+                end: formattedTime(event.created_at),
+              })}
+            </span>
+          )}
+        </p>
       </div>
       <span className="cs-event-row__metric" aria-label={metric.label}>
         {metric.text}
@@ -302,11 +412,27 @@ function EventRow({
       <button
         type="button"
         className="cs-copy-button"
-        aria-label={`复制事件 ${event.seq} 摘要`}
-        title={`复制事件 #${event.seq} 摘要`}
+        aria-label={
+          group.count > 1
+            ? t("复制合并事件摘要，共 {{count}} 条", { count: group.count })
+            : t("复制事件 {{seq}} 摘要", { seq: event.seq })
+        }
+        title={
+          group.count > 1
+            ? t("复制合并的 {{count}} 条事件摘要", { count: group.count })
+            : t("复制事件 #{{seq}} 摘要", { seq: event.seq })
+        }
         onClick={() =>
           navigator.clipboard?.writeText(
-            `${event.title}\n${JSON.stringify(event.summary)}`,
+            `${title}\n${
+              group.count > 1
+                ? `${t("合并 {{count}} 条相同状态事件：{{start}}–{{end}}", {
+                    count: group.count,
+                    start: formattedTime(group.oldestCreatedAt),
+                    end: formattedTime(event.created_at),
+                  })}\n`
+                : ""
+            }${JSON.stringify(event.summary)}`,
           )
         }
       >
@@ -316,7 +442,10 @@ function EventRow({
   );
 }
 
-function eventMetric(event: AuditEvent): { text: string; label: string } {
+function eventMetric(
+  event: AuditEvent,
+  t: Translator,
+): { text: string; label: string } {
   const statusCounts = numericRecord(event.summary.status_counts);
   const totalWorkers = Object.values(statusCounts).reduce(
     (total, count) => total + count,
@@ -327,23 +456,41 @@ function eventMetric(event: AuditEvent): { text: string; label: string } {
     const completed = statusCounts.completed || 0;
     const running = statusCounts.running || 0;
     const cancelled = statusCounts.cancelled || 0;
-    if (failed > 0) return workerMetric(`${failed} 失败`, failed, "执行失败");
+    if (failed > 0)
+      return {
+        text: t("{{count}} 失败", { count: failed }),
+        label: t("{{count}} 个工作单元执行失败", { count: failed }),
+      };
     if (completed > 0) {
-      return workerMetric(
-        `${completed}/${totalWorkers} 已完成`,
-        totalWorkers,
-        `${completed} 个已完成`,
-      );
+      return {
+        text: t("{{completed}}/{{total}} 已完成", {
+          completed,
+          total: totalWorkers,
+        }),
+        label: t("{{total}} 个工作单元中 {{completed}} 个已完成", {
+          total: totalWorkers,
+          completed,
+        }),
+      };
     }
     if (running > 0)
-      return workerMetric(`${running} 运行中`, running, "运行中");
+      return {
+        text: t("{{count}} 运行中", { count: running }),
+        label: t("{{count}} 个工作单元正在运行", { count: running }),
+      };
     if (cancelled > 0)
-      return workerMetric(`${cancelled} 已取消`, cancelled, "已取消");
+      return {
+        text: t("{{count}} 已取消", { count: cancelled }),
+        label: t("{{count}} 个工作单元已取消", { count: cancelled }),
+      };
   }
 
   const launchedWorkers = numericValue(event.summary.launched_workers);
   if (launchedWorkers !== null) {
-    return workerMetric(`${launchedWorkers} 已启动`, launchedWorkers, "已启动");
+    return {
+      text: t("{{count}} 已启动", { count: launchedWorkers }),
+      label: t("{{count}} 个工作单元已启动", { count: launchedWorkers }),
+    };
   }
 
   const counts = numericRecord(event.summary.counts);
@@ -351,27 +498,45 @@ function eventMetric(event: AuditEvent): { text: string; label: string } {
   const verifications = counts.verifications;
   if (candidates !== undefined && verifications) {
     return {
-      text: `${verifications}/${candidates} 已验证`,
-      label: `${candidates} 个候选问题中已有 ${verifications} 个验证记录`,
+      text: t("{{verified}}/{{candidates}} 已验证", {
+        verified: verifications,
+        candidates,
+      }),
+      label: t("{{candidates}} 个候选漏洞中已有 {{verified}} 个验证记录", {
+        candidates,
+        verified: verifications,
+      }),
     };
   }
   if (candidates !== undefined) {
-    return { text: `${candidates} 候选`, label: `${candidates} 个候选问题` };
+    return {
+      text: t("{{count}} 候选漏洞", { count: candidates }),
+      label: t("{{count}} 个候选漏洞", { count: candidates }),
+    };
   }
 
   const findingCount = numericValue(event.summary.finding_count);
   if (findingCount !== null) {
-    return { text: `${findingCount} 漏洞`, label: `${findingCount} 个最终漏洞` };
+    return {
+      text: t("{{count}} 漏洞", { count: findingCount }),
+      label: t("{{count}} 个漏洞", { count: findingCount }),
+    };
   }
 
   const status =
     typeof event.summary.status === "string" ? event.summary.status : "";
   if (status && phaseStatusLabels[status]) {
-    return { text: phaseStatusLabels[status], label: phaseStatusLabels[status] };
+    return {
+      text: t(phaseStatusLabels[status]),
+      label: t(phaseStatusLabels[status]),
+    };
   }
 
   const levelLabels = { info: "信息", warning: "警告", error: "错误" };
-  return { text: levelLabels[event.level], label: `${levelLabels[event.level]}事件` };
+  return {
+    text: t(levelLabels[event.level]),
+    label: t("{{level}}事件", { level: t(levelLabels[event.level]) }),
+  };
 }
 
 function numericRecord(value: unknown): Record<string, number> {
@@ -386,12 +551,4 @@ function numericRecord(value: unknown): Record<string, number> {
 
 function numericValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function workerMetric(
-  text: string,
-  count: number,
-  status: string,
-): { text: string; label: string } {
-  return { text, label: `${count} 个 Worker ${status}` };
 }

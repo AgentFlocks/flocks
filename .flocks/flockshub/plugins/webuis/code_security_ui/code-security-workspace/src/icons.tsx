@@ -17,6 +17,7 @@ export type IconName =
   | "download"
   | "copy"
   | "trash"
+  | "chevron"
   | "panel";
 
 const paths: Record<IconName, ReactElement> = {
@@ -121,6 +122,7 @@ const paths: Record<IconName, ReactElement> = {
       <path d="M14 11v6" />
     </>
   ),
+  chevron: <path d="m8 10 4 4 4-4" />,
   panel: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2" />

@@ -494,7 +494,7 @@ const styles = String.raw`
 .cs-final-findings { align-items: center; background: var(--cs-surface-elevated); border: 1px solid var(--cs-border); border-radius: 8px; display: flex; gap: 16px; justify-content: space-between; min-width: 172px; padding: 8px 10px; }
 .cs-final-findings > div { display: grid; gap: 2px; }
 .cs-final-findings > div > span { color: var(--cs-text); font-size: 11px; font-weight: 650; }
-.cs-final-findings > div > small { color: var(--cs-text-muted); font-size: 10px; }
+.cs-final-findings > div > small { color: var(--cs-text-muted); font-size: 10px; overflow-wrap: anywhere; }
 .cs-final-findings > strong { color: var(--cs-text); font-size: 24px; font-weight: 700; line-height: 26px; white-space: nowrap; }
 .cs-final-findings > strong > small { color: var(--cs-text-secondary); font-size: 10px; font-weight: 600; margin-left: 3px; }
 
@@ -519,7 +519,7 @@ const styles = String.raw`
 
 .cs-phase-step:hover { background: var(--cs-surface-subtle); }
 .cs-phase-step.is-selected { border-color: var(--cs-primary); box-shadow: inset 0 -3px var(--cs-primary); }
-.cs-phase-step strong { font-size: 13px; }
+.cs-phase-step strong { font-size: 13px; overflow-wrap: anywhere; }
 .cs-phase-step > span:last-child { color: var(--cs-text-muted); font-size: 11px; }
 .cs-phase-step .cs-status { justify-self: start; }
 
@@ -560,6 +560,77 @@ const styles = String.raw`
 .cs-phase-summary__grid code { display: block; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cs-phase-summary__note { background: var(--cs-surface-subtle); border-top: 1px solid var(--cs-border); color: var(--cs-text-secondary); font-size: 12px; line-height: 18px; margin: 0; padding: 10px 14px; }
 .cs-phase-summary__note--danger { background: var(--cs-danger-soft); color: var(--cs-danger); }
+.cs-adjudication-summary .cs-phase-summary__heading h3 svg { color: var(--cs-primary); }
+.cs-adjudication-summary__content { display: grid; gap: 14px; padding: 14px; }
+.cs-adjudication-group { border: 1px solid var(--cs-border); border-radius: 8px; min-width: 0; overflow: hidden; }
+.cs-adjudication-group__header { align-items: center; background: var(--cs-surface-subtle); border-bottom: 1px solid var(--cs-border); display: flex; gap: 12px; justify-content: space-between; padding: 10px 12px; }
+.cs-adjudication-group__header > div { align-items: center; display: flex; gap: 9px; min-width: 0; }
+.cs-adjudication-group__icon { align-items: center; border-radius: 7px; display: inline-flex; flex: 0 0 auto; height: 30px; justify-content: center; width: 30px; }
+.cs-adjudication-group__icon svg { height: 17px; width: 17px; }
+.cs-adjudication-group--accepted .cs-adjudication-group__icon { background: var(--cs-success-soft); color: var(--cs-success); }
+.cs-adjudication-group--rejected .cs-adjudication-group__icon { background: var(--cs-danger-soft); color: var(--cs-danger); }
+.cs-adjudication-group__header h4 { font-size: 12px; line-height: 18px; margin: 0; }
+.cs-adjudication-group__header p { color: var(--cs-text-muted); font-size: 10px; line-height: 16px; margin: 1px 0 0; }
+.cs-adjudication-group__header > strong { align-items: baseline; border-radius: 999px; display: inline-flex; flex: 0 0 auto; font-size: 13px; gap: 2px; min-width: 38px; padding: 3px 8px; justify-content: center; }
+.cs-adjudication-group__header > strong small { font-size: 9px; font-weight: 600; }
+.cs-adjudication-group--accepted .cs-adjudication-group__header > strong { background: var(--cs-success-soft); color: var(--cs-success); }
+.cs-adjudication-group--rejected .cs-adjudication-group__header > strong { background: var(--cs-danger-soft); color: var(--cs-danger); }
+.cs-adjudication-group > p { color: var(--cs-text-muted); font-size: 12px; line-height: 18px; margin: 0; padding: 14px 11px; }
+.cs-adjudication-group ul { background: var(--cs-surface-subtle); display: grid; gap: 8px; list-style: none; margin: 0; padding: 10px; }
+.cs-adjudication-group--accepted ul, .cs-adjudication-group--rejected ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cs-adjudication-group li { background: var(--cs-surface-elevated); border: 1px solid var(--cs-border); border-left-width: 3px; border-radius: 7px; display: grid; min-width: 0; overflow: hidden; }
+.cs-adjudication-group--accepted li { border-left-color: var(--cs-success); }
+.cs-adjudication-group li.is-expanded { grid-column: 1 / -1; }
+.cs-adjudication-group--rejected li { border-left-color: var(--cs-danger); }
+.cs-adjudication-candidate__heading { align-items: start; display: grid; gap: 9px; grid-template-columns: auto minmax(0, 1fr) auto; min-width: 0; }
+.cs-adjudication-candidate__heading > div, .cs-adjudication-candidate__copy { display: grid; gap: 3px; min-width: 0; }
+.cs-adjudication-candidate__heading strong { font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.cs-adjudication-candidate__heading code { color: var(--cs-text-muted); font-size: 10px; line-height: 16px; overflow-wrap: anywhere; white-space: normal; }
+.cs-adjudication-candidate__toggle { background: transparent; border: 0; color: inherit; cursor: pointer; font: inherit; min-height: 68px; padding: 11px; text-align: left; transition: background 120ms ease; width: 100%; }
+.cs-adjudication-candidate__toggle:hover { background: var(--cs-surface-subtle); }
+.cs-adjudication-candidate__toggle:focus-visible { outline: 2px solid var(--cs-focus); outline-offset: -3px; }
+.cs-adjudication-candidate__index { align-items: center; background: var(--cs-muted-soft); border-radius: 999px; color: var(--cs-text-secondary); display: inline-flex; font-size: 10px; font-weight: 650; height: 22px; justify-content: center; width: 22px; }
+.cs-adjudication-candidate__actions { align-items: end; display: grid; gap: 6px; justify-items: end; }
+.cs-adjudication-candidate__status { border-radius: 999px; font-size: 10px; font-weight: 650; line-height: 20px; padding: 0 7px; white-space: nowrap; }
+.cs-adjudication-group--accepted .cs-adjudication-candidate__status { background: var(--cs-success-soft); color: var(--cs-success); }
+.cs-adjudication-group--rejected .cs-adjudication-candidate__status { background: var(--cs-danger-soft); color: var(--cs-danger); }
+.cs-adjudication-candidate__disclosure { align-items: center; color: var(--cs-primary); display: inline-flex; font-size: 10px; font-weight: 650; gap: 3px; white-space: nowrap; }
+.cs-adjudication-group--rejected .cs-adjudication-candidate__disclosure { color: var(--cs-danger); }
+.cs-adjudication-candidate__disclosure svg { height: 14px; transition: transform 120ms ease; width: 14px; }
+.cs-adjudication-group li.is-expanded .cs-adjudication-candidate__disclosure svg { transform: rotate(180deg); }
+.cs-adjudication-evidence { background: var(--cs-surface-subtle); border-top: 1px solid var(--cs-border); display: grid; gap: 12px; padding: 12px; }
+.cs-adjudication-evidence h5 { align-items: center; display: flex; font-size: 11px; gap: 7px; line-height: 18px; margin: 0; }
+.cs-adjudication-evidence h5 > span { background: var(--cs-muted-soft); border-radius: 999px; color: var(--cs-text-muted); font-size: 9px; line-height: 18px; padding: 0 6px; }
+.cs-adjudication-evidence__decision { border-radius: 7px; padding: 10px 11px; }
+.cs-adjudication-evidence__decision--rejected { background: var(--cs-danger-soft); }
+.cs-adjudication-evidence__decision--rejected h5 { color: var(--cs-danger); }
+.cs-adjudication-evidence__rationale { background: var(--cs-info-soft); border-radius: 7px; padding: 10px 11px; }
+.cs-adjudication-evidence__rationale h5 { color: var(--cs-info); }
+.cs-adjudication-evidence__decision p, .cs-adjudication-evidence__rationale p { color: var(--cs-text-secondary); font-size: 12px; line-height: 19px; margin: 5px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.cs-adjudication-evidence__code { display: grid; gap: 8px; min-width: 0; }
+.cs-adjudication-evidence__items { display: grid; gap: 8px; }
+.cs-adjudication-evidence__items article { background: var(--cs-surface-elevated); border: 1px solid var(--cs-border); border-radius: 7px; min-width: 0; overflow: hidden; }
+.cs-adjudication-evidence__items header { align-items: center; border-bottom: 1px solid var(--cs-border); display: flex; gap: 10px; justify-content: space-between; min-height: 34px; padding: 6px 9px; }
+.cs-adjudication-evidence__items header strong { flex: 0 0 auto; font-size: 10px; }
+.cs-adjudication-evidence__items header code { color: var(--cs-text-secondary); font-size: 10px; overflow-wrap: anywhere; text-align: right; }
+.cs-adjudication-evidence__items pre { background: var(--cs-code-bg, var(--cs-surface-subtle)); margin: 0; overflow-x: auto; padding: 10px; }
+.cs-adjudication-evidence__items pre:focus-visible { outline: 2px solid var(--cs-focus); outline-offset: -2px; }
+.cs-adjudication-evidence__items pre code { font-size: 11px; line-height: 18px; white-space: pre; }
+.cs-adjudication-evidence__items article > small { border-top: 1px solid var(--cs-border); color: var(--cs-text-muted); display: block; font-size: 9px; padding: 5px 9px; }
+.cs-adjudication-evidence__message { color: var(--cs-text-muted); font-size: 11px; line-height: 18px; margin: 0; padding: 6px 0; }
+.cs-adjudication-evidence__error { align-items: center; background: var(--cs-danger-soft); border-radius: 7px; display: flex; gap: 10px; justify-content: space-between; padding: 8px 10px; }
+.cs-adjudication-evidence__error p { color: var(--cs-danger); font-size: 11px; line-height: 18px; margin: 0; }
+.cs-adjudication-evidence__error button { background: var(--cs-surface-elevated); border: 1px solid var(--cs-border); border-radius: 6px; color: var(--cs-text); flex: 0 0 auto; font-size: 10px; min-height: 30px; padding: 0 9px; }
+.cs-adjudication-evidence__error button:focus-visible { outline: 2px solid var(--cs-focus); outline-offset: 2px; }
+.cs-adjudication-summary__rescan { display: grid; gap: 14px; padding: 14px; }
+.cs-adjudication-summary__rescan > div { min-width: 0; }
+.cs-adjudication-summary__rescan > div:first-child { background: var(--cs-warning-soft); border-radius: 8px; display: grid; gap: 4px; padding: 11px 12px; }
+.cs-adjudication-summary__rescan > div:first-child strong { color: var(--cs-warning); font-size: 13px; }
+.cs-adjudication-summary__rescan h4 { font-size: 12px; margin: 0 0 6px; }
+.cs-adjudication-summary__rescan p, .cs-adjudication-summary__rescan ol { color: var(--cs-text-secondary); font-size: 12px; line-height: 19px; margin: 0; overflow-wrap: anywhere; }
+.cs-adjudication-summary__rescan ol { display: grid; gap: 5px; padding-left: 20px; }
+.cs-adjudication-summary__paths { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.cs-adjudication-summary__paths code { background: var(--cs-surface-subtle); border: 1px solid var(--cs-border); border-radius: 5px; display: block; font-size: 10px; max-width: 100%; overflow-wrap: anywhere; padding: 4px 7px; }
 
 .cs-workers { overflow: hidden; }
 .cs-worker-list { align-items: start; display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; }
@@ -635,6 +706,7 @@ const styles = String.raw`
 .cs-event-row--error .cs-event-row__marker { background: var(--cs-danger); }
 .cs-event-row strong { display: block; font-size: 12px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cs-event-row p { color: var(--cs-text-muted); font-size: 11px; margin: 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-event-row__group { color: var(--cs-text-secondary); font-variant-numeric: tabular-nums; margin-left: 8px; }
 .cs-event-row__metric { background: var(--cs-surface-subtle); border-radius: 999px; color: var(--cs-text-secondary); font-size: 10px; font-weight: 650; padding: 4px 8px; white-space: nowrap; }
 .cs-copy-button { align-items: center; background: transparent; border: 0; border-radius: 6px; color: var(--cs-text-muted); display: inline-flex; justify-content: center; min-height: 32px; min-width: 32px; }
 .cs-copy-button:hover { background: var(--cs-surface-subtle); color: var(--cs-text); }
@@ -663,13 +735,14 @@ const styles = String.raw`
 .cs-artifact-refresh-error { background: var(--cs-warning-soft); border: 1px solid var(--cs-warning); border-radius: 8px; color: var(--cs-text); font-size: 12px; line-height: 18px; margin: 0 0 12px; padding: 9px 10px; }
 .cs-inspector__close { display: none; }
 .cs-artifact-tabs { border-bottom: 1px solid var(--cs-border); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px; }
-.cs-artifact-tabs button { align-items: center; background: transparent; border: 0; border-radius: 7px; color: var(--cs-text-secondary); display: flex; font-size: 12px; justify-content: space-between; min-height: 38px; padding: 6px 8px; text-align: left; }
+.cs-artifact-tabs button { align-items: flex-start; background: transparent; border: 0; border-radius: 7px; color: var(--cs-text-secondary); display: flex; font-size: 12px; gap: 8px; justify-content: space-between; min-height: 38px; padding: 6px 8px; text-align: left; }
+.cs-artifact-tabs button > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .cs-artifact-tabs button:hover { background: var(--cs-surface-subtle); }
 .cs-artifact-tabs button.is-selected { background: var(--cs-surface-selected); color: var(--cs-text); font-weight: 650; }
-.cs-artifact-state { font-size: 9px; line-height: 17px; padding: 0 5px; }
+.cs-artifact-state { flex: 0 0 auto; font-size: 9px; line-height: 17px; padding: 0 5px; }
 .cs-artifact-state--sealed { background: var(--cs-success-soft); color: var(--cs-success); }
 .cs-artifact-state--invalid { background: var(--cs-danger-soft); color: var(--cs-danger); }
-.cs-artifact-state--pending { color: var(--cs-text-muted); }
+.cs-artifact-state--pending, .cs-artifact-state--disabled { background: var(--cs-muted-soft); color: var(--cs-text-muted); }
 .cs-inspector__body { min-height: 0; overflow-y: auto; padding: 14px; scrollbar-gutter: stable; }
 
 .cs-overview { display: grid; gap: 12px; }
@@ -904,6 +977,7 @@ const styles = String.raw`
   .cs-phase-summary__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 14px; }
   .cs-phase-summary__grid > div:nth-child(2) { border-right: 0; padding-right: 0; }
   .cs-phase-summary__grid > div:nth-child(3) { padding-left: 0; }
+  .cs-adjudication-group--accepted ul, .cs-adjudication-group--rejected ul { grid-template-columns: 1fr; }
   .cs-worker-list { grid-template-columns: 1fr; }
   .cs-event-row { grid-template-columns: 58px 8px minmax(0, 1fr) auto; }
   .cs-event-filters { justify-content: flex-start; margin-left: 0; width: 100%; }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createIdempotencyKey, createScan, readApiFailure } from "../api";
 import { Icon } from "../icons";
+import { useCodeSecurityI18n } from "../i18n";
 import type { NewAuditValues, ProjectSummary, ScanDetail } from "../types";
 
 const DRAFT_KEY = "code-security-new-audit-draft-v1";
@@ -34,6 +35,7 @@ export function NewAuditDrawer({
   onClose: () => void;
   onCreated: (detail: ScanDetail) => void;
 }) {
+  const { t } = useCodeSecurityI18n();
   const baselineRef = useRef<NewAuditValues | null>(null);
   const wasOpenRef = useRef(false);
   const attemptRef = useRef<{ signature: string; key: string } | null>(null);
@@ -59,7 +61,7 @@ export function NewAuditDrawer({
   );
 
   function requestClose() {
-    if (dirty && !window.confirm("表单中有尚未提交的内容，确定关闭吗？"))
+    if (dirty && !window.confirm(t("表单中有尚未提交的内容，确定关闭吗？")))
       return;
     onClose();
   }
@@ -205,7 +207,7 @@ export function NewAuditDrawer({
       attemptRef.current = null;
       onCreated(detail);
     } catch (reason: any) {
-      const failure = readApiFailure(reason, "创建审计失败");
+      const failure = readApiFailure(reason, t("创建审计失败"));
       const message =
         (failure.code && CREATE_ERROR_MESSAGES[failure.code]) ||
         failure.message;
@@ -219,11 +221,17 @@ export function NewAuditDrawer({
       if (field) {
         setErrors((current) => ({ ...current, [field]: message }));
         setSubmitError(
-          failure.requestId ? `请求 ID：${failure.requestId}` : "",
+          failure.requestId
+            ? t("请求 ID：{{id}}", { id: failure.requestId })
+            : "",
         );
       } else {
         setSubmitError(
-          `${message}${failure.requestId ? ` · 请求 ID：${failure.requestId}` : ""}`,
+          `${t(message)}${
+            failure.requestId
+              ? ` · ${t("请求 ID：{{id}}", { id: failure.requestId })}`
+              : ""
+          }`,
         );
       }
       window.setTimeout(() => errorRef.current?.focus(), 0);
@@ -238,7 +246,7 @@ export function NewAuditDrawer({
         className="cs-drawer-scrim"
         type="button"
         onClick={requestClose}
-        aria-label="关闭新建审计"
+        aria-label={t("关闭新建审计")}
       />
       <section
         ref={dialogRef}
@@ -249,16 +257,16 @@ export function NewAuditDrawer({
       >
         <header>
           <div>
-            <p className="cs-eyebrow">不可变源码快照</p>
+            <p className="cs-eyebrow">{t("不可变源码快照")}</p>
             <h2 id="new-audit-title" ref={titleRef} tabIndex={-1}>
-              新建代码审计
+              {t("新建代码审计")}
             </h2>
           </div>
           <button
             className="cs-icon-button"
             type="button"
             onClick={requestClose}
-            aria-label="关闭新建审计"
+            aria-label={t("关闭新建审计")}
           >
             <Icon name="close" />
           </button>
@@ -271,14 +279,14 @@ export function NewAuditDrawer({
               tabIndex={-1}
               ref={errorRef}
             >
-              <h3>请修正以下问题</h3>
+              <h3>{t("请修正以下问题")}</h3>
               {submitError && <p>{submitError}</p>}
               <ul>
                 {Object.entries(errors)
                   .filter(([, value]) => value)
                   .map(([key, value]) => (
                     <li key={key}>
-                      <a href={`#audit-${key}`}>{value}</a>
+                      <a href={`#audit-${key}`}>{t(value)}</a>
                     </li>
                   ))}
               </ul>
@@ -286,10 +294,10 @@ export function NewAuditDrawer({
           )}
 
           <fieldset>
-            <legend>目标</legend>
+            <legend>{t("目标")}</legend>
             <label className="cs-field" htmlFor="audit-workspaceId">
               <span>
-                工作区 <b aria-hidden="true">*</b>
+                {t("工作区")} <b aria-hidden="true">*</b>
               </span>
               <select
                 id="audit-workspaceId"
@@ -297,7 +305,7 @@ export function NewAuditDrawer({
                 onChange={(event) => set("workspaceId", event.target.value)}
                 aria-invalid={Boolean(errors.workspaceId)}
               >
-                <option value="">请选择工作区</option>
+                <option value="">{t("请选择工作区")}</option>
                 {availableProjects.map((project) => (
                   <option key={project.id} value={project.id}>
                     {project.name || project.worktree}
@@ -310,7 +318,7 @@ export function NewAuditDrawer({
             </label>
             <label className="cs-field" htmlFor="audit-targetPath">
               <span>
-                目标目录 <b aria-hidden="true">*</b>
+                {t("目标目录")} <b aria-hidden="true">*</b>
               </span>
               <input
                 id="audit-targetPath"
@@ -321,7 +329,7 @@ export function NewAuditDrawer({
                 aria-describedby={`audit-target-help${errors.targetPath ? " audit-targetPath-error" : ""}`}
               />
               <small id="audit-target-help">
-                相对于所选工作区，例如 <code>packages/api</code>。
+                {t("相对于所选工作区，例如")} <code>packages/api</code>。
               </small>
               {errors.targetPath && (
                 <small id="audit-targetPath-error" role="alert">
@@ -332,31 +340,31 @@ export function NewAuditDrawer({
           </fieldset>
 
           <fieldset>
-            <legend>范围</legend>
+            <legend>{t("范围")}</legend>
             <label className="cs-field" htmlFor="audit-includePaths">
-              <span>包含路径</span>
+              <span>{t("包含路径")}</span>
               <textarea
                 id="audit-includePaths"
                 value={values.includePaths}
                 onChange={(event) => set("includePaths", event.target.value)}
                 rows={3}
               />
-              <small>每行一个快照相对路径。</small>
+              <small>{t("每行一个快照相对路径。")}</small>
             </label>
             <label className="cs-field" htmlFor="audit-excludePatterns">
-              <span>排除模式</span>
+              <span>{t("排除模式")}</span>
               <textarea
                 id="audit-excludePatterns"
                 value={values.excludePatterns}
                 onChange={(event) => set("excludePatterns", event.target.value)}
                 rows={3}
               />
-              <small>每行一个 glob；留空使用插件默认排除规则。</small>
+              <small>{t("每行一个 glob；留空使用插件默认排除规则。")}</small>
             </label>
             <details className="cs-advanced">
-              <summary>高级设置</summary>
+              <summary>{t("高级设置")}</summary>
               <label className="cs-field" htmlFor="audit-maxFileBytes">
-                <span>单文件上限（字节）</span>
+                <span>{t("单文件上限（字节）")}</span>
                 <input
                   id="audit-maxFileBytes"
                   type="number"
@@ -372,29 +380,29 @@ export function NewAuditDrawer({
           </fieldset>
 
           <fieldset>
-            <legend>模型</legend>
+            <legend>{t("模型")}</legend>
             <label className="cs-field" htmlFor="audit-model">
-              <span>固定模型</span>
+              <span>{t("固定模型")}</span>
               <input
                 id="audit-model"
                 value={values.model}
                 onChange={(event) => set("model", event.target.value)}
-                placeholder="留空使用系统默认模型"
+                placeholder={t("留空使用系统默认模型")}
                 aria-invalid={Boolean(errors.model)}
               />
               <small>
-                可选；格式为 <code>provider/model</code>。
+                {t("可选；格式为")} <code>provider/model</code>。
               </small>
               {errors.model && <small role="alert">{errors.model}</small>}
             </label>
           </fieldset>
 
           <fieldset>
-            <legend>验证方式</legend>
+            <legend>{t("验证方式")}</legend>
             <label className="cs-toggle" htmlFor="audit-dynamicEnabled">
               <span>
-                <strong>动态验证</strong>
-                <small>默认关闭；开启后执行受限 Docker 探测。</small>
+                <strong>{t("动态验证")}</strong>
+                <small>{t("默认关闭；开启后执行受限 Docker 探测。")}</small>
               </span>
               <input
                 id="audit-dynamicEnabled"
@@ -407,14 +415,16 @@ export function NewAuditDrawer({
               <div className="cs-dynamic-confirm">
                 <Icon name="flask" />
                 <div>
-                  <h3>动态验证将在本地 Docker 中构建并运行受限探测</h3>
+                  <h3>{t("动态验证将在本地 Docker 中构建并运行受限探测")}</h3>
                   <p>
-                    无网络 · 无主机挂载 · 只读根文件系统 · 无 capabilities ·
-                    资源受限 · 仅使用本地已有镜像
+                    {t(
+                      "无网络 · 无主机挂载 · 只读根文件系统 · 无 capabilities · 资源受限 · 仅使用本地已有镜像",
+                    )}
                   </p>
                   <p>
-                    需要 Docker CLI、可用的本地 daemon，以及快照中受支持的
-                    Dockerfile。
+                    {t(
+                      "需要 Docker CLI、可用的本地 daemon，以及快照中受支持的 Dockerfile。",
+                    )}
                   </p>
                   <label htmlFor="audit-dynamicConfirmed">
                     <input
@@ -427,7 +437,7 @@ export function NewAuditDrawer({
                       aria-invalid={Boolean(errors.dynamicConfirmed)}
                     />
                     <span>
-                      我理解动态验证会执行快照中的受限代码，并同意继续。
+                      {t("我理解动态验证会执行快照中的受限代码，并同意继续。")}
                     </span>
                   </label>
                   {errors.dynamicConfirmed && (
@@ -444,18 +454,20 @@ export function NewAuditDrawer({
               type="button"
               onClick={requestClose}
             >
-              取消
+              {t("取消")}
             </button>
             <button
               className="cs-button cs-button--primary"
               type="submit"
               disabled={submitting}
             >
-              {submitting
-                ? "正在创建不可变快照…"
-                : values.dynamicEnabled
-                  ? "启动动态审计"
-                  : "启动静态审计"}
+              {t(
+                submitting
+                  ? "正在创建不可变快照…"
+                  : values.dynamicEnabled
+                    ? "启动动态审计"
+                    : "启动静态审计",
+              )}
             </button>
           </footer>
         </form>

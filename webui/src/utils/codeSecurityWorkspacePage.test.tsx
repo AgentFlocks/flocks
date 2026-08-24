@@ -1,5 +1,11 @@
 import React from "react";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -8,13 +14,30 @@ import Page, {
 } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/Page";
 import { ArtifactInspector } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/ArtifactInspector";
 import { ElapsedTime } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/ElapsedTime";
+import { EventStream } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/EventStream";
+import { NewAuditDrawer } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/NewAuditDrawer";
 import { PhaseWorkspace } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/PhaseWorkspace";
+import {
+  hasEnglishTranslation,
+  translate,
+} from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/i18n";
+import {
+  coverageStatusLabels,
+  formatFileSize,
+  integrityStatusLabels,
+  lifecycleLabels,
+  phaseLabels,
+  phaseStatusLabels,
+  severityLabels,
+  verdictLabels,
+} from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/labels";
 import type { PhaseRun } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/types";
 import { Markdown } from "../pages/WebUIContractPageHost/runtime";
 
 const apiGet = vi.fn();
 const apiPost = vi.fn();
 const apiDelete = vi.fn();
+let codeSecurityLanguage = "zh-CN";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -155,6 +178,7 @@ describe("code security workspace contract page", () => {
       React,
       Markdown,
       useCurrentUser: () => ({ id: "admin-1", role: "admin" }),
+      useLanguage: () => codeSecurityLanguage,
       api: { get: apiGet, post: apiPost, delete: apiDelete },
     };
     (globalThis as any).EventSource = undefined;
@@ -166,6 +190,7 @@ describe("code security workspace contract page", () => {
     }));
     window.history.replaceState({}, "", "/?scan_id=scan_demo");
     window.sessionStorage.clear();
+    codeSecurityLanguage = "zh-CN";
     apiDelete.mockResolvedValue({ data: null });
     apiGet.mockImplementation((path: string) => {
       if (path === "/api/project/") {
@@ -299,6 +324,14 @@ describe("code security workspace contract page", () => {
     apiDelete.mockReset();
   });
 
+  it("formats file sizes in KB and switches to MB at 1024 KB", () => {
+    expect(formatFileSize(0, "en-US")).toBe("0 KB");
+    expect(formatFileSize(512, "en-US")).toBe("0.5 KB");
+    expect(formatFileSize(1_047_552, "en-US")).toBe("1,023 KB");
+    expect(formatFileSize(1_048_576, "en-US")).toBe("1 MB");
+    expect(formatFileSize(1_572_864, "en-US")).toBe("1.5 MB");
+  });
+
   it("renders lifecycle, coverage, skipped dynamic phase, and durable events separately", async () => {
     const { container, unmount } = render(<Page />);
 
@@ -333,6 +366,12 @@ describe("code security workspace contract page", () => {
       ".cs-worker-list { align-items: start;",
     );
     expect(workspaceStyle?.textContent).toContain(
+      ".cs-adjudication-group--accepted ul, .cs-adjudication-group--rejected ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }",
+    );
+    expect(workspaceStyle?.textContent).toContain(
+      ".cs-adjudication-group--accepted ul, .cs-adjudication-group--rejected ul { grid-template-columns: 1fr; }",
+    );
+    expect(workspaceStyle?.textContent).toContain(
       "max-height: min(240px, 35vh)",
     );
     expect(
@@ -345,7 +384,7 @@ describe("code security workspace contract page", () => {
     expect(screen.getByText("静态验证 · 显示 1 / 2 条")).toBeInTheDocument();
     expect(screen.getByText("独立验证 Worker 已开始")).toBeInTheDocument();
     expect(screen.getByText("1 运行中")).toHaveAccessibleName(
-      "1 个 Worker 运行中",
+      "1 个工作单元正在运行",
     );
     expect(screen.queryByText("seq 2")).not.toBeInTheDocument();
     expect(
@@ -384,9 +423,7 @@ describe("code security workspace contract page", () => {
     expect(
       screen.queryByText("不使用不可解释的总体百分比"),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByLabelText("最终漏洞数，审计完成后确定"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("漏洞数，审计完成后确定")).toBeInTheDocument();
     expect(apiGet).toHaveBeenCalledWith(
       "/api/code-security/v1/scans/scan_demo/events",
       { params: { recent: true, limit: 200 } },
@@ -395,6 +432,76 @@ describe("code security workspace contract page", () => {
     expect(
       document.head.querySelector("style[data-flocks-code-security-workspace]"),
     ).toBeNull();
+  });
+
+  it("groups only consecutive phase progress events whose state is unchanged", () => {
+    const progressEvent = (
+      seq: number,
+      createdAt: string,
+      statusCounts: Record<string, number>,
+      workerStatus = "running",
+    ) => ({
+      seq,
+      scan_id: "scan_demo",
+      phase_run_id: "phase_verify",
+      type: "phase.progress",
+      level: "info" as const,
+      title: "审计阶段状态已更新",
+      summary: {
+        phase: "verification",
+        batch_id: "batch_verify",
+        status: "running",
+        status_counts: statusCounts,
+        workers: [
+          { work_unit_id: "worker-1", status: workerStatus },
+          { work_unit_id: "worker-2", status: "running" },
+        ],
+      },
+      created_at: createdAt,
+    });
+    const events = [
+      progressEvent(1, "2026-08-21T10:00:00Z", { running: 7 }),
+      progressEvent(2, "2026-08-21T10:00:10Z", { running: 7 }),
+      {
+        ...progressEvent(3, "2026-08-21T10:00:20Z", { running: 7 }),
+        type: "phase.started",
+        title: "审计阶段已开始",
+        summary: { phase: "verification", batch_id: "batch_verify" },
+      },
+      progressEvent(4, "2026-08-21T10:00:30Z", { running: 7 }),
+      progressEvent(5, "2026-08-21T10:00:40Z", { running: 7 }),
+      progressEvent(
+        6,
+        "2026-08-21T10:00:50Z",
+        { completed: 1, running: 6 },
+        "completed",
+      ),
+    ];
+
+    render(
+      <EventStream
+        events={events}
+        selectedPhase="verification"
+        hasOlder={false}
+        loading={false}
+        loadingOlder={false}
+        onLoadOlder={async () => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByText("静态验证 · 显示 4 组（6 条）/ 6 条"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("审计阶段状态已更新")).toHaveLength(3);
+    expect(screen.getByText("审计阶段已开始")).toBeInTheDocument();
+    expect(screen.getAllByText(/^合并 2 条 ·/)).toHaveLength(2);
+    expect(screen.getAllByText("7 运行中")).toHaveLength(2);
+    expect(screen.getByText("1/7 已完成")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", {
+        name: "复制合并事件摘要，共 2 条",
+      }),
+    ).toHaveLength(2);
   });
 
   it("keeps the current audit visible when its selected history card is clicked again", async () => {
@@ -592,8 +699,8 @@ describe("code security workspace contract page", () => {
 
     fireEvent.pointerEnter(olderButton);
     fireEvent.pointerLeave(olderButton);
-    await act(async () =>
-      new Promise((resolve) => window.setTimeout(resolve, 220)),
+    await act(
+      async () => new Promise((resolve) => window.setTimeout(resolve, 220)),
     );
     expect(
       apiGet.mock.calls.some(
@@ -608,8 +715,8 @@ describe("code security workspace contract page", () => {
       ),
     );
     fireEvent.pointerEnter(thirdButton);
-    await act(async () =>
-      new Promise((resolve) => window.setTimeout(resolve, 220)),
+    await act(
+      async () => new Promise((resolve) => window.setTimeout(resolve, 220)),
     );
     expect(
       apiGet.mock.calls.some(
@@ -653,10 +760,9 @@ describe("code security workspace contract page", () => {
       await screen.findByRole("heading", { name: "legacy-service" }),
     ).toBeInTheDocument();
     expect(screen.getByText("正在加载审计事件…")).toBeInTheDocument();
-    expect(screen.getByLabelText("审计事件列表").closest("section")).toHaveAttribute(
-      "aria-busy",
-      "true",
-    );
+    expect(
+      screen.getByLabelText("审计事件列表").closest("section"),
+    ).toHaveAttribute("aria-busy", "true");
 
     await act(async () =>
       eventsRequest.resolve({
@@ -668,7 +774,9 @@ describe("code security workspace contract page", () => {
         screen.getByLabelText("审计事件列表").closest("section"),
       ).toHaveAttribute("aria-busy", "false"),
     );
-    expect(screen.getByText("当前阶段与筛选条件下还没有事件。")).toBeInTheDocument();
+    expect(
+      screen.getByText("当前阶段与筛选条件下还没有事件。"),
+    ).toBeInTheDocument();
   });
 
   it("does not let an older detail request overwrite a cancellation", async () => {
@@ -838,7 +946,7 @@ describe("code security workspace contract page", () => {
       expect(button).toHaveClass("cs-button--secondary");
       expect(button).not.toHaveClass("cs-button--primary");
     }
-    expect(screen.getByText("0 个最终漏洞")).toBeInTheDocument();
+    expect(screen.getByText("0 个漏洞")).toBeInTheDocument();
     expect(screen.queryByText("1 个候选")).not.toBeInTheDocument();
   });
 
@@ -1345,15 +1453,15 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
-    await user.click(screen.getByRole("tab", { name: /候选问题/ }));
+    await user.click(screen.getByRole("tab", { name: /候选漏洞/ }));
 
     expect(await screen.findByText("待验证路径穿越")).toBeInTheDocument();
     expect(
-      screen.getByText("候选问题", { selector: ".cs-value-tag" }),
+      screen.getByText("候选漏洞", { selector: ".cs-value-tag" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("最终漏洞")).not.toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "查看证据 · src/path.ts:12" }),
+      screen.getByRole("button", { name: "查看证据 · src/path.ts:12-18" }),
     );
     expect(
       await screen.findByText("const resolved = root + userInput;"),
@@ -1653,22 +1761,337 @@ describe("code security workspace contract page", () => {
     expect(
       screen.getByRole("heading", { name: "封装结果" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("已封装产物").nextElementSibling).toHaveTextContent(
+    expect(screen.getByText("已完成产物").nextElementSibling).toHaveTextContent(
       "2 个",
     );
-    expect(screen.getByText("已封装大小").nextElementSibling).toHaveTextContent(
+    expect(screen.getByText("产物大小").nextElementSibling).toHaveTextContent(
       "3 KB",
     );
     expect(screen.getByText("完整性").nextElementSibling).toHaveTextContent(
       "校验通过",
     );
     expect(screen.getByText("最终报告").nextElementSibling).toHaveTextContent(
-      "已封装",
+      "已完成",
     );
     expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "阶段事件" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows what the main agent accepted and rejected during adjudication", async () => {
+    const defaultApiGet = apiGet.getMockImplementation();
+    let evidenceAttempts = 0;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (
+        path ===
+        "/api/code-security/v1/scans/scan_demo/artifacts/candidate_index"
+      ) {
+        return Promise.resolve({
+          data: {
+            kind: "candidate_index",
+            state: "partial",
+            content: [
+              {
+                candidate_id: "candidate-accepted",
+                evidence: [
+                  {
+                    evidence_id: "accepted-evidence-1",
+                    relative_path: "src/path.ts",
+                    start_line: 12,
+                    end_line: 18,
+                  },
+                ],
+              },
+              {
+                candidate_id: "candidate-rejected",
+                evidence: [
+                  {
+                    evidence_id: "rejected-evidence-1",
+                    relative_path: "tests/sandbox_api_test.py",
+                    start_line: 32,
+                    end_line: 40,
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      }
+      if (
+        path ===
+        "/api/code-security/v1/scans/scan_demo/evidence/accepted-evidence-1"
+      ) {
+        evidenceAttempts += 1;
+        if (evidenceAttempts === 1) {
+          return Promise.reject({
+            response: { data: { detail: { message: "证据暂时不可用" } } },
+          });
+        }
+        return Promise.resolve({
+          data: {
+            evidence_id: "accepted-evidence-1",
+            relative_path: "src/path.ts",
+            start_line: 12,
+            end_line: 18,
+            excerpt: "const resolved = root + userInput;",
+            truncated: false,
+          },
+        });
+      }
+      if (
+        path ===
+        "/api/code-security/v1/scans/scan_demo/evidence/rejected-evidence-1"
+      ) {
+        return Promise.resolve({
+          data: {
+            evidence_id: "rejected-evidence-1",
+            relative_path: "tests/sandbox_api_test.py",
+            start_line: 32,
+            end_line: 40,
+            excerpt: 'sha256 = "a" * 64',
+            truncated: false,
+          },
+        });
+      }
+      return defaultApiGet?.(path, config);
+    });
+
+    render(
+      <PhaseWorkspace
+        scanId="scan_demo"
+        phases={[
+          {
+            phase_run_id: "phase_adjudication",
+            phase: "adjudication",
+            ordinal: 6,
+            status: "completed",
+            started_at: "2026-08-21T06:20:00Z",
+            finished_at: "2026-08-21T06:20:36Z",
+            duration_ms: 36_000,
+            summary: {
+              adjudication_round: 1,
+              action: "finalize",
+              accepted_candidate_ids: ["candidate-accepted"],
+              rejected_candidates: [
+                {
+                  candidate_id: "candidate-rejected",
+                  reason: "现有安全控制已阻断攻击者输入到达危险操作。",
+                },
+              ],
+            },
+          },
+        ]}
+        events={[
+          {
+            seq: 101,
+            scan_id: "scan_demo",
+            phase_run_id: "phase_adjudication",
+            type: "adjudication.submitted",
+            level: "info",
+            title: "父 Agent 已提交裁决",
+            summary: { action: "finalize" },
+            created_at: "2026-08-21T06:20:36Z",
+          },
+        ]}
+        workers={
+          [
+            {
+              ...scanDetail.workers[0],
+              work_unit_id: "worker-accepted",
+              candidate_summaries: [
+                {
+                  candidate_id: "candidate-accepted",
+                  title: "未校验路径进入文件读取",
+                  rationale: "用户输入未经规范化便进入文件读取，漏洞已确认。",
+                },
+              ],
+            },
+            {
+              ...scanDetail.workers[0],
+              work_unit_id: "worker-rejected",
+              candidate_summaries: [
+                {
+                  candidate_id: "candidate-rejected",
+                  title: "疑似命令注入",
+                  rationale: "全量调用链确认外部输入不会到达文件写入操作。",
+                },
+              ],
+            },
+          ] as any
+        }
+        currentPhase="adjudication"
+      />,
+    );
+
+    expect(
+      screen.getByRole("tab", { name: /主智能体裁决阶段/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "裁决内容与结果" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("裁决轮次").nextElementSibling).toHaveTextContent(
+      "第 1 轮",
+    );
+    expect(screen.getByText("完成审计定稿")).toBeInTheDocument();
+    expect(screen.getByText("裁决对象").nextElementSibling).toHaveTextContent(
+      "2 个候选漏洞",
+    );
+    expect(screen.getByLabelText("纳入漏洞，1 个")).toBeInTheDocument();
+    expect(screen.getByLabelText("已驳回的候选漏洞，1 个")).toBeInTheDocument();
+    expect(screen.getByText("未校验路径进入文件读取")).toBeInTheDocument();
+    expect(screen.getByText("疑似命令注入")).toBeInTheDocument();
+    expect(screen.getByText("已纳入")).toBeInTheDocument();
+    expect(screen.getByText("已驳回")).toBeInTheDocument();
+    expect(screen.queryByText("驳回依据")).not.toBeInTheDocument();
+    expect(screen.getByText("主智能体已提交裁决")).toBeInTheDocument();
+    expect(
+      screen.getByText("主智能体裁决 · 显示 1 / 1 条"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("现有安全控制已阻断攻击者输入到达危险操作。"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("接受").nextElementSibling).toHaveTextContent(
+      "1 个",
+    );
+    expect(screen.getByText("驳回").nextElementSibling).toHaveTextContent(
+      "1 个",
+    );
+    expect(
+      apiGet.mock.calls.some(([path]) =>
+        String(path).endsWith("/artifacts/candidate_index"),
+      ),
+    ).toBe(false);
+
+    const evidenceToggle = screen.getByRole("button", {
+      name: "未校验路径进入文件读取，查看证据",
+    });
+    expect(evidenceToggle).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(evidenceToggle);
+
+    expect(evidenceToggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      await screen.findByRole("region", {
+        name: "未校验路径进入文件读取的纳入证据",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("用户输入未经规范化便进入文件读取，漏洞已确认。"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("证据暂时不可用")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    expect(await screen.findByText("src/path.ts:12-18")).toBeInTheDocument();
+    expect(
+      screen.getByText("const resolved = root + userInput;"),
+    ).toBeInTheDocument();
+    expect(
+      apiGet.mock.calls.filter(([path]) =>
+        String(path).endsWith("/artifacts/candidate_index"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      apiGet.mock.calls.filter(([path]) =>
+        String(path).endsWith("/evidence/accepted-evidence-1"),
+      ),
+    ).toHaveLength(2);
+
+    await userEvent.click(evidenceToggle);
+    expect(evidenceToggle).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByRole("region", {
+        name: "未校验路径进入文件读取的纳入证据",
+      }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(evidenceToggle);
+    expect(evidenceToggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      apiGet.mock.calls.filter(([path]) =>
+        String(path).endsWith("/evidence/accepted-evidence-1"),
+      ),
+    ).toHaveLength(2);
+
+    const rejectionToggle = screen.getByRole("button", {
+      name: "疑似命令注入，查看依据",
+    });
+    expect(rejectionToggle).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(rejectionToggle);
+
+    expect(rejectionToggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      await screen.findByRole("region", { name: "疑似命令注入的驳回详情" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("驳回依据")).toBeInTheDocument();
+    expect(
+      screen.getByText("现有安全控制已阻断攻击者输入到达危险操作。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("全量调用链确认外部输入不会到达文件写入操作。"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("tests/sandbox_api_test.py:32-40"),
+    ).toBeInTheDocument();
+    expect(screen.getByText('sha256 = "a" * 64')).toBeInTheDocument();
+    expect(
+      apiGet.mock.calls.filter(([path]) =>
+        String(path).endsWith("/artifacts/candidate_index"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      apiGet.mock.calls.filter(([path]) =>
+        String(path).endsWith("/evidence/rejected-evidence-1"),
+      ),
+    ).toHaveLength(1);
+
+    await userEvent.click(rejectionToggle);
+    expect(rejectionToggle).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(rejectionToggle);
+    expect(rejectionToggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      apiGet.mock.calls.filter(([path]) =>
+        String(path).endsWith("/evidence/rejected-evidence-1"),
+      ),
+    ).toHaveLength(1);
+    expect(screen.queryByText("父 Agent 裁决")).not.toBeInTheDocument();
+    expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
+  });
+
+  it("shows the reason, scope, and questions for a targeted rescan decision", () => {
+    render(
+      <PhaseWorkspace
+        phases={[
+          {
+            phase_run_id: "phase_adjudication",
+            phase: "adjudication",
+            ordinal: 6,
+            status: "completed",
+            summary: {
+              adjudication_round: 1,
+              action: "targeted_rescan",
+              rescan: {
+                reason: "缺少鉴权中间件是否覆盖管理接口的直接证据。",
+                paths: ["src/admin", "src/middleware/auth.ts"],
+                questions: ["管理接口是否始终经过鉴权中间件？"],
+              },
+            },
+          },
+        ]}
+        events={[]}
+        workers={[]}
+        currentPhase="adjudication"
+      />,
+    );
+
+    expect(
+      screen.getByText("需要定向复扫后再形成最终结论"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("缺少鉴权中间件是否覆盖管理接口的直接证据。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("src/admin")).toBeInTheDocument();
+    expect(screen.getByText("src/middleware/auth.ts")).toBeInTheDocument();
+    expect(
+      screen.getByText("管理接口是否始终经过鉴权中间件？"),
+    ).toBeInTheDocument();
   });
 
   it("shows an unrunnable dynamic phase without presenting it as success", () => {
@@ -1713,7 +2136,7 @@ describe("code security workspace contract page", () => {
     );
     expect(screen.getByLabelText("阶段状态：无法动态执行")).toBeInTheDocument();
     expect(
-      screen.getByLabelText("Worker 状态：无法动态执行"),
+      screen.getByLabelText("工作单元状态：无法动态执行"),
     ).toBeInTheDocument();
     expect(screen.queryByText("已完成")).not.toBeInTheDocument();
   });
@@ -1734,7 +2157,7 @@ describe("code security workspace contract page", () => {
 
     expect(screen.getByText("静态验证员")).toBeInTheDocument();
     expect(screen.getByText("1 个")).toBeInTheDocument();
-    expect(screen.getByLabelText("Worker 状态：等待中")).toBeInTheDocument();
+    expect(screen.getByLabelText("工作单元状态：等待中")).toBeInTheDocument();
   });
 
   it("keeps a terminal elapsed time fixed when a legacy finish time is absent", () => {
@@ -1776,6 +2199,257 @@ describe("code security workspace contract page", () => {
     expect(await screen.findByText("产物未通过校验")).toBeInTheDocument();
     expect(apiGet).not.toHaveBeenCalledWith(
       "/api/code-security/v1/scans/scan_demo/artifacts/report_markdown",
+    );
+  });
+
+  it("shows disabled dynamic validation immediately without requesting its artifact", () => {
+    render(
+      <ArtifactInspector
+        detail={scanDetail as any}
+        activeTab="dynamic_validation"
+        onTabChange={() => undefined}
+        open={false}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByRole("tab", { name: /动态验证.*未启用/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "动态验证未启用" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("正在加载产物")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "刷新" }),
+    ).not.toBeInTheDocument();
+    expect(
+      apiGet.mock.calls.some(([path]) =>
+        String(path).endsWith("/artifacts/dynamic_validation"),
+      ),
+    ).toBe(false);
+  });
+
+  it("localizes the overview execution states", () => {
+    render(
+      <ArtifactInspector
+        detail={
+          {
+            ...scanDetail,
+            scan: {
+              ...scanDetail.scan,
+              lifecycle_status: "completed",
+              integrity_status: "valid",
+              coverage_status: "complete",
+            },
+          } as any
+        }
+        activeTab="overview"
+        onTabChange={() => undefined}
+        open
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "执行状态" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("执行状态：已完成")).toBeInTheDocument();
+    expect(screen.getByText("产物完整性").nextElementSibling).toHaveTextContent(
+      "校验通过",
+    );
+    expect(
+      screen.getByText("覆盖度", { selector: "dt" }).nextElementSibling,
+    ).toHaveTextContent("完整覆盖");
+    expect(screen.queryByText("四项独立状态")).not.toBeInTheDocument();
+    expect(screen.queryByText("valid")).not.toBeInTheDocument();
+    expect(screen.queryByText("complete")).not.toBeInTheDocument();
+  });
+
+  it("shows completed artifact sizes in KB and MB", () => {
+    render(
+      <ArtifactInspector
+        detail={
+          {
+            ...scanDetail,
+            artifacts: [
+              {
+                kind: "threat_model",
+                state: "sealed",
+                size_bytes: 16_520,
+                download_url: "/artifacts/threat-model",
+              },
+              {
+                kind: "adjudication",
+                state: "sealed",
+                size_bytes: 1_572_864,
+                download_url: "/artifacts/adjudication",
+              },
+            ],
+          } as any
+        }
+        activeTab="overview"
+        onTabChange={() => undefined}
+        open
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("16.1 KB")).toBeInTheDocument();
+    expect(screen.getByText("1.5 MB")).toBeInTheDocument();
+    expect(screen.queryByText(/bytes|字节/)).not.toBeInTheDocument();
+  });
+
+  it("switches the code security UI from Chinese to English", () => {
+    const detail = {
+      ...scanDetail,
+      scan: {
+        ...scanDetail.scan,
+        lifecycle_status: "completed",
+        integrity_status: "valid",
+        coverage_status: "complete",
+      },
+    } as any;
+    const props = {
+      detail,
+      activeTab: "overview",
+      onTabChange: () => undefined,
+      open: true,
+      onClose: () => undefined,
+    };
+    const view = render(<ArtifactInspector {...props} />);
+
+    expect(
+      screen.getByRole("heading", { name: "审计产物" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("执行状态：已完成")).toBeInTheDocument();
+
+    codeSecurityLanguage = "en-US";
+    view.rerender(<ArtifactInspector {...props} />);
+
+    expect(
+      screen.getByRole("heading", { name: "Audit artifacts" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Execution status: Completed"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Artifact integrity").nextElementSibling,
+    ).toHaveTextContent("Validation passed");
+    expect(
+      screen.getByText("Coverage", { selector: "dt" }).nextElementSibling,
+    ).toHaveTextContent("Complete coverage");
+    expect(
+      screen.getByRole("tab", { name: /Primary agent adjudication.*Pending/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the complete audit workspace shell in English", async () => {
+    codeSecurityLanguage = "en-US";
+    render(<Page />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Audit records" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Search target or scan_id"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New audit" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Phases and live events" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Work units" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Audit artifacts" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Filter events by level" }),
+    ).toBeInTheDocument();
+  });
+
+  it("provides English translations for every shared code security label", () => {
+    const sharedLabels = [
+      phaseLabels,
+      lifecycleLabels,
+      phaseStatusLabels,
+      integrityStatusLabels,
+      coverageStatusLabels,
+      severityLabels,
+      verdictLabels,
+    ].flatMap((labels) => Object.values(labels));
+
+    expect(
+      sharedLabels.filter((label) => !hasEnglishTranslation(label)),
+    ).toEqual([]);
+    expect(translate("en-US", "{{count}} 个漏洞", { count: 7 })).toBe(
+      "7 findings",
+    );
+    expect(translate("zh-CN", "{{count}} 个漏洞", { count: 7 })).toBe(
+      "7 个漏洞",
+    );
+  });
+
+  it("renders the new-audit form and phase events in English", () => {
+    codeSecurityLanguage = "en-US";
+    render(
+      <>
+        <NewAuditDrawer
+          open
+          projects={[
+            {
+              id: "project-1",
+              name: "Flocks",
+              worktree: "/workspace/flocks",
+              pathStatus: "available",
+            },
+          ]}
+          onClose={() => undefined}
+          onCreated={() => undefined}
+        />
+        <EventStream
+          events={[
+            {
+              seq: 7,
+              scan_id: "scan_demo",
+              type: "phase.progress",
+              level: "info",
+              title: "审计阶段状态已更新",
+              summary: {
+                phase: "verification",
+                status_counts: { running: 2 },
+              },
+              created_at: "2026-08-21T06:22:00Z",
+            },
+          ]}
+          selectedPhase="verification"
+          hasOlder={false}
+          loading={false}
+          loadingOlder={false}
+          onLoadOlder={async () => undefined}
+        />
+      </>,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "New code audit" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Target" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start static audit" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Phase events" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Audit phase status updated")).toBeInTheDocument();
+    expect(
+      screen.getByText("Static validation · 1 / 1 events"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 running")).toHaveAccessibleName(
+      "2 work units running",
     );
   });
 
@@ -1835,6 +2509,9 @@ describe("code security workspace contract page", () => {
     expect(screen.getByText("5").tagName).toBe("STRONG");
     expect(screen.getByText("completed").tagName).toBe("CODE");
     expect(screen.queryByText("unsafe-marker")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /最终报告.*已完成/ }),
+    ).toBeInTheDocument();
     expect(container.querySelector(".cs-report-markdown")).toBeInTheDocument();
     expect(container.querySelector(".cs-report-fallback")).toBeNull();
   });

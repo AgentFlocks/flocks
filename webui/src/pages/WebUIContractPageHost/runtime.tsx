@@ -1,5 +1,6 @@
 import React, { lazy, Suspense, type ComponentType, type ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
+import { useTranslation } from 'react-i18next';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import apiClient from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
@@ -53,6 +54,7 @@ export interface WebUIContractPageSdk {
   Card: typeof Card;
   Markdown: typeof Markdown;
   useCurrentUser: typeof useCurrentUser;
+  useLanguage: typeof useLanguage;
 }
 
 declare global {
@@ -87,6 +89,11 @@ export function Markdown({ content }: { content: string }) {
 export function useCurrentUser() {
   const { user } = useAuth();
   return user;
+}
+
+export function useLanguage() {
+  const { i18n } = useTranslation();
+  return i18n.resolvedLanguage || i18n.language || 'en-US';
 }
 
 function normalizePageApiPath(path: string): string {
@@ -145,6 +152,7 @@ export function installWebUIContractPageRuntime(pageId: string): void {
     Card,
     Markdown,
     useCurrentUser,
+    useLanguage,
   };
 }
 

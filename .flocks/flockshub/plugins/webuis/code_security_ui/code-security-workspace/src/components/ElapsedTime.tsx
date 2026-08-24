@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { useCodeSecurityI18n } from "../i18n";
 import { formatDuration } from "../labels";
 
 export function ElapsedTime({
@@ -15,6 +16,7 @@ export function ElapsedTime({
   running?: boolean;
   prefix?: string;
 }) {
+  const { t } = useCodeSecurityI18n();
   const [elapsed, setElapsed] = useState(initialMs);
 
   useEffect(() => {
@@ -31,8 +33,8 @@ export function ElapsedTime({
 
   return (
     <span className="cs-tabular">
-      {prefix}
-      {formatDuration(elapsed)}
+      {t(prefix)}
+      {formatDuration(elapsed, t)}
     </span>
   );
 }

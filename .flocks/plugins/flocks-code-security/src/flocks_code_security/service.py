@@ -79,9 +79,9 @@ EVENT_TITLES = {
     "dynamic.completed": "动态验证已完成",
     "dynamic.failed": "动态验证执行失败",
     "dynamic.cancelled": "动态验证已取消",
-    "adjudication.started": "父 Agent 裁决已开始",
-    "adjudication.failed": "父 Agent 裁决失败",
-    "scan.adjudicated": "父 Agent 已提交裁决",
+    "adjudication.started": "主智能体裁决已开始",
+    "adjudication.failed": "主智能体裁决失败",
+    "scan.adjudicated": "主智能体已提交裁决",
     "scan.finalized": "最终产物已完成完整性校验",
     "scan.cancelled": "代码审计已取消",
 }

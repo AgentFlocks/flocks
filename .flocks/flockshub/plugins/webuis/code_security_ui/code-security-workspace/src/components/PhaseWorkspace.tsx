@@ -1,10 +1,23 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
-import { formatDuration, formatTime, phaseLabels, shortId } from "../labels";
-import type { PhaseRun, ScanDetail, WorkerRun } from "../types";
+import { getArtifact, getEvidence, readApiFailure } from "../api";
+import { useCodeSecurityI18n } from "../i18n";
+import {
+  formatDuration,
+  formatFileSize,
+  formatTime,
+  phaseLabels,
+  shortId,
+} from "../labels";
+import type {
+  AuditEvent,
+  EvidenceContent,
+  PhaseRun,
+  ScanDetail,
+  WorkerRun,
+} from "../types";
 import { Icon } from "../icons";
 import { EventStream } from "./EventStream";
-import type { AuditEvent } from "../types";
 import { ElapsedTime } from "./ElapsedTime";
 import { StatusBadge } from "./StatusBadge";
 
@@ -50,11 +63,12 @@ const artifactStateLabels: Record<string, string> = {
   pending: "等待生成",
   partial: "生成中",
   available: "可查看",
-  sealed: "已封装",
+  sealed: "已完成",
   invalid: "校验失败",
 };
 
 export function PhaseWorkspace({
+  scanId,
   phases,
   events,
   workers,
@@ -69,6 +83,7 @@ export function PhaseWorkspace({
   loadingOlderEvents = false,
   onLoadOlderEvents = async () => undefined,
 }: {
+  scanId?: string;
   phases: PhaseRun[];
   events: AuditEvent[];
   workers: WorkerRun[];
@@ -86,6 +101,7 @@ export function PhaseWorkspace({
   loadingOlderEvents?: boolean;
   onLoadOlderEvents?: () => Promise<void>;
 }) {
+  const { language, t } = useCodeSecurityI18n();
   const sorted = useMemo(
     () =>
       [...phases].sort((a, b) => {
@@ -116,33 +132,53 @@ export function PhaseWorkspace({
       .length || 0;
   const selectedHasOperationalDetails =
     selected?.phase !== "snapshot" && selected?.phase !== "finalization";
+  const selectedAdjudicationRound = numberValue(
+    selected?.phase === "adjudication"
+      ? selected.summary?.adjudication_round
+      : undefined,
+  );
+  const eventsWithPhase = useMemo(() => {
+    const phaseByRunId = new Map(
+      sorted.map((phase) => [phase.phase_run_id, phase.phase]),
+    );
+    return events.map((event) => {
+      if (typeof event.summary.phase === "string" || !event.phase_run_id) {
+        return event;
+      }
+      const phase = phaseByRunId.get(event.phase_run_id);
+      return phase ? { ...event, summary: { ...event.summary, phase } } : event;
+    });
+  }, [events, sorted]);
 
   return (
     <section className="cs-execution" aria-labelledby="execution-title">
       <div className="cs-section-heading">
         <div>
-          <h2 id="execution-title">阶段与实时事件</h2>
+          <h2 id="execution-title">{t("阶段与实时事件")}</h2>
         </div>
         <div
           className="cs-final-findings"
           aria-label={
             finalFindingCount === null
-              ? `最终漏洞数，${finalFindingBasis}`
-              : `最终漏洞数 ${finalFindingCount} 个，${finalFindingBasis}`
+              ? t("漏洞数，{{basis}}", { basis: t(finalFindingBasis) })
+              : t("漏洞数 {{count}} 个，{{basis}}", {
+                  count: finalFindingCount,
+                  basis: t(finalFindingBasis),
+                })
           }
         >
           <div>
-            <span>最终漏洞数</span>
-            <small>{finalFindingBasis}</small>
+            <span>{t("漏洞数")}</span>
+            <small>{t(finalFindingBasis)}</small>
           </div>
           <strong className="cs-tabular">
             {finalFindingCount === null ? "—" : finalFindingCount}
-            {finalFindingCount !== null && <small>个</small>}
+            {finalFindingCount !== null && <small>{t("个")}</small>}
           </strong>
         </div>
       </div>
 
-      <div className="cs-phase-rail" role="tablist" aria-label="审计阶段">
+      <div className="cs-phase-rail" role="tablist" aria-label={t("审计阶段")}>
         {sorted.map((phase) => {
           const displayStatus =
             phase.phase === "dynamic_validation" &&
@@ -167,11 +203,18 @@ export function PhaseWorkspace({
             >
               <StatusBadge
                 status={displayStatus}
-                context={`${phaseLabels[phase.phase] || phase.phase}阶段`}
+                context={t("{{phase}}阶段", {
+                  phase: t(phaseLabels[phase.phase] || phase.phase),
+                })}
               />
-              <strong>{phaseLabels[phase.phase] || phase.phase}</strong>
+              <strong>{t(phaseLabels[phase.phase] || phase.phase)}</strong>
               <span className="cs-tabular">
-                {workerTotal ? `${workerDone}/${workerTotal} Worker · ` : ""}
+                {workerTotal
+                  ? t("{{done}}/{{total}} 个工作单元 · ", {
+                      done: workerDone,
+                      total: workerTotal,
+                    })
+                  : ""}
                 {phase.started_at ? (
                   <ElapsedTime
                     startedAt={phase.started_at}
@@ -181,7 +224,7 @@ export function PhaseWorkspace({
                     prefix=""
                   />
                 ) : (
-                  formatDuration(phase.duration_ms)
+                  formatDuration(phase.duration_ms, t)
                 )}
               </span>
             </button>
@@ -193,8 +236,8 @@ export function PhaseWorkspace({
         <article className="cs-current-phase" role="tabpanel">
           <div className="cs-current-phase__header">
             <div>
-              <span className="cs-kicker">当前查看</span>
-              <h3>{phaseLabels[selected.phase] || selected.phase}</h3>
+              <span className="cs-kicker">{t("当前查看")}</span>
+              <h3>{t(phaseLabels[selected.phase] || selected.phase)}</h3>
             </div>
             <StatusBadge
               status={
@@ -203,20 +246,20 @@ export function PhaseWorkspace({
                   ? "not_runnable"
                   : selected.status
               }
-              context="阶段状态"
+              context={t("阶段状态")}
             />
           </div>
           <dl className="cs-metric-grid">
             <div>
-              <dt>开始时间</dt>
-              <dd>{formatTime(selected.started_at)}</dd>
+              <dt>{t("开始时间")}</dt>
+              <dd>{formatTime(selected.started_at, language)}</dd>
             </div>
             <div>
-              <dt>结束时间</dt>
-              <dd>{formatTime(selected.finished_at)}</dd>
+              <dt>{t("结束时间")}</dt>
+              <dd>{formatTime(selected.finished_at, language)}</dd>
             </div>
             <div>
-              <dt>阶段耗时</dt>
+              <dt>{t("阶段耗时")}</dt>
               <dd className="cs-tabular">
                 {selected.started_at ? (
                   <ElapsedTime
@@ -227,42 +270,54 @@ export function PhaseWorkspace({
                     prefix=""
                   />
                 ) : (
-                  formatDuration(selected.duration_ms)
+                  formatDuration(selected.duration_ms, t)
                 )}
               </dd>
             </div>
             <div>
               <dt>
-                {selected.phase === "snapshot"
-                  ? "快照大小"
-                  : selected.phase === "finalization"
-                    ? "已封装产物"
-                    : "Worker"}
+                {t(
+                  selected.phase === "snapshot"
+                    ? "快照大小"
+                    : selected.phase === "finalization"
+                      ? "已完成产物"
+                      : selected.phase === "adjudication"
+                        ? "裁决轮次"
+                        : "工作单元",
+                )}
               </dt>
               <dd className="cs-tabular">
                 {selected.phase === "snapshot"
                   ? snapshotBoundary
-                    ? formatFileSize(snapshotBoundary.total_bytes)
+                    ? formatFileSize(snapshotBoundary.total_bytes, language)
                     : "—"
                   : selected.phase === "finalization"
-                    ? `${sealedArtifactCount} 个`
-                    : (selected.worker_count ?? "—")}
+                    ? t("{{count}} 个", { count: sealedArtifactCount })
+                    : selected.phase === "adjudication"
+                      ? selectedAdjudicationRound
+                        ? t("第 {{round}} 轮", {
+                            round: selectedAdjudicationRound,
+                          })
+                        : "—"
+                      : (selected.worker_count ?? "—")}
               </dd>
             </div>
           </dl>
           {selected.status === "skipped" && (
             <p className="cs-callout cs-callout--muted">
-              启动审计时未启用动态验证。
+              {t("启动审计时未启用动态验证。")}
             </p>
           )}
           {selected.status === "partial" && (
             <p className="cs-callout cs-callout--warning">
-              该阶段仅部分完成，请结合覆盖度与限制项判断结果。
+              {t("该阶段仅部分完成，请结合覆盖度与限制项判断结果。")}
             </p>
           )}
         </article>
       ) : (
-        <div className="cs-inline-empty">阶段信息将在快照创建后出现。</div>
+        <div className="cs-inline-empty">
+          {t("阶段信息将在快照创建后出现。")}
+        </div>
       )}
 
       {selected?.phase === "snapshot" ? (
@@ -270,7 +325,7 @@ export function PhaseWorkspace({
           <SnapshotBoundary boundary={snapshotBoundary} />
         ) : (
           <div className="cs-inline-empty">
-            快照可信边界将在源码快照创建后出现。
+            {t("快照可信边界将在源码快照创建后出现。")}
           </div>
         )
       ) : selected?.phase === "finalization" ? (
@@ -278,9 +333,15 @@ export function PhaseWorkspace({
           <ArtifactBundleSummary bundle={artifactBundle} />
         ) : (
           <div className="cs-inline-empty">
-            封装结果将在最终产物生成后出现。
+            {t("封装结果将在最终产物生成后出现。")}
           </div>
         )
+      ) : selected?.phase === "adjudication" ? (
+        <AdjudicationSummary
+          scanId={scanId}
+          phase={selected}
+          workers={workers}
+        />
       ) : (
         <WorkerList
           dynamicValidationStatus={dynamicValidationStatus}
@@ -294,7 +355,7 @@ export function PhaseWorkspace({
       {selectedHasOperationalDetails && (
         <EventStream
           key={selected?.phase_run_id || "all-events"}
-          events={events}
+          events={eventsWithPhase}
           selectedPhase={selected?.phase}
           hasOlder={hasOlderEvents}
           loading={loadingEvents}
@@ -306,22 +367,555 @@ export function PhaseWorkspace({
   );
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes.toLocaleString("zh-CN")} B`;
+interface RejectedCandidate {
+  candidateId: string;
+  reason: string;
+}
 
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes / 1024;
-  let unitIndex = 0;
+type CandidateEvidenceState =
+  | { status: "loading" }
+  | { status: "loaded"; items: EvidenceContent[] }
+  | { status: "error"; message: string };
 
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
+interface RescanDirective {
+  reason: string;
+  paths: string[];
+  questions: string[];
+}
 
-  return `${value.toLocaleString("zh-CN", { maximumFractionDigits: 1 })} ${units[unitIndex]}`;
+function AdjudicationSummary({
+  scanId,
+  phase,
+  workers,
+}: {
+  scanId?: string;
+  phase: PhaseRun;
+  workers: WorkerRun[];
+}) {
+  const { t } = useCodeSecurityI18n();
+  const summary = phase.summary || {};
+  const round = numberValue(summary.adjudication_round);
+  const action =
+    summary.action === "finalize" || summary.action === "targeted_rescan"
+      ? summary.action
+      : null;
+  const acceptedCandidateIds = stringArray(summary.accepted_candidate_ids);
+  const rejectedCandidates = rejectedCandidateArray(
+    summary.rejected_candidates,
+  );
+  const rescan = rescanDirective(summary.rescan);
+  const candidateTitles = new Map<string, string>();
+  const candidateRationales = new Map<string, string>();
+  workers.forEach((worker) => {
+    worker.candidate_summaries?.forEach((candidate) => {
+      if (candidate.title) {
+        candidateTitles.set(candidate.candidate_id, candidate.title);
+      }
+      if (candidate.rationale) {
+        candidateRationales.set(candidate.candidate_id, candidate.rationale);
+      }
+    });
+  });
+  const [candidateEvidence, setCandidateEvidence] = useState<
+    Record<string, CandidateEvidenceState>
+  >({});
+  const candidateIndexRequestRef = useRef<Promise<unknown> | null>(null);
+  const evidenceRequestRef = useRef(new Map<string, Promise<void>>());
+
+  const loadCandidateIndex = () => {
+    if (!scanId) {
+      return Promise.reject(new Error("当前扫描任务缺少标识，无法读取证据。"));
+    }
+    if (!candidateIndexRequestRef.current) {
+      candidateIndexRequestRef.current = getArtifact(scanId, "candidate_index")
+        .then((artifact) => artifact.content)
+        .catch((reason) => {
+          candidateIndexRequestRef.current = null;
+          throw reason;
+        });
+    }
+    return candidateIndexRequestRef.current;
+  };
+
+  const loadCandidateEvidence = (candidateId: string) => {
+    const existingRequest = evidenceRequestRef.current.get(candidateId);
+    if (existingRequest) return existingRequest;
+
+    setCandidateEvidence((current) => ({
+      ...current,
+      [candidateId]: { status: "loading" },
+    }));
+    const request = loadCandidateIndex()
+      .then((content) => evidenceIdsForCandidate(content, candidateId))
+      .then((evidenceIds) =>
+        scanId
+          ? Promise.all(
+              evidenceIds.map((evidenceId) => getEvidence(scanId, evidenceId)),
+            )
+          : [],
+      )
+      .then((items) => {
+        setCandidateEvidence((current) => ({
+          ...current,
+          [candidateId]: { status: "loaded", items },
+        }));
+      })
+      .catch((reason) => {
+        evidenceRequestRef.current.delete(candidateId);
+        setCandidateEvidence((current) => ({
+          ...current,
+          [candidateId]: {
+            status: "error",
+            message: readApiFailure(reason, "无法加载候选漏洞证据").message,
+          },
+        }));
+      });
+    evidenceRequestRef.current.set(candidateId, request);
+    return request;
+  };
+
+  const candidateLabel = (candidateId: string) =>
+    candidateTitles.get(candidateId) || shortId(candidateId, 28);
+  const candidateRationale = (candidateId: string) =>
+    candidateRationales.get(candidateId) || "";
+  const candidateCount =
+    acceptedCandidateIds.length + rejectedCandidates.length;
+  const failureReason = stringValue(summary.reason);
+
+  return (
+    <section
+      className="cs-phase-summary cs-adjudication-summary"
+      aria-labelledby="adjudication-summary-title"
+    >
+      <div className="cs-subsection-heading cs-phase-summary__heading">
+        <div>
+          <h3 id="adjudication-summary-title">
+            <Icon name="shield" />
+            {t("裁决内容与结果")}
+          </h3>
+          <span>
+            {t(
+              action === "finalize"
+                ? "主智能体已完成{{round}}裁决并形成最终结论"
+                : action === "targeted_rescan"
+                  ? "主智能体已完成{{round}}裁决并要求补充验证"
+                  : phase.status === "failed"
+                    ? "主智能体未能提交有效裁决"
+                    : "主智能体正在审阅候选漏洞与验证结论",
+              {
+                round: round ? t("第 {{round}} 轮", { round }) : "",
+              },
+            )}
+          </span>
+        </div>
+      </div>
+
+      {action === "finalize" ? (
+        <>
+          <dl className="cs-phase-summary__grid">
+            <div>
+              <dt>{t("裁决结果")}</dt>
+              <dd>{t("完成审计定稿")}</dd>
+            </div>
+            <div>
+              <dt>{t("裁决对象")}</dt>
+              <dd className="cs-tabular">
+                {t("{{count}} 个候选漏洞", { count: candidateCount })}
+              </dd>
+            </div>
+            <div>
+              <dt>{t("接受")}</dt>
+              <dd className="cs-tabular">
+                {t("{{count}} 个", { count: acceptedCandidateIds.length })}
+              </dd>
+            </div>
+            <div>
+              <dt>{t("驳回")}</dt>
+              <dd className="cs-tabular">
+                {t("{{count}} 个", { count: rejectedCandidates.length })}
+              </dd>
+            </div>
+          </dl>
+          <div className="cs-adjudication-summary__content">
+            <DecisionCandidateList
+              title="纳入漏洞"
+              emptyText="没有候选漏洞被纳入最终报告。"
+              candidateIds={acceptedCandidateIds}
+              candidateLabel={candidateLabel}
+              candidateRationale={candidateRationale}
+              evidenceByCandidate={candidateEvidence}
+              onLoadEvidence={loadCandidateEvidence}
+              tone="accepted"
+            />
+            <DecisionCandidateList
+              title="已驳回的候选漏洞"
+              emptyText="没有候选漏洞被驳回。"
+              rejectedCandidates={rejectedCandidates}
+              candidateLabel={candidateLabel}
+              candidateRationale={candidateRationale}
+              evidenceByCandidate={candidateEvidence}
+              onLoadEvidence={loadCandidateEvidence}
+              tone="rejected"
+            />
+          </div>
+        </>
+      ) : action === "targeted_rescan" && rescan ? (
+        <div className="cs-adjudication-summary__rescan">
+          <div>
+            <span className="cs-kicker">{t("裁决结果")}</span>
+            <strong>{t("需要定向复扫后再形成最终结论")}</strong>
+          </div>
+          <div>
+            <h4>{t("裁决依据")}</h4>
+            <p>{rescan.reason}</p>
+          </div>
+          <div>
+            <h4>{t("复扫范围")}</h4>
+            <ul className="cs-adjudication-summary__paths">
+              {rescan.paths.map((path) => (
+                <li key={path}>
+                  <code>{path}</code>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h4>{t("待确认问题")}</h4>
+            <ol>
+              {rescan.questions.map((question) => (
+                <li key={question}>{question}</li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      ) : (
+        <p
+          className={`cs-phase-summary__note${phase.status === "failed" ? " cs-phase-summary__note--danger" : ""}`}
+        >
+          {failureReason && phase.status === "failed"
+            ? failureReason
+            : t(
+                phase.status === "failed"
+                  ? "裁决执行失败，请结合阶段事件查看失败原因。"
+                  : phase.status === "running"
+                    ? "裁决提交后，这里将显示接受、驳回或定向复扫的具体内容。"
+                    : "当前任务没有保存结构化裁决详情，可在审计产物面板中查看完整裁决记录。",
+              )}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function DecisionCandidateList({
+  title,
+  emptyText,
+  candidateIds = [],
+  rejectedCandidates = [],
+  candidateLabel,
+  candidateRationale = () => "",
+  evidenceByCandidate = {},
+  onLoadEvidence,
+  tone,
+}: {
+  title: string;
+  emptyText: string;
+  candidateIds?: string[];
+  rejectedCandidates?: RejectedCandidate[];
+  candidateLabel: (candidateId: string) => string;
+  candidateRationale?: (candidateId: string) => string;
+  evidenceByCandidate?: Record<string, CandidateEvidenceState>;
+  onLoadEvidence?: (candidateId: string) => Promise<void>;
+  tone: "accepted" | "rejected";
+}) {
+  const { t } = useCodeSecurityI18n();
+  const items = candidateIds.length
+    ? candidateIds.map((candidateId) => ({ candidateId, reason: "" }))
+    : rejectedCandidates;
+  const accepted = tone === "accepted";
+  const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(
+    null,
+  );
+  const toggleEvidence = (candidateId: string) => {
+    if (expandedCandidateId === candidateId) {
+      setExpandedCandidateId(null);
+      return;
+    }
+    setExpandedCandidateId(candidateId);
+    void onLoadEvidence?.(candidateId);
+  };
+
+  return (
+    <section
+      className={`cs-adjudication-group cs-adjudication-group--${tone}`}
+      aria-label={t("{{title}}，{{count}} 个", {
+        title: t(title),
+        count: items.length,
+      })}
+    >
+      <header className="cs-adjudication-group__header">
+        <div>
+          <span className="cs-adjudication-group__icon">
+            <Icon name={accepted ? "check" : "error"} />
+          </span>
+          <div>
+            <h4>{t(title)}</h4>
+            <p>
+              {t(
+                accepted
+                  ? "经主智能体裁决，纳入最终报告"
+                  : "经主智能体裁决，不纳入最终报告",
+              )}
+            </p>
+          </div>
+        </div>
+        <strong className="cs-tabular">
+          {items.length}
+          <small>{t("个")}</small>
+        </strong>
+      </header>
+      {items.length ? (
+        <ul>
+          {items.map((item, index) => {
+            const expanded = expandedCandidateId === item.candidateId;
+            const evidencePanelId = `${tone}-evidence-${index + 1}`;
+            const label = candidateLabel(item.candidateId);
+            const disclosureLabel = t(
+              accepted
+                ? expanded
+                  ? "收起证据"
+                  : "查看证据"
+                : expanded
+                  ? "收起依据"
+                  : "查看依据",
+            );
+            return (
+              <li
+                key={item.candidateId}
+                className={expanded ? "is-expanded" : undefined}
+              >
+                <button
+                  type="button"
+                  className="cs-adjudication-candidate__heading cs-adjudication-candidate__toggle"
+                  aria-controls={evidencePanelId}
+                  aria-expanded={expanded}
+                  aria-label={t("{{candidate}}，{{action}}", {
+                    candidate: label,
+                    action: disclosureLabel,
+                  })}
+                  onClick={() => toggleEvidence(item.candidateId)}
+                >
+                  <span
+                    className="cs-adjudication-candidate__index"
+                    aria-hidden="true"
+                  >
+                    {index + 1}
+                  </span>
+                  <span className="cs-adjudication-candidate__copy">
+                    <strong>{label}</strong>
+                    <code>{item.candidateId}</code>
+                  </span>
+                  <span className="cs-adjudication-candidate__actions">
+                    <span className="cs-adjudication-candidate__status">
+                      {t(accepted ? "已纳入" : "已驳回")}
+                    </span>
+                    <span className="cs-adjudication-candidate__disclosure">
+                      {disclosureLabel}
+                      <Icon name="chevron" />
+                    </span>
+                  </span>
+                </button>
+                {expanded && (
+                  <CandidateEvidencePanel
+                    id={evidencePanelId}
+                    candidateLabel={label}
+                    decisionReason={item.reason}
+                    rationale={candidateRationale(item.candidateId)}
+                    state={evidenceByCandidate[item.candidateId]}
+                    tone={tone}
+                    onRetry={() => void onLoadEvidence?.(item.candidateId)}
+                  />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p>{t(emptyText)}</p>
+      )}
+    </section>
+  );
+}
+
+function CandidateEvidencePanel({
+  id,
+  candidateLabel,
+  decisionReason,
+  rationale,
+  state,
+  tone,
+  onRetry,
+}: {
+  id: string;
+  candidateLabel: string;
+  decisionReason: string;
+  rationale: string;
+  state?: CandidateEvidenceState;
+  tone: "accepted" | "rejected";
+  onRetry: () => void;
+}) {
+  const { t } = useCodeSecurityI18n();
+  const accepted = tone === "accepted";
+  const showRationale = !!rationale && rationale !== decisionReason;
+  return (
+    <div
+      id={id}
+      className="cs-adjudication-evidence"
+      role="region"
+      aria-label={t(
+        accepted ? "{{candidate}}的纳入证据" : "{{candidate}}的驳回详情",
+        { candidate: candidateLabel },
+      )}
+    >
+      {decisionReason && (
+        <section className="cs-adjudication-evidence__decision cs-adjudication-evidence__decision--rejected">
+          <h5>{t("驳回依据")}</h5>
+          <p>{decisionReason}</p>
+        </section>
+      )}
+      {showRationale && (
+        <section className="cs-adjudication-evidence__rationale">
+          <h5>{t("独立验证结论")}</h5>
+          <p>{rationale}</p>
+        </section>
+      )}
+      <section className="cs-adjudication-evidence__code">
+        <h5>
+          {t(accepted ? "代码证据" : "相关代码证据")}
+          {state?.status === "loaded" && (
+            <span className="cs-tabular">
+              {t("{{count}} 条", { count: state.items.length })}
+            </span>
+          )}
+        </h5>
+        {!state || state.status === "loading" ? (
+          <p className="cs-adjudication-evidence__message" role="status">
+            {t(accepted ? "正在加载纳入证据…" : "正在加载驳回详情…")}
+          </p>
+        ) : state.status === "error" ? (
+          <div className="cs-adjudication-evidence__error" role="alert">
+            <p>{t(state.message)}</p>
+            <button type="button" onClick={onRetry}>
+              {t("重新加载")}
+            </button>
+          </div>
+        ) : state.items.length ? (
+          <div className="cs-adjudication-evidence__items">
+            {state.items.map((evidence, index) => (
+              <article key={evidence.evidence_id}>
+                <header>
+                  <strong>{t("证据 {{index}}", { index: index + 1 })}</strong>
+                  <code>
+                    {evidence.relative_path}:{evidence.start_line}-
+                    {evidence.end_line}
+                  </code>
+                </header>
+                <pre
+                  tabIndex={0}
+                  aria-label={t(
+                    "代码证据 {{index}}，{{path}} 第 {{start}} 至 {{end}} 行",
+                    {
+                      index: index + 1,
+                      path: evidence.relative_path,
+                      start: evidence.start_line,
+                      end: evidence.end_line,
+                    },
+                  )}
+                >
+                  <code>{evidence.excerpt}</code>
+                </pre>
+                {evidence.truncated && <small>{t("证据内容已截断。")}</small>}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="cs-adjudication-evidence__message">
+            {t("该候选漏洞没有可展示的代码证据，可在审计产物中查看完整记录。")}
+          </p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function evidenceIdsForCandidate(
+  content: unknown,
+  candidateId: string,
+): string[] {
+  if (!Array.isArray(content)) return [];
+  const candidate = content.find(
+    (item) =>
+      !!item &&
+      typeof item === "object" &&
+      stringValue((item as Record<string, unknown>).candidate_id) ===
+        candidateId,
+  );
+  if (!candidate || typeof candidate !== "object") return [];
+  const evidence = (candidate as Record<string, unknown>).evidence;
+  if (!Array.isArray(evidence)) return [];
+  return Array.from(
+    new Set(
+      evidence.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const evidenceId = stringValue(
+          (item as Record<string, unknown>).evidence_id,
+        );
+        return evidenceId ? [evidenceId] : [];
+      }),
+    ),
+  );
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.trunc(value)
+    : null;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && !!item)
+    : [];
+}
+
+function rejectedCandidateArray(value: unknown): RejectedCandidate[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const candidateId = stringValue(record.candidate_id);
+    if (!candidateId) return [];
+    return [{ candidateId, reason: stringValue(record.reason) }];
+  });
+}
+
+function rescanDirective(value: unknown): RescanDirective | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const reason = stringValue(record.reason);
+  const paths = stringArray(record.paths);
+  const questions = stringArray(record.questions);
+  return reason && paths.length && questions.length
+    ? { reason, paths, questions }
+    : null;
 }
 
 function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
+  const { language, t } = useCodeSecurityI18n();
   return (
     <section
       className="cs-phase-summary cs-snapshot-boundary"
@@ -331,26 +925,26 @@ function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
         <div>
           <h3 id="snapshot-boundary-title">
             <Icon name="shield" />
-            快照可信边界
+            {t("快照可信边界")}
           </h3>
-          <span>后续审计仅基于此不可变源码快照</span>
+          <span>{t("后续审计仅基于此不可变源码快照")}</span>
         </div>
       </div>
       <dl className="cs-phase-summary__grid">
         <div>
-          <dt>纳入文件</dt>
+          <dt>{t("纳入文件")}</dt>
           <dd className="cs-tabular">
-            {boundary.file_count.toLocaleString("zh-CN")}
+            {boundary.file_count.toLocaleString(language)}
           </dd>
         </div>
         <div>
-          <dt>遗漏文件</dt>
+          <dt>{t("遗漏文件")}</dt>
           <dd className="cs-tabular">
-            {boundary.omitted_file_count.toLocaleString("zh-CN")}
+            {boundary.omitted_file_count.toLocaleString(language)}
           </dd>
         </div>
         <div>
-          <dt>Revision</dt>
+          <dt>{t("版本")}</dt>
           <dd>
             <code title={boundary.source_revision || undefined}>
               {shortId(boundary.source_revision, 18)}
@@ -358,7 +952,7 @@ function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
           </dd>
         </div>
         <div>
-          <dt>Tree digest</dt>
+          <dt>{t("目录摘要")}</dt>
           <dd>
             <code title={boundary.tree_digest}>
               {shortId(boundary.tree_digest, 18)}
@@ -367,8 +961,9 @@ function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
         </div>
       </dl>
       <p className="cs-phase-summary__note">
-        工作区后续发生的文件变化不会影响本次审计结果，所有 Agent
-        共享同一份固定内容与版本标识。
+        {t(
+          "工作区后续发生的文件变化不会影响本次审计结果，所有智能体共享同一份固定内容与版本标识。",
+        )}
       </p>
     </section>
   );
@@ -382,6 +977,7 @@ function ArtifactBundleSummary({
     integrityStatus: string;
   };
 }) {
+  const { language, t } = useCodeSecurityI18n();
   const sealedArtifacts = bundle.artifacts.filter(
     (artifact) => artifact.state === "sealed",
   );
@@ -414,45 +1010,51 @@ function ArtifactBundleSummary({
         <div>
           <h3 id="artifact-bundle-title">
             <Icon name="report" />
-            封装结果
+            {t("封装结果")}
           </h3>
           <span>
-            {bundle.integrityStatus === "valid"
-              ? "最终产物已经固定并通过摘要校验"
-              : bundle.integrityStatus === "invalid"
-                ? "最终产物未通过完整性校验"
-                : "正在生成并校验最终产物"}
+            {t(
+              bundle.integrityStatus === "valid"
+                ? "最终产物已经固定并通过摘要校验"
+                : bundle.integrityStatus === "invalid"
+                  ? "最终产物未通过完整性校验"
+                  : "正在生成并校验最终产物",
+            )}
           </span>
         </div>
       </div>
       <dl className="cs-phase-summary__grid">
         <div>
-          <dt>已封装</dt>
-          <dd className="cs-tabular">{sealedArtifacts.length} 个</dd>
-        </div>
-        <div>
-          <dt>已封装大小</dt>
+          <dt>{t("已完成")}</dt>
           <dd className="cs-tabular">
-            {sealedArtifacts.length ? formatFileSize(totalBytes) : "—"}
+            {t("{{count}} 个", { count: sealedArtifacts.length })}
           </dd>
         </div>
         <div>
-          <dt>完整性</dt>
+          <dt>{t("产物大小")}</dt>
+          <dd className="cs-tabular">
+            {sealedArtifacts.length
+              ? formatFileSize(totalBytes, language)
+              : "—"}
+          </dd>
+        </div>
+        <div>
+          <dt>{t("完整性")}</dt>
           <dd>
             <span
               className={`cs-artifact-state cs-artifact-state--${integrityState}`}
             >
-              {integrityLabel}
+              {t(integrityLabel)}
             </span>
           </dd>
         </div>
         <div>
-          <dt>最终报告</dt>
+          <dt>{t("最终报告")}</dt>
           <dd>
             <span
               className={`cs-artifact-state cs-artifact-state--${finalReport?.state || "pending"}`}
             >
-              {artifactStateLabels[finalReport?.state || "pending"]}
+              {t(artifactStateLabels[finalReport?.state || "pending"])}
             </span>
           </dd>
         </div>
@@ -460,11 +1062,13 @@ function ArtifactBundleSummary({
       <p
         className={`cs-phase-summary__note${bundle.integrityStatus === "invalid" ? " cs-phase-summary__note--danger" : ""}`}
       >
-        {bundle.integrityStatus === "valid"
-          ? "报告、SARIF、漏洞清单、覆盖度和审计清单等产物已封装，可从审计产物面板查看或下载。"
-          : bundle.integrityStatus === "invalid"
-            ? "当前封装结果不可作为可信最终输出，请结合审计产物面板中的校验信息重新发起审计。"
-            : "产物仍在生成中，完整性校验完成后会自动更新封装状态。"}
+        {t(
+          bundle.integrityStatus === "valid"
+            ? "报告、SARIF、漏洞清单、覆盖度和审计清单等产物已完成，可从审计产物面板查看或下载。"
+            : bundle.integrityStatus === "invalid"
+              ? "当前封装结果不可作为可信最终输出，请结合审计产物面板中的校验信息重新发起审计。"
+              : "产物仍在生成中，完整性校验完成后会自动更新封装状态。",
+        )}
       </p>
     </section>
   );
@@ -477,12 +1081,13 @@ function WorkerList({
   workers: WorkerRun[];
   dynamicValidationStatus?: string;
 }) {
+  const { language, t } = useCodeSecurityI18n();
   return (
     <section className="cs-workers" aria-labelledby="workers-title">
       <div className="cs-subsection-heading">
         <div>
-          <h3 id="workers-title">Worker 工作单元</h3>
-          <span>{workers.length} 个</span>
+          <h3 id="workers-title">{t("工作单元")}</h3>
+          <span>{t("{{count}} 个", { count: workers.length })}</span>
         </div>
       </div>
       {workers.length ? (
@@ -513,18 +1118,21 @@ function WorkerList({
               <article key={worker.work_unit_id} className="cs-worker-card">
                 <div className="cs-worker-card__heading">
                   <div>
-                    <strong>{roleLabels[worker.role] || worker.role}</strong>
+                    <strong>{t(roleLabels[worker.role] || worker.role)}</strong>
                     <code title={worker.work_unit_id}>
                       {shortId(worker.work_unit_id, 18)}
                     </code>
                   </div>
-                  <StatusBadge status={displayStatus} context="Worker 状态" />
+                  <StatusBadge
+                    status={displayStatus}
+                    context={t("工作单元状态")}
+                  />
                 </div>
 
                 {candidate && (
                   <section
                     className="cs-worker-candidate"
-                    aria-label="验证对象"
+                    aria-label={t("验证对象")}
                   >
                     <div className="cs-worker-candidate__heading">
                       <h4>
@@ -535,14 +1143,16 @@ function WorkerList({
                           <span
                             className={`cs-severity cs-severity--${candidate.severity}`}
                           >
-                            {severityLabels[candidate.severity] ||
-                              candidate.severity}
+                            {t(
+                              severityLabels[candidate.severity] ||
+                                candidate.severity,
+                            )}
                           </span>
                         )}
                         <span
                           className={`cs-worker-verdict cs-worker-verdict--${verdict}`}
                         >
-                          {verdictLabels[verdict] || "等待结论"}
+                          {t(verdictLabels[verdict] || "等待结论")}
                         </span>
                       </div>
                     </div>
@@ -554,11 +1164,11 @@ function WorkerList({
 
                 <dl>
                   <div>
-                    <dt>开始</dt>
-                    <dd>{formatTime(worker.started_at)}</dd>
+                    <dt>{t("开始")}</dt>
+                    <dd>{formatTime(worker.started_at, language)}</dd>
                   </div>
                   <div>
-                    <dt>耗时</dt>
+                    <dt>{t("耗时")}</dt>
                     <dd className="cs-tabular">
                       {worker.started_at ? (
                         <ElapsedTime
@@ -569,22 +1179,24 @@ function WorkerList({
                           prefix=""
                         />
                       ) : (
-                        formatDuration(worker.elapsed_ms)
+                        formatDuration(worker.elapsed_ms, t)
                       )}
                     </dd>
                   </div>
                   <div>
-                    <dt>范围</dt>
+                    <dt>{t("范围")}</dt>
                     <dd>
                       {isFullSnapshot
-                        ? "全量源码快照"
-                        : `${worker.path_count} 个路径`}
+                        ? t("全量源码快照")
+                        : t("{{count}} 个路径", { count: worker.path_count })}
                     </dd>
                   </div>
                   <div>
-                    <dt>源码访问记录</dt>
+                    <dt>{t("源码访问记录")}</dt>
                     <dd>
-                      {sourceActivityCount ? `${sourceActivityCount} 条` : "—"}
+                      {sourceActivityCount
+                        ? t("{{count}} 条", { count: sourceActivityCount })
+                        : "—"}
                     </dd>
                   </div>
                 </dl>
@@ -592,11 +1204,11 @@ function WorkerList({
                 {sourceActivityCount > 0 && (
                   <div
                     className="cs-worker-activity"
-                    aria-label="源码访问记录统计"
+                    aria-label={t("源码访问记录统计")}
                   >
                     {sourceActivityLabels.map(([operation, label]) => (
                       <span key={operation}>
-                        {label}{" "}
+                        {t(label)}{" "}
                         <strong>{activityCounts[operation] || 0}</strong>
                       </span>
                     ))}
@@ -604,7 +1216,10 @@ function WorkerList({
                 )}
 
                 {!candidate && worker.candidate_ids.length > 0 && (
-                  <div className="cs-worker-tags" aria-label="关联候选 ID">
+                  <div
+                    className="cs-worker-tags"
+                    aria-label={t("关联候选漏洞 ID")}
+                  >
                     {worker.candidate_ids.map((candidateId) => (
                       <code key={candidateId} title={candidateId}>
                         {shortId(candidateId, 18)}
@@ -615,24 +1230,24 @@ function WorkerList({
 
                 {candidate?.rationale && (
                   <details className="cs-worker-details cs-worker-rationale">
-                    <summary>查看验证结论</summary>
+                    <summary>{t("查看验证结论")}</summary>
                     <div
                       className="cs-worker-rationale__content"
                       role="region"
-                      aria-label="验证结论详情"
+                      aria-label={t("验证结论详情")}
                       tabIndex={0}
                     >
                       <p>{candidate.rationale}</p>
                     </div>
                     {candidate.rationale_truncated && (
-                      <small>理由已截取显示。</small>
+                      <small>{t("理由已截取显示。")}</small>
                     )}
                   </details>
                 )}
 
                 {worker.paths.length > 0 && !isFullSnapshot && (
                   <details className="cs-worker-details cs-worker-paths">
-                    <summary>查看分配范围</summary>
+                    <summary>{t("查看分配范围")}</summary>
                     <ul>
                       {worker.paths.map((path) => (
                         <li key={path}>
@@ -641,7 +1256,11 @@ function WorkerList({
                       ))}
                     </ul>
                     {worker.paths_truncated && (
-                      <p>仅显示前 {worker.paths.length} 条路径。</p>
+                      <p>
+                        {t("仅显示前 {{count}} 条路径。", {
+                          count: worker.paths.length,
+                        })}
+                      </p>
                     )}
                   </details>
                 )}
@@ -650,7 +1269,7 @@ function WorkerList({
           })}
         </div>
       ) : (
-        <p className="cs-inline-empty">该阶段没有 Worker 工作单元。</p>
+        <p className="cs-inline-empty">{t("该阶段没有工作单元。")}</p>
       )}
     </section>
   );
