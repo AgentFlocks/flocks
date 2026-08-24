@@ -396,6 +396,40 @@ async def test_scan_listing_maps_an_invalid_cursor_to_a_stable_error(tmp_path: P
     assert raised.value.status_code == 400
 
 
+@pytest.mark.asyncio
+async def test_scan_detail_reuses_one_report_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-detail",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+        owner_subject="user-1",
+    )
+    service = object.__new__(AuditService)
+    service.store = store
+    calls = 0
+    original_report_data = store.report_data
+
+    def counted_report_data(selected_scan_id: str) -> dict:
+        nonlocal calls
+        calls += 1
+        return original_report_data(selected_scan_id)
+
+    monkeypatch.setattr(store, "report_data", counted_report_data)
+
+    detail = await service.get_scan(
+        scan_id,
+        AuditCaller(subject="user-1", source="webui"),
+    )
+
+    assert detail["scan"]["scan_id"] == scan_id
+    assert calls == 1
+
+
 def test_recovery_marks_orphaned_running_scan_interrupted(tmp_path: Path) -> None:
     store = _store(tmp_path)
     scan_id = store.create_scan(

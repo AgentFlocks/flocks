@@ -18,12 +18,14 @@ export function EventStream({
   events,
   selectedPhase,
   hasOlder,
+  loading,
   loadingOlder,
   onLoadOlder,
 }: {
   events: AuditEvent[];
   selectedPhase?: string;
   hasOlder: boolean;
+  loading: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<void>;
 }) {
@@ -123,12 +125,18 @@ export function EventStream({
   };
 
   return (
-    <section className="cs-events" aria-labelledby="event-title">
+    <section
+      className="cs-events"
+      aria-labelledby="event-title"
+      aria-busy={loading}
+    >
       <div className="cs-subsection-heading cs-events__heading">
         <div>
           <h3 id="event-title">阶段事件</h3>
           <span>
-            {phaseFilterLabel} · 显示 {filtered.length} / {events.length} 条
+            {loading
+              ? `${phaseFilterLabel} · 正在加载事件…`
+              : `${phaseFilterLabel} · 显示 ${filtered.length} / ${events.length} 条`}
           </span>
         </div>
         <div className="cs-event-filters">
@@ -219,7 +227,11 @@ export function EventStream({
           visible.map((event) => <EventRow key={event.seq} event={event} />)
         )}
         {!filtered.length && (
-          <p className="cs-inline-empty">当前阶段与筛选条件下还没有事件。</p>
+          <p className="cs-inline-empty" role={loading ? "status" : undefined}>
+            {loading
+              ? "正在加载审计事件…"
+              : "当前阶段与筛选条件下还没有事件。"}
+          </p>
         )}
       </div>
       {!autoFollow && unseen > 0 && (

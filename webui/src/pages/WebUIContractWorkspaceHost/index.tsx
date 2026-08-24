@@ -1,12 +1,8 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useContext, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, Loader2 } from 'lucide-react';
-import {
-  webuiContractPagesAPI,
-  type WebUIContractWorkspaceListItem,
-} from '@/api/webuiContractPages';
-import { useSSE } from '@/hooks/useSSE';
+import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
@@ -15,39 +11,15 @@ import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorksp
 export default function WebUIContractWorkspaceHost() {
   const { workspaceId, pageId } = useParams<{ workspaceId: string; pageId?: string }>();
   const { t, i18n } = useTranslation('webuiContractPage');
-  const [workspaces, setWorkspaces] = useState<WebUIContractWorkspaceListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    workspaces,
+    loading: resourceLoading,
+    error,
+    refetch,
+  } = useWebUIContractPages();
+  const loading = resourceLoading && workspaces.length === 0;
   const showLoading = useDelayedVisible(loading ? 180 : 0);
   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
-
-  const fetchWorkspaces = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    setError(null);
-    try {
-      const response = await webuiContractPagesAPI.listWorkspaces(true);
-      setWorkspaces(Array.isArray(response.data) ? response.data : []);
-    } catch (err: unknown) {
-      setWorkspaces([]);
-      setError(err instanceof Error ? err.message : t('workspace.loadFailed'));
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    void fetchWorkspaces();
-  }, [fetchWorkspaces]);
-
-  useSSE({
-    url: '/api/event',
-    onEvent: useCallback((evt) => {
-      if (evt.type === 'contracts.webui.pages.nav_changed') {
-        void fetchWorkspaces(true);
-      }
-    }, [fetchWorkspaces]),
-    reconnect: { maxRetries: 5, initialDelay: 2000 },
-  });
 
   const workspace = useMemo(
     () => workspaces.find((item) => item.id === workspaceId),
@@ -102,7 +74,7 @@ export default function WebUIContractWorkspaceHost() {
           <div className="mt-1 text-sm">{error}</div>
           <button
             type="button"
-            onClick={() => void fetchWorkspaces()}
+            onClick={() => void refetch()}
             className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
           >
             {t('host.retry')}
@@ -139,7 +111,11 @@ export default function WebUIContractWorkspaceHost() {
   return (
     <div className="h-full min-h-0 overflow-hidden bg-zinc-50 dark:bg-zinc-950">
       <div className={pageContentClassName}>
-        <PageRuntimeHost key={currentPage.id} pageId={currentPage.id} />
+        <PageRuntimeHost
+          key={currentPage.id}
+          pageId={currentPage.id}
+          initialBuildHash={currentPage.buildStatus === 'ready' ? currentPage.buildHash : undefined}
+        />
       </div>
     </div>
   );

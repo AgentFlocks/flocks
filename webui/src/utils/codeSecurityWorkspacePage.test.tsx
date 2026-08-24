@@ -1,5 +1,5 @@
 import React from "react";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +15,16 @@ import { Markdown } from "../pages/WebUIContractPageHost/runtime";
 const apiGet = vi.fn();
 const apiPost = vi.fn();
 const apiDelete = vi.fn();
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
 
 const scanDetail = {
   schemaVersion: "flocks.code-security.tool.v1",
@@ -413,6 +423,298 @@ describe("code security workspace contract page", () => {
     pushState.mockRestore();
   });
 
+  it("reuses a terminal audit view when switching back to it", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans/scan_demo") {
+        return Promise.resolve({
+          data: {
+            ...scanDetail,
+            scan: {
+              ...scanDetail.scan,
+              lifecycle_status: "completed",
+              integrity_status: "valid",
+              finished_at: "2026-08-21T06:30:00Z",
+              can_cancel: false,
+            },
+          },
+        });
+      }
+      if (path === "/api/code-security/v1/scans/scan_older") {
+        return Promise.resolve({
+          data: {
+            ...scanDetail,
+            scan: {
+              ...scanDetail.scan,
+              scan_id: "scan_older",
+              lifecycle_status: "completed",
+              integrity_status: "valid",
+              finished_at: "2026-08-21T05:30:00Z",
+              can_cancel: false,
+            },
+            target: { ...scanDetail.target, display_name: "legacy-service" },
+          },
+        });
+      }
+      return baseGet(path, config);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    await user.click(
+      screen.getByRole("button", { name: /legacy-service.*运行中/ }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "legacy-service" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /flocks.*已完成/ }));
+    expect(screen.getByRole("heading", { name: "flocks" })).toBeInTheDocument();
+    expect(
+      apiGet.mock.calls.filter(
+        ([path]) => path === "/api/code-security/v1/scans/scan_demo",
+      ),
+    ).toHaveLength(1);
+    expect(
+      apiGet.mock.calls.filter(
+        ([path]) => path === "/api/code-security/v1/scans/scan_older",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("commits a prefetched detail when selection happens after the detail response", async () => {
+    const detailRequest = deferred<{ data: typeof scanDetail }>();
+    const eventsRequest = deferred<{
+      data: { items: never[]; latestSeq: number; hasMore: boolean };
+    }>();
+    const baseGet = apiGet.getMockImplementation()!;
+    const olderDetail = {
+      ...scanDetail,
+      scan: {
+        ...scanDetail.scan,
+        scan_id: "scan_older",
+        latest_event_seq: 0,
+      },
+      target: { ...scanDetail.target, display_name: "legacy-service" },
+    };
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans/scan_older")
+        return detailRequest.promise;
+      if (path === "/api/code-security/v1/scans/scan_older/events")
+        return eventsRequest.promise;
+      return baseGet(path, config);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+    const olderButton = screen.getByRole("button", {
+      name: /legacy-service.*运行中/,
+    });
+
+    fireEvent.pointerEnter(olderButton);
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith(
+        "/api/code-security/v1/scans/scan_older",
+      ),
+    );
+    await act(async () => detailRequest.resolve({ data: olderDetail }));
+    await user.click(olderButton);
+    expect(screen.getByLabelText("正在加载扫描详情")).toBeInTheDocument();
+
+    await act(async () =>
+      eventsRequest.resolve({
+        data: { items: [], latestSeq: 0, hasMore: false },
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "legacy-service" }),
+    ).toBeInTheDocument();
+  });
+
+  it("delays hover prefetch and allows only one background prefetch", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                scan_id: "scan_demo",
+                display_name: "flocks",
+                lifecycle_status: "running",
+                current_phase: "verification",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T06:20:00Z",
+              },
+              {
+                scan_id: "scan_older",
+                display_name: "legacy-service",
+                lifecycle_status: "running",
+                current_phase: "baseline",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T05:20:00Z",
+              },
+              {
+                scan_id: "scan_third",
+                display_name: "third-service",
+                lifecycle_status: "running",
+                current_phase: "baseline",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T04:20:00Z",
+              },
+            ],
+          },
+        });
+      }
+      if (
+        path === "/api/code-security/v1/scans/scan_older" ||
+        path === "/api/code-security/v1/scans/scan_older/events"
+      ) {
+        return new Promise(() => undefined);
+      }
+      if (
+        path === "/api/code-security/v1/scans/scan_third" ||
+        path === "/api/code-security/v1/scans/scan_third/events"
+      ) {
+        return Promise.reject(new Error("unexpected third prefetch"));
+      }
+      return baseGet(path, config);
+    });
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+    const olderButton = screen.getByRole("button", {
+      name: /legacy-service.*运行中/,
+    });
+    const thirdButton = screen.getByRole("button", {
+      name: /third-service.*运行中/,
+    });
+
+    fireEvent.pointerEnter(olderButton);
+    fireEvent.pointerLeave(olderButton);
+    await act(async () =>
+      new Promise((resolve) => window.setTimeout(resolve, 220)),
+    );
+    expect(
+      apiGet.mock.calls.some(
+        ([path]) => path === "/api/code-security/v1/scans/scan_older",
+      ),
+    ).toBe(false);
+
+    fireEvent.pointerEnter(olderButton);
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith(
+        "/api/code-security/v1/scans/scan_older",
+      ),
+    );
+    fireEvent.pointerEnter(thirdButton);
+    await act(async () =>
+      new Promise((resolve) => window.setTimeout(resolve, 220)),
+    );
+    expect(
+      apiGet.mock.calls.some(
+        ([path]) => path === "/api/code-security/v1/scans/scan_third",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps the event region busy until events finish loading", async () => {
+    const detailRequest = deferred<{ data: typeof scanDetail }>();
+    const eventsRequest = deferred<{
+      data: { items: never[]; latestSeq: number; hasMore: boolean };
+    }>();
+    const baseGet = apiGet.getMockImplementation()!;
+    const olderDetail = {
+      ...scanDetail,
+      scan: {
+        ...scanDetail.scan,
+        scan_id: "scan_older",
+        latest_event_seq: 0,
+      },
+      target: { ...scanDetail.target, display_name: "legacy-service" },
+    };
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans/scan_older")
+        return detailRequest.promise;
+      if (path === "/api/code-security/v1/scans/scan_older/events")
+        return eventsRequest.promise;
+      return baseGet(path, config);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    await user.click(
+      screen.getByRole("button", { name: /legacy-service.*运行中/ }),
+    );
+    await act(async () => detailRequest.resolve({ data: olderDetail }));
+
+    expect(
+      await screen.findByRole("heading", { name: "legacy-service" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("正在加载审计事件…")).toBeInTheDocument();
+    expect(screen.getByLabelText("审计事件列表").closest("section")).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+
+    await act(async () =>
+      eventsRequest.resolve({
+        data: { items: [], latestSeq: 0, hasMore: false },
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText("审计事件列表").closest("section"),
+      ).toHaveAttribute("aria-busy", "false"),
+    );
+    expect(screen.getByText("当前阶段与筛选条件下还没有事件。")).toBeInTheDocument();
+  });
+
+  it("does not let an older detail request overwrite a cancellation", async () => {
+    const eventsRequest = deferred<{
+      data: { items: never[]; latestSeq: number; hasMore: boolean };
+    }>();
+    const baseGet = apiGet.getMockImplementation()!;
+    const cancelledDetail = {
+      ...scanDetail,
+      scan: {
+        ...scanDetail.scan,
+        lifecycle_status: "cancelled",
+        can_cancel: false,
+        finished_at: "2026-08-21T06:25:00Z",
+      },
+    };
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans/scan_demo/events")
+        return eventsRequest.promise;
+      return baseGet(path, config);
+    });
+    apiPost.mockResolvedValue({ data: cancelledDetail });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    await user.click(screen.getByRole("button", { name: "取消审计" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "取消审计" }),
+      ).not.toBeInTheDocument(),
+    );
+    await act(async () =>
+      eventsRequest.resolve({
+        data: { items: [], latestSeq: 0, hasMore: false },
+      }),
+    );
+
+    expect(screen.getAllByText("已取消").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("button", { name: "取消审计" }),
+    ).not.toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
   it("uses the static confirmation count when dynamic validation was skipped", () => {
     expect(
       deriveFinalFindingMetric({
@@ -600,6 +902,97 @@ describe("code security workspace contract page", () => {
     expect(
       screen.getByText("已删除 legacy-service 的审计记录。"),
     ).toBeInTheDocument();
+  });
+
+  it("does not restore a deleted audit from an in-flight prefetch", async () => {
+    const detailRequest = deferred<{ data: typeof scanDetail }>();
+    const eventsRequest = deferred<{
+      data: { items: never[]; latestSeq: number; hasMore: boolean };
+    }>();
+    const baseGet = apiGet.getMockImplementation()!;
+    let olderDetailRequests = 0;
+    const deletedDetail = {
+      ...scanDetail,
+      scan: {
+        ...scanDetail.scan,
+        scan_id: "scan_older",
+        lifecycle_status: "completed",
+        integrity_status: "valid",
+        latest_event_seq: 0,
+        finished_at: "2026-08-21T05:30:00Z",
+        can_cancel: false,
+      },
+      target: { ...scanDetail.target, display_name: "legacy-service" },
+    };
+    apiGet.mockImplementation((path: string, config?: unknown) => {
+      if (path === "/api/code-security/v1/scans") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                scan_id: "scan_demo",
+                display_name: "flocks",
+                lifecycle_status: "running",
+                current_phase: "verification",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T06:20:00Z",
+              },
+              {
+                scan_id: "scan_older",
+                display_name: "legacy-service",
+                lifecycle_status: "completed",
+                current_phase: "finalization",
+                dynamic_enabled: false,
+                created_at: "2026-08-21T05:20:00Z",
+              },
+            ],
+          },
+        });
+      }
+      if (path === "/api/code-security/v1/scans/scan_older") {
+        olderDetailRequests += 1;
+        return olderDetailRequests === 1
+          ? detailRequest.promise
+          : Promise.reject(new Error("扫描不存在"));
+      }
+      if (path === "/api/code-security/v1/scans/scan_older/events")
+        return eventsRequest.promise;
+      return baseGet(path, config);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    fireEvent.pointerEnter(
+      screen.getByRole("button", { name: /legacy-service.*已完成/ }),
+    );
+    await waitFor(() => expect(olderDetailRequests).toBe(1));
+    await user.click(
+      screen.getByRole("button", { name: "删除审计 legacy-service" }),
+    );
+    await user.click(screen.getByRole("button", { name: "永久删除" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /legacy-service.*已完成/ }),
+      ).not.toBeInTheDocument(),
+    );
+
+    await act(async () => {
+      detailRequest.resolve({ data: deletedDetail });
+      eventsRequest.resolve({
+        data: { items: [], latestSeq: 0, hasMore: false },
+      });
+      await Promise.resolve();
+    });
+    act(() => {
+      window.history.pushState({}, "", "/?scan_id=scan_older");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(await screen.findByText("扫描不存在")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "legacy-service" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps stylesheet content out of the loading skeleton", async () => {
@@ -1106,6 +1499,10 @@ describe("code security workspace contract page", () => {
     expect(
       screen.queryByRole("button", { name: "取消审计" }),
     ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("正在加载扫描详情")).toBeInTheDocument();
+    expect(
+      screen.getByRole("navigation", { name: "扫描列表" }),
+    ).toBeInTheDocument();
     expect(apiPost).not.toHaveBeenCalled();
   });
 

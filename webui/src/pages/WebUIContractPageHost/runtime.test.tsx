@@ -41,8 +41,14 @@ describe('WebUIContractPage runtime', () => {
       'https://api.example.test/api/contracts/webui/pages/dash-1/bundle.js?v=abc123',
       'missing default',
     );
+    const cachedComponent = await loadWebUIContractPageBundle(
+      'https://api.example.test/api/contracts/webui/pages/dash-1/bundle.js?v=abc123',
+      'missing default',
+    );
 
     expect(component).toEqual(expect.any(Function));
+    expect(cachedComponent).toBe(component);
+    expect(getSpy).toHaveBeenCalledTimes(1);
     expect(getSpy).toHaveBeenCalledWith(
       'https://api.example.test/api/contracts/webui/pages/dash-1/bundle.js?v=abc123',
       { responseType: 'text' },

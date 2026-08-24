@@ -7,6 +7,7 @@ import { StatusBadge } from "./StatusBadge";
 
 const SCAN_ROW_HEIGHT = 106;
 const SCAN_OVERSCAN = 5;
+const PREFETCH_DELAY_MS = 180;
 
 export function ScanListPanel({
   scans,
@@ -20,6 +21,7 @@ export function ScanListPanel({
   loadingMore,
   onLoadMore,
   onDelete,
+  onPrefetch,
 }: {
   scans: ScanSummary[];
   selectedId: string | null;
@@ -32,6 +34,7 @@ export function ScanListPanel({
   loadingMore: boolean;
   onLoadMore: () => Promise<void>;
   onDelete: (scan: ScanSummary, opener: HTMLButtonElement) => void;
+  onPrefetch?: (scanId: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
@@ -46,6 +49,7 @@ export function ScanListPanel({
   const panelRef = useRef<HTMLElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const listRef = useRef<HTMLElement>(null);
+  const prefetchTimerRef = useRef<number | null>(null);
   const filtered = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
     return scans.filter((scan) => {
@@ -69,6 +73,28 @@ export function ScanListPanel({
       )
     : filtered.length;
   const visible = filtered.slice(start, end);
+
+  const cancelScheduledPrefetch = () => {
+    if (prefetchTimerRef.current === null) return;
+    window.clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = null;
+  };
+
+  const schedulePrefetch = (scanId: string) => {
+    cancelScheduledPrefetch();
+    prefetchTimerRef.current = window.setTimeout(() => {
+      prefetchTimerRef.current = null;
+      onPrefetch?.(scanId);
+    }, PREFETCH_DELAY_MS);
+  };
+
+  useEffect(
+    () => () => {
+      if (prefetchTimerRef.current !== null)
+        window.clearTimeout(prefetchTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!window.matchMedia) return undefined;
@@ -246,6 +272,10 @@ export function ScanListPanel({
                 <button
                   type="button"
                   className="cs-scan-item__select"
+                  onPointerEnter={() => schedulePrefetch(scan.scan_id)}
+                  onPointerLeave={cancelScheduledPrefetch}
+                  onFocus={() => schedulePrefetch(scan.scan_id)}
+                  onBlur={cancelScheduledPrefetch}
                   onClick={() => {
                     onSelect(scan.scan_id);
                     if (overlayLayout) onClose();

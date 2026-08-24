@@ -38,6 +38,15 @@ export interface FinalFindingMetric {
   basis: string;
 }
 
+interface ScanViewCacheEntry {
+  detail: ScanDetail;
+  events: AuditEvent[];
+  hasOlderEvents: boolean;
+  latestSeq: number;
+}
+
+const MAX_CACHED_SCAN_VIEWS = 8;
+
 export function deriveFinalFindingMetric(
   detail: ScanDetail,
 ): FinalFindingMetric {
@@ -85,6 +94,7 @@ export default function Page() {
   const [detail, setDetail] = useState<ScanDetail | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingEvents, setLoadingEvents] = useState(true);
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [error, setError] = useState("");
   const [connection, setConnection] = useState<
@@ -118,6 +128,13 @@ export default function Page() {
   const queuedScanRefreshRef = useRef(new Set<string>());
   const deletedScanIdsRef = useRef(new Set<string>());
   const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const scanViewCacheRef = useRef(new Map<string, ScanViewCacheEntry>());
+  const initialLoadTasksRef = useRef(
+    new Map<string, Promise<{ detail: ScanDetail; hasMore: boolean }>>(),
+  );
+  const authoritativeDetailsRef = useRef(new Map<string, ScanDetail>());
+  const prefetchTaskRef = useRef<Promise<void> | null>(null);
+  const hasPresentedDetailRef = useRef(false);
 
   const openDrawer = useCallback(() => {
     drawerOpenerRef.current =
@@ -176,16 +193,19 @@ export default function Page() {
 
   const applySelection = useCallback(
     (scanId: string, updateHistory: boolean) => {
+      const cached = scanViewCacheRef.current.get(scanId);
+      if (cached) rememberScanView(scanViewCacheRef.current, scanId, cached);
       selectedIdRef.current = scanId;
       setSelectedId(scanId);
-      setDetail(null);
-      setEvents([]);
+      setDetail(cached?.detail || null);
+      setEvents(cached?.events || []);
       setError("");
-      setLoading(true);
+      setLoading(!cached);
+      setLoadingEvents(!cached);
       setInspectorOpen(false);
-      setHasOlderEvents(false);
+      setHasOlderEvents(cached?.hasOlderEvents || false);
       setLoadingOlderEvents(false);
-      latestSeqRef.current = 0;
+      latestSeqRef.current = cached?.latestSeq || 0;
       if (updateHistory) {
         const params = new URLSearchParams(window.location.search);
         params.set("scan_id", scanId);
@@ -221,44 +241,112 @@ export default function Page() {
     [applySelection],
   );
 
-  const loadSelected = useCallback(async (scanId: string, afterSeq = 0) => {
-    const [nextDetail, page] = await Promise.all([
-      getScan(scanId),
-      afterSeq ? getEvents(scanId, afterSeq) : getRecentEvents(scanId),
-    ]);
-    const eventItems: AuditEvent[] = page.items;
-    if (!deletedScanIdsRef.current.has(scanId)) {
-      setScans((current) =>
-        mergeScans(current, [summaryFromDetail(nextDetail)]),
+  const loadSelected = useCallback((scanId: string, afterSeq = 0) => {
+    const load = async () => {
+      const detailRequest = getScan(scanId).then((nextDetail) => {
+        const displayDetail =
+          authoritativeDetailsRef.current.get(scanId) || nextDetail;
+        if (!deletedScanIdsRef.current.has(scanId)) {
+          setScans((current) =>
+            mergeScans(current, [summaryFromDetail(displayDetail)]),
+          );
+        }
+        if (selectedIdRef.current === scanId) {
+          hasPresentedDetailRef.current = true;
+          setDetail(displayDetail);
+          setLoading(false);
+        }
+        return nextDetail;
+      });
+      const eventsRequest = afterSeq
+        ? getEvents(scanId, afterSeq)
+        : getRecentEvents(scanId);
+      const [nextDetail, page] = await Promise.all([
+        detailRequest,
+        eventsRequest,
+      ]);
+      if (deletedScanIdsRef.current.has(scanId)) {
+        return { detail: nextDetail, hasMore: false };
+      }
+      const resolvedDetail =
+        authoritativeDetailsRef.current.get(scanId) || nextDetail;
+      const eventItems: AuditEvent[] = page.items;
+      const previous = scanViewCacheRef.current.get(scanId);
+      const nextEvents = mergeAuditEvents(
+        afterSeq ? previous?.events || [] : [],
+        eventItems,
       );
-    }
-    if (selectedIdRef.current !== scanId)
-      return { detail: nextDetail, hasMore: false };
-    setDetail(nextDetail);
-    if (!afterSeq) setHasOlderEvents(page.hasMore);
-    const deliveredSeq = eventItems.length
-      ? eventItems[eventItems.length - 1].seq
-      : afterSeq;
-    latestSeqRef.current = Math.max(latestSeqRef.current, deliveredSeq);
-    setEvents((current) => {
-      const merged = afterSeq ? [...current, ...eventItems] : eventItems;
-      return Array.from(
-        new Map(merged.map((item) => [item.seq, item])).values(),
-      ).sort((a, b) => a.seq - b.seq);
-    });
-    if (eventItems.length) {
-      setLiveMessage(
-        `${phaseLabels[nextDetail.scan.current_phase || ""] || "代码审计"}新增 ${eventItems.length} 条事件。`,
+      const nextHasOlderEvents = afterSeq
+        ? previous?.hasOlderEvents || false
+        : page.hasMore;
+      const deliveredSeq = eventItems.length
+        ? eventItems[eventItems.length - 1].seq
+        : afterSeq;
+      const nextLatestSeq = Math.max(
+        previous?.latestSeq || 0,
+        deliveredSeq,
       );
-    }
-    return {
-      detail: nextDetail,
-      hasMore: Boolean(
-        (afterSeq && page.hasMore) ||
-        deliveredSeq !== Number(nextDetail.scan.latest_event_seq || 0),
-      ),
+      rememberScanView(scanViewCacheRef.current, scanId, {
+        detail: resolvedDetail,
+        events: nextEvents,
+        hasOlderEvents: nextHasOlderEvents,
+        latestSeq: nextLatestSeq,
+      });
+      if (selectedIdRef.current !== scanId)
+        return { detail: nextDetail, hasMore: false };
+      hasPresentedDetailRef.current = true;
+      setDetail(resolvedDetail);
+      setLoading(false);
+      setLoadingEvents(false);
+      if (!afterSeq) setHasOlderEvents(page.hasMore);
+      latestSeqRef.current = Math.max(latestSeqRef.current, deliveredSeq);
+      setEvents(nextEvents);
+      if (eventItems.length) {
+        setLiveMessage(
+          `${phaseLabels[resolvedDetail.scan.current_phase || ""] || "代码审计"}新增 ${eventItems.length} 条事件。`,
+        );
+      }
+      return {
+        detail: resolvedDetail,
+        hasMore: Boolean(
+          (afterSeq && page.hasMore) ||
+          deliveredSeq !== Number(resolvedDetail.scan.latest_event_seq || 0),
+        ),
+      };
     };
+
+    if (afterSeq) return load();
+    const existing = initialLoadTasksRef.current.get(scanId);
+    if (existing) return existing;
+    let running: Promise<{ detail: ScanDetail; hasMore: boolean }>;
+    running = load().finally(() => {
+      if (initialLoadTasksRef.current.get(scanId) === running)
+        initialLoadTasksRef.current.delete(scanId);
+    });
+    initialLoadTasksRef.current.set(scanId, running);
+    return running;
   }, []);
+
+  const prefetchScan = useCallback(
+    (scanId: string) => {
+      if (
+        scanId === selectedIdRef.current ||
+        scanViewCacheRef.current.has(scanId) ||
+        prefetchTaskRef.current
+      )
+        return;
+      let running: Promise<void>;
+      running = loadSelected(scanId)
+        .then(() => undefined)
+        .catch(() => undefined)
+        .finally(() => {
+          if (prefetchTaskRef.current === running)
+            prefetchTaskRef.current = null;
+        });
+      prefetchTaskRef.current = running;
+    },
+    [loadSelected],
+  );
 
   const refreshChangedScan = useCallback(
     async (scanId: string) => {
@@ -270,8 +358,10 @@ export default function Page() {
           refreshQueuedRef.current.delete(scanId) &&
           selectedIdRef.current === scanId
         ) {
-          const result = await loadSelected(scanId, latestSeqRef.current);
-          if (result.hasMore) refreshQueuedRef.current.add(scanId);
+          const beforeSeq = latestSeqRef.current;
+          const result = await loadSelected(scanId, beforeSeq);
+          if (result.hasMore && latestSeqRef.current > beforeSeq)
+            refreshQueuedRef.current.add(scanId);
         }
       };
       let running: Promise<void>;
@@ -358,9 +448,8 @@ export default function Page() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => setShowSkeleton(true), 180);
-    Promise.all([reloadList(), listProjects()])
-      .then(([nextScans, nextProjects]) => {
-        setProjects(nextProjects);
+    reloadList()
+      .then((nextScans) => {
         const currentSelection = selectedIdRef.current;
         const candidate = currentSelection || nextScans[0]?.scan_id || null;
         if (candidate && candidate !== currentSelection)
@@ -375,30 +464,52 @@ export default function Page() {
         );
         setLoading(false);
       });
+    if (canCreate) {
+      listProjects()
+        .then(setProjects)
+        .catch((reason) =>
+          setError(
+            reason?.response?.data?.detail?.message ||
+              reason?.message ||
+              "无法加载可审计项目列表",
+          ),
+        );
+    }
     return () => window.clearTimeout(timer);
-  }, [reloadList, replaceSelection]);
+  }, [canCreate, reloadList, replaceSelection]);
 
   useEffect(() => {
     if (!selectedId) return;
-    setLoading(true);
-    loadSelected(selectedId)
+    const cached = scanViewCacheRef.current.get(selectedId);
+    if (cached) {
+      setLoading(false);
+      setLoadingEvents(false);
+      window.setTimeout(() => titleRef.current?.focus(), 0);
+      if (isTerminalScan(cached.detail)) return;
+    } else {
+      setLoading(true);
+      setLoadingEvents(true);
+    }
+    loadSelected(selectedId, cached?.latestSeq || 0)
       .then(({ hasMore }) => {
         if (selectedIdRef.current === selectedId && hasMore) {
           refreshChangedScan(selectedId).catch(() =>
             setConnection("reconnecting"),
           );
         }
-        if (selectedIdRef.current === selectedId) {
+        if (selectedIdRef.current === selectedId && !cached) {
           window.setTimeout(() => titleRef.current?.focus(), 0);
         }
       })
       .catch((reason) => {
-        if (selectedIdRef.current === selectedId)
+        if (selectedIdRef.current === selectedId) {
+          setLoadingEvents(false);
           setError(
             reason?.response?.data?.detail?.message ||
               reason?.message ||
               "无法加载扫描详情",
           );
+        }
       })
       .finally(() => {
         if (selectedIdRef.current === selectedId) setLoading(false);
@@ -406,7 +517,7 @@ export default function Page() {
   }, [loadSelected, refreshChangedScan, selectedId]);
 
   useEffect(() => {
-    if (!selectedId || typeof EventSource === "undefined") return undefined;
+    if (typeof EventSource === "undefined") return undefined;
     const source = new EventSource("/api/event", { withCredentials: true });
     source.onopen = () => setConnection("connected");
     source.onmessage = (message) => {
@@ -416,13 +527,14 @@ export default function Page() {
         const properties = event.properties || {};
         const changedScanId = String(properties.scanId || "");
         if (!changedScanId) return;
-        if (changedScanId !== selectedId) {
+        const activeScanId = selectedIdRef.current;
+        if (changedScanId !== activeScanId) {
           scheduleListRefresh(changedScanId);
           return;
         }
         if (Number(properties.latestEventSeq || 0) <= latestSeqRef.current)
           return;
-        refreshChangedScan(selectedId).catch(() =>
+        refreshChangedScan(changedScanId).catch(() =>
           setConnection("reconnecting"),
         );
       } catch {
@@ -431,7 +543,7 @@ export default function Page() {
     };
     source.onerror = () => setConnection("reconnecting");
     return () => source.close();
-  }, [refreshChangedScan, scheduleListRefresh, selectedId]);
+  }, [refreshChangedScan, scheduleListRefresh]);
 
   const loadOlderEvents = async () => {
     const scanId = selectedIdRef.current;
@@ -441,13 +553,18 @@ export default function Page() {
     try {
       const page = await getEarlierEvents(scanId, beforeSeq);
       if (selectedIdRef.current !== scanId) return;
-      setEvents((current) =>
-        Array.from(
-          new Map(
-            [...page.items, ...current].map((item) => [item.seq, item]),
-          ).values(),
-        ).sort((a, b) => a.seq - b.seq),
-      );
+      setEvents((current) => {
+        const nextEvents = mergeAuditEvents(page.items, current);
+        const cached = scanViewCacheRef.current.get(scanId);
+        if (cached) {
+          rememberScanView(scanViewCacheRef.current, scanId, {
+            ...cached,
+            events: nextEvents,
+            hasOlderEvents: page.hasMore,
+          });
+        }
+        return nextEvents;
+      });
       setHasOlderEvents(page.hasMore);
     } catch (reason: any) {
       setError(
@@ -491,7 +608,16 @@ export default function Page() {
     setCancelling(true);
     try {
       const nextDetail = await cancelScan(detail.scan.scan_id);
-      if (selectedIdRef.current === nextDetail.scan.scan_id)
+      const scanId = nextDetail.scan.scan_id;
+      authoritativeDetailsRef.current.set(scanId, nextDetail);
+      const cached = scanViewCacheRef.current.get(scanId);
+      if (cached) {
+        rememberScanView(scanViewCacheRef.current, scanId, {
+          ...cached,
+          detail: nextDetail,
+        });
+      }
+      if (selectedIdRef.current === scanId)
         setDetail(nextDetail);
       await reloadList();
     } catch (reason: any) {
@@ -525,6 +651,9 @@ export default function Page() {
     try {
       await deleteScan(target.scan_id);
       deletedScanIdsRef.current.add(target.scan_id);
+      authoritativeDetailsRef.current.delete(target.scan_id);
+      scanViewCacheRef.current.delete(target.scan_id);
+      initialLoadTasksRef.current.delete(target.scan_id);
       const remaining = scans.filter((scan) => scan.scan_id !== target.scan_id);
       setScans(remaining);
       setDeleteTarget(null);
@@ -542,6 +671,7 @@ export default function Page() {
           setDetail(null);
           setEvents([]);
           setLoading(false);
+          setLoadingEvents(false);
           setInspectorOpen(false);
           latestSeqRef.current = 0;
           const params = new URLSearchParams(window.location.search);
@@ -574,7 +704,7 @@ export default function Page() {
     }
   };
 
-  if (loading && !detail) {
+  if (loading && !detail && !hasPresentedDetailRef.current) {
     return showSkeleton ? (
       <WorkspaceSkeleton />
     ) : (
@@ -608,6 +738,7 @@ export default function Page() {
         loadingMore={loadingMoreScans}
         onLoadMore={loadMoreScans}
         onDelete={openDeleteDialog}
+        onPrefetch={prefetchScan}
       />
       {scanPanelOpen && (
         <button
@@ -649,7 +780,11 @@ export default function Page() {
           </div>
         )}
         {!detail ? (
-          <EmptyWorkspace canCreate={canCreate} onNewAudit={openDrawer} />
+          loading ? (
+            <ScanDetailSkeleton />
+          ) : (
+            <EmptyWorkspace canCreate={canCreate} onNewAudit={openDrawer} />
+          )
         ) : (
           <>
             <header className="cs-scan-header">
@@ -787,6 +922,7 @@ export default function Page() {
               finalFindingCount={finalFindingMetric?.count}
               finalFindingBasis={finalFindingMetric?.basis}
               hasOlderEvents={hasOlderEvents}
+              loadingEvents={loadingEvents}
               loadingOlderEvents={loadingOlderEvents}
               onLoadOlderEvents={loadOlderEvents}
             />
@@ -859,6 +995,35 @@ function mergeScans(
   );
 }
 
+function mergeAuditEvents(
+  current: AuditEvent[],
+  incoming: AuditEvent[],
+): AuditEvent[] {
+  return Array.from(
+    new Map([...current, ...incoming].map((item) => [item.seq, item])).values(),
+  ).sort((left, right) => left.seq - right.seq);
+}
+
+function rememberScanView(
+  cache: Map<string, ScanViewCacheEntry>,
+  scanId: string,
+  entry: ScanViewCacheEntry,
+) {
+  cache.delete(scanId);
+  cache.set(scanId, entry);
+  while (cache.size > MAX_CACHED_SCAN_VIEWS) {
+    const oldest = cache.keys().next().value;
+    if (typeof oldest !== "string") break;
+    cache.delete(oldest);
+  }
+}
+
+function isTerminalScan(detail: ScanDetail): boolean {
+  return ["completed", "failed", "cancelled", "interrupted"].includes(
+    detail.scan.lifecycle_status,
+  );
+}
+
 function useSdkUser(): any {
   const sdk = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__;
   return sdk?.useCurrentUser ? sdk.useCurrentUser() : null;
@@ -920,6 +1085,21 @@ function WorkspaceSkeleton() {
         <span />
       </aside>
     </main>
+  );
+}
+
+function ScanDetailSkeleton() {
+  return (
+    <section
+      className="cs-skeleton-stack cs-detail-skeleton"
+      aria-label="正在加载扫描详情"
+      aria-busy="true"
+    >
+      <span />
+      <span />
+      <span />
+      <span />
+    </section>
   );
 }
 

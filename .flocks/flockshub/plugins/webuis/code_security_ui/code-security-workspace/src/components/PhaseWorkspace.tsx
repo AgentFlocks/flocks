@@ -65,6 +65,7 @@ export function PhaseWorkspace({
   finalFindingCount = null,
   finalFindingBasis = "审计完成后确定",
   hasOlderEvents = false,
+  loadingEvents = false,
   loadingOlderEvents = false,
   onLoadOlderEvents = async () => undefined,
 }: {
@@ -81,6 +82,7 @@ export function PhaseWorkspace({
   finalFindingCount?: number | null;
   finalFindingBasis?: string;
   hasOlderEvents?: boolean;
+  loadingEvents?: boolean;
   loadingOlderEvents?: boolean;
   onLoadOlderEvents?: () => Promise<void>;
 }) {
@@ -295,6 +297,7 @@ export function PhaseWorkspace({
           events={events}
           selectedPhase={selected?.phase}
           hasOlder={hasOlderEvents}
+          loading={loadingEvents}
           loadingOlder={loadingOlderEvents}
           onLoadOlder={onLoadOlderEvents}
         />

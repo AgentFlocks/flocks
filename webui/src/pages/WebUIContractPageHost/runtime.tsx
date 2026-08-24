@@ -1,10 +1,28 @@
-import React, { type ComponentType, type ReactNode } from 'react';
+import React, { lazy, Suspense, type ComponentType, type ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import apiClient from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
+
+interface MarkdownRendererProps {
+  content: string;
+}
+
+const LazyMarkdownRenderer = lazy(async () => {
+  const [{ default: ReactMarkdown }, { default: remarkGfm }] = await Promise.all([
+    import('react-markdown'),
+    import('remark-gfm'),
+  ]);
+  const MarkdownRenderer = ({ content }: MarkdownRendererProps) => (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      {content}
+    </ReactMarkdown>
+  );
+  return { default: MarkdownRenderer };
+});
+
+const MAX_CACHED_PAGE_BUNDLES = 20;
+const pageBundleCache = new Map<string, Promise<ComponentType>>();
 
 interface WebUIContractPageScopedApi {
   get<T = unknown>(path: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
@@ -54,9 +72,15 @@ export function Card({ title, children }: { title: string; children: ReactNode }
 
 export function Markdown({ content }: { content: string }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-      {content}
-    </ReactMarkdown>
+    <Suspense
+      fallback={(
+        <pre className="whitespace-pre-wrap text-sm" aria-busy="true">
+          {content}
+        </pre>
+      )}
+    >
+      <LazyMarkdownRenderer content={content} />
+    </Suspense>
   );
 }
 
@@ -124,22 +148,41 @@ export function installWebUIContractPageRuntime(pageId: string): void {
   };
 }
 
-export async function loadWebUIContractPageBundle(
+export function loadWebUIContractPageBundle(
   url: string,
   missingExportMessage = 'Page bundle does not export a default component',
 ): Promise<ComponentType> {
-  const response = await apiClient.get<string>(url, { responseType: 'text' });
-  const source = typeof response.data === 'string' ? response.data : String(response.data ?? '');
-  const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
-
-  try {
-    const mod = await import(/* @vite-ignore */ moduleUrl);
-    const component = mod.default as ComponentType | undefined;
-    if (!component) {
-      throw new Error(missingExportMessage);
-    }
-    return component;
-  } finally {
-    URL.revokeObjectURL(moduleUrl);
+  const cached = pageBundleCache.get(url);
+  if (cached) {
+    pageBundleCache.delete(url);
+    pageBundleCache.set(url, cached);
+    return cached;
   }
+
+  const request = (async () => {
+    const response = await apiClient.get<string>(url, { responseType: 'text' });
+    const source = typeof response.data === 'string' ? response.data : String(response.data ?? '');
+    const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+
+    try {
+      const mod = await import(/* @vite-ignore */ moduleUrl);
+      const component = mod.default as ComponentType | undefined;
+      if (!component) {
+        throw new Error(missingExportMessage);
+      }
+      return component;
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
+    }
+  })().catch((error: unknown) => {
+    pageBundleCache.delete(url);
+    throw error;
+  });
+  pageBundleCache.set(url, request);
+  while (pageBundleCache.size > MAX_CACHED_PAGE_BUNDLES) {
+    const oldest = pageBundleCache.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    pageBundleCache.delete(oldest);
+  }
+  return request;
 }

@@ -758,6 +758,7 @@ const styles = String.raw`
 .cs-skeleton-stack, .cs-workspace-skeleton > * { display: grid; gap: 10px; }
 .cs-skeleton-stack span, .cs-workspace-skeleton span { animation: cs-pulse 1.2s ease-in-out infinite; background: var(--cs-surface-subtle); border-radius: 8px; display: block; height: 72px; }
 .cs-skeleton-stack span:first-child { height: 130px; }
+.cs-detail-skeleton { align-content: start; min-height: 100%; padding: 20px; }
 .cs-workspace-skeleton > * { background: var(--cs-surface-elevated); border-right: 1px solid var(--cs-border); padding: 16px; }
 .cs-workspace-skeleton > section span:nth-child(2) { height: 180px; }
 @keyframes cs-pulse { 50% { opacity: 0.55; } }

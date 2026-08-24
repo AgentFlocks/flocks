@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import WebUIContractPageHost from './index';
+import PageRuntimeHost from './PageRuntimeHost';
 import { setupSSEMock } from '@/test/mocks/sse';
 
 const { getMock, loadBundleMock, installMock } = vi.hoisted(() => ({
@@ -89,6 +90,19 @@ describe('WebUIContractPageHost', () => {
     expect(installMock).toHaveBeenCalledWith('dash-1');
     expect(loadBundleMock).toHaveBeenCalledWith(
       'https://api.example.test/api/contracts/webui/pages/dash-1/bundle.js?v=abc123',
+      'host.bundleMissingExport',
+    );
+  });
+
+  it('loads a known workspace bundle without refetching its build metadata', async () => {
+    render(<PageRuntimeHost pageId="dash-cached" initialBuildHash="cached123" />);
+
+    await waitFor(() => {
+      expect(screen.getByText('契约页面内容')).toBeInTheDocument();
+    });
+    expect(getMock).not.toHaveBeenCalled();
+    expect(loadBundleMock).toHaveBeenCalledWith(
+      'https://api.example.test/api/contracts/webui/pages/dash-cached/bundle.js?v=cached123',
       'host.bundleMissingExport',
     );
   });

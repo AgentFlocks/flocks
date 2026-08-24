@@ -5,18 +5,18 @@ import WebUIContractWorkspaceHost from './index';
 import { setupSSEMock } from '@/test/mocks/sse';
 import { ThemeContext } from '@/contexts/ThemeContext';
 
-const { listWorkspacesMock } = vi.hoisted(() => ({
-  listWorkspacesMock: vi.fn(),
+const { useWebUIContractPagesMock } = vi.hoisted(() => ({
+  useWebUIContractPagesMock: vi.fn(),
 }));
 
-vi.mock('@/api/webuiContractPages', () => ({
-  webuiContractPagesAPI: {
-    listWorkspaces: listWorkspacesMock,
-  },
+vi.mock('@/hooks/useWebUIContractPages', () => ({
+  useWebUIContractPages: useWebUIContractPagesMock,
 }));
 
 vi.mock('@/pages/WebUIContractPageHost/PageRuntimeHost', () => ({
-  default: ({ pageId }: { pageId?: string }) => <div>page:{pageId}</div>,
+  default: ({ pageId, initialBuildHash }: { pageId?: string; initialBuildHash?: string }) => (
+    <div data-build-hash={initialBuildHash}>page:{pageId}</div>
+  ),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -31,8 +31,12 @@ describe('WebUIContractWorkspaceHost', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    listWorkspacesMock.mockResolvedValue({
-      data: [
+    useWebUIContractPagesMock.mockReturnValue({
+      pages: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      workspaces: [
         {
           id: 'scene_workspace',
           title: '场景工作区',
@@ -163,6 +167,7 @@ describe('WebUIContractWorkspaceHost', () => {
     await waitFor(() => {
       expect(screen.getByText('page:risk-dashboard')).toBeInTheDocument();
     });
+    expect(screen.getByText('page:risk-dashboard')).toHaveAttribute('data-build-hash', 'posture');
     expect(screen.getByText('page:risk-dashboard').parentElement).not.toHaveClass('p-6');
     await waitFor(() => {
       expect(setTemporaryThemeOverride).toHaveBeenCalledWith('dark');

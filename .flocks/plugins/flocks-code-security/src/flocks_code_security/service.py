@@ -683,16 +683,20 @@ class AuditService:
             self._active.pop(scan_id, None)
 
     async def get_scan(self, scan_id: str, caller: AuditCaller) -> dict[str, Any]:
+        return await asyncio.to_thread(self._build_scan_detail, scan_id, caller)
+
+    def _build_scan_detail(self, scan_id: str, caller: AuditCaller) -> dict[str, Any]:
         scan = self._require_visible_scan(scan_id, caller)
-        status = await asyncio.to_thread(self.store.scan_status, scan_id)
+        status = self.store.scan_status(scan_id)
         if scan["status"] == "completed" and status.get("integrity_status") == "invalid":
-            repaired = await asyncio.to_thread(self._reseal_legacy_bundle, scan_id)
+            repaired = self._reseal_legacy_bundle(scan_id)
             if repaired:
-                status = await asyncio.to_thread(self.store.scan_status, scan_id)
+                status = self.store.scan_status(scan_id)
         snapshot = self.store.get_snapshot(scan["snapshot_id"])
         if snapshot is None:
             raise AuditServiceError("scan_invalid", "Scan snapshot is unavailable", status_code=500)
-        workers = self._public_workers(scan_id)
+        report_data = self.store.report_data(scan_id)
+        workers = self._public_workers(scan_id, report_data=report_data)
         phases = [self._public_phase_run(item) for item in self.store.list_phase_runs(scan_id)]
         if not phases and workers:
             phases = self._phase_runs_from_workers(scan_id, workers)
@@ -716,6 +720,7 @@ class AuditService:
             "coverage_status": self._coverage_status(
                 scan_id,
                 verified_artifacts=integrity_artifacts,
+                report_data=report_data,
             ),
             "dynamic_enabled": bool(scan["dynamic_enabled"]),
             "created_at": scan["created_at"],
@@ -743,10 +748,12 @@ class AuditService:
             "coverage_summary": self._coverage_summary(
                 scan_id,
                 verified_artifacts=integrity_artifacts,
+                report_data=report_data,
             ),
             "dynamic_validation": self._dynamic_summary(
                 status,
                 enabled=bool(scan["dynamic_enabled"]),
+                report_data=report_data,
             ),
             "phase_runs": phases,
             "workers": workers,
@@ -754,6 +761,7 @@ class AuditService:
                 scan_id,
                 scan,
                 verified_artifacts=integrity_artifacts,
+                report_data=report_data,
             ),
             "server_time": _utc_now().isoformat(),
             "workspace_url": (f"/contracts/webui/workspaces/code_security/code-security-workspace?scan_id={scan_id}"),
@@ -769,6 +777,22 @@ class AuditService:
             return False
 
     async def list_scans(
+        self,
+        caller: AuditCaller,
+        *,
+        statuses: set[str] | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._list_scans,
+            caller,
+            statuses=statuses,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def _list_scans(
         self,
         caller: AuditCaller,
         *,
@@ -1440,6 +1464,7 @@ class AuditService:
         scan_id: str,
         *,
         verified_artifacts: dict[str, str],
+        report_data: dict[str, Any] | None = None,
     ) -> str:
         path = self._artifact_file(scan_id, "coverage")
         if path and path.name in verified_artifacts:
@@ -1447,7 +1472,7 @@ class AuditService:
                 return str(json.loads(path.read_text(encoding="utf-8")).get("completeness") or "unknown")
             except (OSError, json.JSONDecodeError):
                 return "unknown"
-        data = self.store.report_data(scan_id)
+        data = report_data if report_data is not None else self.store.report_data(scan_id)
         return "partial" if data["coverage"] else "pending"
 
     def _finding_summary(
@@ -1491,10 +1516,11 @@ class AuditService:
         scan_id: str,
         *,
         verified_artifacts: dict[str, str] | None = None,
+        report_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         path = self._artifact_file(scan_id, "coverage")
         if path is None or path.name not in (verified_artifacts or {}):
-            data = self.store.report_data(scan_id)
+            data = report_data if report_data is not None else self.store.report_data(scan_id)
             return {
                 "completeness": "partial" if data["coverage"] else "pending",
                 "deferred_count": 0,
@@ -1512,7 +1538,13 @@ class AuditService:
             "open_question_count": len(document.get("openQuestions", [])),
         }
 
-    def _dynamic_summary(self, status: dict[str, Any], *, enabled: bool) -> dict[str, Any]:
+    def _dynamic_summary(
+        self,
+        status: dict[str, Any],
+        *,
+        enabled: bool,
+        report_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         counts = status.get("counts") if isinstance(status.get("counts"), dict) else {}
         if not enabled:
             return {
@@ -1523,7 +1555,12 @@ class AuditService:
                 "not_runnable": 0,
             }
         scan_id = str(status.get("scan_id") or "")
-        data = self.store.report_data(scan_id) if scan_id else {"dynamic_runs": []}
+        if report_data is not None:
+            data = report_data
+        elif scan_id:
+            data = self.store.report_data(scan_id)
+        else:
+            data = {"dynamic_runs": []}
         run_counts = {"ready": 0, "completed": 0, "inconclusive": 0, "not_runnable": 0}
         for run in data["dynamic_runs"]:
             run_status = run.get("status")
@@ -1543,9 +1580,14 @@ class AuditService:
             lifecycle = "completed"
         return {"status": lifecycle, **run_counts}
 
-    def _public_workers(self, scan_id: str) -> list[dict[str, Any]]:
+    def _public_workers(
+        self,
+        scan_id: str,
+        *,
+        report_data: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return bounded work-unit metadata without session or task identifiers."""
-        data = self.store.report_data(scan_id)
+        data = report_data if report_data is not None else self.store.report_data(scan_id)
         candidate_ids: dict[str, set[str]] = {}
         candidate_summaries: dict[str, dict[str, Any]] = {}
         record_counts: dict[str, dict[str, int]] = {}
@@ -1725,8 +1767,9 @@ class AuditService:
         scan: dict[str, Any],
         *,
         verified_artifacts: dict[str, str],
+        report_data: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        data = self.store.report_data(scan_id)
+        data = report_data if report_data is not None else self.store.report_data(scan_id)
         available = {
             "snapshot_summary": True,
             "threat_model": data["threat_model"] is not None,
