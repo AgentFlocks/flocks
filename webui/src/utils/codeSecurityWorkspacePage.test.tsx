@@ -377,12 +377,11 @@ describe("code security workspace contract page", () => {
     expect(screen.getAllByText("运行中").length).toBeGreaterThan(0);
     expect(screen.getAllByText("已跳过").length).toBeGreaterThan(0);
     expect(screen.getByText("静态验证员")).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "执行模型" })).toHaveTextContent(
-      "deepseek / deepseek-v4-flash",
-    );
-    expect(screen.getByRole("group", { name: "执行模型" })).toHaveTextContent(
-      "第 2 次执行 · 续跑 1 次",
-    );
+    const workerModel = screen.getByRole("group", { name: /执行模型/ });
+    expect(workerModel).toHaveTextContent("deepseek / deepseek-v4-flash");
+    expect(workerModel).toHaveTextContent("第 2 次执行 · 续跑 1 次");
+    expect(workerModel).toHaveClass("cs-worker-model");
+    expect(workerModel.closest(".cs-worker-card__heading")).not.toBeNull();
     await userEvent.click(screen.getByText("查看执行记录（2）"));
     expect(screen.getByText("openai / gpt-5.4")).toBeVisible();
     expect(screen.getByText("路由参数可能触发路径穿越")).toBeInTheDocument();
@@ -477,6 +476,38 @@ describe("code security workspace contract page", () => {
     expect(
       document.head.querySelector("style[data-flocks-code-security-workspace]"),
     ).toBeNull();
+  });
+
+  it("keeps a first-attempt model compact in the worker heading", () => {
+    render(
+      <PhaseWorkspace
+        phases={[scanDetail.phaseRuns[2]] as any}
+        events={[]}
+        workers={
+          [
+            {
+              ...scanDetail.workers[0],
+              attempts: [
+                {
+                  ordinal: 1,
+                  provider_id: "deepseek",
+                  model_id: "deepseek-v4-flash",
+                  status: "running",
+                  resume_count: 0,
+                },
+              ],
+            },
+          ] as any
+        }
+        currentPhase="verification"
+      />,
+    );
+
+    const model = screen.getByRole("group", { name: /执行模型/ });
+    expect(model).toHaveClass("cs-worker-model");
+    expect(model).toHaveTextContent("deepseek / deepseek-v4-flash");
+    expect(model).not.toHaveTextContent("第 1 次执行");
+    expect(screen.queryByText("查看执行记录（1）")).not.toBeInTheDocument();
   });
 
   it("groups only consecutive phase progress events whose state is unchanged", () => {
@@ -1986,7 +2017,7 @@ describe("code security workspace contract page", () => {
     expect(
       screen.getByRole("heading", { name: "裁决内容与结果" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "执行模型" })).toHaveTextContent(
+    expect(screen.getByRole("group", { name: /执行模型/ })).toHaveTextContent(
       "openai / gpt-5.5",
     );
     expect(screen.getByText("裁决轮次").nextElementSibling).toHaveTextContent(

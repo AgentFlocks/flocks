@@ -415,6 +415,11 @@ function AdjudicationSummary({
   );
   const rescan = rescanDirective(summary.rescan);
   const execution = executionIdentity(summary.execution);
+  const executionModel = executionModelLabel(
+    execution.providerId,
+    execution.modelId,
+  );
+  const executionModelDisplay = executionModel || t("模型信息不可用");
   const candidateTitles = new Map<string, string>();
   const candidateRationales = new Map<string, string>();
   workers.forEach((worker) => {
@@ -522,10 +527,19 @@ function AdjudicationSummary({
       </div>
 
       <div className="cs-adjudication-summary__execution">
-        <ExecutionModel
-          providerId={execution.providerId}
-          modelId={execution.modelId}
-        />
+        <div
+          className="cs-execution-model"
+          role="group"
+          aria-label={t("{{context}}：{{label}}", {
+            context: t("执行模型"),
+            label: executionModelDisplay,
+          })}
+        >
+          <div>
+            <span>{t("执行模型")}</span>
+            <code>{executionModelDisplay}</code>
+          </div>
+        </div>
       </div>
 
       {action === "finalize" ? (
@@ -955,39 +969,6 @@ function executionModelLabel(
   return provider && model ? `${provider} / ${model}` : model || provider;
 }
 
-function ExecutionModel({
-  providerId,
-  modelId,
-  ordinal,
-  resumeCount = 0,
-  waiting = false,
-}: {
-  providerId?: string | null;
-  modelId?: string | null;
-  ordinal?: number;
-  resumeCount?: number;
-  waiting?: boolean;
-}) {
-  const { t } = useCodeSecurityI18n();
-  const model = executionModelLabel(providerId, modelId);
-  return (
-    <div className="cs-execution-model" role="group" aria-label={t("执行模型")}>
-      <div>
-        <span>{t("执行模型")}</span>
-        <code>{model || t(waiting ? "等待执行" : "模型信息不可用")}</code>
-      </div>
-      {ordinal !== undefined && (
-        <small>
-          {t("第 {{ordinal}} 次执行", { ordinal })}
-          {resumeCount > 0
-            ? ` · ${t("续跑 {{count}} 次", { count: resumeCount })}`
-            : ""}
-        </small>
-      )}
-    </div>
-  );
-}
-
 function WorkerAttemptHistory({ attempts }: { attempts: WorkerAttempt[] }) {
   const { t } = useCodeSecurityI18n();
   if (attempts.length < 2) return null;
@@ -1217,6 +1198,10 @@ function WorkerList({
             const verdict = candidate?.verdict || "pending";
             const attempts = worker.attempts || [];
             const latestAttempt = attempts.at(-1);
+            const latestModel = executionModelLabel(
+              latestAttempt?.provider_id,
+              latestAttempt?.model_id,
+            );
             const displayStatus =
               worker.role === "prober" &&
               worker.status === "completed" &&
@@ -1225,12 +1210,54 @@ function WorkerList({
                 : worker.status === "running" && !worker.started_at
                   ? "pending"
                   : worker.status;
+            const latestModelDisplay =
+              latestModel ||
+              t(
+                !latestAttempt && displayStatus === "pending"
+                  ? "等待执行"
+                  : "模型信息不可用",
+              );
+            const latestAttemptSummary =
+              latestAttempt &&
+              (latestAttempt.ordinal > 1 || latestAttempt.resume_count > 0)
+                ? [
+                    t("第 {{ordinal}} 次执行", {
+                      ordinal: latestAttempt.ordinal,
+                    }),
+                    latestAttempt.resume_count > 0
+                      ? t("续跑 {{count}} 次", {
+                          count: latestAttempt.resume_count,
+                        })
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                : "";
 
             return (
               <article key={worker.work_unit_id} className="cs-worker-card">
                 <div className="cs-worker-card__heading">
-                  <div>
-                    <strong>{t(roleLabels[worker.role] || worker.role)}</strong>
+                  <div className="cs-worker-card__identity">
+                    <div className="cs-worker-card__title">
+                      <strong>
+                        {t(roleLabels[worker.role] || worker.role)}
+                      </strong>
+                      <span
+                        className="cs-worker-model"
+                        role="group"
+                        aria-label={t("{{context}}：{{label}}", {
+                          context: t("执行模型"),
+                          label: [latestModelDisplay, latestAttemptSummary]
+                            .filter(Boolean)
+                            .join(" · "),
+                        })}
+                      >
+                        <code>{latestModelDisplay}</code>
+                        {latestAttemptSummary && (
+                          <small>{latestAttemptSummary}</small>
+                        )}
+                      </span>
+                    </div>
                     <code title={worker.work_unit_id}>
                       {shortId(worker.work_unit_id, 18)}
                     </code>
@@ -1240,14 +1267,6 @@ function WorkerList({
                     context={t("工作单元状态")}
                   />
                 </div>
-
-                <ExecutionModel
-                  providerId={latestAttempt?.provider_id}
-                  modelId={latestAttempt?.model_id}
-                  ordinal={latestAttempt?.ordinal}
-                  resumeCount={latestAttempt?.resume_count}
-                  waiting={!latestAttempt && displayStatus === "pending"}
-                />
 
                 {candidate && (
                   <section

@@ -637,12 +637,16 @@ const styles = String.raw`
 .cs-worker-list { align-items: start; display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; }
 .cs-worker-card { align-content: start; border: 1px solid var(--cs-border); border-radius: 8px; display: grid; gap: 12px; min-width: 0; padding: 12px; }
 .cs-worker-card__heading { align-items: flex-start; display: flex; gap: 10px; justify-content: space-between; }
-.cs-worker-card__heading > div { display: grid; gap: 3px; min-width: 0; }
+.cs-worker-card__identity { display: grid; flex: 1 1 auto; gap: 3px; min-width: 0; }
+.cs-worker-card__title { align-items: baseline; display: flex; flex-wrap: wrap; gap: 3px 8px; min-width: 0; }
 .cs-worker-card__heading strong { font-size: 13px; }
-.cs-worker-card__heading code { color: var(--cs-text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+.cs-worker-card__identity > code { color: var(--cs-text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+.cs-worker-model { align-items: baseline; border-left: 1px solid var(--cs-border-strong); display: flex; flex: 1 1 180px; flex-wrap: wrap; gap: 2px 7px; min-width: 0; padding-left: 8px; }
+.cs-worker-model code { color: var(--cs-text-secondary); font-size: 10px; line-height: 16px; overflow-wrap: anywhere; white-space: normal; }
+.cs-worker-model small { color: var(--cs-text-muted); font-size: 9px; line-height: 15px; white-space: nowrap; }
 .cs-execution-model { align-items: flex-end; background: var(--cs-surface-subtle); border-radius: 7px; display: flex; flex-wrap: wrap; gap: 6px 12px; justify-content: space-between; min-width: 0; padding: 8px 10px; }
 .cs-execution-model > div { display: grid; flex: 1 1 180px; gap: 2px; min-width: 0; }
-.cs-execution-model span, .cs-execution-model > small { color: var(--cs-text-muted); font-size: 10px; line-height: 16px; }
+.cs-execution-model span { color: var(--cs-text-muted); font-size: 10px; line-height: 16px; }
 .cs-execution-model code { color: var(--cs-text-secondary); font-size: 11px; line-height: 17px; overflow-wrap: anywhere; white-space: normal; }
 .cs-worker-candidate { background: var(--cs-surface-subtle); border-radius: 7px; display: grid; gap: 5px; padding: 9px 10px; }
 .cs-worker-candidate__heading { align-items: flex-start; display: flex; gap: 8px; justify-content: space-between; }
