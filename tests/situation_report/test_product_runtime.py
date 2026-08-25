@@ -15,6 +15,7 @@ from flocks.session.session import Session, SessionInfo
 from flocks.situation_report.product.backend_sync import (
     BackendReportSyncError,
     BackendReportSynchronizer,
+    LatestResource,
     initialize_report_action,
 )
 from flocks.situation_report.product.contracts import (
@@ -72,6 +73,27 @@ def _prompt(operation: str, generation_id: str, *, base_version: int | None = No
 
 def _missing() -> dict:
     return {"exists": False, "version": None, "changed": False}
+
+
+def _missing_with_zero_version() -> dict:
+    return {"exists": False, "version": 0, "changed": False}
+
+
+def test_missing_resource_normalizes_zero_version_sentinel() -> None:
+    assert LatestResource.model_validate(_missing()).model_dump() == _missing()
+    assert LatestResource.model_validate(_missing_with_zero_version()).model_dump() == _missing()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"exists": False, "version": 1, "changed": False},
+        {"exists": False, "version": 0, "changed": True},
+    ],
+)
+def test_missing_resource_rejects_conflicting_state(value: dict) -> None:
+    with pytest.raises(ValidationError):
+        LatestResource.model_validate(value)
 
 
 def _changed(
@@ -248,7 +270,7 @@ async def test_generate_uses_original_session_id_and_backend_latest(
             }
             return _state_response(
                 request,
-                report=_missing(),
+                report=_missing_with_zero_version(),
                 template=_changed(
                     version=1,
                     content=template,

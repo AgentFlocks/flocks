@@ -35,6 +35,8 @@
        &knownMaterialVersion=...
    ```
 
+   后端应以 `exists=false, version=null, changed=false` 表示资源不存在。为兼容整型字段的零值序列化，Flocks 也接受 `exists=false, version=0, changed=false`，并立即归一化为 `version=null`；正数版本或 `changed=true` 仍视为冲突状态。
+
 8. modify 下载当前报告；所有操作每轮无条件下载当前模板和实时素材。Flocks 校验下载响应版本、格式和大小，自行计算 SHA-256 并固化本地不可变快照；全部成功后才切换 `index.json` 当前指针。
 9. modify 同时校验状态版本和 `X-Report-Version` 均等于请求的基线版本；regenerate 检查报告状态但不下载、不读取报告正文。
 10. A1 单 Agent 只通过受限工具读取本轮上下文和分页素材、写候选、执行校验。

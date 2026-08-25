@@ -39,8 +39,12 @@ class LatestResource(BaseModel):
     @model_validator(mode="after")
     def validate_state(self) -> "LatestResource":
         if not self.exists:
-            if self.changed or self.version is not None:
-                raise ValueError("A missing resource cannot be changed or carry a version")
+            if self.changed or self.version not in {None, 0}:
+                raise ValueError("A missing resource cannot be changed or carry a positive version")
+            # Some backend serializers use integer zero as the sentinel for
+            # an absent resource. Keep the wire boundary tolerant while the
+            # rest of Flocks retains one canonical missing-resource shape.
+            self.version = None
             return self
         if self.version is None or self.version < 1:
             raise ValueError("An existing resource requires a positive version")
