@@ -639,6 +639,7 @@ class AuditService:
                 self._run_background(normalized, ctx, prepared, recorder),
                 name=f"code-security:{scan_id}",
             )
+            task.add_done_callback(self._retrieve_background_task_result)
             self._active[scan_id] = _ActiveScan(
                 ctx=ctx,
                 task=task,
@@ -660,6 +661,13 @@ class AuditService:
         if active is not None:
             return await active.task
         return await self.get_result(scan_id, caller)
+
+    @staticmethod
+    def _retrieve_background_task_result(
+        task: asyncio.Task[dict[str, Any]],
+    ) -> None:
+        if not task.cancelled():
+            task.exception()
 
     async def _run_background(
         self,

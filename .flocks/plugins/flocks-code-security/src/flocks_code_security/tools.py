@@ -12,10 +12,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from flocks.session.callable_state import (
-    get_session_callable_tools,
-    set_session_callable_tools,
-)
+from flocks.session.callable_state import get_session_callable_tools
 from flocks.tool.registry import (
     ParameterType,
     Tool,
@@ -1438,10 +1435,6 @@ async def _launch_worker(
         is not None
     )
     callable_tools = await get_session_callable_tools(child.id)
-    if not knowledge_base_present:
-        if "audit_knowledge_base" in callable_tools:
-            callable_tools.remove("audit_knowledge_base")
-            await set_session_callable_tools(child.id, callable_tools)
     attempt = await asyncio.to_thread(
         runtime.store.create_work_attempt,
         work_unit_id=unit["work_unit_id"],

@@ -2634,9 +2634,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
             "audit_submit_threat_model",
         }
     )
-    set_callable_tools = AsyncMock()
     monkeypatch.setattr(tools_module, "get_session_callable_tools", get_callable_tools)
-    monkeypatch.setattr(tools_module, "set_session_callable_tools", set_callable_tools)
     manager = _FakeBackgroundManager()
     monkeypatch.setattr(tools_module, "_background_manager", lambda: manager)
 
@@ -2658,16 +2656,6 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "threat_modeling",
     )
     assert threat_model_batch.success is True
-    set_callable_tools.assert_awaited_once_with(
-        children[0].id,
-        {
-            "audit_repository_summary",
-            "audit_inventory",
-            "audit_read",
-            "audit_search",
-            "audit_submit_threat_model",
-        },
-    )
     assert children[0].creation_kwargs["metadata"]["langfuse"]["trace_context"] == {
         "trace_id": "a" * 32,
         "parent_span_id": "b" * 16,
@@ -2682,9 +2670,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     )
     modeler.extra.update(
         model={"providerID": "provider", "modelID": "model"},
-        turn_callable_tool_names=sorted(
-            get_callable_tools.return_value - {"audit_knowledge_base"}
-        ),
+        turn_callable_tool_names=sorted(get_callable_tools.return_value),
     )
     assert (await audit_repository_summary(modeler)).success
     inventory = await audit_inventory(modeler)
@@ -2753,9 +2739,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     )
     baseline.extra.update(
         model={"providerID": "provider", "modelID": "model"},
-        turn_callable_tool_names=sorted(
-            get_callable_tools.return_value - {"audit_knowledge_base"}
-        ),
+        turn_callable_tool_names=sorted(get_callable_tools.return_value),
     )
     assert (await audit_threat_model_context(baseline)).success
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
@@ -2816,9 +2800,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     )
     verifier.extra.update(
         model={"providerID": "provider", "modelID": "model"},
-        turn_callable_tool_names=sorted(
-            get_callable_tools.return_value - {"audit_knowledge_base"}
-        ),
+        turn_callable_tool_names=sorted(get_callable_tools.return_value),
     )
     assert (await audit_verification_subject(verifier)).success
     assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success

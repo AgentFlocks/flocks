@@ -762,6 +762,21 @@ def test_legacy_terminal_scan_uses_and_persists_its_last_update_time(tmp_path: P
     assert repaired["finished_at"] == repaired["updated_at"]
 
 
+def test_background_task_completion_retrieves_failure() -> None:
+    retrieved = False
+
+    def exception() -> RuntimeError:
+        nonlocal retrieved
+        retrieved = True
+        return RuntimeError("scan failed")
+
+    task = SimpleNamespace(cancelled=lambda: False, exception=exception)
+
+    AuditService._retrieve_background_task_result(task)
+
+    assert retrieved is True
+
+
 @pytest.mark.asyncio
 async def test_scan_start_requires_admin_and_an_authorized_workspace(
     tmp_path: Path,
