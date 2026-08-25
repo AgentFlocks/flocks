@@ -1035,7 +1035,7 @@ def test_legacy_worker_history_projects_completed_phases() -> None:
 
 
 def test_public_worker_projection_exposes_distinct_verification_results() -> None:
-    rationale = "x" * (service_module.MAX_WORKER_RATIONALE_CHARS + 1)
+    vote_rationale = "x" * (service_module.MAX_WORKER_RATIONALE_CHARS + 1)
     service = object.__new__(AuditService)
     service.store = SimpleNamespace(
         report_data=lambda _scan_id: {
@@ -1054,7 +1054,19 @@ def test_public_worker_projection_exposes_distinct_verification_results() -> Non
                     "candidate_id": "candidate-1",
                     "work_unit_id": "unit-verifier",
                     "verdict": "confirmed",
-                    "rationale": rationale,
+                    "rationale": (
+                        "Host consensus from 1 independent votes: confirmed=1, "
+                        "rejected=0, insufficient_evidence=0."
+                    ),
+                }
+            ],
+            "verification_votes": [
+                {
+                    "candidate_id": "candidate-1",
+                    "work_unit_id": "unit-verifier",
+                    "vote_index": 1,
+                    "verdict": "confirmed",
+                    "rationale": vote_rationale,
                 }
             ],
             "coverage": [],

@@ -1770,6 +1770,21 @@ class AuditService:
                         "rationale_truncated": bool(rationale and len(rationale) > MAX_WORKER_RATIONALE_CHARS),
                     }
                 )
+        vote_summary_by_unit: dict[str, dict[str, Any]] = {}
+        for item in data.get("verification_votes", []):
+            work_unit_id = item.get("work_unit_id")
+            candidate_id = item.get("candidate_id")
+            summary = candidate_summaries.get(candidate_id) if isinstance(candidate_id, str) else None
+            if not isinstance(work_unit_id, str) or summary is None:
+                continue
+            rationale = item.get("rationale")
+            rationale = rationale if isinstance(rationale, str) else None
+            vote_summary_by_unit[work_unit_id] = {
+                **summary,
+                "verdict": item.get("verdict") if isinstance(item.get("verdict"), str) else None,
+                "rationale": rationale[:MAX_WORKER_RATIONALE_CHARS] if rationale else None,
+                "rationale_truncated": bool(rationale and len(rationale) > MAX_WORKER_RATIONALE_CHARS),
+            }
         for item in data["coverage"]:
             record(item.get("work_unit_id"), "coverage")
         dynamic_statuses: dict[str, set[str]] = {}
@@ -1803,6 +1818,7 @@ class AuditService:
                 finished_at = item.get("finished_at")
                 if not finished_at and worker_status in terminal_statuses:
                     finished_at = item.get("updated_at")
+                vote_summary = vote_summary_by_unit.get(work_unit_id)
                 workers.append(
                     {
                         "work_unit_id": work_unit_id,
@@ -1817,7 +1833,12 @@ class AuditService:
                         "paths_truncated": len(paths) > 50,
                         "candidate_ids": sorted(related),
                         "candidate_summaries": [
-                            candidate_summaries[candidate_id]
+                            (
+                                vote_summary
+                                if vote_summary is not None
+                                and vote_summary["candidate_id"] == candidate_id
+                                else candidate_summaries[candidate_id]
+                            )
                             for candidate_id in sorted(related)
                             if candidate_id in candidate_summaries
                         ],
