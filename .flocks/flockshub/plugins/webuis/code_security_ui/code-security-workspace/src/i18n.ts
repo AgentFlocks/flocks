@@ -73,6 +73,13 @@ const englishMessages: Record<string, string> = {
   执行状态: "Execution status",
   阶段状态: "Phase status",
   工作单元状态: "Work unit status",
+  执行模型: "Execution model",
+  等待执行: "Waiting to run",
+  模型信息不可用: "Model information unavailable",
+  恢复中: "Recovering",
+  "第 {{ordinal}} 次执行": "Attempt {{ordinal}}",
+  "续跑 {{count}} 次": "{{count}} resumes",
+  "查看执行记录（{{count}}）": "View execution history ({{count}})",
   "{{context}}：{{label}}": "{{context}}: {{label}}",
   审计完成后确定: "Available after the audit completes",
   最终结果不可用: "Final result unavailable",
@@ -498,7 +505,8 @@ export function useCodeSecurityI18n(): {
   t: Translator;
 } {
   const runtime = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__ as
-    ContractRuntime | undefined;
+    | ContractRuntime
+    | undefined;
   const language = runtime?.useLanguage
     ? runtime.useLanguage()
     : window.localStorage?.getItem("flocks-language") ||

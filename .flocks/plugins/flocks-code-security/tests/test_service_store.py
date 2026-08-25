@@ -106,6 +106,42 @@ def test_scan_persists_bounded_verification_vote_count(tmp_path: Path) -> None:
         )
 
 
+def test_report_data_includes_public_work_attempt_model_identity(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="verification",
+        role="verifier",
+        paths=["."],
+    )
+    store.create_work_attempt(
+        work_unit_id=work_unit_id,
+        session_id="verifier-1",
+        agent_name="code-security-verifier",
+        provider_id="deepseek",
+        model_id="deepseek-v4-flash",
+    )
+
+    assert store.report_data(scan_id)["work_attempts"] == [
+        {
+            "work_unit_id": work_unit_id,
+            "ordinal": 1,
+            "provider_id": "deepseek",
+            "model_id": "deepseek-v4-flash",
+            "status": "running",
+            "resume_count": 0,
+        }
+    ]
+
+
 def test_dynamic_probe_queue_prioritizes_execution_candidates(tmp_path: Path) -> None:
     store = _store(tmp_path)
     scan_id = store.create_scan(
@@ -339,6 +375,47 @@ def test_progress_recorder_creates_one_phase_run_per_worker_batch(
         "batch-1",
         "batch-2",
     ]
+
+
+def test_progress_recorder_preserves_adjudication_model_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    monkeypatch.setattr(
+        service_module,
+        "get_runtime",
+        lambda: SimpleNamespace(store=store),
+    )
+    recorder = _ProgressRecorder(scan_id, dynamic_enabled=False)
+    execution = {
+        "provider_id": "openai",
+        "model_id": "gpt-5.5",
+    }
+
+    recorder(
+        "adjudication.started",
+        {"adjudication_round": 1, "execution": execution},
+    )
+    recorder(
+        "scan.adjudicated",
+        {
+            "adjudication_round": 1,
+            "action": "finalize",
+            "accepted_candidate_ids": [],
+            "rejected_candidates": [],
+        },
+    )
+
+    phase = store.list_phase_runs(scan_id)[0]
+    assert phase["status"] == "completed"
+    assert phase["summary"]["execution"] == execution
 
 
 def test_recent_event_page_is_bounded_and_chronological(tmp_path: Path) -> None:
@@ -981,6 +1058,24 @@ def test_public_worker_projection_exposes_distinct_verification_results() -> Non
                 }
             ],
             "coverage": [],
+            "work_attempts": [
+                {
+                    "work_unit_id": "unit-verifier",
+                    "ordinal": 1,
+                    "provider_id": "openai",
+                    "model_id": "gpt-5.4",
+                    "status": "failed",
+                    "resume_count": 0,
+                },
+                {
+                    "work_unit_id": "unit-verifier",
+                    "ordinal": 2,
+                    "provider_id": "deepseek",
+                    "model_id": "deepseek-v4-flash",
+                    "status": "completed",
+                    "resume_count": 1,
+                },
+            ],
             "submission_rejections": [
                 {
                     "rejection_id": "rejection-1",
@@ -1051,6 +1146,22 @@ def test_public_worker_projection_exposes_distinct_verification_results() -> Non
             "rationale": "x" * service_module.MAX_WORKER_RATIONALE_CHARS,
             "rationale_truncated": True,
         }
+    ]
+    assert worker["attempts"] == [
+        {
+            "ordinal": 1,
+            "provider_id": "openai",
+            "model_id": "gpt-5.4",
+            "status": "failed",
+            "resume_count": 0,
+        },
+        {
+            "ordinal": 2,
+            "provider_id": "deepseek",
+            "model_id": "deepseek-v4-flash",
+            "status": "completed",
+            "resume_count": 1,
+        },
     ]
     assert workers[1]["started_at"] is None
     assert workers[1]["elapsed_ms"] is None

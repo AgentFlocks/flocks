@@ -163,6 +163,22 @@ const scanDetail = {
           rationale_truncated: false,
         },
       ],
+      attempts: [
+        {
+          ordinal: 1,
+          provider_id: "openai",
+          model_id: "gpt-5.4",
+          status: "failed",
+          resume_count: 0,
+        },
+        {
+          ordinal: 2,
+          provider_id: "deepseek",
+          model_id: "deepseek-v4-flash",
+          status: "running",
+          resume_count: 1,
+        },
+      ],
       activity_counts: { inventory: 1, search: 8, read: 3 },
       record_counts: { verifications: 1 },
       recent_rejection: {
@@ -361,6 +377,14 @@ describe("code security workspace contract page", () => {
     expect(screen.getAllByText("运行中").length).toBeGreaterThan(0);
     expect(screen.getAllByText("已跳过").length).toBeGreaterThan(0);
     expect(screen.getByText("静态验证员")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "执行模型" })).toHaveTextContent(
+      "deepseek / deepseek-v4-flash",
+    );
+    expect(screen.getByRole("group", { name: "执行模型" })).toHaveTextContent(
+      "第 2 次执行 · 续跑 1 次",
+    );
+    await userEvent.click(screen.getByText("查看执行记录（2）"));
+    expect(screen.getByText("openai / gpt-5.4")).toBeVisible();
     expect(screen.getByText("路由参数可能触发路径穿越")).toBeInTheDocument();
     expect(screen.getByText("已确认")).toBeInTheDocument();
     expect(screen.getByText("2 个路径")).toBeInTheDocument();
@@ -1899,6 +1923,10 @@ describe("code security workspace contract page", () => {
             duration_ms: 36_000,
             summary: {
               adjudication_round: 1,
+              execution: {
+                provider_id: "openai",
+                model_id: "gpt-5.5",
+              },
               action: "finalize",
               accepted_candidate_ids: ["candidate-accepted"],
               rejected_candidates: [
@@ -1958,6 +1986,9 @@ describe("code security workspace contract page", () => {
     expect(
       screen.getByRole("heading", { name: "裁决内容与结果" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "执行模型" })).toHaveTextContent(
+      "openai / gpt-5.5",
+    );
     expect(screen.getByText("裁决轮次").nextElementSibling).toHaveTextContent(
       "第 1 轮",
     );

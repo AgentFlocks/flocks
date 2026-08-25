@@ -79,6 +79,14 @@ export interface WorkerCandidateSummary {
   rationale_truncated?: boolean;
 }
 
+export interface WorkerAttempt {
+  ordinal: number;
+  provider_id?: string | null;
+  model_id?: string | null;
+  status: string;
+  resume_count: number;
+}
+
 export interface WorkerRun {
   work_unit_id: string;
   phase: string;
@@ -92,6 +100,7 @@ export interface WorkerRun {
   paths_truncated: boolean;
   candidate_ids: string[];
   candidate_summaries?: WorkerCandidateSummary[];
+  attempts?: WorkerAttempt[];
   activity_counts?: Record<string, number>;
   record_counts: Record<string, number>;
   coverage?: {

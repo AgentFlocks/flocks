@@ -446,6 +446,7 @@ class _ProgressRecorder:
             "threat_model_status",
             "integrity_status",
             "adjudication_round",
+            "execution",
             "action",
             "accepted_candidate_ids",
             "rejected_candidates",
@@ -1719,6 +1720,20 @@ class AuditService:
             for item in data.get("submission_rejections", [])
             if isinstance(item.get("work_unit_id"), str)
         }
+        attempts_by_unit: dict[str, list[dict[str, Any]]] = {}
+        for item in data.get("work_attempts", []):
+            work_unit_id = item.get("work_unit_id")
+            if not isinstance(work_unit_id, str) or not work_unit_id:
+                continue
+            attempts_by_unit.setdefault(work_unit_id, []).append(
+                {
+                    "ordinal": item.get("ordinal"),
+                    "provider_id": item.get("provider_id"),
+                    "model_id": item.get("model_id"),
+                    "status": item.get("status"),
+                    "resume_count": item.get("resume_count") or 0,
+                }
+            )
 
         def record(work_unit_id: Any, kind: str, candidate_id: Any = None) -> None:
             if not isinstance(work_unit_id, str) or not work_unit_id:
@@ -1808,6 +1823,7 @@ class AuditService:
                         ],
                         "activity_counts": data.get("source_access_counts", {}).get(work_unit_id, {}),
                         "record_counts": record_counts.get(work_unit_id, {}),
+                        "attempts": attempts_by_unit.get(work_unit_id, []),
                         "coverage": coverage_by_unit.get(work_unit_id),
                         "recent_rejection": recent_rejection_by_unit.get(
                             work_unit_id

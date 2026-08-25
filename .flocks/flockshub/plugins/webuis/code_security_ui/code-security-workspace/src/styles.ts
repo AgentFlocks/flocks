@@ -561,6 +561,7 @@ const styles = String.raw`
 .cs-phase-summary__note { background: var(--cs-surface-subtle); border-top: 1px solid var(--cs-border); color: var(--cs-text-secondary); font-size: 12px; line-height: 18px; margin: 0; padding: 10px 14px; }
 .cs-phase-summary__note--danger { background: var(--cs-danger-soft); color: var(--cs-danger); }
 .cs-adjudication-summary .cs-phase-summary__heading h3 svg { color: var(--cs-primary); }
+.cs-adjudication-summary__execution { padding: 12px 14px 0; }
 .cs-adjudication-summary__content { display: grid; gap: 14px; padding: 14px; }
 .cs-adjudication-group { border: 1px solid var(--cs-border); border-radius: 8px; min-width: 0; overflow: hidden; }
 .cs-adjudication-group__header { align-items: center; background: var(--cs-surface-subtle); border-bottom: 1px solid var(--cs-border); display: flex; gap: 12px; justify-content: space-between; padding: 10px 12px; }
@@ -639,6 +640,10 @@ const styles = String.raw`
 .cs-worker-card__heading > div { display: grid; gap: 3px; min-width: 0; }
 .cs-worker-card__heading strong { font-size: 13px; }
 .cs-worker-card__heading code { color: var(--cs-text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+.cs-execution-model { align-items: flex-end; background: var(--cs-surface-subtle); border-radius: 7px; display: flex; flex-wrap: wrap; gap: 6px 12px; justify-content: space-between; min-width: 0; padding: 8px 10px; }
+.cs-execution-model > div { display: grid; flex: 1 1 180px; gap: 2px; min-width: 0; }
+.cs-execution-model span, .cs-execution-model > small { color: var(--cs-text-muted); font-size: 10px; line-height: 16px; }
+.cs-execution-model code { color: var(--cs-text-secondary); font-size: 11px; line-height: 17px; overflow-wrap: anywhere; white-space: normal; }
 .cs-worker-candidate { background: var(--cs-surface-subtle); border-radius: 7px; display: grid; gap: 5px; padding: 9px 10px; }
 .cs-worker-candidate__heading { align-items: flex-start; display: flex; gap: 8px; justify-content: space-between; }
 .cs-worker-candidate h4 { font-size: 12px; line-height: 18px; margin: 0; overflow-wrap: anywhere; }
@@ -666,6 +671,12 @@ const styles = String.raw`
 .cs-worker-rationale__content:focus-visible { outline: 2px solid var(--cs-focus); outline-offset: -2px; }
 .cs-worker-rationale__content > p { margin: 0; }
 .cs-worker-details > small { color: var(--cs-text-muted); display: block; font-size: 10px; margin-top: 5px; }
+.cs-worker-attempts ol { display: grid; gap: 6px; list-style: none; margin: 8px 0 0; padding: 0; }
+.cs-worker-attempts li { background: var(--cs-surface-subtle); border-radius: 6px; display: grid; gap: 3px; min-width: 0; padding: 7px 9px; }
+.cs-worker-attempts li > div { align-items: baseline; display: flex; gap: 7px; justify-content: space-between; }
+.cs-worker-attempts li strong { font-size: 11px; }
+.cs-worker-attempts li small { color: var(--cs-text-muted); font-size: 9px; }
+.cs-worker-attempts li code { color: var(--cs-text-secondary); font-size: 10px; overflow-wrap: anywhere; white-space: normal; }
 .cs-worker-paths ul { display: grid; gap: 5px; list-style: none; margin: 8px 0 0; max-height: 160px; overflow-y: auto; padding: 0; }
 .cs-worker-paths li { min-width: 0; }
 .cs-worker-paths li code { display: block; font-size: 10px; overflow-wrap: anywhere; }

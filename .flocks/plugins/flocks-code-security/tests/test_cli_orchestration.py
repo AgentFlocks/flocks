@@ -610,7 +610,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         "set_session_callable_tools",
         set_callable_tools,
     )
-    events: list[str] = []
+    events: list[tuple[str, dict]] = []
     ctx = ToolContext(
         "coordinator",
         "message",
@@ -621,7 +621,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
     result = await audit_cli.AuditOrchestrator(
         ctx,
         Path("/target"),
-        lambda event, _payload: events.append(event),
+        lambda event, payload: events.append((event, payload)),
     )._run_parent_adjudication("scan_parent", None)
 
     assert result == decision
@@ -636,7 +636,14 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         model_id="model",
         agent_name="code-security",
     )
-    assert events == ["adjudication.started", "scan.adjudicated"]
+    assert [event for event, _payload in events] == [
+        "adjudication.started",
+        "scan.adjudicated",
+    ]
+    assert events[0][1]["execution"] == {
+        "provider_id": "provider",
+        "model_id": "model",
+    }
 
 
 @pytest.mark.asyncio

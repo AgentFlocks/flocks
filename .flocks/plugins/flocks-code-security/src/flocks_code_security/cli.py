@@ -407,10 +407,18 @@ class AuditOrchestrator:
             scan_id,
         )
         expected_round = 1 if previous is None else 2
+        model = self.ctx.extra.get("model")
+        model = model if isinstance(model, dict) else {}
         _emit(
             self.progress,
             "adjudication.started",
-            {"adjudication_round": expected_round},
+            {
+                "adjudication_round": expected_round,
+                "execution": {
+                    "provider_id": model.get("providerID"),
+                    "model_id": model.get("modelID"),
+                },
+            },
             observation_parent=scan_observation,
         )
         try:

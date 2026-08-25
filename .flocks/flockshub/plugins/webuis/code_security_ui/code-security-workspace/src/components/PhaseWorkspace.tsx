@@ -14,6 +14,7 @@ import type {
   EvidenceContent,
   PhaseRun,
   ScanDetail,
+  WorkerAttempt,
   WorkerRun,
 } from "../types";
 import { Icon } from "../icons";
@@ -65,6 +66,15 @@ const artifactStateLabels: Record<string, string> = {
   available: "可查看",
   sealed: "已完成",
   invalid: "校验失败",
+};
+
+const attemptStatusLabels: Record<string, string> = {
+  pending: "等待中",
+  running: "运行中",
+  recovering: "恢复中",
+  completed: "已完成",
+  failed: "执行失败",
+  cancelled: "已取消",
 };
 
 export function PhaseWorkspace({
@@ -404,6 +414,7 @@ function AdjudicationSummary({
     summary.rejected_candidates,
   );
   const rescan = rescanDirective(summary.rescan);
+  const execution = executionIdentity(summary.execution);
   const candidateTitles = new Map<string, string>();
   const candidateRationales = new Map<string, string>();
   workers.forEach((worker) => {
@@ -508,6 +519,13 @@ function AdjudicationSummary({
             )}
           </span>
         </div>
+      </div>
+
+      <div className="cs-adjudication-summary__execution">
+        <ExecutionModel
+          providerId={execution.providerId}
+          modelId={execution.modelId}
+        />
       </div>
 
       {action === "finalize" ? (
@@ -914,6 +932,97 @@ function rescanDirective(value: unknown): RescanDirective | null {
     : null;
 }
 
+function executionIdentity(value: unknown): {
+  providerId: string;
+  modelId: string;
+} {
+  if (!value || typeof value !== "object") {
+    return { providerId: "", modelId: "" };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    providerId: stringValue(record.provider_id),
+    modelId: stringValue(record.model_id),
+  };
+}
+
+function executionModelLabel(
+  providerId?: string | null,
+  modelId?: string | null,
+): string {
+  const provider = providerId?.trim() || "";
+  const model = modelId?.trim() || "";
+  return provider && model ? `${provider} / ${model}` : model || provider;
+}
+
+function ExecutionModel({
+  providerId,
+  modelId,
+  ordinal,
+  resumeCount = 0,
+  waiting = false,
+}: {
+  providerId?: string | null;
+  modelId?: string | null;
+  ordinal?: number;
+  resumeCount?: number;
+  waiting?: boolean;
+}) {
+  const { t } = useCodeSecurityI18n();
+  const model = executionModelLabel(providerId, modelId);
+  return (
+    <div className="cs-execution-model" role="group" aria-label={t("执行模型")}>
+      <div>
+        <span>{t("执行模型")}</span>
+        <code>{model || t(waiting ? "等待执行" : "模型信息不可用")}</code>
+      </div>
+      {ordinal !== undefined && (
+        <small>
+          {t("第 {{ordinal}} 次执行", { ordinal })}
+          {resumeCount > 0
+            ? ` · ${t("续跑 {{count}} 次", { count: resumeCount })}`
+            : ""}
+        </small>
+      )}
+    </div>
+  );
+}
+
+function WorkerAttemptHistory({ attempts }: { attempts: WorkerAttempt[] }) {
+  const { t } = useCodeSecurityI18n();
+  if (attempts.length < 2) return null;
+  return (
+    <details className="cs-worker-details cs-worker-attempts">
+      <summary>
+        {t("查看执行记录（{{count}}）", { count: attempts.length })}
+      </summary>
+      <ol>
+        {attempts.map((attempt) => (
+          <li key={attempt.ordinal}>
+            <div>
+              <strong>
+                {t("第 {{ordinal}} 次执行", { ordinal: attempt.ordinal })}
+              </strong>
+              <small>
+                {t(attemptStatusLabels[attempt.status] || attempt.status)}
+              </small>
+            </div>
+            <code>
+              {executionModelLabel(attempt.provider_id, attempt.model_id) ||
+                t("模型信息不可用")}
+            </code>
+            {attempt.resume_count > 0 && (
+              <small>
+                {t("续跑 {{count}} 次", { count: attempt.resume_count })}
+              </small>
+            )}
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
 function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
   const { language, t } = useCodeSecurityI18n();
   return (
@@ -1106,6 +1215,8 @@ function WorkerList({
             const isFullSnapshot =
               worker.paths.length === 1 && worker.paths[0] === ".";
             const verdict = candidate?.verdict || "pending";
+            const attempts = worker.attempts || [];
+            const latestAttempt = attempts.at(-1);
             const displayStatus =
               worker.role === "prober" &&
               worker.status === "completed" &&
@@ -1129,6 +1240,14 @@ function WorkerList({
                     context={t("工作单元状态")}
                   />
                 </div>
+
+                <ExecutionModel
+                  providerId={latestAttempt?.provider_id}
+                  modelId={latestAttempt?.model_id}
+                  ordinal={latestAttempt?.ordinal}
+                  resumeCount={latestAttempt?.resume_count}
+                  waiting={!latestAttempt && displayStatus === "pending"}
+                />
 
                 {candidate && (
                   <section
@@ -1245,16 +1364,14 @@ function WorkerList({
                     aria-label={t("最近一次提交拒绝")}
                   >
                     <span>
-                      {t("错误码")} {" "}
+                      {t("错误码")}{" "}
                       <strong>
                         {worker.recent_rejection.error_code || "—"}
                       </strong>
                     </span>
                     <span>
-                      {t("违规项")} {" "}
-                      <strong>
-                        {worker.recent_rejection.violation_count}
-                      </strong>
+                      {t("违规项")}{" "}
+                      <strong>{worker.recent_rejection.violation_count}</strong>
                     </span>
                     <span>
                       {worker.recent_rejection.retryable
@@ -1276,6 +1393,8 @@ function WorkerList({
                     ))}
                   </div>
                 )}
+
+                <WorkerAttemptHistory attempts={attempts} />
 
                 {candidate?.rationale && (
                   <details className="cs-worker-details cs-worker-rationale">

@@ -4541,6 +4541,17 @@ class ScanStore:
                 "SELECT * FROM work_units WHERE scan_id = ? ORDER BY created_at, work_unit_id",
                 (scan_id,),
             ).fetchall()
+            work_attempt_rows = connection.execute(
+                """
+                SELECT wa.work_unit_id, wa.ordinal, wa.provider_id,
+                       wa.model_id, wa.status, wa.resume_count
+                FROM work_attempts wa
+                JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id
+                WHERE wu.scan_id = ?
+                ORDER BY wu.created_at, wu.work_unit_id, wa.ordinal
+                """,
+                (scan_id,),
+            ).fetchall()
             omission_rows = connection.execute(
                 """
                 SELECT relative_path, reason, size_bytes
@@ -4631,6 +4642,7 @@ class ScanStore:
             "verification_votes": verification_votes,
             "coverage": self.list_latest_coverage(scan_id),
             "work_units": work_units,
+            "work_attempts": [dict(row) for row in work_attempt_rows],
             "source_access_counts": source_access_counts,
             "submission_rejections": [
                 {
