@@ -712,7 +712,9 @@ async def _sync_connection(
             seen.add(workflow_id_text)
             existing = _load_existing_record_for_workflow(store, workflow_id_text, connection)
             name = str(workflow.get("name") or "")
-            should_import = bool(existing) or name.startswith(prefix) or include_external
+            should_import = name.startswith(prefix) or include_external or (
+                existing is not None and existing.source != "external"
+            )
             if not should_import:
                 continue
             source = existing.source if existing else ("discovered" if name.startswith(prefix) else "external")
@@ -744,6 +746,8 @@ async def _sync_connection(
     if not truncated:
         for record in store.list_records(limit=1000):
             if record.connection_id != connection.id or not record.n8n_workflow_id:
+                continue
+            if not include_external and record.source == "external":
                 continue
             if record.n8n_workflow_id not in seen and record.remote_status not in {"cleaned", "connection_missing"}:
                 record.remote_status = "missing_remote"

@@ -36,10 +36,7 @@ vi.mock('react-i18next', () => ({
         'n8n.backToFlocks': '返回 Flocks 工作流',
         'n8n.backToCenter': '返回 n8n 工作流',
         'n8n.syncAll': '同步状态',
-        'n8n.syncExternal': '同步外部',
         'n8n.syncSummary': `新增 ${options?.created || 0}，更新 ${options?.updated || 0}，失联 ${options?.missing || 0}，失败连接 ${options?.failed || 0}`,
-        'n8n.allConnections': '全部连接',
-        'n8n.allSources': '全部来源',
         'n8n.create': '创建 n8n',
         'n8n.emptyTitle': '暂无 n8n 工作流',
         'n8n.emptyDescription': '暂无说明',
@@ -198,19 +195,6 @@ describe('N8nWorkflowPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.spyOn(window, 'confirm').mockReturnValue(true);
-    mocks.listConnections.mockResolvedValue({
-      data: [
-        {
-          id: 'default',
-          name: 'Default n8n',
-          baseUrl: 'http://localhost:5678',
-          apiKeySecretRef: 'N8N_API_KEY',
-          isDefault: true,
-          status: 'healthy',
-          apiKeyConfigured: true,
-        },
-      ],
-    });
     mocks.listWorkflowRecords.mockResolvedValue({ data: [record] });
     mocks.getWorkflowRecord.mockResolvedValue({ data: record });
     mocks.discoverWorkflowRecords.mockResolvedValue({ data: [record] });
@@ -251,6 +235,15 @@ describe('N8nWorkflowPage', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith('清理完成');
   });
 
+  it('keeps the list controls focused on a single Flocks-managed sync action', async () => {
+    renderPage('/workflows/n8n');
+
+    expect(await screen.findByText('hello n8n')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '同步外部' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(mocks.listConnections).not.toHaveBeenCalled();
+  });
+
   it('discovers remote flocks-prefixed n8n workflows when syncing from an empty list', async () => {
     const user = userEvent.setup();
     mocks.listWorkflowRecords.mockResolvedValue({ data: [] });
@@ -259,9 +252,30 @@ describe('N8nWorkflowPage', () => {
     expect(await screen.findByText('暂无 n8n 工作流')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '同步状态' }));
 
-    await waitFor(() => expect(mocks.syncWorkflowRecords).toHaveBeenCalledWith({ connectionIds: undefined, includeExternal: false }));
+    await waitFor(() => expect(mocks.syncWorkflowRecords).toHaveBeenCalledWith({ includeExternal: false }));
     expect(await screen.findByText('hello n8n')).toBeInTheDocument();
     expect(mocks.toastSuccess).toHaveBeenCalledWith('同步完成', '新增 1，更新 0，失联 0，失败连接 0');
+  });
+
+  it('does not show external n8n workflow records in the Flocks-managed list', async () => {
+    mocks.listWorkflowRecords.mockResolvedValue({
+      data: [
+        record,
+        {
+          ...record,
+          id: 'n8n-external-1',
+          name: 'external workflow',
+          source: 'external',
+          ownership: 'readonly',
+          n8nWorkflowId: 'external-1',
+        },
+      ],
+    });
+
+    renderPage('/workflows/n8n');
+
+    expect(await screen.findByText('hello n8n')).toBeInTheDocument();
+    expect(screen.queryByText('external workflow')).not.toBeInTheDocument();
   });
 
   it('shows detail actions for sync, retry test, open n8n, and cleanup', async () => {

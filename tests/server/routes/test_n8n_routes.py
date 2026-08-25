@@ -430,3 +430,51 @@ async def test_n8n_global_sync_does_not_let_second_connection_steal_legacy_recor
     assert legacy["n8nBaseUrl"] == "http://n8n-a.local"
     assert second_record["id"] != legacy["id"]
     assert second_record["name"] == "flocks-from-b"
+
+
+@pytest.mark.asyncio
+async def test_n8n_global_sync_skips_external_records_by_default(client, monkeypatch: pytest.MonkeyPatch, n8n_route_state):
+    from flocks.integrations.n8n.state import N8nStateStore, N8nWorkflowRecord
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    store = N8nStateStore()
+    store.save_record(
+        N8nWorkflowRecord(
+            id="n8n-default-external-1",
+            name="external workflow",
+            connectionId="default",
+            connectionName="Default n8n",
+            source="external",
+            ownership="readonly",
+            n8nWorkflowId="external-1",
+            n8nBaseUrl="http://localhost:5678",
+            apiKeySecretRef="N8N_API_KEY",
+            workflowUrl="http://localhost:5678/workflow/external-1",
+            remoteStatus="active",
+        )
+    )
+    monkeypatch.setattr(
+        n8n_routes,
+        "_client_for",
+        lambda _base_url, _secret_ref: FakeN8nClient(
+            workflows=[
+                {
+                    "id": "external-1",
+                    "name": "not-from-flocks",
+                    "active": False,
+                    "nodes": [],
+                }
+            ]
+        ),
+    )
+
+    response = await client.post("/api/integrations/n8n/sync", json={})
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["updated"] == 0
+    assert data["external"] == 0
+    external = next(record for record in data["records"] if record["id"] == "n8n-default-external-1")
+    assert external["remoteStatus"] == "active"
+    assert external["lastSyncedAt"] is None

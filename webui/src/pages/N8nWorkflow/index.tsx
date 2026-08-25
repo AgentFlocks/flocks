@@ -6,7 +6,7 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
-import { n8nAPI, type N8nBuildRun, type N8nConnection, type N8nWorkflowRecord } from '@/api/n8n';
+import { n8nAPI, type N8nBuildRun, type N8nWorkflowRecord } from '@/api/n8n';
 import { extractErrorMessage } from '@/utils/error';
 import N8nBuildPanel from '@/pages/WorkflowCreate/N8nBuildPanel';
 
@@ -45,6 +45,10 @@ function JsonBlock({ title, value }: { title: string; value: unknown }) {
   );
 }
 
+function isFlocksManagedRecord(record: N8nWorkflowRecord): boolean {
+  return record.source !== 'external';
+}
+
 export default function N8nWorkflowPage() {
   const params = useParams();
   const location = useLocation();
@@ -59,21 +63,14 @@ function N8nWorkflowList() {
   const navigate = useNavigate();
   const toast = useToast();
   const [records, setRecords] = useState<N8nWorkflowRecord[]>([]);
-  const [connections, setConnections] = useState<N8nConnection[]>([]);
-  const [connectionFilter, setConnectionFilter] = useState('');
-  const [sourceFilter, setSourceFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadRecords = useCallback(async () => {
     try {
-      const [response, connectionResponse] = await Promise.all([
-        n8nAPI.listWorkflowRecords(500),
-        n8nAPI.listConnections(),
-      ]);
+      const response = await n8nAPI.listWorkflowRecords(500);
       setRecords(response.data);
-      setConnections(connectionResponse.data);
       setError(null);
     } catch (err) {
       setError(extractErrorMessage(err));
@@ -86,19 +83,14 @@ function N8nWorkflowList() {
     void loadRecords();
   }, [loadRecords]);
 
-  const filteredRecords = useMemo(() => records.filter((record) => {
-    if (connectionFilter && record.connectionId !== connectionFilter) return false;
-    if (sourceFilter && record.source !== sourceFilter) return false;
-    return true;
-  }), [connectionFilter, records, sourceFilter]);
+  const managedRecords = useMemo(() => records.filter(isFlocksManagedRecord), [records]);
 
-  const handleSyncAll = async (includeExternal = false) => {
+  const handleSyncAll = async () => {
     if (refreshing) return;
     setRefreshing(true);
     try {
       const response = await n8nAPI.syncWorkflowRecords({
-        connectionIds: connectionFilter ? [connectionFilter] : undefined,
-        includeExternal,
+        includeExternal: false,
       });
       setRecords(response.data.records);
       toast.success(t('n8n.syncSuccess'), t('n8n.syncSummary', {
@@ -144,43 +136,14 @@ function N8nWorkflowList() {
           <ArrowLeft className="h-4 w-4" />
           {t('n8n.backToFlocks')}
         </Link>
-        <select
-          value={connectionFilter}
-          onChange={(event) => setConnectionFilter(event.target.value)}
-          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 outline-none hover:bg-gray-50"
-        >
-          <option value="">{t('n8n.allConnections')}</option>
-          {connections.map((connection) => (
-            <option key={connection.id} value={connection.id}>{connection.name}</option>
-          ))}
-        </select>
-        <select
-          value={sourceFilter}
-          onChange={(event) => setSourceFilter(event.target.value)}
-          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 outline-none hover:bg-gray-50"
-        >
-          <option value="">{t('n8n.allSources')}</option>
-          <option value="flocks_created">{t('n8n.sourceFlocksCreated')}</option>
-          <option value="discovered">{t('n8n.sourceDiscovered')}</option>
-          <option value="external">{t('n8n.sourceExternal')}</option>
-        </select>
         <button
           type="button"
-          onClick={() => void handleSyncAll(false)}
+          onClick={() => void handleSyncAll()}
           disabled={refreshing}
           className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
         >
           <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
           {t('n8n.syncAll')}
-        </button>
-        <button
-          type="button"
-          onClick={() => void handleSyncAll(true)}
-          disabled={refreshing}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-50"
-        >
-          <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
-          {t('n8n.syncExternal')}
         </button>
         <button
           type="button"
@@ -195,7 +158,7 @@ function N8nWorkflowList() {
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {error ? (
           <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>
-        ) : filteredRecords.length === 0 ? (
+        ) : managedRecords.length === 0 ? (
           <EmptyState
             icon={<Workflow className="h-16 w-16" />}
             title={t('n8n.emptyTitle')}
@@ -218,7 +181,6 @@ function N8nWorkflowList() {
                 <tr>
                   <th className="px-4 py-3">{t('n8n.name')}</th>
                   <th className="px-4 py-3">{t('n8n.connection')}</th>
-                  <th className="px-4 py-3">{t('n8n.source')}</th>
                   <th className="px-4 py-3">{t('n8n.remoteStatus')}</th>
                   <th className="px-4 py-3">{t('n8n.testStatus')}</th>
                   <th className="px-4 py-3">{t('n8n.webhookUrl')}</th>
@@ -226,7 +188,7 @@ function N8nWorkflowList() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 text-sm">
-                {filteredRecords.map((record) => (
+                {managedRecords.map((record) => (
                   <tr key={record.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
                       <button type="button" onClick={() => navigate(`/workflows/n8n/${record.id}`)} className="text-left">
@@ -237,10 +199,6 @@ function N8nWorkflowList() {
                     <td className="max-w-[220px] truncate px-4 py-3">
                       <span className="block text-gray-700">{record.connectionName || record.connectionId}</span>
                       <span className="block truncate font-mono text-xs text-gray-400">{record.n8nBaseUrl}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="block text-gray-700">{t(`n8n.sourceValue.${record.source}`, record.source)}</span>
-                      <span className="block text-xs text-gray-400">{t(`n8n.ownershipValue.${record.ownership}`, record.ownership)}</span>
                     </td>
                     <td className="px-4 py-3"><span className={`rounded border px-2 py-1 text-xs ${statusClass(record.remoteStatus)}`}>{record.remoteStatus}</span></td>
                     <td className="px-4 py-3"><span className={`rounded border px-2 py-1 text-xs ${statusClass(record.testStatus)}`}>{record.testStatus}</span></td>
