@@ -94,6 +94,21 @@ class N8nClient:
             query["cursor"] = cursor
         return self._request("GET", "/api/v1/workflows?" + urllib.parse.urlencode(query))
 
+    def list_credentials(self, *, limit: int = 100, cursor: Optional[str] = None) -> Dict[str, Any]:
+        query = {"limit": str(limit)}
+        if cursor:
+            query["cursor"] = cursor
+        return self._request("GET", "/api/v1/credentials?" + urllib.parse.urlencode(query))
+
+    def create_credential(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/api/v1/credentials", body=payload)
+
+    def get_credential_schema(self, credential_type_name: str) -> Dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/v1/credentials/schema/{urllib.parse.quote(credential_type_name)}",
+        )
+
     def get_workflow(self, workflow_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/api/v1/workflows/{urllib.parse.quote(workflow_id)}")
 

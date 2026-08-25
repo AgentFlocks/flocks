@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import parse_qsl, urlparse
 
 from flocks.integrations.n8n.renderer import API_READONLY_FIELDS
 
@@ -23,7 +24,47 @@ SUPPORTED_NODE_TYPES = {
 
 SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key|authorization|bearer|secret|token|password)\s*[:=]\s*['\"][^'\"]{8,}"),
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}"),
+    re.compile(r"(?i)\b(?:sk|pk|n8n|tb|ak)-[A-Za-z0-9._~+/=-]{10,}"),
 )
+
+FLOCKS_SECRET_REF_PATTERNS = (
+    re.compile(r"\{secret\}"),
+    re.compile(r"\{secret:[^}]+\}"),
+    re.compile(r"\{\{\s*secrets\.[^}]+\}\}"),
+)
+
+FLOCKS_RUNTIME_TEXT_PATTERNS = (
+    re.compile(r"(?i)\bflocks[_-]?mcp\b"),
+    re.compile(r"(?i)\bmcp[_-]?(?:tool|server|call|query)\b"),
+)
+
+FLOCKS_RUNTIME_API_PATHS = (
+    "/api/mcp",
+    "/api/tools",
+    "/api/workflows",
+    "/api/sessions",
+    "/api/integrations/n8n",
+)
+
+SENSITIVE_HEADER_NAMES = {
+    "authorization",
+    "x-api-key",
+    "x-apikey",
+    "api-key",
+    "apikey",
+    "token",
+}
+
+SENSITIVE_QUERY_PARAM_NAMES = {
+    "api_key",
+    "apikey",
+    "access_token",
+    "token",
+    "key",
+    "secret",
+    "password",
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +112,87 @@ def _credential_label(credentials: Any, key: str) -> Optional[str]:
     return None
 
 
+def _iter_scalar_values(value: Any, path: str = "$") -> Iterable[tuple[str, Any]]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _iter_scalar_values(item, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _iter_scalar_values(item, f"{path}[{index}]")
+        return
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        yield path, value
+
+
+def _is_expression(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().startswith("=")
+
+
+def _looks_like_flocks_runtime_url(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    text = value.strip()
+    if text.startswith("="):
+        return any(marker in text.lower() for marker in FLOCKS_RUNTIME_API_PATHS)
+    parsed = urlparse(text)
+    if not parsed.scheme and not parsed.netloc:
+        return False
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.lower()
+    if "flocks" in host:
+        return True
+    if host in {"localhost", "127.0.0.1", "0.0.0.0"} and parsed.port in {8000, 5173}:
+        return True
+    return any(path.startswith(marker) for marker in FLOCKS_RUNTIME_API_PATHS)
+
+
+def _contains_literal_secret_query_param(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip() or value.strip().startswith("="):
+        return False
+    parsed = urlparse(value.strip())
+    if not parsed.query:
+        return False
+    for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_key = key.strip().lower()
+        text = item.strip()
+        if normalized_key in SENSITIVE_QUERY_PARAM_NAMES and text and not text.startswith("{{") and len(text) >= 8:
+            return True
+    return False
+
+
+def _runtime_policy_issues(workflow: Dict[str, Any]) -> List[N8nLintIssue]:
+    issues: List[N8nLintIssue] = []
+    for path, value in _iter_scalar_values(workflow):
+        if not isinstance(value, str):
+            continue
+        for pattern in FLOCKS_SECRET_REF_PATTERNS:
+            if pattern.search(value):
+                issues.append(
+                    N8nLintIssue(
+                        "FLOCKS-SECRET-REF",
+                        "error",
+                        "n8n workflow JSON must not contain Flocks secret placeholders; use n8n credentials instead",
+                        path,
+                    )
+                )
+                break
+        if ".parameters." not in path:
+            continue
+        for pattern in FLOCKS_RUNTIME_TEXT_PATTERNS:
+            if pattern.search(value):
+                issues.append(
+                    N8nLintIssue(
+                        "FLOCKS-RUNTIME-REF",
+                        "error",
+                        "n8n workflows must run independently and cannot call Flocks MCP/runtime tools",
+                        path,
+                    )
+                )
+                break
+    return issues
+
+
 def lint_workflow(
     workflow: Dict[str, Any] | str,
     *,
@@ -86,6 +208,7 @@ def lint_workflow(
             return [N8nLintIssue("JSON-001", "error", f"Invalid JSON: {exc}")]
     if not isinstance(workflow, dict):
         return [N8nLintIssue("WF-001", "error", "Workflow must be an object")]
+    issues.extend(_runtime_policy_issues(workflow))
 
     if for_api_create:
         for key in sorted(API_READONLY_FIELDS):
@@ -172,6 +295,43 @@ def lint_workflow(
                 issues.append(N8nLintIssue("EXPR-001", "warning", "Expression should contain {{ ... }}", path + ".parameters.responseBody"))
         if node_type == "n8n-nodes-base.httpRequest" and not params.get("url"):
             issues.append(N8nLintIssue("HTTP-URL", "error", "HTTP Request node requires url", path + ".parameters.url"))
+        if node_type == "n8n-nodes-base.httpRequest":
+            url = params.get("url")
+            if _looks_like_flocks_runtime_url(url):
+                issues.append(
+                    N8nLintIssue(
+                        "FLOCKS-RUNTIME-CALLBACK",
+                        "error",
+                        "HTTP Request nodes must not call Flocks; move the capability into n8n-native nodes or an external API",
+                        path + ".parameters.url",
+                    )
+                )
+            if _contains_literal_secret_query_param(url):
+                issues.append(
+                    N8nLintIssue(
+                        "SECRET-URL",
+                        "error",
+                        "Sensitive URL query parameters must use n8n credentials, not literal values",
+                        path + ".parameters.url",
+                    )
+                )
+            headers = params.get("headerParameters")
+            header_rows = headers.get("parameters") if isinstance(headers, dict) else []
+            if isinstance(header_rows, list):
+                for header_index, header in enumerate(header_rows):
+                    if not isinstance(header, dict):
+                        continue
+                    header_name = str(header.get("name") or "").strip().lower()
+                    header_value = header.get("value")
+                    if header_name in SENSITIVE_HEADER_NAMES and header_value and not _is_expression(header_value):
+                        issues.append(
+                            N8nLintIssue(
+                                "SECRET-HEADER",
+                                "error",
+                                "Sensitive HTTP headers must use n8n credentials or expressions, not literal values",
+                                f"{path}.parameters.headerParameters.parameters[{header_index}].value",
+                            )
+                        )
         if node_type == "n8n-nodes-base.code":
             code = str(params.get("jsCode") or "")
             if not code.strip():

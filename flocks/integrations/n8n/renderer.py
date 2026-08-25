@@ -40,25 +40,25 @@ def _node(step: N8nStep, *, index: int) -> Dict[str, Any]:
             "const input = $input.first().json;\n"
             "return [{ json: { ...input, source: 'n8n' } }];"
         )
-        return {
+        return _with_step_credentials(step, {
             **base,
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "parameters": {"jsCode": js_code},
-        }
+        })
     if step.kind == "set":
         assignments = []
         for key, value in step.assignments.items():
             assignments.append({"name": key, "value": value, "type": _assignment_type(value)})
-        return {
+        return _with_step_credentials(step, {
             **base,
             "type": "n8n-nodes-base.set",
             "typeVersion": 3.4,
             "parameters": {"assignments": {"assignments": assignments}, "options": {}},
-        }
+        })
     if step.kind == "if":
         condition = step.condition or "={{ true }}"
-        return {
+        return _with_step_credentials(step, {
             **base,
             "type": "n8n-nodes-base.if",
             "typeVersion": 2.2,
@@ -80,7 +80,7 @@ def _node(step: N8nStep, *, index: int) -> Dict[str, Any]:
                 },
                 "options": {},
             },
-        }
+        })
     if step.kind == "http_request":
         if not step.url:
             raise ValueError(f"http_request step {step.id!r} requires url")
@@ -89,6 +89,10 @@ def _node(step: N8nStep, *, index: int) -> Dict[str, Any]:
             "url": step.url,
             "options": {},
         }
+        if step.authentication:
+            parameters["authentication"] = step.authentication
+        if step.generic_auth_type:
+            parameters["genericAuthType"] = step.generic_auth_type
         if step.headers:
             parameters["sendHeaders"] = True
             parameters["headerParameters"] = {
@@ -98,15 +102,15 @@ def _node(step: N8nStep, *, index: int) -> Dict[str, Any]:
             parameters["sendBody"] = True
             parameters["specifyBody"] = "json"
             parameters["jsonBody"] = step.body if isinstance(step.body, str) else json.dumps(step.body, ensure_ascii=False)
-        return {
+        return _with_step_credentials(step, {
             **base,
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
             "parameters": parameters,
-        }
+        })
     if step.kind == "respond_to_webhook":
         response_body = step.response_body if step.response_body is not None else "={{ $json }}"
-        return {
+        return _with_step_credentials(step, {
             **base,
             "type": "n8n-nodes-base.respondToWebhook",
             "typeVersion": 1.4,
@@ -115,14 +119,14 @@ def _node(step: N8nStep, *, index: int) -> Dict[str, Any]:
                 "responseBody": response_body,
                 "options": {},
             },
-        }
+        })
     if step.kind == "noop":
-        return {
+        return _with_step_credentials(step, {
             **base,
             "type": "n8n-nodes-base.noOp",
             "typeVersion": 1,
             "parameters": {},
-        }
+        })
     raise ValueError(f"Unsupported step kind: {step.kind}")
 
 
@@ -147,6 +151,17 @@ def _credential_payload(ref: N8nCredentialRef | None) -> Dict[str, Any] | None:
     if ref.type:
         payload["type"] = ref.type
     return payload or None
+
+
+def _with_step_credentials(step: N8nStep, node: Dict[str, Any]) -> Dict[str, Any]:
+    credentials = {
+        key: payload
+        for key, ref in step.credentials.items()
+        if (payload := _credential_payload(ref))
+    }
+    if credentials:
+        node["credentials"] = credentials
+    return node
 
 
 def _trigger_node(ir: N8nIR) -> tuple[str, Dict[str, Any]]:

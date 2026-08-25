@@ -2,18 +2,20 @@
 
 ## 1. 功能概述
 
-`n8n_workflow_autobuilder` 是一个用于验证和发布 n8n workflow 的 Flocks 工作流。它接收稳定的 n8n IR，生成 n8n 原生 workflow JSON，进行静态校验，按需发布到 n8n 测试实例；Webhook 类型会执行 Webhook 测试，Kafka 类型激活后由 n8n 独立持续消费。
+`n8n_workflow_autobuilder` 是一个用于验证和发布 n8n workflow 的 Flocks 工作流。它接收稳定的 n8n IR，生成 n8n 原生 workflow JSON，进行静态校验，按需发布到 n8n 测试实例；Webhook 类型可由 Flocks 触发一次测试，Kafka 类型激活后由 n8n 独立持续消费。
 
 它主要解决三件事：
 
 - 将自然语言 Agent 已确认的 n8n IR 转为 n8n 原生 JSON。
 - 在发布前执行结构化 lint，拦截节点、连线、表达式、只读字段和密钥泄露风险。
-- 发布测试 workflow、激活、按触发器类型输出报告；Webhook 支持 Flocks 侧测试调用，Kafka 不依赖 Flocks 运行。
+- 发布测试 workflow、激活、按触发器类型输出报告；Webhook 支持 Flocks 侧一次性测试调用，Kafka 和业务处理不依赖 Flocks 运行。
+- 拦截 n8n workflow 内部对 Flocks MCP、Flocks workflow API、Flocks webhook 或本地 Flocks 服务的运行时依赖。
 
 不适合做的事：
 
 - 不直接负责理解用户自然语言；自然语言理解由 `n8n-workflow-builder` Agent 和 Skill 完成。
 - 不保存明文 API key。
+- 不把 Flocks 作为 n8n 业务节点的输入、输出、查询或研判服务。
 - 不默认修改生产 workflow。
 
 ## 2. 总体流程
@@ -50,11 +52,12 @@ run_autobuilder
 1. 校验输入 IR。
 2. 使用 `render_ir_to_workflow` 生成 n8n workflow JSON。
 3. 使用 `lint_workflow` 做静态校验。
-4. 将 JSON 和报告写入 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/`。
-5. 如果 `publish=true` 且 lint 无错误，则通过 n8n Public API 创建 workflow。
-6. 如果 trigger 是 Webhook，激活后运行 IR 中的 webhook 测试。
-7. 如果 trigger 是 Kafka，只完成发布和激活，后续消息消费由 n8n 独立完成。
-8. 输出 workflow id、编辑 URL、触发器信息、测试结果和报告路径。
+4. lint 会拒绝 Flocks secret 占位、明文敏感 header/token、Flocks runtime callback 和不支持节点。
+5. 将 JSON 和报告写入 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/`。
+6. 如果 `publish=true` 且 lint 无错误，则通过 n8n Public API 创建 workflow。
+7. 如果 trigger 是 Webhook，激活后运行 IR 中的 webhook 测试。
+8. 如果 trigger 是 Kafka，只完成发布和激活，后续消息消费由 n8n 独立完成。
+9. 输出 workflow id、编辑 URL、触发器信息、测试结果和报告路径。
 
 ## 5. 输出说明
 
@@ -70,9 +73,22 @@ run_autobuilder
 | `generated_json_path` | 生成的 n8n JSON |
 | `report_path` | Markdown 报告 |
 | `lint_issues` | lint 结果 |
+| `credential_results` | credential 创建/复用结果，不包含密钥值 |
 | `test_results` | webhook 测试结果 |
 
-## 6. 验证方式
+## 6. 能力映射边界
+
+生成阶段遵循 n8n `2.35.4` Public API v1 兼容策略，不再询问用户选择 Flocks MCP / Flocks webhook / n8n 原生实现。若缺少 Flocks 无法自动提供的业务参数、密钥、credential、网络连通性或 n8n API 权限，则作为阻断项停止，不创建坏 workflow：
+
+| 用户能力意图 | n8n 生成策略 | Flocks 运行时参与 |
+| --- | --- | --- |
+| Webhook 接收和响应 | Webhook + Code/Set/IF + Respond to Webhook | 仅可测试触发 |
+| Kafka 消费 | Kafka Trigger + 后续 n8n 节点 | 不参与 |
+| IOC/情报查询 | HTTP Request 调外部 API，并引用 n8n credential | 不参与 |
+| 数据格式化/路由 | Code/Set/IF | 不参与 |
+| Flocks 私有 MCP 能力且无外部 API | 标记 unsupported/missing prerequisite | 不参与 |
+
+## 7. 验证方式
 
 最小验证：
 

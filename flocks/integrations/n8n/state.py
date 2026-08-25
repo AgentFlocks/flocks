@@ -75,6 +75,7 @@ class N8nBuildRunState(BaseModel):
     workflow_url: Optional[str] = Field(None, alias="workflowUrl")
     webhook_url: Optional[str] = Field(None, alias="webhookUrl")
     lint_issues: List[Dict[str, Any]] = Field(default_factory=list, alias="lintIssues")
+    credential_results: List[Dict[str, Any]] = Field(default_factory=list, alias="credentialResults")
     test_results: List[Dict[str, Any]] = Field(default_factory=list, alias="testResults")
     cleanup: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None

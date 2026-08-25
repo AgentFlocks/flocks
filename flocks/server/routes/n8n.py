@@ -21,6 +21,7 @@ from flocks.integrations.n8n import (
     workflow_to_api_create_payload,
 )
 from flocks.integrations.n8n.cleanup import cleanup_workflows
+from flocks.integrations.n8n.credentials import attach_credential_ids_to_workflow, ensure_n8n_credentials
 from flocks.integrations.n8n.renderer import slugify_webhook_path
 from flocks.integrations.n8n.secrets import (
     delete_n8n_api_key,
@@ -653,9 +654,19 @@ def _build_run_sync(request: N8nBuildRunCreateRequest) -> N8nBuildRunState:
             store.save_run(run)
             return run
 
+        client = _client_for(base_url, secret_ref)
+
+        if parsed_ir.credential_requirements:
+            run.current_step = "credentials"
+            store.save_run(run)
+            run.credential_results = ensure_n8n_credentials(client, parsed_ir.credential_requirements)
+            workflow = attach_credential_ids_to_workflow(workflow, run.credential_results)
+            run.workflow = workflow
+            _write_run_artifacts(run)
+            store.save_run(run)
+
         run.current_step = "publish"
         store.save_run(run)
-        client = _client_for(base_url, secret_ref)
         created_response = client.create_workflow(workflow_to_api_create_payload(workflow))
         created = created_response.get("body") if isinstance(created_response.get("body"), dict) else {}
         workflow_id = str(created.get("id") or "")

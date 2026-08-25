@@ -32,6 +32,7 @@ export interface N8nBuildRun {
   workflowUrl?: string | null;
   webhookUrl?: string | null;
   lintIssues: Array<Record<string, any>>;
+  credentialResults: Array<Record<string, any>>;
   testResults: Array<Record<string, any>>;
   cleanup: Array<Record<string, any>>;
   error?: string | null;

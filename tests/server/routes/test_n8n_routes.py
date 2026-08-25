@@ -78,6 +78,8 @@ class FakeN8nClient:
         self.deleted: list[str] = []
         self.workflows = workflows
         self.created_payloads: list[dict] = []
+        self.credentials: list[dict] = []
+        self.created_credentials: list[dict] = []
 
     def create_workflow(self, payload):
         self.created_payloads.append(payload)
@@ -122,6 +124,29 @@ class FakeN8nClient:
             },
         }
 
+    def list_credentials(self, *, limit: int = 100, cursor: str | None = None):
+        return {"status": 200, "body": {"data": self.credentials}}
+
+    def create_credential(self, payload):
+        self.created_credentials.append(payload)
+        credential = {"id": f"cred-{len(self.created_credentials)}", "name": payload["name"], "type": payload["type"]}
+        self.credentials.append(credential)
+        return {"status": 200, "body": credential}
+
+    def get_credential_schema(self, credential_type_name: str):
+        return {
+            "status": 200,
+            "body": {
+                "type": "object",
+                "required": ["name", "value"] if credential_type_name == "httpQueryAuth" else [],
+                "properties": (
+                    {"name": {"type": "string"}, "value": {"type": "string"}}
+                    if credential_type_name == "httpQueryAuth"
+                    else {"password": {"type": "string"}}
+                ),
+            },
+        }
+
 
 @pytest.fixture(autouse=True)
 def n8n_route_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_workspace: Path):
@@ -129,9 +154,11 @@ def n8n_route_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_worksp
     fake_secrets = FakeSecrets()
 
     import flocks.integrations.n8n.secrets as n8n_secrets
+    import flocks.integrations.n8n.credentials as n8n_credentials
 
     monkeypatch.setattr(n8n_secrets, "get_secret_manager", lambda: fake_secrets)
     monkeypatch.setattr(n8n_secrets, "resolve_secret_value", lambda key, secrets=None: fake_secrets.get(key))
+    monkeypatch.setattr(n8n_credentials, "resolve_secret_value", lambda key: fake_secrets.get(key))
     return {"secrets": fake_secrets, "workspace": mock_workspace}
 
 
@@ -182,6 +209,47 @@ async def test_n8n_build_run_can_render_without_publishing(client):
 
 
 @pytest.mark.asyncio
+async def test_n8n_build_run_blocks_flocks_runtime_dependencies(client):
+    invalid_ir = {
+        "name": "flocks-test-invalid-runtime-route",
+        "trigger": {"type": "webhook", "method": "POST", "path": "invalid-runtime-route"},
+        "steps": [
+            {
+                "id": "callback",
+                "kind": "http_request",
+                "method": "POST",
+                "url": "http://localhost:8000/api/mcp/threatbook",
+                "headers": {"Authorization": "Bearer {{secrets.THREATBOOK_API_KEY}}"},
+                "next": "respond",
+            },
+            {
+                "id": "respond",
+                "kind": "respond_to_webhook",
+                "name": "Respond",
+                "response_body": "={{ $json }}",
+            },
+        ],
+        "tests": [{"name": "blocked", "input": {"ioc": "1.1.1.1"}}],
+    }
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={
+            "userRequest": "must not call flocks runtime",
+            "ir": invalid_ir,
+            "publish": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["status"] == "lint_failed"
+    codes = {issue["code"] for issue in data["lintIssues"]}
+    assert "FLOCKS-RUNTIME-CALLBACK" in codes
+    assert "FLOCKS-SECRET-REF" in codes
+
+
+@pytest.mark.asyncio
 async def test_n8n_build_run_auto_registers_workflow_record(client, monkeypatch: pytest.MonkeyPatch, n8n_route_state):
     from flocks.server.routes import n8n as n8n_routes
 
@@ -220,6 +288,188 @@ async def test_n8n_build_run_auto_registers_workflow_record(client, monkeypatch:
     detail = await client.get("/api/integrations/n8n/workflows/n8n-default-wf-route-1")
     assert detail.status_code == 200, detail.text
     assert detail.json()["webhookPath"] == "flocks-test-route"
+
+
+@pytest.mark.asyncio
+async def test_n8n_build_run_creates_required_credentials_from_flocks_secret(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    ir = {
+        "name": "flocks-test-credential-route",
+        "trigger": SAMPLE_IR["trigger"] | {"path": "flocks-test-credential-route"},
+        "credentialRequirements": [
+            {
+                "name": "ThreatBook API",
+                "type": "httpQueryAuth",
+                "secretRef": "THREATBOOK_API_KEY",
+                "data": {"name": "apikey", "value": "{secret}"},
+            }
+        ],
+        "steps": [
+            {
+                "id": "lookup",
+                "kind": "http_request",
+                "name": "ThreatBook Lookup",
+                "method": "GET",
+                "url": "https://api.threatbook.example/v3/scene/ip_reputation",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpQueryAuth",
+                "credentials": {"httpQueryAuth": {"name": "ThreatBook API", "type": "httpQueryAuth"}},
+                "next": "respond",
+            },
+            {
+                "id": "respond",
+                "kind": "respond_to_webhook",
+                "name": "Respond",
+                "response_body": "={{ $json }}",
+            },
+        ],
+        "tests": SAMPLE_IR["tests"],
+    }
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    n8n_route_state["secrets"].set("THREATBOOK_API_KEY", "threatbook-secret-value")
+    fake_client = FakeN8nClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={"userRequest": "route credential publish", "ir": ir, "publish": True, "activate": True},
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "test_passed"
+    assert run["credentialResults"] == [
+        {"name": "ThreatBook API", "type": "httpQueryAuth", "status": "created", "id": "cred-1"}
+    ]
+    assert fake_client.created_credentials[0]["data"] == {"name": "apikey", "value": "threatbook-secret-value"}
+    published_node = fake_client.created_payloads[0]["nodes"][1]
+    assert published_node["credentials"] == {
+        "httpQueryAuth": {"id": "cred-1", "name": "ThreatBook API", "type": "httpQueryAuth"}
+    }
+    assert "threatbook-secret-value" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_n8n_build_run_reuses_existing_required_credentials(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    ir = {
+        **KAFKA_IR,
+        "credentialRequirements": [
+            {
+                "name": "Kafka Production",
+                "type": "kafka",
+                "secretRef": "KAFKA_PASSWORD",
+                "data": {"password": "{secret}"},
+            }
+        ],
+    }
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = FakeN8nClient()
+    fake_client.credentials = [{"id": "cred-existing", "name": "Kafka Production", "type": "kafka"}]
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={"userRequest": "route existing credential", "ir": ir, "publish": True, "activate": True},
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "published"
+    assert run["credentialResults"] == [
+        {"name": "Kafka Production", "type": "kafka", "status": "exists", "id": "cred-existing"}
+    ]
+    assert fake_client.created_credentials == []
+
+
+@pytest.mark.asyncio
+async def test_n8n_build_run_fails_before_publish_when_required_secret_missing(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    ir = {
+        **KAFKA_IR,
+        "credentialRequirements": [
+            {
+                "name": "Kafka Production",
+                "type": "kafka",
+                "secretRef": "KAFKA_PASSWORD",
+                "data": {"password": "{secret}"},
+            }
+        ],
+    }
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = FakeN8nClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={"userRequest": "route missing credential", "ir": ir, "publish": True, "activate": True},
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "failed"
+    assert run["currentStep"] == "credentials"
+    assert "KAFKA_PASSWORD" in run["error"]
+    assert fake_client.created_credentials == []
+    assert fake_client.created_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_n8n_build_run_fails_before_publish_when_credential_permission_missing(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.integrations.n8n.client import N8nClientError
+    from flocks.server.routes import n8n as n8n_routes
+
+    class ForbiddenCredentialClient(FakeN8nClient):
+        def create_credential(self, payload):
+            raise N8nClientError("n8n HTTP 403 for POST /api/v1/credentials", status=403)
+
+    ir = {
+        **KAFKA_IR,
+        "credentialRequirements": [
+            {
+                "name": "Kafka Production",
+                "type": "kafka",
+                "secretRef": "KAFKA_PASSWORD",
+                "data": {"password": "{secret}"},
+            }
+        ],
+    }
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    n8n_route_state["secrets"].set("KAFKA_PASSWORD", "kafka-secret-value")
+    fake_client = ForbiddenCredentialClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={"userRequest": "route forbidden credential", "ir": ir, "publish": True, "activate": True},
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "failed"
+    assert run["currentStep"] == "credentials"
+    assert "POST /api/v1/credentials" in run["error"]
+    assert fake_client.created_payloads == []
+    assert "kafka-secret-value" not in response.text
 
 
 @pytest.mark.asyncio

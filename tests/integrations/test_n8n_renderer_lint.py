@@ -105,6 +105,144 @@ def test_lint_catches_invalid_kafka_trigger() -> None:
     assert {"KAFKA-TOPIC", "KAFKA-GROUP", "KAFKA-CREDENTIAL"} <= codes
 
 
+def test_render_http_request_with_n8n_credentials() -> None:
+    workflow = render_ir_to_workflow(
+        {
+            "name": "flocks-test-http-credential",
+            "trigger": {"type": "webhook", "method": "POST", "path": "http-credential"},
+            "steps": [
+                {
+                    "id": "lookup",
+                    "kind": "http_request",
+                    "method": "GET",
+                    "url": "https://api.example.com/ioc/{{$json.body.ioc}}",
+                    "authentication": "genericCredentialType",
+                    "genericAuthType": "httpHeaderAuth",
+                    "credentials": {
+                        "httpHeaderAuth": {
+                            "name": "ThreatBook API",
+                            "type": "httpHeaderAuth",
+                        }
+                    },
+                    "next": "respond",
+                },
+                {
+                    "id": "respond",
+                    "kind": "respond_to_webhook",
+                    "response_body": "={{ $json }}",
+                },
+            ],
+            "tests": [{"name": "lookup", "input": {"ioc": "1.1.1.1"}}],
+        }
+    )
+
+    node = workflow["nodes"][1]
+
+    assert node["parameters"]["authentication"] == "genericCredentialType"
+    assert node["parameters"]["genericAuthType"] == "httpHeaderAuth"
+    assert node["credentials"]["httpHeaderAuth"]["name"] == "ThreatBook API"
+    assert [issue for issue in lint_workflow(workflow, require_tests=True, tests=[{"name": "lookup"}]) if issue.severity == "error"] == []
+
+
+def test_lint_blocks_flocks_runtime_callbacks_and_secret_placeholders() -> None:
+    workflow = render_ir_to_workflow(
+        {
+            "name": "flocks-test-invalid-runtime",
+            "trigger": {"type": "webhook", "method": "POST", "path": "invalid-runtime"},
+            "steps": [
+                {
+                    "id": "callback",
+                    "kind": "http_request",
+                    "method": "POST",
+                    "url": "http://localhost:8000/api/mcp/threatbook",
+                    "headers": {
+                        "Authorization": "Bearer {{secrets.THREATBOOK_API_KEY}}",
+                    },
+                    "body": {"apikey": "{secret}"},
+                    "next": "respond",
+                },
+                {
+                    "id": "respond",
+                    "kind": "respond_to_webhook",
+                    "response_body": "={{ $json }}",
+                },
+            ],
+            "tests": [{"name": "blocked", "input": {"ioc": "1.1.1.1"}}],
+        }
+    )
+
+    codes = {issue.code for issue in lint_workflow(workflow, require_tests=True, tests=[{"name": "blocked"}])}
+
+    assert "FLOCKS-RUNTIME-CALLBACK" in codes
+    assert "FLOCKS-SECRET-REF" in codes
+
+
+def test_lint_blocks_literal_sensitive_http_headers() -> None:
+    workflow = render_ir_to_workflow(
+        {
+            "name": "flocks-test-literal-secret",
+            "trigger": {"type": "webhook", "method": "POST", "path": "literal-secret"},
+            "steps": [
+                {
+                    "id": "lookup",
+                    "kind": "http_request",
+                    "method": "GET",
+                    "url": "https://api.example.com/ioc",
+                    "headers": {"X-API-Key": "plain-secret-value-12345"},
+                    "next": "respond",
+                },
+                {
+                    "id": "respond",
+                    "kind": "respond_to_webhook",
+                    "response_body": "={{ $json }}",
+                },
+            ],
+            "tests": [{"name": "blocked", "input": {"ioc": "1.1.1.1"}}],
+        }
+    )
+
+    codes = {issue.code for issue in lint_workflow(workflow, require_tests=True, tests=[{"name": "blocked"}])}
+
+    assert "SECRET-HEADER" in codes
+
+
+def test_lint_blocks_literal_secret_query_params() -> None:
+    workflow = render_ir_to_workflow(
+        {
+            "name": "flocks-test-literal-secret-url",
+            "trigger": {"type": "webhook", "method": "POST", "path": "literal-secret-url"},
+            "steps": [
+                {
+                    "id": "lookup",
+                    "kind": "http_request",
+                    "method": "GET",
+                    "url": "https://api.example.com/ioc?apikey=plain-secret-value-12345",
+                    "next": "respond",
+                },
+                {
+                    "id": "respond",
+                    "kind": "respond_to_webhook",
+                    "response_body": "={{ $json }}",
+                },
+            ],
+            "tests": [{"name": "blocked", "input": {"ioc": "1.1.1.1"}}],
+        }
+    )
+
+    codes = {issue.code for issue in lint_workflow(workflow, require_tests=True, tests=[{"name": "blocked"}])}
+
+    assert "SECRET-URL" in codes
+
+
+def test_lint_allows_mcp_text_in_non_runtime_metadata() -> None:
+    workflow = render_ir_to_workflow(_sample_ir())
+    workflow["name"] = "flocks-test-mcp-migration"
+
+    codes = {issue.code for issue in lint_workflow(workflow, require_tests=True, tests=_sample_ir()["tests"])}
+
+    assert "FLOCKS-RUNTIME-REF" not in codes
+
+
 def test_api_payload_removes_readonly_fields() -> None:
     workflow = render_ir_to_workflow(_sample_ir(), workflow_id="wf-cli-id")
     payload = workflow_to_api_create_payload(workflow)

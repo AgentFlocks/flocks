@@ -30,6 +30,24 @@ class N8nCredentialRef(BaseModel):
     type: Optional[str] = None
 
 
+class N8nCredentialRequirement(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    name: str
+    type: str
+    secret_ref: Optional[str] = Field(None, alias="secretRef")
+    data: Dict[str, Any] = Field(default_factory=dict)
+    update_existing: bool = Field(False, alias="updateExisting")
+
+    @field_validator("name", "type")
+    @classmethod
+    def _valid_required_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("credential name and type are required")
+        return cleaned
+
+
 class N8nTrigger(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -50,7 +68,7 @@ class N8nTrigger(BaseModel):
 
 
 class N8nStep(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     id: str
     kind: N8nStepKind
@@ -64,8 +82,11 @@ class N8nStep(BaseModel):
     condition: Optional[str] = None
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
     url: Optional[str] = None
+    authentication: Optional[str] = None
+    generic_auth_type: Optional[str] = Field(None, alias="genericAuthType")
     headers: Dict[str, str] = Field(default_factory=dict)
     body: Optional[Any] = None
+    credentials: Dict[str, N8nCredentialRef] = Field(default_factory=dict)
     respond_with: Literal["json", "text", "firstIncomingItem"] = "json"
     response_body: Optional[Any] = None
 
@@ -104,6 +125,7 @@ class N8nIR(BaseModel):
     trigger: N8nTrigger = Field(default_factory=N8nTrigger)
     steps: List[N8nStep] = Field(default_factory=list)
     tests: List[N8nTestCase] = Field(default_factory=list)
+    credential_requirements: List[N8nCredentialRequirement] = Field(default_factory=list, alias="credentialRequirements")
     max_iterations: int = Field(8, alias="maxIterations")
 
     @field_validator("name")

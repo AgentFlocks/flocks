@@ -10,7 +10,7 @@ Use this skill when the user wants Flocks to create, validate, publish, test, or
 
 ## Required Flow
 
-1. Clarify the automation goal, trigger, sample input, expected output, and side-effect boundaries.
+1. Clarify only business intent that is impossible to infer safely: automation goal, trigger, sample input, expected output, and high-risk side-effect boundaries. Do not ask the user how to bridge Flocks MCP/tools into n8n.
 2. Build a stable n8n IR first. Do not ask the model to directly author native n8n JSON.
 3. Call `n8n_workflow_render` to render native n8n workflow JSON.
 4. Call `n8n_workflow_lint` before any publish call.
@@ -25,6 +25,12 @@ Use this skill when the user wants Flocks to create, validate, publish, test, or
 
 - Never write API keys, tokens, passwords, cookies, or Authorization headers into workflow files, reports, prompts, or generated n8n JSON.
 - Prefer `api_key_secret_ref` such as `N8N_API_KEY`; direct `api_key` inputs are transient only.
+- Target n8n compatibility is `2.35.4` Public API v1. The API key must have the needed scopes before publish: `workflow:create`, `workflow:list`, `workflow:read`, `workflow:activate`, plus `credential:list`, `credential:read`, and `credential:create` when `credentialRequirements` is present.
+- The generated n8n workflow must be runtime-independent from Flocks. Do not use Flocks MCP tools, Flocks workflow endpoints, Flocks webhooks, or any local Flocks callback as a business node.
+- When the user asks for a capability that exists in Flocks/MCP, translate it to n8n-native nodes or external HTTP APIs. For example, IOC enrichment should become an HTTP Request/API workflow in n8n, not a call back into Flocks MCP.
+- Do not ask the user to provide service API keys when Flocks already has the needed secret or credential reference. Use `credentialRequirements` to declare which Flocks secret should create or reuse which n8n credential.
+- If the workflow cannot be safely generated because required business data, secrets, credentials, network reachability, or n8n permissions are missing, ask for the missing prerequisite and stop. If the prerequisite is still unavailable, do not publish or activate a broken workflow. Return a precise blocker such as `缺少密钥 THREATBOOK_API_KEY，请先在 Flocks 密钥配置中添加` or `n8n API key 缺少创建 credential 的权限`。
+- Do not put `{secret:...}`, `{{secrets.NAME}}`, plaintext keys, or bearer tokens into n8n workflow JSON. `{secret}` is allowed only inside `credentialRequirements[].data`, where the publisher replaces it while creating n8n credentials.
 - Do not modify or activate production workflows unless the user explicitly confirms that scope.
 - Do not remove core business steps just to pass one sample test.
 - Do not hard-code a test fixture response unless the user's requested workflow is intentionally constant.
@@ -41,8 +47,21 @@ The stable renderer/linter currently supports:
 - HTTP Request
 - Respond to Webhook
 - NoOp
+- Kafka Trigger
 
 For unsupported n8n nodes, either ask to reduce scope to supported primitives or produce a draft with an explicit unsupported-node warning instead of claiming it is production-ready.
+
+## Capability Mapping Policy
+
+Use this policy before asking any implementation-choice question:
+
+- `kafka.consume` -> Kafka Trigger with `credentialRef` pointing to an n8n Kafka credential, plus `credentialRequirements` if Flocks has the Kafka secret material.
+- `threatbook.ioc_lookup` -> HTTP Request node calling the ThreatBook HTTP API with an n8n HTTP/header/query credential, plus `credentialRequirements` that references the known Flocks secret id. Never embed the secret in workflow JSON.
+- `generic.rest_api` -> HTTP Request with n8n credential or expression-safe auth.
+- `format/normalize/enrich/route` -> Code, Set, and IF nodes.
+- `webhook.response` -> Respond to Webhook, only for webhook-triggered workflows.
+
+If no n8n-native mapping exists, mark the request as unsupported for autonomous n8n runtime instead of offering a Flocks MCP/webhook bridge.
 
 ## IR Pattern
 
@@ -51,6 +70,17 @@ Build IR like this:
 ```json
 {
   "name": "flocks-test-alert-triage",
+  "credentialRequirements": [
+    {
+      "name": "ThreatBook API",
+      "type": "httpQueryAuth",
+      "secretRef": "THREATBOOK_API_KEY",
+      "data": {
+        "name": "apikey",
+        "value": "{secret}"
+      }
+    }
+  ],
   "trigger": {
     "type": "webhook",
     "method": "POST",
@@ -90,4 +120,3 @@ Only call the workflow ready when:
 - n8n API create/update and activate succeeded for a test workflow.
 - Runtime tests passed, or the user explicitly accepts a draft.
 - The final response includes workflow id, editor URL, webhook URL if applicable, generated JSON path, and test report path.
-
