@@ -94,6 +94,28 @@ export interface WorkerRun {
   candidate_summaries?: WorkerCandidateSummary[];
   activity_counts?: Record<string, number>;
   record_counts: Record<string, number>;
+  coverage?: {
+    attestation_id?: string;
+    attempt_id?: string;
+    policy?: string;
+    completeness?: string;
+    counts?: {
+      assigned?: number;
+      read_complete?: number;
+      failed?: number;
+      unexamined?: number;
+    };
+    attestation_digest?: string;
+  } | null;
+  recent_rejection?: {
+    rejection_id?: string;
+    attempt_id?: string;
+    tool_name?: string;
+    error_code?: string;
+    retryable: boolean;
+    violation_count: number;
+    created_at?: string;
+  } | null;
 }
 
 export interface ArtifactRef {
@@ -115,6 +137,8 @@ export interface ScanDetail {
     integrity_status: string;
     integrity_errors?: string[];
     coverage_status: string;
+    coverage_policy?: string;
+    verification_votes?: number;
     dynamic_enabled: boolean;
     created_at: string;
     started_at: string;
@@ -141,9 +165,14 @@ export interface ScanDetail {
   counts: Record<string, number>;
   findingSummary: Record<string, number>;
   coverageSummary: {
+    policy?: string;
     completeness: string;
     deferred_count: number;
     open_question_count: number;
+    assigned_count?: number;
+    read_complete_count?: number;
+    failed_count?: number;
+    unexamined_count?: number;
   };
   dynamicValidation: Record<string, number | string>;
   phaseRuns: PhaseRun[];
@@ -178,4 +207,6 @@ export interface NewAuditValues {
   maxFileBytes: number;
   dynamicEnabled: boolean;
   dynamicConfirmed: boolean;
+  coveragePolicy: "evidence_backed_partial" | "exhaustive";
+  verificationVotes: 1 | 2 | 3 | 4 | 5;
 }

@@ -57,6 +57,7 @@ const scanDetail = {
     current_phase: "verification",
     integrity_status: "pending",
     coverage_status: "partial",
+    coverage_policy: "evidence_backed_partial",
     dynamic_enabled: false,
     created_at: "2026-08-21T06:20:00Z",
     started_at: "2026-08-21T06:20:00Z",
@@ -88,9 +89,14 @@ const scanDetail = {
     dynamic_reproduced: 0,
   },
   coverageSummary: {
+    policy: "evidence_backed_partial",
     completeness: "partial",
     deferred_count: 1,
     open_question_count: 0,
+    assigned_count: 12,
+    read_complete_count: 9,
+    failed_count: 1,
+    unexamined_count: 2,
   },
   dynamicValidation: {
     status: "skipped",
@@ -159,6 +165,15 @@ const scanDetail = {
       ],
       activity_counts: { inventory: 1, search: 8, read: 3 },
       record_counts: { verifications: 1 },
+      recent_rejection: {
+        rejection_id: "rejection-1",
+        attempt_id: "attempt-1",
+        tool_name: "audit_submit_verdict",
+        error_code: "EVIDENCE_NOT_READ",
+        retryable: true,
+        violation_count: 2,
+        created_at: "2026-08-21T06:21:30Z",
+      },
     },
   ],
   artifacts: [
@@ -352,6 +367,12 @@ describe("code security workspace contract page", () => {
     expect(screen.getByText("12 条")).toBeInTheDocument();
     expect(screen.getByLabelText("源码访问记录统计")).toHaveTextContent(
       "搜索 8",
+    );
+    expect(screen.getByLabelText("最近一次提交拒绝")).toHaveTextContent(
+      "EVIDENCE_NOT_READ",
+    );
+    expect(screen.getByLabelText("最近一次提交拒绝")).toHaveTextContent(
+      "违规项 2",
     );
     await userEvent.click(screen.getByText("查看验证结论"));
     const rationale = screen.getByText(
@@ -1537,12 +1558,19 @@ describe("code security workspace contract page", () => {
     await screen.findByRole("heading", { name: "flocks" });
 
     await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    screen.getByText("高级设置").closest("details")!.open = true;
+    const voteCount = screen.getByLabelText("独立复核票数");
+    await user.selectOptions(voteCount, "3");
     await user.click(screen.getByRole("button", { name: "启动静态审计" }));
     expect(await screen.findByText(/连接暂时不可用/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "启动静态审计" }));
 
     await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2));
     expect(apiPost.mock.calls[0][1].idempotencyKey).toBeTruthy();
+    expect(apiPost.mock.calls[0][1].coveragePolicy).toBe(
+      "evidence_backed_partial",
+    );
+    expect(apiPost.mock.calls[0][1].verificationVotes).toBe(3);
     expect(apiPost.mock.calls[1][1].idempotencyKey).toBe(
       apiPost.mock.calls[0][1].idempotencyKey,
     );
@@ -2340,6 +2368,12 @@ describe("code security workspace contract page", () => {
       screen.getByText("Coverage", { selector: "dt" }).nextElementSibling,
     ).toHaveTextContent("Complete coverage");
     expect(
+      screen.getByRole("heading", { name: "Coverage attestation" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Unexamined", { selector: "dt" }).nextElementSibling,
+    ).toHaveTextContent("2");
+    expect(
       screen.getByRole("tab", { name: /Primary agent adjudication.*Pending/ }),
     ).toBeInTheDocument();
   });
@@ -2438,6 +2472,10 @@ describe("code security workspace contract page", () => {
       screen.getByRole("heading", { name: "New code audit" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Target" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Advanced settings"));
+    expect(screen.getByLabelText(/Coverage policy/)).toHaveValue(
+      "evidence_backed_partial",
+    );
     expect(
       screen.getByRole("button", { name: "Start static audit" }),
     ).toBeInTheDocument();

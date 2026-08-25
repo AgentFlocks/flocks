@@ -29,10 +29,19 @@ from flocks.tool.registry import (
 
 from flocks_code_security.contract import SLUG_RE
 from flocks_code_security.coverage import (
+    CoverageAttestationService,
+    CoverageSubmissionError,
     normalize_open_questions,
     public_open_question,
 )
 from flocks_code_security.dynamic_validation import validate_probe
+from flocks_code_security.execution import (
+    ExecutionCapsuleError,
+    MAX_SAME_SESSION_RESUMES,
+    classify_execution_failure,
+    toolset_digest,
+)
+from flocks_code_security.models import SessionBinding
 from flocks_code_security.orchestration import (
     baseline_prompt,
     plan_baseline_units,
@@ -92,7 +101,7 @@ SOURCE_SUBMIT_ROLES = {"baseline"}
 THREAT_MODEL_CONSUMER_ROLES = {"baseline"}
 VERIFIER_ROLE = {"verifier"}
 PROBER_ROLE = {"prober"}
-KNOWLEDGE_BASE_ROLES = COORDINATOR_ROLE | THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | VERIFIER_ROLE
+KNOWLEDGE_BASE_ROLES = COORDINATOR_ROLE | THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES
 SOURCE_READ_ROLES = THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | VERIFIER_ROLE | PROBER_ROLE
 EVIDENCE_ROLES = {
     "user_input",
@@ -113,6 +122,7 @@ REGISTERED_AUDIT_TOOLS: dict[
 AUDIT_TOOL_NAMES = (
     "audit_prepare",
     "audit_knowledge_base",
+    "audit_repository_summary",
     "audit_inventory",
     "audit_read",
     "audit_search",
@@ -135,15 +145,114 @@ AUDIT_TOOL_NAMES = (
 
 
 def _error(error: Exception | str, *, title: str) -> ToolResult:
+    if isinstance(error, ExecutionCapsuleError):
+        details = {
+            "error_code": error.code,
+            "retryable": False,
+            "binding_state": "terminated",
+        }
+        return ToolResult(
+            success=False,
+            output=details,
+            error=str(error),
+            metadata=details,
+            title=title,
+        )
     return ToolResult(success=False, error=str(error), title=title)
+
+
+def _submission_error(
+    error: Exception,
+    *,
+    binding: SessionBinding,
+    tool_name: str,
+    title: str,
+    error_code: str,
+) -> ToolResult:
+    violations = getattr(error, "violations", None)
+    details = {
+        "error_code": error_code,
+        "retryable": True,
+        "binding_state": "active",
+        "violations": (
+            violations
+            if isinstance(violations, list)
+            else [{"message": str(error)}]
+        ),
+    }
+    rejection = get_runtime().store.record_submission_rejection(
+        binding,
+        tool_name=tool_name,
+        error_code=error_code,
+        violations=details["violations"],
+        retryable=True,
+    )
+    details["rejection_id"] = rejection["rejection_id"]
+    return ToolResult(
+        success=False,
+        output=details,
+        error=str(error),
+        metadata=details,
+        title=title,
+    )
+
+
+def _is_terminal_submission_error(error: Exception) -> bool:
+    if isinstance(error, ExecutionCapsuleError):
+        return True
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "agent identity",
+            "agent execution session",
+            "binding is not active",
+            "not bound to a code-security scan",
+            "session binding",
+            "session role",
+            "scan not found",
+            "scan status",
+        )
+    )
 
 
 def _require_agent_execution(ctx: ToolContext, roles: set[str]) -> None:
     if ctx.extra.get("agent_execution_session") is not True:
         raise ValueError("Audit tools require an agent execution session")
-    expected_agents = {ROLE_AGENTS[role] for role in roles}
-    if ctx.agent not in expected_agents:
-        raise ValueError("Agent identity does not match the audit operation")
+    runtime = get_runtime()
+    binding = runtime.store.resolve_binding(ctx.session_id)
+    if binding is None:
+        if roles == COORDINATOR_ROLE and ctx.agent == ROLE_AGENTS["coordinator"]:
+            return
+        raise ValueError("This session is not bound to a code-security scan")
+    if binding.role not in roles:
+        raise ValueError(f"Session role {binding.role!r} cannot perform this operation")
+    if binding.role == "coordinator":
+        if ctx.agent != ROLE_AGENTS["coordinator"]:
+            raise ValueError("Agent identity does not match the audit operation")
+        return
+    model = ctx.extra.get("model")
+    model = model if isinstance(model, dict) else {}
+    observed_provider_id = model.get("providerID", "<missing-runtime-provider-id>")
+    if observed_provider_id is not None and not isinstance(observed_provider_id, str):
+        observed_provider_id = "<invalid-runtime-provider-id>"
+    observed_model_id = model.get("modelID", "<missing-runtime-model-id>")
+    if observed_model_id is not None and not isinstance(observed_model_id, str):
+        observed_model_id = "<invalid-runtime-model-id>"
+    callable_tools = ctx.extra.get("turn_callable_tool_names")
+    observed_toolset_digest = (
+        toolset_digest(callable_tools)
+        if isinstance(callable_tools, list)
+        and all(isinstance(name, str) for name in callable_tools)
+        else "<missing-runtime-toolset>"
+    )
+    runtime.store.verify_execution_capsule(
+        binding,
+        agent_name=ctx.agent,
+        provider_id=observed_provider_id,
+        model_id=observed_model_id,
+        toolset_digest_value=observed_toolset_digest,
+    )
 
 
 def _coordinator_binding(ctx: ToolContext, scan_id: str):
@@ -163,6 +272,8 @@ async def audit_prepare(
     max_file_bytes: int = 1_048_576,
     mode: str = "standard",
     dynamic_enabled: bool = False,
+    coverage_policy: str = "evidence_backed_partial",
+    verification_votes: int = 1,
 ) -> ToolResult:
     if mode != "standard":
         return _error("Only standard audits are implemented in this version", title="Audit preparation")
@@ -187,6 +298,8 @@ async def audit_prepare(
             mode=mode,
             ruleset_digest=RULESET_DIGEST,
             dynamic_enabled=dynamic_enabled,
+            coverage_policy=coverage_policy,
+            verification_vote_count=verification_votes,
         )
         await asyncio.to_thread(
             runtime.store.bind_session,
@@ -201,6 +314,8 @@ async def audit_prepare(
                 "scan_id": scan_id,
                 "status": "running",
                 "dynamic_enabled": bool(dynamic_enabled),
+                "coverage_policy": coverage_policy,
+                "verification_votes": verification_votes,
                 "snapshot": snapshot.public_dict(),
             },
             title=f"Prepared code audit {scan_id}",
@@ -274,6 +389,22 @@ async def audit_inventory(
         return ToolResult(success=True, output=output, title="Snapshot inventory")
     except STORE_ERRORS as exc:
         return _error(exc, title="Snapshot inventory failed")
+
+
+async def audit_repository_summary(ctx: ToolContext) -> ToolResult:
+    try:
+        _require_agent_execution(ctx, THREAT_MODELER_ROLE)
+        output = await asyncio.to_thread(
+            get_runtime().source.repository_summary,
+            ctx.session_id,
+        )
+        return ToolResult(
+            success=True,
+            output=output,
+            title="Canonical repository summary",
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="Repository summary failed")
 
 
 async def audit_read(
@@ -422,7 +553,22 @@ async def audit_submit_threat_model(
             title="Submitted source-backed threat model",
         )
     except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
-        return _error(exc, title="Threat-model submission failed")
+        if _is_terminal_submission_error(exc):
+            return _error(exc, title="Threat-model submission failed")
+        message = str(exc).casefold()
+        if "repository summary" in message:
+            error_code = "MANIFEST_NOT_CONSUMED"
+        elif "evidence" in message or "digest mismatch" in message or "line range" in message:
+            error_code = "EVIDENCE_MISMATCH"
+        else:
+            error_code = "SCHEMA_INVALID"
+        return _submission_error(
+            exc,
+            binding=binding,
+            tool_name="audit_submit_threat_model",
+            title="Threat-model submission failed",
+            error_code=error_code,
+        )
 
 
 async def audit_verification_subject(ctx: ToolContext) -> ToolResult:
@@ -637,10 +783,6 @@ async def audit_submit_verdict(
     try:
         _require_agent_execution(ctx, VERIFIER_ROLE)
         binding = runtime.store.require_binding(ctx.session_id, VERIFIER_ROLE)
-        await asyncio.to_thread(
-            runtime.store.require_knowledge_base_consumed,
-            binding,
-        )
         normalized_verdict = str(verdict or "").lower()
         if normalized_verdict not in {"confirmed", "rejected", "insufficient_evidence"}:
             raise ValueError("Unsupported verification verdict")
@@ -657,8 +799,8 @@ async def audit_submit_verdict(
                 binding,
                 counter_evidence,
             )
-        verification_id = await asyncio.to_thread(
-            runtime.store.save_verification,
+        vote = await asyncio.to_thread(
+            runtime.store.save_verification_vote,
             binding,
             candidate_id=candidate_id,
             verdict=normalized_verdict,
@@ -667,7 +809,7 @@ async def audit_submit_verdict(
         )
         return ToolResult(
             success=True,
-            output={"verification_id": verification_id, "verdict": normalized_verdict},
+            output={**vote, "verdict": normalized_verdict},
             title=f"Submitted verdict {normalized_verdict}",
         )
     except STORE_ERRORS as exc:
@@ -725,9 +867,7 @@ async def audit_submit_probe(
 
 async def audit_submit_coverage(
     ctx: ToolContext,
-    inventoried_paths: list[str] | None = None,
-    analyzed_paths: list[str] | None = None,
-    failed_paths: list[str] | None = None,
+    dispositions: list[dict[str, Any]] | None = None,
     open_questions: list[dict[str, Any] | str] | None = None,
 ) -> ToolResult:
     runtime = get_runtime()
@@ -742,33 +882,7 @@ async def audit_submit_coverage(
             runtime.store.require_knowledge_base_consumed,
             binding,
         )
-        path_groups = {
-            "inventoried_paths": inventoried_paths or [],
-            "analyzed_paths": analyzed_paths or [],
-            "failed_paths": failed_paths or [],
-        }
-        if any(len(items) > 2_000 for items in path_groups.values()):
-            raise ValueError("Each coverage path list may contain at most 2000 entries")
         questions = normalize_open_questions(open_questions)
-
-        validated_inventoried = await asyncio.to_thread(
-            runtime.source.validate_coverage_paths,
-            binding,
-            path_groups["inventoried_paths"],
-            allow_omitted=True,
-        )
-        validated_analyzed = await asyncio.to_thread(
-            runtime.source.validate_coverage_paths,
-            binding,
-            path_groups["analyzed_paths"],
-            allow_omitted=False,
-        )
-        validated_failed = await asyncio.to_thread(
-            runtime.source.validate_coverage_paths,
-            binding,
-            path_groups["failed_paths"],
-            allow_omitted=True,
-        )
         for question in questions:
             question["related_paths"] = await asyncio.to_thread(
                 runtime.source.validate_coverage_paths,
@@ -776,22 +890,37 @@ async def audit_submit_coverage(
                 question["related_paths"],
                 allow_omitted=True,
             )
-        await asyncio.to_thread(
-            runtime.store.validate_coverage_access,
+
+        result = await asyncio.to_thread(
+            CoverageAttestationService(runtime.store).attest,
             binding,
-            inventoried_paths=validated_inventoried,
-            analyzed_paths=validated_analyzed,
+            dispositions=dispositions,
+            open_questions=questions,
         )
-        payload = {
-            "inventoried_paths": validated_inventoried,
-            "analyzed_paths": validated_analyzed,
-            "failed_paths": validated_failed,
-            "open_questions": questions,
-        }
-        await asyncio.to_thread(runtime.store.save_coverage, binding, payload)
-        return ToolResult(success=True, output=payload, title="Submitted audit coverage")
+        return ToolResult(
+            success=True,
+            output=result,
+            title=f"Submitted {result['completeness']} audit coverage",
+        )
     except STORE_ERRORS as exc:
-        return _error(exc, title="Coverage submission failed")
+        if _is_terminal_submission_error(exc):
+            return _error(exc, title="Coverage submission failed")
+        message = str(exc).casefold()
+        if isinstance(exc, CoverageSubmissionError):
+            error_code = exc.code
+        elif "coverage path" in message:
+            error_code = "SCOPE_PATH_INVALID"
+        elif "coverage is not backed" in message or "analysis coverage" in message:
+            error_code = "COVERAGE_OVERCLAIM"
+        else:
+            error_code = "SCHEMA_INVALID"
+        return _submission_error(
+            exc,
+            binding=binding,
+            tool_name="audit_submit_coverage",
+            title="Coverage submission failed",
+            error_code=error_code,
+        )
 
 
 async def audit_adjudication_context(
@@ -859,9 +988,12 @@ async def audit_adjudication_context(
             failed_paths: list[str] = []
             open_questions: list[dict[str, Any]] = []
             for item in context["coverage"]:
-                payload = item.get("payload", {})
-                failed_paths.extend(payload.get("failed_paths", []))
-                open_questions.extend(payload.get("open_questions", []))
+                failed_paths.extend(
+                    record["relative_path"]
+                    for record in item.get("records", [])
+                    if record.get("state") == "failed"
+                )
+                open_questions.extend(item.get("open_questions", []))
             failed_paths = list(dict.fromkeys(failed_paths))
             questions_by_key = {
                 json.dumps(question, sort_keys=True): question
@@ -1027,7 +1159,7 @@ async def audit_status(ctx: ToolContext, scan_id: str) -> ToolResult:
     try:
         _coordinator_binding(ctx, scan_id)
         for batch in get_runtime().store.list_worker_batches(scan_id):
-            await _refresh_worker_batch(batch["batch_id"])
+            await _refresh_worker_batch(batch["batch_id"], ctx=ctx)
         output = await asyncio.to_thread(get_runtime().store.scan_status, scan_id)
         return ToolResult(success=True, output=output, title=f"Audit status {scan_id}")
     except STORE_ERRORS as exc:
@@ -1038,7 +1170,7 @@ async def audit_finalize(ctx: ToolContext, scan_id: str) -> ToolResult:
     try:
         _coordinator_binding(ctx, scan_id)
         for batch in get_runtime().store.list_worker_batches(scan_id):
-            await _refresh_worker_batch(batch["batch_id"])
+            await _refresh_worker_batch(batch["batch_id"], ctx=ctx)
         await asyncio.to_thread(get_runtime().store.ensure_ready_to_finalize, scan_id)
         output = await asyncio.to_thread(ReportWriter(get_runtime().store).write, scan_id)
         return ToolResult(success=True, output=output, title=f"Finalized audit {scan_id}")
@@ -1086,11 +1218,11 @@ async def audit_run_workers(
             units = plan_threat_model_units()
             candidates_by_id = {}
         elif phase == "baseline":
-            files = await asyncio.to_thread(
-                runtime.store.list_snapshot_files,
+            manifest = await asyncio.to_thread(
+                runtime.manifests.get_or_build,
                 binding.snapshot_id,
             )
-            units = plan_baseline_units(files)
+            units = plan_baseline_units(manifest)
             candidates_by_id: dict[str, dict[str, Any]] = {}
         elif phase == "verification":
             candidates = await asyncio.to_thread(
@@ -1177,7 +1309,7 @@ async def audit_run_workers(
                 batch["batch_id"],
                 "running",
             )
-        await _refresh_worker_batch(batch["batch_id"])
+        await _refresh_worker_batch(batch["batch_id"], ctx=ctx)
         output = await _public_batch_status(batch["batch_id"])
         output["launched_workers"] = launched
         output["launch_failures"] = launch_failures
@@ -1206,7 +1338,7 @@ async def audit_wait_workers(
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
-            batch = await _refresh_worker_batch(batch_id)
+            batch = await _refresh_worker_batch(batch_id, ctx=ctx)
             if batch["status"] in WORKER_TERMINAL_STATUSES:
                 break
             remaining = deadline - loop.time()
@@ -1238,7 +1370,7 @@ async def _launch_worker(
     unit: dict[str, Any],
     *,
     candidate: dict[str, Any] | None,
-) -> None:
+) -> dict[str, Any]:
     from flocks.session.message import Message, MessageRole
     from flocks.session.session import Session
 
@@ -1266,8 +1398,12 @@ async def _launch_worker(
         "work_unit_id": unit["work_unit_id"],
         "assigned_paths": list(unit.get("paths", [])),
     }
+    if unit.get("assignment_digest") is not None:
+        correlation_metadata["assignment_digest"] = unit["assignment_digest"]
     if candidate is not None:
         correlation_metadata["candidate_id"] = candidate["candidate_id"]
+    if unit.get("vote_index") is not None:
+        correlation_metadata["vote_index"] = unit["vote_index"]
     trace_context = ctx.extra.get("langfuse_trace_context")
     trace_context = trace_context if isinstance(trace_context, dict) else None
     langfuse_metadata = {
@@ -1297,23 +1433,41 @@ async def _launch_worker(
         metadata={"langfuse": langfuse_metadata},
         **child_kwargs,
     )
-    await asyncio.to_thread(
-        runtime.store.bind_session,
-        session_id=child.id,
-        scan_id=scan_id,
-        snapshot_id=snapshot_id,
-        role=unit["role"],
-        work_unit_id=unit["work_unit_id"],
-    )
     knowledge_base_present = (
         await asyncio.to_thread(runtime.store.get_knowledge_base_metadata, scan_id)
         is not None
     )
+    callable_tools = await get_session_callable_tools(child.id)
     if not knowledge_base_present:
-        callable_tools = await get_session_callable_tools(child.id)
         if "audit_knowledge_base" in callable_tools:
             callable_tools.remove("audit_knowledge_base")
             await set_session_callable_tools(child.id, callable_tools)
+    attempt = await asyncio.to_thread(
+        runtime.store.create_work_attempt,
+        work_unit_id=unit["work_unit_id"],
+        session_id=child.id,
+        agent_name=agent_name,
+        provider_id=provider_id,
+        model_id=model_id,
+        toolset_digest_value=toolset_digest(callable_tools),
+    )
+    attempt_binding = await asyncio.to_thread(
+        runtime.store.require_binding,
+        child.id,
+        {unit["role"]},
+    )
+    await asyncio.to_thread(
+        runtime.store.verify_execution_capsule,
+        attempt_binding,
+        agent_name=(
+            child.agent
+            if isinstance(getattr(child, "agent", None), str)
+            else agent_name
+        ),
+        provider_id=provider_id,
+        model_id=model_id,
+        toolset_digest_value=toolset_digest(callable_tools),
+    )
     if phase == "threat_modeling":
         prompt = threat_model_prompt(
             snapshot_id=snapshot_id,
@@ -1334,7 +1488,7 @@ async def _launch_worker(
         prompt = verification_prompt(
             snapshot_id=snapshot_id,
             candidate_id=candidate["candidate_id"],
-            knowledge_base_present=knowledge_base_present,
+            vote_index=unit["vote_index"],
         )
     elif phase == "probing" and candidate is not None:
         prompt = probe_prompt(
@@ -1343,31 +1497,31 @@ async def _launch_worker(
         )
     else:
         raise ValueError("Worker prompt data is incomplete")
-    await Message.create(
-        session_id=child.id,
-        role=MessageRole.USER,
-        content=prompt,
-        agent=agent_name,
-    )
     manager = _background_manager()
-    task = await manager.run_existing_session(
-        session_id=child.id,
-        parent_session_id=(
-            None
-            if ctx.extra.get("suppress_parent_completion") is True
-            else parent.id
-        ),
-        description=f"Code security {phase} worker",
-        agent=agent_name,
-        allow_user_questions=False,
-        provider_id=provider_id,
-        model_id=model_id,
-    )
     try:
-        await asyncio.to_thread(
-            runtime.store.set_work_unit_runtime,
-            unit["work_unit_id"],
+        await Message.create(
             session_id=child.id,
+            role=MessageRole.USER,
+            content=prompt,
+            agent=agent_name,
+        )
+        task = await manager.run_existing_session(
+            session_id=child.id,
+            parent_session_id=(
+                None
+                if ctx.extra.get("suppress_parent_completion") is True
+                else parent.id
+            ),
+            description=f"Code security {phase} worker",
+            agent=agent_name,
+            allow_user_questions=False,
+            provider_id=provider_id,
+            model_id=model_id,
+            execution_capsule=attempt["capsule"],
+        )
+        await asyncio.to_thread(
+            runtime.store.set_work_attempt_runtime,
+            attempt["attempt_id"],
             background_task_id=task.id,
             started_at=_background_timestamp(getattr(task, "started_at", None)),
         )
@@ -1378,12 +1532,174 @@ async def _launch_worker(
                 unit["work_unit_id"],
                 started_at=task_started_at,
             )
+        await asyncio.to_thread(
+            runtime.store.append_scan_event,
+            scan_id,
+            "worker.attempt_started",
+            "Worker attempt started",
+            {
+                "work_unit_id": unit["work_unit_id"],
+                "attempt_id": attempt["attempt_id"],
+                "attempt_ordinal": attempt["ordinal"],
+                "agent_name": agent_name,
+                "capsule_digest": attempt["capsule_digest"],
+            },
+        )
+    except BaseException:
+        if "task" in locals():
+            manager.cancel(task_id=task.id)
+        await asyncio.to_thread(
+            runtime.store.finish_work_attempt,
+            attempt["attempt_id"],
+            status="failed",
+            failure_class="launch_failure",
+            work_unit_status="failed",
+        )
+        raise
+    return attempt
+
+
+async def _resume_worker_attempt(
+    ctx: ToolContext,
+    unit: dict[str, Any],
+) -> None:
+    from flocks.session.session import Session
+
+    runtime = get_runtime()
+    attempt_id = unit.get("attempt_id")
+    session_id = unit.get("session_id")
+    if not isinstance(attempt_id, str) or not isinstance(session_id, str):
+        raise RuntimeError("Session is missing for the active work attempt")
+    session = await Session.get_by_id(session_id)
+    if session is None:
+        raise RuntimeError(f"Session {session_id} not found")
+    binding = await asyncio.to_thread(
+        runtime.store.require_binding,
+        session_id,
+        {unit["role"]},
+    )
+    session_agent = getattr(session, "agent", None)
+    capsule = await asyncio.to_thread(
+        runtime.store.verify_execution_capsule,
+        binding,
+        agent_name=(
+            session_agent if isinstance(session_agent, str) else unit["agent_name"]
+        ),
+        provider_id=unit.get("provider_id"),
+        model_id=unit.get("model_id"),
+        toolset_digest_value=unit.get("toolset_digest"),
+    )
+    attempt = await asyncio.to_thread(
+        runtime.store.prepare_work_attempt_resume,
+        attempt_id,
+    )
+    manager = _background_manager()
+    start_gate = asyncio.Event()
+    task = await manager.run_existing_session(
+        session_id=session_id,
+        parent_session_id=(
+            None
+            if ctx.extra.get("suppress_parent_completion") is True
+            else ctx.session_id
+        ),
+        description=f"Code security {unit['phase']} worker resume",
+        agent=unit["agent_name"],
+        allow_user_questions=False,
+        provider_id=unit.get("provider_id"),
+        model_id=unit.get("model_id"),
+        execution_capsule=capsule,
+        start_gate=start_gate,
+    )
+    try:
+        await asyncio.to_thread(
+            runtime.store.set_work_attempt_runtime,
+            attempt_id,
+            background_task_id=task.id,
+            started_at=_background_timestamp(getattr(task, "started_at", None)),
+        )
+        start_gate.set()
+        await asyncio.to_thread(
+            runtime.store.append_scan_event,
+            unit["scan_id"],
+            "worker.resume_started",
+            "Worker session resume started",
+            {
+                "work_unit_id": unit["work_unit_id"],
+                "attempt_id": attempt_id,
+                "session_id": session_id,
+                "resume_count": attempt["resume_count"],
+            },
+        )
     except BaseException:
         manager.cancel(task_id=task.id)
         raise
 
 
-async def _refresh_worker_batch(batch_id: str) -> dict[str, Any]:
+async def _start_fresh_worker_attempt(
+    ctx: ToolContext,
+    batch: dict[str, Any],
+    unit: dict[str, Any],
+    *,
+    failure_class: str,
+) -> bool:
+    runtime = get_runtime()
+    prior_attempt_id = unit.get("attempt_id")
+    if not isinstance(prior_attempt_id, str):
+        return False
+    attempts_exhausted = int(unit.get("attempt_ordinal") or 0) >= 2
+    await asyncio.to_thread(
+        runtime.store.finish_work_attempt,
+        prior_attempt_id,
+        status="failed",
+        failure_class=("attempts_exhausted" if attempts_exhausted else failure_class),
+    )
+    if attempts_exhausted:
+        await asyncio.to_thread(
+            runtime.store.update_work_unit_status,
+            unit["work_unit_id"],
+            "failed",
+        )
+        return False
+    if unit["role"] == "threat_modeler":
+        candidate = None
+    else:
+        subject_id = unit.get("subject_id")
+        candidate = (
+            await asyncio.to_thread(runtime.store.get_candidate, subject_id)
+            if isinstance(subject_id, str)
+            else None
+        )
+    scan = await asyncio.to_thread(runtime.store.get_scan, batch["scan_id"])
+    if scan is None:
+        raise ValueError("Scan not found")
+    attempt = await _launch_worker(
+        ctx,
+        batch["scan_id"],
+        scan["snapshot_id"],
+        batch["phase"],
+        unit,
+        candidate=candidate,
+    )
+    await asyncio.to_thread(
+        runtime.store.append_scan_event,
+        batch["scan_id"],
+        "worker.fresh_attempt_started",
+        "Fresh worker attempt started",
+        {
+            "work_unit_id": unit["work_unit_id"],
+            "prior_attempt_id": prior_attempt_id,
+            "new_attempt_id": attempt["attempt_id"],
+            "reason": failure_class,
+        },
+    )
+    return True
+
+
+async def _refresh_worker_batch(
+    batch_id: str,
+    *,
+    ctx: ToolContext | None = None,
+) -> dict[str, Any]:
     runtime = get_runtime()
     batch = await asyncio.to_thread(runtime.store.get_worker_batch, batch_id)
     if batch is None:
@@ -1407,40 +1723,132 @@ async def _refresh_worker_batch(batch_id: str) -> dict[str, Any]:
         if unit["status"] not in {"pending", "running"}:
             continue
         if task is None:
-            if unit["status"] == "running" or task_id or batch_id not in LAUNCHING_BATCH_IDS:
+            if batch_id in LAUNCHING_BATCH_IDS and not task_id:
+                continue
+            if ctx is not None and unit.get("attempt_id") is not None:
+                try:
+                    await _resume_worker_attempt(ctx, unit)
+                    continue
+                except ExecutionCapsuleError:
+                    continue
+                except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                    pass
+            if unit.get("attempt_id") is not None and ctx is not None:
+                try:
+                    if await _start_fresh_worker_attempt(
+                        ctx,
+                        batch,
+                        unit,
+                        failure_class="session_missing",
+                    ):
+                        continue
+                except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                    pass
+            current = await asyncio.to_thread(
+                runtime.store.get_work_unit,
+                unit["work_unit_id"],
+            )
+            if current and current["status"] in {"pending", "running"}:
                 await asyncio.to_thread(
                     runtime.store.update_work_unit_status,
                     unit["work_unit_id"],
                     "failed",
                 )
             continue
+        facts_complete = False
+        failure_class: str | None = None
         if task.status == "completed":
             facts_complete = await asyncio.to_thread(
                 runtime.store.work_unit_has_required_facts,
                 unit["work_unit_id"],
                 role=unit["role"],
             )
-            next_status = "completed" if facts_complete else "failed"
         elif task.status == "cancelled":
-            next_status = "cancelled"
+            await asyncio.to_thread(
+                runtime.store.finish_work_attempt,
+                unit.get("attempt_id"),
+                status="cancelled",
+                failure_class="cancelled",
+            )
+            continue
         elif task.status == "error":
+            failure_class = classify_execution_failure(
+                getattr(task, "error", None)
+            )
+            if failure_class == "identity_capsule_mismatch":
+                await asyncio.to_thread(
+                    runtime.store.finish_work_attempt,
+                    unit.get("attempt_id"),
+                    status="failed",
+                    failure_class=failure_class,
+                    work_unit_status="failed",
+                )
+                await asyncio.to_thread(
+                    runtime.store.append_scan_event,
+                    batch["scan_id"],
+                    "identity.mismatch",
+                    "Execution capsule mismatch",
+                    {
+                        "attempt_id": unit.get("attempt_id"),
+                        "work_unit_id": unit["work_unit_id"],
+                        "source": "background_task",
+                    },
+                    level="error",
+                )
+                continue
             facts_complete = await asyncio.to_thread(
                 runtime.store.work_unit_has_required_facts,
                 unit["work_unit_id"],
                 role=unit["role"],
             )
-            next_status = (
-                "completed"
-                if unit["role"] == "threat_modeler" and facts_complete
-                else "failed"
-            )
         else:
             continue
-        await asyncio.to_thread(
-            runtime.store.update_work_unit_status,
-            unit["work_unit_id"],
-            next_status,
+        if facts_complete:
+            await asyncio.to_thread(
+                runtime.store.finish_work_attempt,
+                unit.get("attempt_id"),
+                status="completed",
+            )
+            continue
+        failure_class = failure_class or classify_execution_failure(
+            getattr(task, "error", None)
         )
+        if (
+            task.status == "error"
+            and failure_class == "transient_execution_failure"
+            and int(unit.get("resume_count") or 0) < MAX_SAME_SESSION_RESUMES
+            and ctx is not None
+        ):
+            try:
+                await _resume_worker_attempt(ctx, unit)
+                continue
+            except ExecutionCapsuleError:
+                continue
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                pass
+        if ctx is not None:
+            try:
+                if await _start_fresh_worker_attempt(
+                    ctx,
+                    batch,
+                    unit,
+                    failure_class=failure_class,
+                ):
+                    continue
+            except ExecutionCapsuleError:
+                continue
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                pass
+        current = await asyncio.to_thread(
+            runtime.store.get_work_unit,
+            unit["work_unit_id"],
+        )
+        if current and current["status"] in {"pending", "running"}:
+            await asyncio.to_thread(
+                runtime.store.update_work_unit_status,
+                unit["work_unit_id"],
+                "failed",
+            )
 
     refreshed = await asyncio.to_thread(runtime.store.get_worker_batch, batch_id)
     if refreshed is None:
@@ -1487,11 +1895,17 @@ async def _public_batch_status(batch_id: str) -> dict[str, Any]:
         "workers": [
             {
                 "work_unit_id": unit["work_unit_id"],
+                "attempt_id": unit.get("attempt_id"),
+                "attempt_ordinal": unit.get("attempt_ordinal"),
+                "attempt_status": unit.get("attempt_status"),
+                "resume_count": unit.get("resume_count"),
                 "role": unit["role"],
                 "assigned_paths": unit["paths"],
+                "assignment_digest": unit.get("assignment_digest"),
                 "candidate_id": unit.get("subject_id"),
                 "session_id": unit.get("session_id"),
                 "status": unit["status"],
+                "failure_class": unit.get("attempt_failure_class"),
             }
             for unit in batch["units"]
         ],
@@ -1617,6 +2031,41 @@ def register_tools() -> None:
                     },
                     "then": {"properties": {"blocking": {"const": True}}},
                     "else": {"properties": {"blocking": {"const": False}}},
+                }
+            ],
+        },
+    }
+    coverage_dispositions_schema = {
+        "type": "array",
+        "maxItems": 2_000,
+        "uniqueItems": True,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["path", "claim"],
+            "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "claim": {
+                    "type": "string",
+                    "enum": ["analyzed", "failed", "not_applicable"],
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1_000,
+                },
+            },
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "claim": {
+                                "enum": ["failed", "not_applicable"]
+                            }
+                        }
+                    },
+                    "then": {"required": ["reason"]},
+                    "else": {"not": {"required": ["reason"]}},
                 }
             ],
         },
@@ -1917,12 +2366,33 @@ def register_tools() -> None:
             _parameter("exclude_patterns", ParameterType.ARRAY, "Optional relative glob patterns to exclude.", required=False, json_schema=string_array),
             _parameter("max_file_bytes", ParameterType.INTEGER, "Maximum bytes copied per file.", required=False, default=1_048_576),
             _parameter("mode", ParameterType.STRING, "Audit mode. Only standard is currently implemented.", required=False, default="standard", enum=["standard"]),
+            _parameter(
+                "coverage_policy",
+                ParameterType.STRING,
+                "Coverage completion policy.",
+                required=False,
+                default="evidence_backed_partial",
+                enum=["evidence_backed_partial", "exhaustive"],
+            ),
+            _parameter(
+                "verification_votes",
+                ParameterType.INTEGER,
+                "Independent verifier votes required per candidate (1 to 5).",
+                required=False,
+                default=1,
+            ),
         ],
     )
     _register(
         "audit_knowledge_base",
         "Return the optional scan-bound vulnerability target specification as untrusted external hypothesis data.",
         audit_knowledge_base,
+        [],
+    )
+    _register(
+        "audit_repository_summary",
+        "Return the canonical host-computed repository summary and record that this threat-modeling worker consumed it.",
+        audit_repository_summary,
         [],
     )
     _register(
@@ -2050,12 +2520,16 @@ def register_tools() -> None:
     )
     _register(
         "audit_submit_coverage",
-        "Submit analyzed, failed, and unresolved scope facts for the bound work unit.",
+        "Submit per-path analysis dispositions; the host derives trusted coverage from current-attempt receipts.",
         audit_submit_coverage,
         [
-            _parameter("inventoried_paths", ParameterType.ARRAY, "Exact snapshot paths returned by audit_inventory whose inventory page was consumed.", required=False, json_schema=string_array),
-            _parameter("analyzed_paths", ParameterType.ARRAY, "Exact existing snapshot paths fully covered by this worker's audit_read or audit_search accesses.", required=False, json_schema=string_array),
-            _parameter("failed_paths", ParameterType.ARRAY, "Exact inventory or omission paths that could not be analyzed; never invent paths.", required=False, json_schema=string_array),
+            _parameter(
+                "dispositions",
+                ParameterType.ARRAY,
+                "Exact assigned file dispositions. analyzed requires current-attempt read_complete; failed and not_applicable require a reason.",
+                required=False,
+                json_schema=coverage_dispositions_schema,
+            ),
             _parameter(
                 "open_questions",
                 ParameterType.ARRAY,

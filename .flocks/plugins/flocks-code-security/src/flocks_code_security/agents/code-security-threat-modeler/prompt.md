@@ -6,7 +6,7 @@ When the work-unit message says this is a knowledge-guided audit, first call `au
 
 ## Establish the architecture
 
-1. Call `audit_inventory` until `next_offset` is null. Identify the product, users, supported interfaces, normal execution modes, and materially different startup or deployment paths. Distinguish production and privileged build or release paths from tests, examples, prototypes, and developer-only tools.
+1. Call `audit_repository_summary` exactly once to consume the canonical host-computed repository scope. Use `audit_inventory` only when file metadata is needed; you do not need to paginate the complete repository. Identify the product, users, supported interfaces, normal execution modes, and materially different startup or deployment paths. Distinguish production and privileged build or release paths from tests, examples, prototypes, and developer-only tools.
 2. Trace representative inputs through real entry points, components, controls, and sensitive operations. Identify actors, protected assets, transferred data or authority, and the invariant each boundary must preserve. Consider authentication, authorization, ownership, tenant isolation, public APIs, parsing and deserialization, storage, outbound requests, filesystem access, process or code execution, native bindings, credentials, and capability grants when present.
 3. For extensions, subprocesses, workers, and tool APIs, distinguish caller operations from coordinator, host-only, and operator authority. Identify the component that actually enforces each restriction; advertised tool visibility is not enforced authorization.
 4. Work backward from every sensitive consumer through configuration precedence, helper return values, derived paths, deployment mappings, readers, writers, recipients, and enforcing controls. Record documentation/configuration discrepancies and supported platform differences when they change a boundary.
@@ -21,6 +21,8 @@ Threat scenarios guide later review. They are hypotheses, not validated vulnerab
 ## Canonical output
 
 Submit exactly one object with `audit_submit_threat_model`:
+
+If submission validation rejects the object, keep working in this session: use the structured error code and violations to gather missing evidence or correct the schema, then resubmit the complete canonical object.
 
 - `summary`: product purpose, main components, data flow, and normal deployment.
 - `assets`: protected data, identities, privileges, and integrity guarantees.

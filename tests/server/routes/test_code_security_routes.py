@@ -57,6 +57,20 @@ def test_resolve_target_rejects_paths_and_symlinks_outside_workspace(tmp_path) -
     assert symlink_escape.value.status_code == 400
 
 
+def test_create_scan_request_accepts_bounded_verification_votes() -> None:
+    payload = code_security.CreateScanRequest(
+        workspaceId="workspace-1",
+        verificationVotes=3,
+    )
+
+    assert payload.verification_votes == 3
+    with pytest.raises(ValueError):
+        code_security.CreateScanRequest(
+            workspaceId="workspace-1",
+            verificationVotes=6,
+        )
+
+
 @pytest.mark.asyncio
 async def test_dynamic_scan_requires_explicit_confirmation(monkeypatch) -> None:
     monkeypatch.setattr(

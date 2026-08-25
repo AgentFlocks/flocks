@@ -12,12 +12,25 @@ import threading
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from flocks_code_security.coverage import normalize_open_questions
+from flocks_code_security.execution import (
+    ExecutionCapsuleError,
+    MAX_FRESH_ATTEMPTS,
+    MAX_SAME_SESSION_RESUMES,
+    scope_digest,
+    toolset_digest,
+)
 from flocks_code_security.models import (
+    CoverageAttestation,
+    CoverageRecord,
+    ExecutionCapsule,
+    ManifestComponent,
+    RepositoryManifest,
     SessionBinding,
     SnapshotFile,
     SnapshotOmission,
@@ -34,6 +47,22 @@ THREAT_MODEL_REQUIRED_LIST_FIELDS = (
 MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+WORKER_ROLE_AGENTS = {
+    "threat_modeler": "code-security-threat-modeler",
+    "baseline": "code-security-baseline",
+    "investigator": "code-security-investigator",
+    "verifier": "code-security-verifier",
+    "prober": "code-security-prober",
+}
+DYNAMIC_EXECUTION_CATEGORIES = (
+    "code-execution",
+    "code-injection",
+    "command-injection",
+    "rce",
+    "remote-code-execution",
+    "template-injection",
+    "unsafe-deserialization",
+)
 
 
 def _now() -> str:
@@ -155,6 +184,182 @@ class ScanStore:
             if path.exists():
                 path.chmod(0o600)
 
+    @staticmethod
+    def _migrate_legacy_coverage(connection: sqlite3.Connection) -> None:
+        """Convert model-authored legacy coverage into explicit reanalysis state."""
+        legacy_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'coverage'"
+        ).fetchone()
+        if legacy_table is None:
+            return
+        legacy_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(coverage)").fetchall()
+        }
+        if not {"scan_id", "work_unit_id", "payload_json", "updated_at"} <= legacy_columns:
+            return
+
+        legacy_rows = connection.execute(
+            "SELECT scan_id, work_unit_id, payload_json, updated_at "
+            "FROM coverage ORDER BY scan_id, work_unit_id"
+        ).fetchall()
+        for legacy in legacy_rows:
+            existing = connection.execute(
+                "SELECT 1 FROM coverage_attestations WHERE work_unit_id = ? LIMIT 1",
+                (legacy["work_unit_id"],),
+            ).fetchone()
+            if existing is not None:
+                continue
+            unit = connection.execute(
+                "SELECT wu.paths_json, wu.role, s.snapshot_id, s.coverage_policy "
+                "FROM work_units wu JOIN scans s ON s.scan_id = wu.scan_id "
+                "WHERE wu.work_unit_id = ? AND wu.scan_id = ?",
+                (legacy["work_unit_id"], legacy["scan_id"]),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT attempt_id FROM work_attempts WHERE work_unit_id = ? "
+                "ORDER BY ordinal DESC LIMIT 1",
+                (legacy["work_unit_id"],),
+            ).fetchone()
+            if unit is None or attempt is None or unit["role"] not in {
+                "baseline",
+                "investigator",
+            }:
+                continue
+            try:
+                assigned_scopes = json.loads(unit["paths_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(assigned_scopes, list):
+                continue
+
+            def in_scope(path: str) -> bool:
+                return any(
+                    scope == "." or path == scope or path.startswith(f"{scope}/")
+                    for scope in assigned_scopes
+                    if isinstance(scope, str)
+                )
+
+            # Legacy analyzed/failed arrays had no host receipts, so none are trusted.
+            records: list[dict[str, Any]] = []
+            files = connection.execute(
+                "SELECT relative_path, size_bytes FROM snapshot_files "
+                "WHERE snapshot_id = ? ORDER BY relative_path",
+                (unit["snapshot_id"],),
+            ).fetchall()
+            for item in files:
+                if not in_scope(item["relative_path"]):
+                    continue
+                is_empty = int(item["size_bytes"]) == 0
+                records.append(
+                    {
+                        "relative_path": item["relative_path"],
+                        "state": "not_applicable" if is_empty else "unexamined",
+                        "reason": (
+                            "not_applicable_empty"
+                            if is_empty
+                            else "legacy_coverage_requires_reanalysis"
+                        ),
+                        "receipt_digest": None,
+                    }
+                )
+            omissions = connection.execute(
+                "SELECT relative_path, reason FROM snapshot_omissions "
+                "WHERE snapshot_id = ? ORDER BY relative_path",
+                (unit["snapshot_id"],),
+            ).fetchall()
+            for item in omissions:
+                if in_scope(item["relative_path"]):
+                    records.append(
+                        {
+                            "relative_path": item["relative_path"],
+                            "state": "failed",
+                            "reason": f"snapshot_omission:{item['reason']}",
+                            "receipt_digest": None,
+                        }
+                    )
+            records.sort(key=lambda item: item["relative_path"])
+
+            legacy_questions: list[dict[str, Any]] = []
+            try:
+                payload = json.loads(legacy["payload_json"])
+                if isinstance(payload, dict):
+                    legacy_questions = normalize_open_questions(
+                        payload.get("open_questions", [])
+                    )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            warning = {
+                "question": (
+                    "Coverage was stored in a legacy untrusted format and requires "
+                    "source reanalysis."
+                ),
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": [],
+                "follow_up": "Re-run this work unit against the immutable snapshot.",
+            }
+            questions = [warning, *legacy_questions[:99]]
+            policy = str(unit["coverage_policy"])
+            completeness = "blocked" if policy == "exhaustive" else "partial"
+            attestation_id = f"attestation_{uuid.uuid4().hex}"
+            digest_payload = {
+                "work_unit_id": legacy["work_unit_id"],
+                "attempt_id": attempt["attempt_id"],
+                "policy": policy,
+                "completeness": completeness,
+                "records": records,
+                "open_questions": questions,
+            }
+            attestation_digest = hashlib.sha256(
+                json.dumps(
+                    digest_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            connection.execute(
+                "INSERT INTO coverage_attestations ("
+                "attestation_id, scan_id, work_unit_id, attempt_id, policy, "
+                "completeness, assigned_count, read_complete_count, failed_count, "
+                "unexamined_count, attestation_digest, open_questions_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+                (
+                    attestation_id,
+                    legacy["scan_id"],
+                    legacy["work_unit_id"],
+                    attempt["attempt_id"],
+                    policy,
+                    completeness,
+                    len(records),
+                    sum(item["state"] == "failed" for item in records),
+                    sum(
+                        item["state"]
+                        not in {"read_complete", "failed", "not_applicable"}
+                        for item in records
+                    ),
+                    attestation_digest,
+                    json.dumps(questions, ensure_ascii=False, sort_keys=True),
+                    legacy["updated_at"] or _now(),
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO coverage_records ("
+                "attestation_id, relative_path, state, reason, receipt_digest"
+                ") VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        attestation_id,
+                        item["relative_path"],
+                        item["state"],
+                        item["reason"],
+                        item["receipt_digest"],
+                    )
+                    for item in records
+                ],
+            )
+
     def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.database_path.parent.chmod(0o700)
@@ -196,12 +401,25 @@ class ScanStore:
                     is_binary INTEGER NOT NULL,
                     PRIMARY KEY (snapshot_id, relative_path)
                 );
+                CREATE TABLE IF NOT EXISTS repository_manifests (
+                    manifest_id TEXT PRIMARY KEY,
+                    snapshot_id TEXT NOT NULL UNIQUE REFERENCES snapshots(snapshot_id) ON DELETE CASCADE,
+                    manifest_digest TEXT NOT NULL,
+                    file_count INTEGER NOT NULL,
+                    total_bytes INTEGER NOT NULL,
+                    omitted_file_count INTEGER NOT NULL,
+                    languages_json TEXT NOT NULL,
+                    components_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS scans (
                     scan_id TEXT PRIMARY KEY,
                     parent_session_id TEXT NOT NULL,
                     snapshot_id TEXT NOT NULL REFERENCES snapshots(snapshot_id),
                     mode TEXT NOT NULL,
                     dynamic_enabled INTEGER NOT NULL DEFAULT 0,
+                    coverage_policy TEXT NOT NULL DEFAULT 'evidence_backed_partial',
+                    verification_vote_count INTEGER NOT NULL DEFAULT 1,
                     status TEXT NOT NULL,
                     ruleset_digest TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -227,7 +445,29 @@ class ScanStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     started_at TEXT,
-                    finished_at TEXT
+                    finished_at TEXT,
+                    assignment_digest TEXT
+                );
+                CREATE TABLE IF NOT EXISTS work_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    ordinal INTEGER NOT NULL,
+                    session_id TEXT NOT NULL UNIQUE,
+                    background_task_id TEXT,
+                    agent_name TEXT NOT NULL,
+                    provider_id TEXT,
+                    model_id TEXT,
+                    toolset_digest TEXT NOT NULL,
+                    scope_digest TEXT NOT NULL,
+                    capsule_digest TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    failure_class TEXT,
+                    resume_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    UNIQUE(work_unit_id, ordinal)
                 );
                 CREATE TABLE IF NOT EXISTS worker_batches (
                     batch_id TEXT PRIMARY KEY,
@@ -241,15 +481,26 @@ class ScanStore:
                     batch_id TEXT NOT NULL REFERENCES worker_batches(batch_id) ON DELETE CASCADE,
                     work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
                     subject_id TEXT,
+                    vote_index INTEGER,
                     PRIMARY KEY (batch_id, work_unit_id)
                 );
                 CREATE TABLE IF NOT EXISTS session_bindings (
                     session_id TEXT PRIMARY KEY,
                     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
                     work_unit_id TEXT,
+                    attempt_id TEXT REFERENCES work_attempts(attempt_id),
                     snapshot_id TEXT NOT NULL REFERENCES snapshots(snapshot_id),
                     role TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS manifest_access (
+                    manifest_id TEXT NOT NULL REFERENCES repository_manifests(manifest_id) ON DELETE CASCADE,
+                    attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id),
+                    session_id TEXT NOT NULL REFERENCES session_bindings(session_id) ON DELETE CASCADE,
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    manifest_digest TEXT NOT NULL,
+                    accessed_at TEXT NOT NULL,
+                    PRIMARY KEY (attempt_id, manifest_id)
                 );
                 CREATE TABLE IF NOT EXISTS threat_models (
                     scan_id TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
@@ -301,20 +552,66 @@ class ScanStore:
                     counter_evidence_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS verification_votes (
+                    vote_id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE CASCADE,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    vote_index INTEGER NOT NULL CHECK (vote_index BETWEEN 1 AND 5),
+                    verdict TEXT NOT NULL CHECK (
+                        verdict IN ('confirmed', 'rejected', 'insufficient_evidence')
+                    ),
+                    rationale TEXT NOT NULL,
+                    counter_evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(candidate_id, vote_index)
+                );
+                CREATE TABLE IF NOT EXISTS verification_subject_access (
+                    attempt_id TEXT PRIMARY KEY REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE CASCADE,
+                    accessed_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS verification_conflicts (
                     candidate_id TEXT PRIMARY KEY REFERENCES candidates(candidate_id) ON DELETE CASCADE,
                     payload_json TEXT NOT NULL,
                     detected_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS coverage (
+                CREATE TABLE IF NOT EXISTS coverage_attestations (
+                    attestation_id TEXT PRIMARY KEY,
                     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
-                    work_unit_id TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (scan_id, work_unit_id)
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id),
+                    policy TEXT NOT NULL CHECK (
+                        policy IN ('evidence_backed_partial', 'exhaustive')
+                    ),
+                    completeness TEXT NOT NULL CHECK (
+                        completeness IN ('complete', 'partial', 'blocked')
+                    ),
+                    assigned_count INTEGER NOT NULL,
+                    read_complete_count INTEGER NOT NULL,
+                    failed_count INTEGER NOT NULL,
+                    unexamined_count INTEGER NOT NULL,
+                    attestation_digest TEXT NOT NULL,
+                    open_questions_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS coverage_records (
+                    attestation_id TEXT NOT NULL REFERENCES coverage_attestations(attestation_id) ON DELETE CASCADE,
+                    relative_path TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (
+                        state IN (
+                            'read_complete', 'read_partial', 'located',
+                            'inventoried', 'failed', 'not_applicable',
+                            'unexamined'
+                        )
+                    ),
+                    reason TEXT,
+                    receipt_digest TEXT,
+                    PRIMARY KEY (attestation_id, relative_path)
                 );
                 CREATE TABLE IF NOT EXISTS source_access (
                     access_id TEXT PRIMARY KEY,
+                    attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id),
                     session_id TEXT NOT NULL,
                     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
                     work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
@@ -323,6 +620,15 @@ class ScanStore:
                     blob_digest TEXT,
                     start_line INTEGER,
                     end_line INTEGER,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS submission_rejections (
+                    rejection_id TEXT PRIMARY KEY,
+                    attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
+                    tool_name TEXT NOT NULL,
+                    error_code TEXT NOT NULL,
+                    violations_json TEXT NOT NULL,
+                    retryable INTEGER NOT NULL,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS adjudications (
@@ -383,6 +689,16 @@ class ScanStore:
             scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)").fetchall()}
             if "dynamic_enabled" not in scan_columns:
                 connection.execute("ALTER TABLE scans ADD COLUMN dynamic_enabled INTEGER NOT NULL DEFAULT 0")
+            if "coverage_policy" not in scan_columns:
+                connection.execute(
+                    "ALTER TABLE scans ADD COLUMN coverage_policy TEXT NOT NULL "
+                    "DEFAULT 'evidence_backed_partial'"
+                )
+            if "verification_vote_count" not in scan_columns:
+                connection.execute(
+                    "ALTER TABLE scans ADD COLUMN verification_vote_count "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
             scan_column_definitions = (
                 ("owner_subject", "TEXT"),
                 ("request_source", "TEXT NOT NULL DEFAULT 'cli'"),
@@ -402,9 +718,195 @@ class ScanStore:
                 if column not in scan_columns:
                     connection.execute(f"ALTER TABLE scans ADD COLUMN {column} {definition}")
             work_unit_columns = {row["name"] for row in connection.execute("PRAGMA table_info(work_units)").fetchall()}
-            for column in ("started_at", "finished_at"):
+            for column, definition in (
+                ("started_at", "TEXT"),
+                ("finished_at", "TEXT"),
+                ("assignment_digest", "TEXT"),
+            ):
                 if column not in work_unit_columns:
-                    connection.execute(f"ALTER TABLE work_units ADD COLUMN {column} TEXT")
+                    connection.execute(
+                        f"ALTER TABLE work_units ADD COLUMN {column} {definition}"
+                    )
+            session_binding_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(session_bindings)"
+                ).fetchall()
+            }
+            if "attempt_id" not in session_binding_columns:
+                connection.execute(
+                    "ALTER TABLE session_bindings ADD COLUMN attempt_id TEXT"
+                )
+            worker_batch_unit_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(worker_batch_units)"
+                ).fetchall()
+            }
+            if "vote_index" not in worker_batch_unit_columns:
+                connection.execute(
+                    "ALTER TABLE worker_batch_units ADD COLUMN vote_index INTEGER"
+                )
+            connection.execute(
+                "UPDATE worker_batch_units SET vote_index = 1 "
+                "WHERE vote_index IS NULL AND work_unit_id IN ("
+                "SELECT work_unit_id FROM work_units WHERE phase = 'verification'"
+                ")"
+            )
+            manifest_access_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(manifest_access)"
+                ).fetchall()
+            }
+            if "attempt_id" not in manifest_access_columns:
+                connection.execute(
+                    "ALTER TABLE manifest_access ADD COLUMN attempt_id TEXT"
+                )
+            source_access_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(source_access)"
+                ).fetchall()
+            }
+            if "attempt_id" not in source_access_columns:
+                connection.execute(
+                    "ALTER TABLE source_access ADD COLUMN attempt_id TEXT"
+                )
+            legacy_bindings = connection.execute(
+                """
+                SELECT sb.session_id, sb.scan_id, sb.work_unit_id,
+                       sb.snapshot_id, sb.role, sb.created_at,
+                       wu.phase, wu.paths_json, wu.assignment_digest,
+                       wu.background_task_id, wu.status, wu.started_at,
+                       wu.finished_at, wu.updated_at,
+                       s.ruleset_digest,
+                       COALESCE(rm.manifest_digest, sn.tree_digest)
+                           AS manifest_digest
+                FROM session_bindings sb
+                JOIN work_units wu ON wu.work_unit_id = sb.work_unit_id
+                JOIN scans s ON s.scan_id = sb.scan_id
+                JOIN snapshots sn ON sn.snapshot_id = sb.snapshot_id
+                LEFT JOIN repository_manifests rm
+                    ON rm.snapshot_id = sb.snapshot_id
+                WHERE sb.role != 'coordinator' AND sb.attempt_id IS NULL
+                ORDER BY sb.created_at, sb.session_id
+                """
+            ).fetchall()
+            for legacy in legacy_bindings:
+                attempt_id = f"attempt_{uuid.uuid4().hex}"
+                ordinal = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(ordinal), 0) + 1 "
+                        "FROM work_attempts WHERE work_unit_id = ?",
+                        (legacy["work_unit_id"],),
+                    ).fetchone()[0]
+                )
+                migrated_toolset_digest = toolset_digest(())
+                migrated_scope_digest = scope_digest(
+                    snapshot_id=legacy["snapshot_id"],
+                    manifest_digest=legacy["manifest_digest"],
+                    paths=json.loads(legacy["paths_json"]),
+                    assignment_digest=legacy["assignment_digest"],
+                )
+                capsule = ExecutionCapsule(
+                    scan_id=legacy["scan_id"],
+                    snapshot_id=legacy["snapshot_id"],
+                    work_unit_id=legacy["work_unit_id"],
+                    attempt_id=attempt_id,
+                    phase=legacy["phase"],
+                    role=legacy["role"],
+                    agent_name=WORKER_ROLE_AGENTS[legacy["role"]],
+                    session_id=legacy["session_id"],
+                    provider_id=None,
+                    model_id=None,
+                    toolset_digest=migrated_toolset_digest,
+                    ruleset_digest=legacy["ruleset_digest"],
+                    scope_digest=migrated_scope_digest,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO work_attempts (
+                        attempt_id, work_unit_id, ordinal, session_id,
+                        background_task_id, agent_name, provider_id, model_id,
+                        toolset_digest, scope_digest, capsule_digest, status,
+                        failure_class, resume_count, created_at, updated_at,
+                        started_at, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?,
+                              NULL, 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        legacy["work_unit_id"],
+                        ordinal,
+                        legacy["session_id"],
+                        legacy["background_task_id"],
+                        WORKER_ROLE_AGENTS[legacy["role"]],
+                        migrated_toolset_digest,
+                        migrated_scope_digest,
+                        capsule.digest(),
+                        legacy["status"],
+                        legacy["created_at"],
+                        legacy["updated_at"],
+                        legacy["started_at"],
+                        legacy["finished_at"],
+                    ),
+                )
+                connection.execute(
+                    "UPDATE session_bindings SET attempt_id = ? "
+                    "WHERE session_id = ?",
+                    (attempt_id, legacy["session_id"]),
+                )
+                connection.execute(
+                    "UPDATE source_access SET attempt_id = ? "
+                    "WHERE session_id = ? AND attempt_id IS NULL",
+                    (attempt_id, legacy["session_id"]),
+                )
+                connection.execute(
+                    "UPDATE manifest_access SET attempt_id = ? "
+                    "WHERE session_id = ? AND attempt_id IS NULL",
+                    (attempt_id, legacy["session_id"]),
+                )
+            self._migrate_legacy_coverage(connection)
+            connection.execute(
+                "DELETE FROM coverage_attestations WHERE EXISTS ("
+                "SELECT 1 FROM coverage_attestations newer "
+                "WHERE newer.work_unit_id = coverage_attestations.work_unit_id "
+                "AND newer.attempt_id = coverage_attestations.attempt_id "
+                "AND (newer.created_at > coverage_attestations.created_at "
+                "OR (newer.created_at = coverage_attestations.created_at "
+                "AND newer.attestation_id > coverage_attestations.attestation_id))"
+                ")"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS coverage_attestations_unit_attempt "
+                "ON coverage_attestations(work_unit_id, attempt_id)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS work_attempts_one_active "
+                "ON work_attempts(work_unit_id) "
+                "WHERE status IN ('pending', 'running', 'recovering')"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS source_access_attempt_path_op "
+                "ON source_access(attempt_id, relative_path, operation)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS submission_rejections_attempt_created "
+                "ON submission_rejections(attempt_id, created_at, rejection_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS coverage_attestations_scan_unit "
+                "ON coverage_attestations(scan_id, work_unit_id, created_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS coverage_records_state "
+                "ON coverage_records(attestation_id, state)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS verification_votes_scan_candidate "
+                "ON verification_votes(scan_id, candidate_id, vote_index)"
+            )
             connection.execute(
                 "UPDATE work_units SET started_at = created_at WHERE started_at IS NULL AND status != 'pending'"
             )
@@ -545,6 +1047,73 @@ class ScanStore:
         payload["exclude_patterns"] = tuple(json.loads(payload.pop("exclude_patterns_json")))
         return SnapshotRef(**payload)
 
+    def save_repository_manifest(self, manifest: RepositoryManifest) -> None:
+        with self._lock, self._connect() as connection:
+            snapshot = connection.execute(
+                "SELECT file_count, total_bytes, omitted_file_count FROM snapshots WHERE snapshot_id = ?",
+                (manifest.snapshot_id,),
+            ).fetchone()
+            if snapshot is None:
+                raise ValueError("Manifest snapshot not found")
+            if (
+                manifest.file_count != snapshot["file_count"]
+                or manifest.total_bytes != snapshot["total_bytes"]
+                or manifest.omitted_file_count != snapshot["omitted_file_count"]
+            ):
+                raise ValueError("Repository manifest counts do not match the snapshot")
+            connection.execute(
+                "INSERT INTO repository_manifests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(snapshot_id) DO NOTHING",
+                (
+                    manifest.manifest_id,
+                    manifest.snapshot_id,
+                    manifest.manifest_digest,
+                    manifest.file_count,
+                    manifest.total_bytes,
+                    manifest.omitted_file_count,
+                    json.dumps(dict(manifest.languages), ensure_ascii=False, sort_keys=True),
+                    json.dumps(
+                        [item.public_dict() for item in manifest.components],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    manifest.created_at,
+                ),
+            )
+            persisted = connection.execute(
+                "SELECT manifest_id, manifest_digest FROM repository_manifests WHERE snapshot_id = ?",
+                (manifest.snapshot_id,),
+            ).fetchone()
+            if persisted is None or (
+                persisted["manifest_id"] != manifest.manifest_id
+                or persisted["manifest_digest"] != manifest.manifest_digest
+            ):
+                raise ValueError("Snapshot already has a different repository manifest")
+
+    def get_repository_manifest(self, snapshot_id: str) -> RepositoryManifest | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM repository_manifests WHERE snapshot_id = ?",
+                (snapshot_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        languages = json.loads(row["languages_json"])
+        components = json.loads(row["components_json"])
+        return RepositoryManifest(
+            manifest_id=row["manifest_id"],
+            snapshot_id=row["snapshot_id"],
+            manifest_digest=row["manifest_digest"],
+            file_count=row["file_count"],
+            total_bytes=row["total_bytes"],
+            omitted_file_count=row["omitted_file_count"],
+            languages=tuple(sorted((str(key), int(value)) for key, value in languages.items())),
+            components=tuple(ManifestComponent(**item) for item in components),
+            created_at=row["created_at"],
+            files=tuple(self.list_snapshot_files(snapshot_id)),
+            omissions=tuple(self.list_snapshot_omissions(snapshot_id)),
+        )
+
     def list_snapshot_files(self, snapshot_id: str) -> list[SnapshotFile]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -606,6 +1175,8 @@ class ScanStore:
         mode: str,
         ruleset_digest: str,
         dynamic_enabled: bool = False,
+        coverage_policy: str = "evidence_backed_partial",
+        verification_vote_count: int = 1,
         owner_subject: str | None = None,
         request_source: str = "cli",
         workspace_ref: str | None = None,
@@ -615,23 +1186,34 @@ class ScanStore:
         task_owner_token: str | None = None,
         task_owner_identity: str | None = None,
     ) -> str:
+        if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:
+            raise ValueError("Unsupported coverage policy")
+        if (
+            not isinstance(verification_vote_count, int)
+            or isinstance(verification_vote_count, bool)
+            or not 1 <= verification_vote_count <= 5
+        ):
+            raise ValueError("verification_vote_count must be between 1 and 5")
         scan_id = f"scan_{uuid.uuid4().hex}"
         now = _now()
         with self._lock, self._connect() as connection:
             connection.execute(
                 "INSERT INTO scans ("
                 "scan_id, parent_session_id, snapshot_id, mode, "
-                "dynamic_enabled, status, ruleset_digest, created_at, updated_at, "
+                "dynamic_enabled, coverage_policy, verification_vote_count, "
+                "status, ruleset_digest, created_at, updated_at, "
                 "owner_subject, request_source, workspace_ref, idempotency_key, "
                 "request_digest, current_phase, task_owner_pid, task_owner_token, "
                 "task_owner_identity"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     parent_session_id,
                     snapshot_id,
                     mode,
                     int(bool(dynamic_enabled)),
+                    coverage_policy,
+                    verification_vote_count,
                     "running",
                     ruleset_digest,
                     now,
@@ -657,6 +1239,7 @@ class ScanStore:
         role: str,
         paths: list[str],
         status: str = "pending",
+        assignment_digest: str | None = None,
     ) -> str:
         if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober"}:
             raise ValueError("Unsupported work-unit role")
@@ -664,6 +1247,11 @@ class ScanStore:
             raise ValueError("Work units require at least one path")
         if status not in {"pending", "running", "completed", "failed", "cancelled"}:
             raise ValueError("Unsupported work-unit status")
+        if assignment_digest is not None and (
+            len(assignment_digest) != 64
+            or any(character not in "0123456789abcdef" for character in assignment_digest)
+        ):
+            raise ValueError("assignment_digest must be a lowercase SHA-256 digest")
         work_unit_id = f"unit_{uuid.uuid4().hex}"
         now = _now()
         started_at = now if status != "pending" else None
@@ -675,8 +1263,8 @@ class ScanStore:
                 INSERT INTO work_units (
                     work_unit_id, scan_id, phase, role, paths_json,
                     session_id, background_task_id, status, created_at,
-                    updated_at, started_at, finished_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    updated_at, started_at, finished_at, assignment_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     work_unit_id,
@@ -691,6 +1279,7 @@ class ScanStore:
                     now,
                     started_at,
                     finished_at,
+                    assignment_digest,
                 ),
             )
         return work_unit_id
@@ -763,6 +1352,8 @@ class ScanStore:
                 role = str(unit.get("role") or "")
                 paths = unit.get("paths")
                 subject_id = unit.get("subject_id")
+                vote_index = unit.get("vote_index")
+                assignment_digest = unit.get("assignment_digest")
                 if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober"}:
                     raise ValueError("Unsupported work-unit role")
                 expected_role = {
@@ -786,6 +1377,31 @@ class ScanStore:
                     raise ValueError(f"{phase.title()} work units require a candidate subject")
                 if phase not in {"verification", "probing"} and subject_id is not None:
                     raise ValueError("Only verification and probing work units may have a subject")
+                if phase == "verification":
+                    required_votes = int(scan["verification_vote_count"])
+                    if (
+                        not isinstance(vote_index, int)
+                        or isinstance(vote_index, bool)
+                        or not 1 <= vote_index <= required_votes
+                    ):
+                        raise ValueError("Verification work units require a valid vote_index")
+                elif vote_index is not None:
+                    raise ValueError("Only verification work units accept vote_index")
+                if phase == "baseline" and (
+                    not isinstance(assignment_digest, str)
+                    or len(assignment_digest) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in assignment_digest
+                    )
+                ):
+                    raise ValueError(
+                        "Baseline work units require a valid assignment_digest"
+                    )
+                if phase != "baseline" and assignment_digest is not None:
+                    raise ValueError(
+                        "Only baseline work units accept assignment_digest"
+                    )
                 if subject_id is not None:
                     candidate = connection.execute(
                         "SELECT scan_id FROM candidates WHERE candidate_id = ?",
@@ -811,8 +1427,8 @@ class ScanStore:
                     INSERT INTO work_units (
                         work_unit_id, scan_id, phase, role, paths_json,
                         session_id, background_task_id, status, created_at,
-                        updated_at, started_at, finished_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        updated_at, started_at, finished_at, assignment_digest
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         work_unit_id,
@@ -827,11 +1443,14 @@ class ScanStore:
                         now,
                         None,
                         None,
+                        assignment_digest,
                     ),
                 )
                 connection.execute(
-                    "INSERT INTO worker_batch_units VALUES (?, ?, ?)",
-                    (batch_id, work_unit_id, subject_id),
+                    "INSERT INTO worker_batch_units "
+                    "(batch_id, work_unit_id, subject_id, vote_index) "
+                    "VALUES (?, ?, ?, ?)",
+                    (batch_id, work_unit_id, subject_id, vote_index),
                 )
                 created_units.append(
                     {
@@ -839,6 +1458,8 @@ class ScanStore:
                         "role": role,
                         "paths": paths,
                         "subject_id": subject_id,
+                        "vote_index": vote_index,
+                        "assignment_digest": assignment_digest,
                     }
                 )
         return {
@@ -859,9 +1480,29 @@ class ScanStore:
                 return None
             units = connection.execute(
                 """
-                SELECT wu.*, wbu.subject_id
+                SELECT wu.*, wbu.subject_id, wbu.vote_index,
+                       wa.attempt_id AS latest_attempt_id,
+                       wa.ordinal AS attempt_ordinal,
+                       wa.session_id AS attempt_session_id,
+                       wa.background_task_id AS attempt_background_task_id,
+                       wa.status AS attempt_status,
+                       wa.failure_class AS attempt_failure_class,
+                       wa.resume_count AS attempt_resume_count,
+                       wa.agent_name AS attempt_agent_name,
+                       wa.provider_id AS attempt_provider_id,
+                       wa.model_id AS attempt_model_id,
+                       wa.toolset_digest AS attempt_toolset_digest,
+                       wa.scope_digest AS attempt_scope_digest,
+                       wa.capsule_digest AS attempt_capsule_digest,
+                       wa.started_at AS attempt_started_at,
+                       wa.finished_at AS attempt_finished_at
                 FROM worker_batch_units wbu
                 JOIN work_units wu ON wu.work_unit_id = wbu.work_unit_id
+                LEFT JOIN work_attempts wa ON wa.attempt_id = (
+                    SELECT nested.attempt_id FROM work_attempts nested
+                    WHERE nested.work_unit_id = wu.work_unit_id
+                    ORDER BY nested.ordinal DESC LIMIT 1
+                )
                 WHERE wbu.batch_id = ? ORDER BY wu.created_at, wu.work_unit_id
                 """,
                 (batch_id,),
@@ -871,6 +1512,24 @@ class ScanStore:
         for row in units:
             item = dict(row)
             item["paths"] = json.loads(item.pop("paths_json"))
+            item["attempt_id"] = item.pop("latest_attempt_id")
+            item["session_id"] = item.pop("attempt_session_id") or item["session_id"]
+            item["background_task_id"] = (
+                item.pop("attempt_background_task_id")
+                or item["background_task_id"]
+            )
+            item["attempt_failure_class"] = item.pop("attempt_failure_class")
+            item["resume_count"] = item.pop("attempt_resume_count")
+            item["agent_name"] = item.pop("attempt_agent_name")
+            item["provider_id"] = item.pop("attempt_provider_id")
+            item["model_id"] = item.pop("attempt_model_id")
+            item["toolset_digest"] = item.pop("attempt_toolset_digest")
+            item["scope_digest"] = item.pop("attempt_scope_digest")
+            item["capsule_digest"] = item.pop("attempt_capsule_digest")
+            item["started_at"] = item.pop("attempt_started_at") or item["started_at"]
+            item["finished_at"] = (
+                item.pop("attempt_finished_at") or item["finished_at"]
+            )
             output["units"].append(item)
         return output
 
@@ -882,26 +1541,286 @@ class ScanStore:
             ).fetchall()
         return [batch for row in rows if (batch := self.get_worker_batch(row["batch_id"])) is not None]
 
-    def set_work_unit_runtime(
+    def create_work_attempt(
         self,
-        work_unit_id: str,
         *,
+        work_unit_id: str,
         session_id: str,
+        agent_name: str,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+        toolset_digest_value: str | None = None,
+    ) -> dict[str, Any]:
+        if not session_id or not agent_name:
+            raise ValueError("Work attempts require a session and agent identity")
+        persisted_toolset_digest = toolset_digest_value or toolset_digest(())
+        if (
+            len(persisted_toolset_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in persisted_toolset_digest
+            )
+        ):
+            raise ValueError("toolset_digest must be a lowercase SHA-256 digest")
+        now = _now()
+        attempt_id = f"attempt_{uuid.uuid4().hex}"
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT wu.*, s.snapshot_id AS scan_snapshot_id,
+                       s.ruleset_digest, s.status AS scan_status,
+                       COALESCE(rm.manifest_digest, sn.tree_digest)
+                           AS manifest_digest
+                FROM work_units wu
+                JOIN scans s ON s.scan_id = wu.scan_id
+                JOIN snapshots sn ON sn.snapshot_id = s.snapshot_id
+                LEFT JOIN repository_manifests rm
+                    ON rm.snapshot_id = s.snapshot_id
+                WHERE wu.work_unit_id = ?
+                """,
+                (work_unit_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Work unit not found")
+            if row["scan_status"] != "running":
+                raise ValueError("Only running scans may create work attempts")
+            if row["status"] not in {"pending", "running"}:
+                raise ValueError("Terminal work units cannot create fresh attempts")
+            active = connection.execute(
+                "SELECT 1 FROM work_attempts WHERE work_unit_id = ? "
+                "AND status IN ('pending', 'running', 'recovering')",
+                (work_unit_id,),
+            ).fetchone()
+            if active is not None:
+                raise ValueError("Work unit is already bound to an active attempt")
+            ordinal = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM work_attempts "
+                    "WHERE work_unit_id = ?",
+                    (work_unit_id,),
+                ).fetchone()[0]
+            )
+            if ordinal > MAX_FRESH_ATTEMPTS:
+                raise ValueError("ATTEMPTS_EXHAUSTED: fresh attempt budget exhausted")
+            paths = json.loads(row["paths_json"])
+            persisted_scope_digest = scope_digest(
+                snapshot_id=row["scan_snapshot_id"],
+                manifest_digest=row["manifest_digest"],
+                paths=paths,
+                assignment_digest=row["assignment_digest"],
+            )
+            capsule = ExecutionCapsule(
+                scan_id=row["scan_id"],
+                snapshot_id=row["scan_snapshot_id"],
+                work_unit_id=work_unit_id,
+                attempt_id=attempt_id,
+                phase=row["phase"],
+                role=row["role"],
+                agent_name=agent_name,
+                session_id=session_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                toolset_digest=persisted_toolset_digest,
+                ruleset_digest=row["ruleset_digest"],
+                scope_digest=persisted_scope_digest,
+            )
+            connection.execute(
+                """
+                INSERT INTO work_attempts (
+                    attempt_id, work_unit_id, ordinal, session_id,
+                    background_task_id, agent_name, provider_id, model_id,
+                    toolset_digest, scope_digest, capsule_digest, status,
+                    failure_class, resume_count, created_at, updated_at,
+                    started_at, finished_at
+                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'running',
+                          NULL, 0, ?, ?, ?, NULL)
+                """,
+                (
+                    attempt_id,
+                    work_unit_id,
+                    ordinal,
+                    session_id,
+                    agent_name,
+                    provider_id,
+                    model_id,
+                    persisted_toolset_digest,
+                    persisted_scope_digest,
+                    capsule.digest(),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO session_bindings (
+                    session_id, scan_id, work_unit_id, attempt_id,
+                    snapshot_id, role, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    row["scan_id"],
+                    work_unit_id,
+                    attempt_id,
+                    row["scan_snapshot_id"],
+                    row["role"],
+                    now,
+                ),
+            )
+            cursor = connection.execute(
+                "UPDATE work_units SET status = 'running', updated_at = ?, "
+                "started_at = COALESCE(started_at, ?) "
+                "WHERE work_unit_id = ? AND status IN ('pending', 'running')",
+                (now, now, work_unit_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Work unit changed while creating its attempt")
+        attempt = self.get_work_attempt(attempt_id)
+        if attempt is None:
+            raise ValueError("Work attempt was not persisted")
+        return attempt
+
+    def get_work_attempt(self, attempt_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            capsule = self._execution_capsule(connection, attempt_id)
+        item = dict(row)
+        item["capsule"] = capsule.public_dict()
+        return item
+
+    def list_work_attempts(self, work_unit_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT attempt_id FROM work_attempts WHERE work_unit_id = ? "
+                "ORDER BY ordinal",
+                (work_unit_id,),
+            ).fetchall()
+        return [
+            attempt
+            for row in rows
+            if (attempt := self.get_work_attempt(row["attempt_id"])) is not None
+        ]
+
+    @staticmethod
+    def _execution_capsule(
+        connection: sqlite3.Connection,
+        attempt_id: str,
+    ) -> ExecutionCapsule:
+        row = connection.execute(
+            """
+            SELECT wa.*, wu.scan_id, wu.phase, wu.role,
+                   s.snapshot_id, s.ruleset_digest
+            FROM work_attempts wa
+            JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id
+            JOIN scans s ON s.scan_id = wu.scan_id
+            WHERE wa.attempt_id = ?
+            """,
+            (attempt_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Work attempt not found")
+        return ExecutionCapsule(
+            scan_id=row["scan_id"],
+            snapshot_id=row["snapshot_id"],
+            work_unit_id=row["work_unit_id"],
+            attempt_id=row["attempt_id"],
+            phase=row["phase"],
+            role=row["role"],
+            agent_name=row["agent_name"],
+            session_id=row["session_id"],
+            provider_id=row["provider_id"],
+            model_id=row["model_id"],
+            toolset_digest=row["toolset_digest"],
+            ruleset_digest=row["ruleset_digest"],
+            scope_digest=row["scope_digest"],
+        )
+
+    def set_work_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
         background_task_id: str,
         started_at: str | None,
     ) -> None:
         if started_at is not None:
             parsed = datetime.fromisoformat(started_at)
             if parsed.tzinfo is None:
-                raise ValueError("Work-unit timestamps must include a timezone")
+                raise ValueError("Work-attempt timestamps must include a timezone")
         with self._lock, self._connect() as connection:
+            now = _now()
             cursor = connection.execute(
-                "UPDATE work_units SET background_task_id = ?, started_at = ?, updated_at = ? "
-                "WHERE work_unit_id = ? AND session_id = ? AND status = 'running'",
-                (background_task_id, started_at, _now(), work_unit_id, session_id),
+                "UPDATE work_attempts SET background_task_id = ?, status = 'running', "
+                "started_at = COALESCE(?, started_at), updated_at = ? "
+                "WHERE attempt_id = ? AND status IN ('running', 'recovering')",
+                (background_task_id, started_at, now, attempt_id),
             )
             if cursor.rowcount != 1:
-                raise ValueError("Work unit is not bound to the worker session")
+                raise ValueError("Work attempt is not active")
+
+    def prepare_work_attempt_resume(self, attempt_id: str) -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE work_attempts SET status = 'recovering', "
+                "resume_count = resume_count + 1, updated_at = ? "
+                "WHERE attempt_id = ? AND status = 'running' "
+                "AND resume_count < ?",
+                (_now(), attempt_id, MAX_SAME_SESSION_RESUMES),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Same-session resume budget is exhausted")
+        attempt = self.get_work_attempt(attempt_id)
+        if attempt is None:
+            raise ValueError("Work attempt not found")
+        return attempt
+
+    def finish_work_attempt(
+        self,
+        attempt_id: str | None,
+        *,
+        status: str,
+        failure_class: str | None = None,
+        work_unit_status: str | None = None,
+    ) -> None:
+        if attempt_id is None:
+            raise ValueError("Work attempt is required")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("Unsupported work-attempt terminal status")
+        if work_unit_status not in {None, "completed", "failed", "cancelled"}:
+            raise ValueError("Unsupported work-unit terminal status")
+        if work_unit_status is None and status in {"completed", "cancelled"}:
+            work_unit_status = status
+        now = _now()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT work_unit_id, status FROM work_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Work attempt not found")
+            if row["status"] in {"completed", "failed", "cancelled"}:
+                if row["status"] == status:
+                    return
+                raise ValueError("Work attempt is already terminal")
+            cursor = connection.execute(
+                "UPDATE work_attempts SET status = ?, failure_class = ?, "
+                "finished_at = ?, updated_at = ? WHERE attempt_id = ? "
+                "AND status IN ('pending', 'running', 'recovering')",
+                (status, failure_class, now, now, attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Work attempt status changed concurrently")
+            if work_unit_status is not None:
+                connection.execute(
+                    "UPDATE work_units SET status = ?, updated_at = ?, finished_at = ? "
+                    "WHERE work_unit_id = ? AND status IN ('pending', 'running')",
+                    (work_unit_status, now, now, row["work_unit_id"]),
+                )
 
     def update_worker_batch_status(self, batch_id: str, status: str) -> None:
         if status not in {"pending", "running", "completed", "partial", "failed", "cancelled"}:
@@ -935,7 +1854,7 @@ class ScanStore:
         role: str,
     ) -> bool:
         with self._connect() as connection:
-            if role in {"threat_modeler", "baseline", "investigator", "verifier"}:
+            if role in {"threat_modeler", "baseline", "investigator"}:
                 guided = connection.execute(
                     "SELECT 1 FROM work_units wu "
                     "JOIN scan_knowledge_base kb ON kb.scan_id = wu.scan_id "
@@ -956,24 +1875,28 @@ class ScanStore:
                 ).fetchone()
             elif role in {"baseline", "investigator"}:
                 row = connection.execute(
-                    "SELECT 1 FROM coverage WHERE work_unit_id = ?",
+                    "SELECT completeness FROM coverage_attestations "
+                    "WHERE work_unit_id = ? "
+                    "ORDER BY created_at DESC, attestation_id DESC LIMIT 1",
                     (work_unit_id,),
                 ).fetchone()
             elif role == "verifier":
                 assignment = connection.execute(
-                    "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
+                    "SELECT subject_id, vote_index FROM worker_batch_units "
+                    "WHERE work_unit_id = ?",
                     (work_unit_id,),
                 ).fetchone()
-                if assignment is not None and assignment["subject_id"] is not None:
-                    row = connection.execute(
-                        "SELECT 1 FROM verifications WHERE work_unit_id = ? AND candidate_id = ?",
-                        (work_unit_id, assignment["subject_id"]),
-                    ).fetchone()
-                else:
-                    row = connection.execute(
-                        "SELECT 1 FROM verifications WHERE work_unit_id = ?",
-                        (work_unit_id,),
-                    ).fetchone()
+                if assignment is None or assignment["subject_id"] is None:
+                    return False
+                row = connection.execute(
+                    "SELECT 1 FROM verification_votes WHERE work_unit_id = ? "
+                    "AND candidate_id = ? AND vote_index = ?",
+                    (
+                        work_unit_id,
+                        assignment["subject_id"],
+                        assignment["vote_index"],
+                    ),
+                ).fetchone()
             elif role == "prober":
                 assignment = connection.execute(
                     "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
@@ -997,6 +1920,9 @@ class ScanStore:
                 )
             except (json.JSONDecodeError, TypeError, ValueError):
                 return False
+        elif role in {"baseline", "investigator"}:
+            if row["completeness"] == "blocked":
+                return False
         return True
 
     def list_unverified_candidates(
@@ -1006,26 +1932,49 @@ class ScanStore:
         limit: int = 32,
     ) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            self._require_scan_status(connection, scan_id, {"running"})
+            scan = self._require_scan_status(connection, scan_id, {"running"})
+            vote_count = int(scan["verification_vote_count"])
             rows = connection.execute(
                 """
                 SELECT c.* FROM candidates c
                 LEFT JOIN verifications v ON v.candidate_id = c.candidate_id
                 WHERE c.scan_id = ? AND v.candidate_id IS NULL
-                  AND NOT EXISTS (
-                    SELECT 1 FROM worker_batch_units assigned
-                    JOIN work_units wu ON wu.work_unit_id = assigned.work_unit_id
-                    WHERE assigned.subject_id = c.candidate_id
-                      AND wu.status IN ('pending', 'running')
-                  )
-                ORDER BY c.created_at, c.candidate_id LIMIT ?
+                ORDER BY c.created_at, c.candidate_id
                 """,
-                (scan_id, max(1, min(int(limit), 32))),
+                (scan_id,),
             ).fetchall()
+            remaining = max(1, min(int(limit), 32))
             output: list[dict[str, Any]] = []
             for row in rows:
+                used_indices = {
+                    int(item["vote_index"])
+                    for item in connection.execute(
+                        "SELECT vote_index FROM verification_votes "
+                        "WHERE candidate_id = ?",
+                        (row["candidate_id"],),
+                    ).fetchall()
+                }
+                active_indices = {
+                    int(item["vote_index"])
+                    for item in connection.execute(
+                        "SELECT assigned.vote_index FROM worker_batch_units assigned "
+                        "JOIN work_units wu ON wu.work_unit_id = assigned.work_unit_id "
+                        "WHERE assigned.subject_id = ? "
+                        "AND assigned.vote_index IS NOT NULL "
+                        "AND wu.status IN ('pending', 'running')",
+                        (row["candidate_id"],),
+                    ).fetchall()
+                }
+                pending_indices = [
+                    index
+                    for index in range(1, vote_count + 1)
+                    if index not in used_indices and index not in active_indices
+                ][:remaining]
+                if not pending_indices:
+                    continue
                 item = dict(row)
                 item["payload"] = json.loads(item.pop("payload_json"))
+                item["pending_vote_indices"] = pending_indices
                 evidence = connection.execute(
                     "SELECT relative_path, blob_digest, start_line, end_line, "
                     "excerpt_hash, ordinal "
@@ -1035,6 +1984,9 @@ class ScanStore:
                 ).fetchall()
                 item["evidence"] = [dict(record) for record in evidence]
                 output.append(item)
+                remaining -= len(pending_indices)
+                if remaining == 0:
+                    break
         return output
 
     def list_confirmed_without_dynamic_record(
@@ -1043,12 +1995,16 @@ class ScanStore:
         *,
         limit: int = 32,
     ) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 32))
         with self._connect() as connection:
             scan = self._require_scan_status(connection, scan_id, {"running"})
             if not bool(scan["dynamic_enabled"]):
                 return []
+            category_placeholders = ", ".join(
+                "?" for _ in DYNAMIC_EXECUTION_CATEGORIES
+            )
             rows = connection.execute(
-                """
+                f"""
                 SELECT c.* FROM candidates c
                 JOIN verifications v ON v.candidate_id = c.candidate_id
                 LEFT JOIN dynamic_runs d ON d.candidate_id = c.candidate_id
@@ -1061,9 +2017,13 @@ class ScanStore:
                       AND wu.role = 'prober'
                       AND wu.status IN ('pending', 'running')
                   )
-                ORDER BY c.created_at, c.candidate_id LIMIT ?
+                ORDER BY CASE WHEN LOWER(TRIM(COALESCE(
+                    json_extract(c.payload_json, '$.category'), ''
+                ))) IN ({category_placeholders}) THEN 0 ELSE 1 END,
+                c.created_at, c.candidate_id
+                LIMIT ?
                 """,
-                (scan_id, max(1, min(int(limit), 32))),
+                (scan_id, *DYNAMIC_EXECUTION_CATEGORIES, bounded_limit),
             ).fetchall()
         output: list[dict[str, Any]] = []
         for row in rows:
@@ -1215,10 +2175,20 @@ class ScanStore:
         with self._lock, self._connect() as connection:
             now = _now()
             task_rows = connection.execute(
-                "SELECT background_task_id FROM work_units WHERE scan_id = ? "
-                "AND status IN ('pending', 'running') AND background_task_id IS NOT NULL",
+                "SELECT wa.background_task_id FROM work_attempts wa "
+                "JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id "
+                "WHERE wu.scan_id = ? "
+                "AND wa.status IN ('pending', 'running', 'recovering') "
+                "AND wa.background_task_id IS NOT NULL",
                 (scan_id,),
             ).fetchall()
+            connection.execute(
+                "UPDATE work_attempts SET status = 'cancelled', updated_at = ?, "
+                "finished_at = ? WHERE work_unit_id IN ("
+                "SELECT work_unit_id FROM work_units WHERE scan_id = ?"
+                ") AND status IN ('pending', 'running', 'recovering')",
+                (now, now, scan_id),
+            )
             connection.execute(
                 "UPDATE work_units SET status = 'cancelled', updated_at = ?, "
                 "finished_at = ? "
@@ -1749,6 +2719,14 @@ class ScanStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("Work unit status changed concurrently")
+            if status in {"completed", "failed", "cancelled"}:
+                connection.execute(
+                    "UPDATE work_attempts SET status = ?, updated_at = ?, "
+                    "finished_at = COALESCE(finished_at, ?) "
+                    "WHERE work_unit_id = ? "
+                    "AND status IN ('pending', 'running', 'recovering')",
+                    (status, now, now, work_unit_id),
+                )
 
     def get_scan(self, scan_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -2305,6 +3283,25 @@ class ScanStore:
             raise ValueError("Coordinator bindings cannot reference a work unit")
         if role != "coordinator" and work_unit_id is None:
             raise ValueError("Worker bindings require a work unit")
+        if role != "coordinator":
+            work_unit = self.get_work_unit(work_unit_id)
+            scan = self.get_scan(scan_id)
+            if work_unit is None:
+                raise ValueError("Work unit not found")
+            if scan is not None and scan["snapshot_id"] != snapshot_id:
+                raise ValueError("Binding snapshot does not belong to the scan")
+            if (
+                scan is None
+                or work_unit["scan_id"] != scan_id
+                or work_unit["role"] != role
+            ):
+                raise ValueError("Work unit does not match the binding")
+            self.create_work_attempt(
+                work_unit_id=work_unit_id,
+                session_id=session_id,
+                agent_name=WORKER_ROLE_AGENTS[role],
+            )
+            return
         with self._lock, self._connect() as connection:
             scan = connection.execute(
                 "SELECT snapshot_id, status FROM scans WHERE scan_id = ?",
@@ -2316,55 +3313,37 @@ class ScanStore:
                 raise ValueError("Binding snapshot does not belong to the scan")
             if scan["status"] != "running":
                 raise ValueError("Only running scans may create session bindings")
-            if work_unit_id is not None:
-                work_unit = connection.execute(
-                    "SELECT scan_id, role, status, session_id FROM work_units WHERE work_unit_id = ?",
-                    (work_unit_id,),
-                ).fetchone()
-                if work_unit is None:
-                    raise ValueError("Work unit not found")
-                if work_unit["scan_id"] != scan_id or work_unit["role"] != role:
-                    raise ValueError("Work unit does not match the binding")
-                if work_unit["status"] not in {"pending", "running"}:
-                    raise ValueError("Completed work units cannot be rebound")
-                if work_unit["session_id"] not in {None, session_id}:
-                    raise ValueError("Work unit is already bound to another session")
             existing = connection.execute(
-                "SELECT scan_id, work_unit_id, snapshot_id, role FROM session_bindings WHERE session_id = ?",
+                "SELECT scan_id, work_unit_id, attempt_id, snapshot_id, role "
+                "FROM session_bindings WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
-            expected = (scan_id, work_unit_id, snapshot_id, role)
+            expected = (scan_id, work_unit_id, None, snapshot_id, role)
             if existing is not None and tuple(existing) != expected:
                 raise ValueError("Session is already bound to another audit context")
             connection.execute(
                 """
-                INSERT INTO session_bindings VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO session_bindings (
+                    session_id, scan_id, work_unit_id, attempt_id,
+                    snapshot_id, role, created_at
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     scan_id = excluded.scan_id,
                     work_unit_id = excluded.work_unit_id,
+                    attempt_id = excluded.attempt_id,
                     snapshot_id = excluded.snapshot_id,
                     role = excluded.role,
                     created_at = excluded.created_at
                 """,
                 (session_id, scan_id, work_unit_id, snapshot_id, role, _now()),
             )
-            if work_unit_id is not None:
-                now = _now()
-                cursor = connection.execute(
-                    "UPDATE work_units SET session_id = ?, status = 'running', "
-                    "updated_at = ?, started_at = COALESCE(started_at, ?) "
-                    "WHERE work_unit_id = ? "
-                    "AND (session_id IS NULL OR session_id = ?)",
-                    (session_id, now, now, work_unit_id, session_id),
-                )
-                if cursor.rowcount != 1:
-                    raise ValueError("Work unit is already bound to another session")
 
     def resolve_binding(self, session_id: str) -> SessionBinding | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT session_id, scan_id, work_unit_id, snapshot_id, role
+                SELECT session_id, scan_id, work_unit_id, snapshot_id, role,
+                       attempt_id
                 FROM session_bindings WHERE session_id = ?
                 """,
                 (session_id,),
@@ -2378,6 +3357,125 @@ class ScanStore:
         if binding.role not in roles:
             raise ValueError(f"Session role {binding.role!r} cannot perform this operation")
         return binding
+
+    def verify_execution_capsule(
+        self,
+        binding: SessionBinding,
+        *,
+        agent_name: str,
+        provider_id: str | None,
+        model_id: str | None,
+        toolset_digest_value: str,
+    ) -> dict[str, Any]:
+        if binding.work_unit_id is None or binding.attempt_id is None:
+            raise ExecutionCapsuleError("worker binding has no work attempt")
+        mismatches: list[dict[str, Any]] = []
+        capsule: ExecutionCapsule | None = None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT wa.*, wu.scan_id AS unit_scan_id, wu.phase, wu.role,
+                       wu.paths_json, wu.assignment_digest,
+                       s.snapshot_id AS scan_snapshot_id, s.ruleset_digest,
+                       COALESCE(rm.manifest_digest, sn.tree_digest)
+                           AS manifest_digest
+                FROM work_attempts wa
+                JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id
+                JOIN scans s ON s.scan_id = wu.scan_id
+                JOIN snapshots sn ON sn.snapshot_id = s.snapshot_id
+                LEFT JOIN repository_manifests rm
+                    ON rm.snapshot_id = s.snapshot_id
+                WHERE wa.session_id = ?
+                """,
+                (binding.session_id,),
+            ).fetchone()
+            if row is None:
+                raise ExecutionCapsuleError("session has no persisted work attempt")
+            if row["status"] not in {"running"}:
+                raise ExecutionCapsuleError(
+                    "work attempt is not active",
+                    code="ATTEMPT_NOT_ACTIVE",
+                )
+            capsule = self._execution_capsule(connection, row["attempt_id"])
+
+            def compare(field: str, expected: Any, actual: Any) -> None:
+                if expected != actual:
+                    mismatches.append(
+                        {"field": field, "expected": expected, "actual": actual}
+                    )
+
+            compare("attempt_id", row["attempt_id"], binding.attempt_id)
+            compare("work_unit_id", row["work_unit_id"], binding.work_unit_id)
+            compare("scan_id", row["unit_scan_id"], binding.scan_id)
+            compare("snapshot_id", row["scan_snapshot_id"], binding.snapshot_id)
+            compare("role", row["role"], binding.role)
+            compare("agent_name", row["agent_name"], agent_name)
+            compare(
+                "role_agent",
+                WORKER_ROLE_AGENTS.get(row["role"]),
+                row["agent_name"],
+            )
+            compare("provider_id", row["provider_id"], provider_id)
+            compare("model_id", row["model_id"], model_id)
+            compare(
+                "toolset_digest",
+                row["toolset_digest"],
+                toolset_digest_value,
+            )
+            expected_scope_digest = scope_digest(
+                snapshot_id=row["scan_snapshot_id"],
+                manifest_digest=row["manifest_digest"],
+                paths=json.loads(row["paths_json"]),
+                assignment_digest=row["assignment_digest"],
+            )
+            compare("scope_digest", row["scope_digest"], expected_scope_digest)
+            compare("capsule_digest", row["capsule_digest"], capsule.digest())
+            if mismatches:
+                now = _now()
+                connection.execute(
+                    "UPDATE work_attempts SET status = 'failed', "
+                    "failure_class = 'identity_capsule_mismatch', "
+                    "finished_at = ?, updated_at = ? WHERE attempt_id = ? "
+                    "AND status IN ('pending', 'running', 'recovering')",
+                    (now, now, row["attempt_id"]),
+                )
+                connection.execute(
+                    "UPDATE work_units SET status = 'failed', finished_at = ?, "
+                    "updated_at = ? WHERE work_unit_id = ? "
+                    "AND status IN ('pending', 'running')",
+                    (now, now, row["work_unit_id"]),
+                )
+                connection.execute(
+                    "INSERT INTO scan_events ("
+                    "scan_id, phase_run_id, event_type, level, title, "
+                    "payload_json, created_at"
+                    ") VALUES (?, NULL, 'identity.mismatch', 'error', ?, ?, ?)",
+                    (
+                        row["unit_scan_id"],
+                        "Execution capsule mismatch",
+                        json.dumps(
+                            {
+                                "attempt_id": row["attempt_id"],
+                                "work_unit_id": row["work_unit_id"],
+                                "mismatches": mismatches,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        now,
+                    ),
+                )
+        if mismatches:
+            snapshot_mismatch = any(
+                item["field"] == "snapshot_id" for item in mismatches
+            )
+            raise ExecutionCapsuleError(
+                "persisted execution identity does not match runtime context",
+                code=("SNAPSHOT_MISMATCH" if snapshot_mismatch else "IDENTITY_CAPSULE_MISMATCH"),
+            )
+        if capsule is None:
+            raise ExecutionCapsuleError("execution capsule is unavailable")
+        return capsule.public_dict()
 
     def get_knowledge_base_metadata(self, scan_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -2400,7 +3498,6 @@ class ScanStore:
             "threat_modeler",
             "baseline",
             "investigator",
-            "verifier",
         }
         if binding.role not in allowed_roles:
             raise ValueError("This session role cannot read the audit knowledge base")
@@ -2462,6 +3559,88 @@ class ScanStore:
         if access is None:
             raise ValueError("This guided audit requires audit_knowledge_base before submitting this phase")
 
+    def record_manifest_access(
+        self,
+        binding: SessionBinding,
+        manifest: RepositoryManifest,
+    ) -> None:
+        if (
+            binding.role != "threat_modeler"
+            or binding.work_unit_id is None
+            or binding.attempt_id is None
+        ):
+            raise ValueError("Repository summary access requires a threat-modeler work unit")
+        if manifest.snapshot_id != binding.snapshot_id:
+            raise ValueError("Repository manifest does not match the bound snapshot")
+        with self._lock, self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            connection.execute(
+                "INSERT INTO manifest_access ("
+                "manifest_id, attempt_id, session_id, work_unit_id, "
+                "manifest_digest, accessed_at"
+                ") VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT DO NOTHING",
+                (
+                    manifest.manifest_id,
+                    binding.attempt_id,
+                    binding.session_id,
+                    binding.work_unit_id,
+                    manifest.manifest_digest,
+                    _now(),
+                ),
+            )
+
+    def require_repository_summary_consumed(self, binding: SessionBinding) -> None:
+        if (
+            binding.role != "threat_modeler"
+            or binding.work_unit_id is None
+            or binding.attempt_id is None
+        ):
+            raise ValueError("Repository summary consumption requires a threat-modeler work unit")
+        with self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            manifest = connection.execute(
+                "SELECT manifest_id, manifest_digest FROM repository_manifests WHERE snapshot_id = ?",
+                (binding.snapshot_id,),
+            ).fetchone()
+            access = None
+            if manifest is not None:
+                access = connection.execute(
+                    "SELECT 1 FROM manifest_access "
+                    "WHERE manifest_id = ? AND attempt_id = ? "
+                    "AND session_id = ? AND work_unit_id = ? "
+                    "AND manifest_digest = ?",
+                    (
+                        manifest["manifest_id"],
+                        binding.attempt_id,
+                        binding.session_id,
+                        binding.work_unit_id,
+                        manifest["manifest_digest"],
+                    ),
+                ).fetchone()
+            if manifest is None:
+                snapshot = connection.execute(
+                    "SELECT tree_digest FROM snapshots WHERE snapshot_id = ?",
+                    (binding.snapshot_id,),
+                ).fetchone()
+                access = connection.execute(
+                    "SELECT 1 FROM source_access "
+                    "WHERE work_unit_id = ? AND session_id = ? "
+                    "AND operation = 'repository_summary' AND relative_path = '.' "
+                    "AND blob_digest = ?",
+                    (
+                        binding.work_unit_id,
+                        binding.session_id,
+                        snapshot["tree_digest"] if snapshot is not None else None,
+                    ),
+                ).fetchone()
+        if access is None:
+            raise ValueError(
+                "Canonical repository summary has not been consumed; call audit_repository_summary before submitting"
+            )
+
     def save_threat_model(
         self,
         binding: SessionBinding,
@@ -2471,11 +3650,7 @@ class ScanStore:
         if binding.role != "threat_modeler" or binding.work_unit_id is None:
             raise ValueError("Threat models require a threat-modeler work unit")
         self.validate_threat_model_contract(payload, evidence)
-        self.validate_coverage_access(
-            binding,
-            inventoried_paths=["."],
-            analyzed_paths=[],
-        )
+        self.require_repository_summary_consumed(binding)
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
@@ -2665,16 +3840,23 @@ class ScanStore:
     ) -> None:
         if binding.work_unit_id is None:
             raise ValueError("Worker operation requires a bound work unit")
-        work_unit = connection.execute(
-            "SELECT scan_id, role, session_id, status FROM work_units WHERE work_unit_id = ?",
-            (binding.work_unit_id,),
+        active = connection.execute(
+            """
+            SELECT wu.scan_id, wu.role, wu.status AS work_unit_status,
+                   wa.session_id, wa.status AS attempt_status
+            FROM work_units wu
+            JOIN work_attempts wa ON wa.work_unit_id = wu.work_unit_id
+            WHERE wu.work_unit_id = ? AND wa.attempt_id = ?
+            """,
+            (binding.work_unit_id, binding.attempt_id),
         ).fetchone()
         if (
-            work_unit is None
-            or work_unit["scan_id"] != binding.scan_id
-            or work_unit["role"] != binding.role
-            or work_unit["session_id"] != binding.session_id
-            or work_unit["status"] != "running"
+            active is None
+            or active["scan_id"] != binding.scan_id
+            or active["role"] != binding.role
+            or active["session_id"] != binding.session_id
+            or active["work_unit_status"] != "running"
+            or active["attempt_status"] != "running"
         ):
             raise ValueError("Worker binding is not active")
 
@@ -2752,18 +3934,25 @@ class ScanStore:
     ) -> None:
         if not accesses:
             return
+        if binding.attempt_id is None:
+            raise ValueError("Source access requires a bound work attempt")
         operations = {str(item.get("operation") or "") for item in accesses}
-        if not operations <= {"inventory", "read", "search"}:
+        if not operations <= {"repository_summary", "inventory", "read", "search"}:
             raise ValueError("Unsupported source access operation")
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
             now = _now()
             connection.executemany(
-                "INSERT INTO source_access VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO source_access ("
+                "access_id, attempt_id, session_id, scan_id, work_unit_id, "
+                "operation, relative_path, blob_digest, start_line, end_line, "
+                "created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         f"access_{uuid.uuid4().hex}",
+                        binding.attempt_id,
                         binding.session_id,
                         binding.scan_id,
                         binding.work_unit_id,
@@ -2778,104 +3967,70 @@ class ScanStore:
                 ],
             )
 
-    def validate_coverage_access(
+    def list_source_accesses(self, attempt_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT operation, relative_path, blob_digest, start_line, "
+                "end_line FROM source_access WHERE attempt_id = ? "
+                "ORDER BY created_at, access_id",
+                (attempt_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_submission_rejection(
         self,
         binding: SessionBinding,
         *,
-        inventoried_paths: list[str],
-        analyzed_paths: list[str],
-    ) -> None:
-        if binding.work_unit_id is None:
-            raise ValueError("Coverage requires a bound work unit")
-        with self._connect() as connection:
+        tool_name: str,
+        error_code: str,
+        violations: list[dict[str, Any]],
+        retryable: bool,
+    ) -> dict[str, Any]:
+        if binding.attempt_id is None or binding.work_unit_id is None:
+            raise ValueError("Submission rejection requires a bound work attempt")
+        rejection_id = f"rejection_{uuid.uuid4().hex}"
+        now = _now()
+        with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
-            file_rows = connection.execute(
-                "SELECT relative_path, blob_digest, size_bytes, line_count, is_binary "
-                "FROM snapshot_files "
-                "WHERE snapshot_id = ?",
-                (binding.snapshot_id,),
-            ).fetchall()
-            omission_rows = connection.execute(
-                "SELECT relative_path FROM snapshot_omissions WHERE snapshot_id = ?",
-                (binding.snapshot_id,),
-            ).fetchall()
-            access_rows = connection.execute(
-                "SELECT operation, relative_path, blob_digest, start_line, end_line "
-                "FROM source_access "
-                "WHERE work_unit_id = ? AND session_id = ?",
-                (binding.work_unit_id, binding.session_id),
-            ).fetchall()
-
-        def covered(relative_path: str, claims: list[str]) -> bool:
-            return any(
-                claim == "." or relative_path == claim or relative_path.startswith(f"{claim}/") for claim in claims
+            connection.execute(
+                "INSERT INTO submission_rejections VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    rejection_id,
+                    binding.attempt_id,
+                    tool_name,
+                    error_code,
+                    json.dumps(violations, ensure_ascii=False, sort_keys=True),
+                    int(retryable),
+                    now,
+                ),
             )
-
-        inventoried_access = {row["relative_path"] for row in access_rows if row["operation"] == "inventory"}
-        expected_inventory = {
-            row["relative_path"]
-            for row in [*file_rows, *omission_rows]
-            if covered(row["relative_path"], inventoried_paths)
+            event_payload = {
+                "rejection_id": rejection_id,
+                "attempt_id": binding.attempt_id,
+                "work_unit_id": binding.work_unit_id,
+                "tool": tool_name,
+                "error_code": error_code,
+                "retryable": retryable,
+                "violation_count": len(violations),
+            }
+            connection.execute(
+                "INSERT INTO scan_events ("
+                "scan_id, phase_run_id, event_type, level, title, "
+                "payload_json, created_at"
+                ") VALUES (?, NULL, 'submission.rejected', 'warning', ?, ?, ?)",
+                (
+                    binding.scan_id,
+                    "提交校验被拒绝",
+                    json.dumps(event_payload, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+        return {
+            **event_payload,
+            "violations": violations,
+            "created_at": now,
         }
-        missing_inventory = sorted(expected_inventory - inventoried_access)
-        if missing_inventory:
-            raise ValueError(
-                "Inventory coverage is not backed by audit_inventory access: " + ", ".join(missing_inventory[:20])
-            )
-
-        search_access = {
-            (row["relative_path"], row["blob_digest"]) for row in access_rows if row["operation"] == "search"
-        }
-        reads_by_file: dict[tuple[str, str], list[tuple[int, int]]] = {}
-        for row in access_rows:
-            if (
-                row["operation"] == "read"
-                and row["blob_digest"]
-                and row["start_line"] is not None
-                and row["end_line"] is not None
-            ):
-                reads_by_file.setdefault(
-                    (row["relative_path"], row["blob_digest"]),
-                    [],
-                ).append((row["start_line"], row["end_line"]))
-
-        def fully_read(
-            path: str,
-            digest: str,
-            size_bytes: int,
-            line_count: int,
-        ) -> bool:
-            if size_bytes == 0:
-                return True
-            key = (path, digest)
-            if key in search_access:
-                return True
-            intervals = sorted(reads_by_file.get(key, []))
-            covered_until = 0
-            for start_line, end_line in intervals:
-                if start_line > covered_until + 1:
-                    return False
-                covered_until = max(covered_until, end_line)
-                if covered_until >= line_count:
-                    return True
-            return False
-
-        missing_analysis = sorted(
-            row["relative_path"]
-            for row in file_rows
-            if covered(row["relative_path"], analyzed_paths)
-            and not fully_read(
-                row["relative_path"],
-                row["blob_digest"],
-                row["size_bytes"],
-                row["line_count"],
-            )
-        )
-        if missing_analysis:
-            raise ValueError(
-                "Analysis coverage is not backed by complete snapshot source reads: " + ", ".join(missing_analysis[:20])
-            )
 
     def require_verifier_source_access(
         self,
@@ -2891,9 +4046,9 @@ class ScanStore:
             raise ValueError("Candidate has no evidence to verify")
         reads = connection.execute(
             "SELECT relative_path, blob_digest, start_line, end_line "
-            "FROM source_access WHERE work_unit_id = ? AND session_id = ? "
+            "FROM source_access WHERE attempt_id = ? "
             "AND operation = 'read'",
-            (binding.work_unit_id, binding.session_id),
+            (binding.attempt_id,),
         ).fetchall()
         for item in evidence:
             independently_read = any(
@@ -2923,11 +4078,14 @@ class ScanStore:
     def get_verification_subject(self, binding: SessionBinding) -> dict[str, Any]:
         if binding.role != "verifier" or binding.work_unit_id is None:
             raise ValueError("Verification subject requires a verifier work unit")
-        with self._connect() as connection:
+        if binding.attempt_id is None:
+            raise ValueError("Verification subject requires a bound work attempt")
+        with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
             assignment = connection.execute(
-                "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
+                "SELECT subject_id, vote_index FROM worker_batch_units "
+                "WHERE work_unit_id = ?",
                 (binding.work_unit_id,),
             ).fetchone()
             if assignment is None or not assignment["subject_id"]:
@@ -2944,12 +4102,38 @@ class ScanStore:
                 "ORDER BY ordinal, rowid",
                 (assignment["subject_id"],),
             ).fetchall()
-        output = dict(candidate)
-        output["payload"] = json.loads(output.pop("payload_json"))
-        output["evidence"] = [dict(item) for item in evidence]
+            threat_model = connection.execute(
+                "SELECT payload_json FROM threat_models WHERE scan_id = ?",
+                (binding.scan_id,),
+            ).fetchone()
+            if threat_model is None:
+                raise ValueError("Verification requires a trusted threat model")
+            threat_payload = json.loads(threat_model["payload_json"])
+            output = {
+                "candidate_id": candidate["candidate_id"],
+                "vote_index": assignment["vote_index"],
+                "trust": "untrusted_candidate_claim",
+                "claim": json.loads(candidate["payload_json"]),
+                "evidence": [dict(item) for item in evidence],
+                "threat_context": {
+                    key: threat_payload.get(key)
+                    for key in (
+                        "summary",
+                        "trustBoundaries",
+                        "attackerCapabilities",
+                        "securityObjectives",
+                        "assumptions",
+                    )
+                },
+            }
+            connection.execute(
+                "INSERT INTO verification_subject_access VALUES (?, ?, ?) "
+                "ON CONFLICT(attempt_id) DO NOTHING",
+                (binding.attempt_id, candidate["candidate_id"], _now()),
+            )
         return output
 
-    def save_verification(
+    def save_verification_vote(
         self,
         binding: SessionBinding,
         *,
@@ -2957,10 +4141,10 @@ class ScanStore:
         verdict: str,
         rationale: str,
         counter_evidence: list[dict[str, Any]],
-    ) -> str:
-        verification_id = f"verify_{uuid.uuid4().hex}"
+    ) -> dict[str, Any]:
+        vote_id = f"vote_{uuid.uuid4().hex}"
         with self._lock, self._connect() as connection:
-            self._require_scan_status(connection, binding.scan_id, {"running"})
+            scan = self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
             candidate = connection.execute(
                 "SELECT scan_id FROM candidates WHERE candidate_id = ?",
@@ -2969,43 +4153,112 @@ class ScanStore:
             if candidate is None or candidate["scan_id"] != binding.scan_id:
                 raise ValueError("Candidate does not belong to this scan")
             assignment = connection.execute(
-                "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
+                "SELECT subject_id, vote_index FROM worker_batch_units "
+                "WHERE work_unit_id = ?",
                 (binding.work_unit_id,),
             ).fetchone()
-            if (
-                assignment is not None
-                and assignment["subject_id"] is not None
-                and assignment["subject_id"] != candidate_id
-            ):
+            if assignment is None or not assignment["subject_id"]:
+                raise ValueError("Verifier work unit has no assigned candidate")
+            if assignment["subject_id"] != candidate_id:
                 raise ValueError("Candidate is not assigned to this verifier work unit")
-            existing = connection.execute(
-                "SELECT 1 FROM verifications WHERE candidate_id = ?",
-                (candidate_id,),
+            required_votes = int(scan["verification_vote_count"])
+            if assignment["vote_index"] is None:
+                raise ValueError("Verifier work unit has no assigned vote index")
+            vote_index = int(assignment["vote_index"])
+            if not 1 <= vote_index <= required_votes:
+                raise ValueError("Verifier vote index is outside the scan policy")
+            subject_access = connection.execute(
+                "SELECT 1 FROM verification_subject_access "
+                "WHERE attempt_id = ? AND candidate_id = ?",
+                (binding.attempt_id, candidate_id),
             ).fetchone()
-            if existing is not None:
-                raise ValueError("Candidate already has a verification verdict")
+            if subject_access is None:
+                raise ValueError(
+                    "Verifier must call audit_verification_subject before submitting a verdict"
+                )
             self.require_verifier_source_access(connection, binding, candidate_id)
             connection.execute(
-                "INSERT INTO verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO verification_votes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    verification_id,
+                    vote_id,
                     candidate_id,
                     binding.scan_id,
                     binding.work_unit_id,
+                    vote_index,
                     verdict,
                     rationale,
                     json.dumps(counter_evidence, ensure_ascii=False, sort_keys=True),
                     _now(),
                 ),
             )
-        return verification_id
+            votes = connection.execute(
+                "SELECT verdict, counter_evidence_json FROM verification_votes "
+                "WHERE candidate_id = ? ORDER BY vote_index",
+                (candidate_id,),
+            ).fetchall()
+            verification_id: str | None = None
+            consensus: str | None = None
+            if len(votes) == required_votes:
+                counts = Counter(row["verdict"] for row in votes)
+                majority = required_votes // 2 + 1
+                if counts["confirmed"] >= majority:
+                    consensus = "confirmed"
+                elif counts["rejected"] >= majority:
+                    consensus = "rejected"
+                else:
+                    consensus = "insufficient_evidence"
+                combined_counter_evidence = {
+                    json.dumps(item, ensure_ascii=False, sort_keys=True): item
+                    for row in votes
+                    for item in json.loads(row["counter_evidence_json"])
+                }
+                verification_id = f"verify_{uuid.uuid4().hex}"
+                consensus_rationale = (
+                    f"Host consensus from {required_votes} independent votes: "
+                    f"confirmed={counts['confirmed']}, rejected={counts['rejected']}, "
+                    "insufficient_evidence="
+                    f"{counts['insufficient_evidence']}."
+                )
+                connection.execute(
+                    "INSERT INTO verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        verification_id,
+                        candidate_id,
+                        binding.scan_id,
+                        binding.work_unit_id,
+                        consensus,
+                        consensus_rationale,
+                        json.dumps(
+                            list(combined_counter_evidence.values()),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        _now(),
+                    ),
+                )
+        return {
+            "vote_id": vote_id,
+            "vote_index": vote_index,
+            "votes_required": required_votes,
+            "consensus_verification_id": verification_id,
+            "consensus_verdict": consensus,
+        }
 
-    def save_coverage(self, binding: SessionBinding, payload: dict[str, Any]) -> None:
-        if binding.work_unit_id is None:
-            raise ValueError("Coverage requires a bound work unit")
-        work_unit_id = binding.work_unit_id
-        payload = dict(payload)
-        payload["open_questions"] = normalize_open_questions(payload.get("open_questions"))
+    def save_coverage_attestation(
+        self,
+        binding: SessionBinding,
+        *,
+        attestation: CoverageAttestation,
+        records: list[CoverageRecord],
+        open_questions: list[dict[str, Any]],
+    ) -> None:
+        if binding.work_unit_id is None or binding.attempt_id is None:
+            raise ValueError("Coverage requires a bound work attempt")
+        if (
+            attestation.work_unit_id != binding.work_unit_id
+            or attestation.attempt_id != binding.attempt_id
+        ):
+            raise ValueError("Coverage attestation does not match the binding")
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
@@ -3013,24 +4266,106 @@ class ScanStore:
                 self._require_threat_model_access(connection, binding)
             work_unit = connection.execute(
                 "SELECT scan_id, role FROM work_units WHERE work_unit_id = ?",
-                (work_unit_id,),
+                (binding.work_unit_id,),
             ).fetchone()
-            if work_unit is None or work_unit["scan_id"] != binding.scan_id or work_unit["role"] != binding.role:
+            if (
+                work_unit is None
+                or work_unit["scan_id"] != binding.scan_id
+                or work_unit["role"] != binding.role
+            ):
                 raise ValueError("Coverage work unit does not match the binding")
+            now = _now()
             connection.execute(
-                """
-                INSERT INTO coverage VALUES (?, ?, ?, ?)
-                ON CONFLICT(scan_id, work_unit_id) DO UPDATE SET
-                    payload_json = excluded.payload_json,
-                    updated_at = excluded.updated_at
-                """,
+                "DELETE FROM coverage_attestations "
+                "WHERE work_unit_id = ? AND attempt_id = ?",
+                (binding.work_unit_id, binding.attempt_id),
+            )
+            connection.execute(
+                "INSERT INTO coverage_attestations ("
+                "attestation_id, scan_id, work_unit_id, attempt_id, policy, "
+                "completeness, assigned_count, read_complete_count, "
+                "failed_count, unexamined_count, attestation_digest, "
+                "open_questions_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
+                    attestation.attestation_id,
                     binding.scan_id,
-                    work_unit_id,
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                    _now(),
+                    attestation.work_unit_id,
+                    attestation.attempt_id,
+                    attestation.policy,
+                    attestation.completeness,
+                    attestation.assigned_count,
+                    attestation.read_complete_count,
+                    attestation.failed_count,
+                    attestation.unexamined_count,
+                    attestation.attestation_digest,
+                    json.dumps(
+                        normalize_open_questions(open_questions),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    now,
                 ),
             )
+            connection.executemany(
+                "INSERT INTO coverage_records ("
+                "attestation_id, relative_path, state, reason, receipt_digest"
+                ") VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        attestation.attestation_id,
+                        item.relative_path,
+                        item.state,
+                        item.reason,
+                        item.receipt_digest,
+                    )
+                    for item in records
+                ],
+            )
+
+    def list_coverage_records(self, attestation_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT relative_path, state, reason, receipt_digest "
+                "FROM coverage_records WHERE attestation_id = ? "
+                "ORDER BY relative_path",
+                (attestation_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_latest_coverage(self, scan_id: str) -> list[dict[str, Any]]:
+        """Return one canonical attestation with records per analysis work unit."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT ca.* FROM coverage_attestations ca "
+                "WHERE ca.scan_id = ? AND ca.attestation_id = ("
+                "SELECT nested.attestation_id FROM coverage_attestations nested "
+                "WHERE nested.work_unit_id = ca.work_unit_id "
+                "ORDER BY nested.created_at DESC, nested.attestation_id DESC LIMIT 1"
+                ") ORDER BY ca.work_unit_id",
+                (scan_id,),
+            ).fetchall()
+            output: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                item["counts"] = {
+                    "assigned": item.pop("assigned_count"),
+                    "read_complete": item.pop("read_complete_count"),
+                    "failed": item.pop("failed_count"),
+                    "unexamined": item.pop("unexamined_count"),
+                }
+                item["open_questions"] = normalize_open_questions(
+                    json.loads(item.pop("open_questions_json"))
+                )
+                record_rows = connection.execute(
+                    "SELECT relative_path, state, reason, receipt_digest "
+                    "FROM coverage_records WHERE attestation_id = ? "
+                    "ORDER BY relative_path",
+                    (item["attestation_id"],),
+                ).fetchall()
+                item["records"] = [dict(record) for record in record_rows]
+                output.append(item)
+        return output
 
     def scan_status(self, scan_id: str) -> dict[str, Any]:
         scan = self.get_scan(scan_id)
@@ -3048,7 +4383,15 @@ class ScanStore:
                     "SELECT COUNT(*) FROM verifications WHERE scan_id = ?", (scan_id,)
                 ).fetchone()[0],
                 "coverage_records": connection.execute(
-                    "SELECT COUNT(*) FROM coverage WHERE scan_id = ?", (scan_id,)
+                    "SELECT COUNT(*) FROM coverage_records cr "
+                    "JOIN coverage_attestations ca "
+                    "ON ca.attestation_id = cr.attestation_id "
+                    "WHERE ca.scan_id = ? AND ca.attestation_id = ("
+                    "SELECT nested.attestation_id FROM coverage_attestations nested "
+                    "WHERE nested.work_unit_id = ca.work_unit_id "
+                    "ORDER BY nested.created_at DESC, nested.attestation_id DESC LIMIT 1"
+                    ")",
+                    (scan_id,),
                 ).fetchone()[0],
                 "threat_models": connection.execute(
                     "SELECT COUNT(*) FROM threat_models WHERE scan_id = ?", (scan_id,)
@@ -3189,8 +4532,10 @@ class ScanStore:
             verification_rows = connection.execute(
                 "SELECT * FROM verifications WHERE scan_id = ? ORDER BY created_at", (scan_id,)
             ).fetchall()
-            coverage_rows = connection.execute(
-                "SELECT * FROM coverage WHERE scan_id = ? ORDER BY work_unit_id", (scan_id,)
+            verification_vote_rows = connection.execute(
+                "SELECT * FROM verification_votes WHERE scan_id = ? "
+                "ORDER BY candidate_id, vote_index",
+                (scan_id,),
             ).fetchall()
             work_unit_rows = connection.execute(
                 "SELECT * FROM work_units WHERE scan_id = ? ORDER BY created_at, work_unit_id",
@@ -3238,6 +4583,14 @@ class ScanStore:
                 "GROUP BY work_unit_id, operation ORDER BY work_unit_id, operation",
                 (scan_id,),
             ).fetchall()
+            submission_rejection_rows = connection.execute(
+                "SELECT sr.*, wa.work_unit_id FROM submission_rejections sr "
+                "JOIN work_attempts wa ON wa.attempt_id = sr.attempt_id "
+                "JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id "
+                "WHERE wu.scan_id = ? "
+                "ORDER BY sr.created_at, sr.rejection_id",
+                (scan_id,),
+            ).fetchall()
         candidates = []
         for row in candidate_rows:
             item = dict(row)
@@ -3248,12 +4601,13 @@ class ScanStore:
             item = dict(row)
             item["counter_evidence"] = json.loads(item.pop("counter_evidence_json"))
             verifications.append(item)
-        coverage = []
-        for row in coverage_rows:
+        verification_votes = []
+        for row in verification_vote_rows:
             item = dict(row)
-            item["payload"] = json.loads(item.pop("payload_json"))
-            item["payload"]["open_questions"] = normalize_open_questions(item["payload"].get("open_questions"))
-            coverage.append(item)
+            item["counter_evidence"] = json.loads(
+                item.pop("counter_evidence_json")
+            )
+            verification_votes.append(item)
         work_units = []
         for row in work_unit_rows:
             item = dict(row)
@@ -3274,9 +4628,28 @@ class ScanStore:
             "candidates": candidates,
             "evidence": [dict(row) for row in evidence_rows],
             "verifications": verifications,
-            "coverage": coverage,
+            "verification_votes": verification_votes,
+            "coverage": self.list_latest_coverage(scan_id),
             "work_units": work_units,
             "source_access_counts": source_access_counts,
+            "submission_rejections": [
+                {
+                    **{
+                        key: row[key]
+                        for key in (
+                            "rejection_id",
+                            "attempt_id",
+                            "work_unit_id",
+                            "tool_name",
+                            "error_code",
+                            "created_at",
+                        )
+                    },
+                    "retryable": bool(row["retryable"]),
+                    "violations": json.loads(row["violations_json"]),
+                }
+                for row in submission_rejection_rows
+            ],
             "omissions": [dict(row) for row in omission_rows],
             "verification_conflicts": [
                 {

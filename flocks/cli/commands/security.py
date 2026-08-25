@@ -290,6 +290,18 @@ def security_audit(
         "--dynamic",
         help="Execute validated probes in a network-isolated local Docker runtime",
     ),
+    coverage_policy: str = typer.Option(
+        "evidence_backed_partial",
+        "--coverage-policy",
+        help="Coverage policy: evidence_backed_partial or exhaustive",
+    ),
+    verification_votes: int = typer.Option(
+        1,
+        "--verification-votes",
+        min=1,
+        max=5,
+        help="Independent verifier votes required per candidate",
+    ),
     knowledge_base: Optional[Path] = typer.Option(
         None,
         "--knowledge-base",
@@ -303,6 +315,12 @@ def security_audit(
         audit_kwargs = {"model": model, "progress": progress}
         if dynamic:
             audit_kwargs["dynamic_enabled"] = True
+        if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:
+            raise ValueError("Unsupported coverage policy")
+        if coverage_policy != "evidence_backed_partial":
+            audit_kwargs["coverage_policy"] = coverage_policy
+        if verification_votes != 1:
+            audit_kwargs["verification_votes"] = verification_votes
         if knowledge_base is not None:
             audit_kwargs["knowledge_base"] = _read_knowledge_base(
                 knowledge_base,

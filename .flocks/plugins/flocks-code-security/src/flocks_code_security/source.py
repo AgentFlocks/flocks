@@ -10,6 +10,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from flocks_code_security.manifest import RepositoryManifestService
 from flocks_code_security.models import SessionBinding, SnapshotFile
 from flocks_code_security.snapshot import TargetSnapshotService, normalize_relative_path
 from flocks_code_security.store import ScanStore
@@ -24,6 +25,16 @@ class AuditSourceRepository:
     def binding(self, session_id: str) -> SessionBinding:
         return self.store.require_binding(session_id, SOURCE_ROLES)
 
+    def repository_summary(self, session_id: str) -> dict[str, Any]:
+        binding = self.binding(session_id)
+        if binding.role != "threat_modeler":
+            raise ValueError("Repository summary is only available to threat-modeling workers")
+        manifest = RepositoryManifestService(self.store).get_or_build(
+            binding.snapshot_id
+        )
+        self.store.record_manifest_access(binding, manifest)
+        return manifest.public_dict()
+
     def inventory(
         self,
         session_id: str,
@@ -32,6 +43,9 @@ class AuditSourceRepository:
         limit: int = 500,
     ) -> dict[str, Any]:
         binding = self.binding(session_id)
+        manifest = RepositoryManifestService(self.store).get_or_build(
+            binding.snapshot_id
+        )
         assigned = self._assigned_paths(binding)
         files = [
             item
@@ -60,9 +74,14 @@ class AuditSourceRepository:
         languages = Counter(item.language for item in files)
         return {
             "snapshot_id": binding.snapshot_id,
+            "manifest_id": manifest.manifest_id,
+            "manifest_digest": manifest.manifest_digest,
             "file_count": len(files),
             "total_bytes": sum(item.size_bytes for item in files),
             "languages": dict(sorted(languages.items())),
+            "components": manifest.public_dict()["components"],
+            "component_count": len(manifest.components),
+            "components_truncated": len(manifest.components) > 500,
             "offset": offset,
             "limit": limit,
             "next_offset": offset + len(page) if offset + len(page) < len(files) else None,
@@ -270,11 +289,19 @@ class AuditSourceRepository:
             end_line = item["end_line"]
             if start_line < 1 or end_line < start_line or end_line > record.line_count:
                 raise ValueError(f"Invalid evidence line range: {relative_path}")
-            excerpt = self.read(
-                binding.session_id,
+            if not self._in_assigned_scope(
                 relative_path,
-                start_line=start_line,
-                end_line=end_line,
+                self._assigned_paths(binding),
+            ):
+                raise ValueError("Path is outside the bound work-unit scope")
+            excerpt = self.evidence_excerpt(
+                binding.snapshot_id,
+                {
+                    "relative_path": relative_path,
+                    "blob_digest": record.blob_digest,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                },
             )
             if not excerpt["text"].strip():
                 raise ValueError(f"Evidence excerpt is empty: {relative_path}")

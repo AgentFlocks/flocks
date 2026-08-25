@@ -494,6 +494,7 @@ async def test_background_task_fails_fast_when_user_input_is_required(
         _session_id: str,
         provider_id=None,
         model_id=None,
+        agent_name=None,
         callbacks=None,
     ):
         try:
@@ -533,6 +534,111 @@ async def test_background_task_fails_fast_when_user_input_is_required(
         )
 
     assert rejected == ["ses_interactive_block"]
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_pins_agent_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None))
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_identity",
+        status="running",
+        description="security worker",
+        prompt="",
+        agent="code-security-threat-modeler",
+    )
+
+    await manager._run_session_with_watchdog(
+        task,
+        "ses_security_worker",
+        callbacks=None,
+        agent_name=task.agent,
+    )
+
+    assert loop_run.await_args.args == ("ses_security_worker",)
+    assert loop_run.await_args.kwargs["agent_name"] == "code-security-threat-modeler"
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_rejects_capsule_identity_mismatch() -> None:
+    manager = BackgroundManager()
+
+    with pytest.raises(ValueError, match="execution capsule"):
+        await manager.run_existing_session(
+            session_id="ses_security_worker",
+            description="security worker",
+            agent="code-security-threat-modeler",
+            execution_capsule={
+                "session_id": "ses_other",
+                "agent_name": "code-security-threat-modeler",
+            },
+        )
+
+    assert manager.list_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_waits_for_start_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundManager()
+    run = AsyncMock(return_value=SimpleNamespace(action=None, last_message=None))
+    monkeypatch.setattr(manager, "_run_session_with_watchdog", run)
+    monkeypatch.setattr(manager, "_inject_parent_completion", AsyncMock())
+    start_gate = asyncio.Event()
+
+    task = await manager.run_existing_session(
+        session_id="ses_security_worker",
+        description="security worker",
+        agent="code-security-threat-modeler",
+        start_gate=start_gate,
+    )
+    await asyncio.sleep(0)
+
+    assert task.status == "pending"
+    run.assert_not_awaited()
+
+    start_gate.set()
+    completed = await manager.wait_for(task.id, timeout_ms=1_000)
+
+    assert completed is task
+    assert task.status == "completed"
+    run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_preserves_loop_error_for_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundManager()
+    monkeypatch.setattr(
+        manager,
+        "_run_session_with_watchdog",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                action="error",
+                error="provider 503 stream interrupted",
+                last_message=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(manager, "_inject_parent_completion", AsyncMock())
+    task = BackgroundTask(
+        id="bg_provider_error",
+        status="pending",
+        description="security worker",
+        prompt="",
+        agent="code-security-threat-modeler",
+    )
+
+    await manager._run_existing_session(task, "ses_security_worker")
+
+    assert task.status == "error"
+    assert task.error == "provider 503 stream interrupted"
 
 
 @pytest.mark.asyncio

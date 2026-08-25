@@ -11,6 +11,7 @@ import pytest
 from flocks_code_security.models import SnapshotRef
 from flocks_code_security import service as service_module
 from flocks_code_security import store as store_module
+from flocks_code_security.execution import ExecutionCapsuleError, toolset_digest
 from flocks_code_security.service import (
     AuditCaller,
     AuditService,
@@ -84,6 +85,85 @@ def test_request_metadata_enforces_caller_scoped_idempotency(tmp_path: Path) -> 
         )
 
 
+def test_scan_persists_bounded_verification_vote_count(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+        verification_vote_count=3,
+    )
+
+    assert store.get_scan(scan_id)["verification_vote_count"] == 3
+    with pytest.raises(ValueError, match="between 1 and 5"):
+        store.create_scan(
+            parent_session_id="session-2",
+            snapshot_id="snapshot_test",
+            mode="standard",
+            ruleset_digest="rules",
+            verification_vote_count=6,
+        )
+
+
+def test_dynamic_probe_queue_prioritizes_execution_candidates(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+        dynamic_enabled=True,
+    )
+    candidates = [
+        (
+            "candidate_rce_metadata",
+            {"rule_id": "metadata.rce-label", "category": "source-rce-metadata"},
+            "2026-08-24T23:59:59+00:00",
+        ),
+        (
+            "candidate_access",
+            {"rule_id": "access-control.idor", "category": "access-control"},
+            "2026-08-25T00:00:00+00:00",
+        ),
+        (
+            "candidate_execution",
+            {"rule_id": "code-injection.eval", "category": "code-injection"},
+            "2026-08-25T00:00:01+00:00",
+        ),
+    ]
+    with store._connect() as connection:
+        for candidate_id, payload, created_at in candidates:
+            connection.execute(
+                "INSERT INTO candidates VALUES (?, ?, NULL, ?, ?, ?)",
+                (
+                    candidate_id,
+                    scan_id,
+                    "baseline",
+                    json.dumps(payload),
+                    created_at,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO verifications VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+                (
+                    f"verification_{candidate_id}",
+                    candidate_id,
+                    scan_id,
+                    "confirmed",
+                    "confirmed",
+                    "[]",
+                    created_at,
+                ),
+            )
+
+    queued = store.list_confirmed_without_dynamic_record(scan_id, limit=1)
+
+    assert [item["candidate_id"] for item in queued] == [
+        "candidate_execution"
+    ]
+
+
 def test_knowledge_base_is_immutable_bound_and_private_to_its_scan(
     tmp_path: Path,
 ) -> None:
@@ -125,6 +205,23 @@ def test_knowledge_base_is_immutable_bound_and_private_to_its_scan(
     assert captured["content"] == content
     store.require_knowledge_base_consumed(binding)
 
+    verifier_unit = store.create_work_unit(
+        scan_id=scan_id,
+        phase="verification",
+        role="verifier",
+        paths=["."],
+    )
+    store.bind_session(
+        session_id="verifier",
+        scan_id=scan_id,
+        snapshot_id="snapshot_test",
+        role="verifier",
+        work_unit_id=verifier_unit,
+    )
+    verifier_binding = store.require_binding("verifier", {"verifier"})
+    with pytest.raises(ValueError, match="cannot read"):
+        store.read_knowledge_base(verifier_binding)
+
     metadata = store.get_knowledge_base_metadata(scan_id)
     assert metadata == {
         "display_name": "description.txt",
@@ -157,6 +254,9 @@ def test_knowledge_base_changes_the_request_digest_and_is_validated() -> None:
         )
     )
     assert first_digest != renamed_digest
+    assert first_digest != AuditService._request_digest(
+        StartScanRequest(target_path=Path("/tmp/target"), verification_votes=3)
+    )
 
     with pytest.raises(AuditServiceError, match="32 KiB"):
         AuditService._validate_knowledge_base(KnowledgeBaseInput("description.txt", "a" * (32 * 1024 + 1)))
@@ -193,6 +293,52 @@ def test_phase_and_event_sequences_are_durable_and_monotonic(tmp_path: Path) -> 
     assert [item["seq"] for item in page["items"]] == [second["seq"]]
     assert page["latest_seq"] == second["seq"]
     assert store.list_phase_runs(scan_id)[0]["status"] == "completed"
+
+
+def test_progress_recorder_creates_one_phase_run_per_worker_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    monkeypatch.setattr(
+        service_module,
+        "get_runtime",
+        lambda: SimpleNamespace(store=store),
+    )
+    recorder = _ProgressRecorder(scan_id, dynamic_enabled=False)
+
+    recorder(
+        "batch.started",
+        {"batch_id": "batch-1", "phase": "threat_modeling", "attempt_ordinal": 1},
+    )
+    recorder(
+        "batch.status",
+        {"batch_id": "batch-1", "phase": "threat_modeling", "status": "failed"},
+    )
+    recorder(
+        "batch.started",
+        {"batch_id": "batch-2", "phase": "threat_modeling", "attempt_ordinal": 2},
+    )
+    recorder(
+        "batch.status",
+        {"batch_id": "batch-2", "phase": "threat_modeling", "status": "completed"},
+    )
+
+    phase_runs = store.list_phase_runs(scan_id)
+    assert [(item["ordinal"], item["status"]) for item in phase_runs] == [
+        (1, "failed"),
+        (2, "completed"),
+    ]
+    assert [item["summary"]["batch_id"] for item in phase_runs] == [
+        "batch-1",
+        "batch-2",
+    ]
 
 
 def test_recent_event_page_is_bounded_and_chronological(tmp_path: Path) -> None:
@@ -820,6 +966,18 @@ def test_public_worker_projection_exposes_distinct_verification_results() -> Non
                 }
             ],
             "coverage": [],
+            "submission_rejections": [
+                {
+                    "rejection_id": "rejection-1",
+                    "attempt_id": "attempt-1",
+                    "work_unit_id": "unit-verifier",
+                    "tool_name": "audit_submit_verdict",
+                    "error_code": "EVIDENCE_NOT_READ",
+                    "retryable": True,
+                    "violations": [{"path": "src/app.py"}],
+                    "created_at": "2026-08-21T00:00:00+00:00",
+                }
+            ],
             "dynamic_runs": [],
             "source_access_counts": {"unit-verifier": {"inventory": 1, "search": 8, "read": 3}},
         },
@@ -860,6 +1018,15 @@ def test_public_worker_projection_exposes_distinct_verification_results() -> Non
 
     assert worker["activity_counts"] == {"inventory": 1, "search": 8, "read": 3}
     assert worker["elapsed_ms"] == 2_000
+    assert worker["recent_rejection"] == {
+        "rejection_id": "rejection-1",
+        "attempt_id": "attempt-1",
+        "tool_name": "audit_submit_verdict",
+        "error_code": "EVIDENCE_NOT_READ",
+        "retryable": True,
+        "violation_count": 1,
+        "created_at": "2026-08-21T00:00:00+00:00",
+    }
     assert worker["candidate_summaries"] == [
         {
             "candidate_id": "candidate-1",
@@ -1055,16 +1222,19 @@ def test_work_unit_timing_can_be_synchronized_to_background_task(tmp_path: Path)
         role="verifier",
         work_unit_id=work_unit_id,
     )
-    store.set_work_unit_runtime(
-        work_unit_id,
-        session_id="worker-1",
+    binding = store.require_binding("worker-1", {"verifier"})
+    store.set_work_attempt_runtime(
+        binding.attempt_id,
         background_task_id="task-1",
         started_at=None,
     )
 
     queued = store.get_work_unit(work_unit_id)
     assert queued is not None
-    assert queued["started_at"] is None
+    assert queued["started_at"] is not None
+    attempt = store.list_work_attempts(work_unit_id)[0]
+    assert attempt["background_task_id"] == "task-1"
+    assert attempt["status"] == "running"
 
     store.set_work_unit_timing(
         work_unit_id,
@@ -1082,3 +1252,262 @@ def test_work_unit_timing_can_be_synchronized_to_background_task(tmp_path: Path)
             work_unit_id,
             started_at="2026-08-21T00:00:08",
         )
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["identity", "snapshot", "scope", "assignment", "toolset"],
+)
+def test_execution_capsule_mismatch_fails_closed(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    store.bind_session(
+        session_id="worker-1",
+        scan_id=scan_id,
+        snapshot_id="snapshot_test",
+        role="baseline",
+        work_unit_id=work_unit_id,
+    )
+    binding = store.require_binding("worker-1", {"baseline"})
+    assert binding.attempt_id is not None
+
+    observed_agent = "code-security-baseline"
+    if mismatch == "identity":
+        observed_agent = "code-security-verifier"
+    elif mismatch == "snapshot":
+        other_root = tmp_path / "snapshots" / "snapshot_other"
+        other_root.mkdir()
+        store.save_snapshot(
+            SnapshotRef(
+                snapshot_id="snapshot_other",
+                repository_identity="other",
+                source_revision=None,
+                tree_digest="c" * 64,
+                scope_digest="d" * 64,
+                file_count=0,
+                total_bytes=0,
+                created_at="2026-08-21T00:00:01+00:00",
+                root_path=str(other_root),
+            ),
+            [],
+        )
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE session_bindings SET snapshot_id = ? WHERE session_id = ?",
+                ("snapshot_other", "worker-1"),
+            )
+        binding = store.require_binding("worker-1", {"baseline"})
+    elif mismatch == "scope":
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE work_units SET paths_json = ? WHERE work_unit_id = ?",
+                ('["tampered"]', work_unit_id),
+            )
+    elif mismatch == "assignment":
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE work_units SET assignment_digest = ? WHERE work_unit_id = ?",
+                ("a" * 64, work_unit_id),
+            )
+
+    observed_toolset = "b" * 64 if mismatch == "toolset" else toolset_digest(())
+    with pytest.raises(ExecutionCapsuleError):
+        store.verify_execution_capsule(
+            binding,
+            agent_name=observed_agent,
+            provider_id=None,
+            model_id=None,
+            toolset_digest_value=observed_toolset,
+        )
+
+    attempt = store.get_work_attempt(binding.attempt_id)
+    assert attempt is not None
+    assert attempt["status"] == "failed"
+    assert attempt["failure_class"] == "identity_capsule_mismatch"
+    assert store.get_work_unit(work_unit_id)["status"] == "failed"
+    events = store.list_recent_scan_events(scan_id, limit=10)["items"]
+    assert events[-1]["type"] == "identity.mismatch"
+
+
+def test_initialize_backfills_legacy_worker_binding_and_receipts(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    store.bind_session(
+        session_id="legacy-worker",
+        scan_id=scan_id,
+        snapshot_id="snapshot_test",
+        role="baseline",
+        work_unit_id=work_unit_id,
+    )
+    original = store.require_binding("legacy-worker", {"baseline"})
+    store.record_source_access(
+        original,
+        operation="inventory",
+        relative_path=".",
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE session_bindings SET attempt_id = NULL WHERE session_id = ?",
+            ("legacy-worker",),
+        )
+        connection.execute("DROP INDEX source_access_attempt_path_op")
+        connection.execute(
+            "ALTER TABLE source_access RENAME TO source_access_with_attempt"
+        )
+        connection.execute(
+            """
+            CREATE TABLE source_access (
+                access_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                operation TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                blob_digest TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO source_access
+            SELECT access_id, session_id, scan_id, work_unit_id, operation,
+                   relative_path, blob_digest, start_line, end_line, created_at
+            FROM source_access_with_attempt
+            """
+        )
+        connection.execute("DROP TABLE source_access_with_attempt")
+        connection.execute(
+            "DELETE FROM work_attempts WHERE attempt_id = ?",
+            (original.attempt_id,),
+        )
+        connection.execute(
+            "UPDATE work_units SET session_id = ?, background_task_id = ? "
+            "WHERE work_unit_id = ?",
+            ("legacy-worker", "legacy-task", work_unit_id),
+        )
+
+    store.initialize()
+
+    migrated = store.require_binding("legacy-worker", {"baseline"})
+    assert migrated.attempt_id is not None
+    attempt = store.get_work_attempt(migrated.attempt_id)
+    assert attempt is not None
+    assert attempt["background_task_id"] == "legacy-task"
+    with store._connect() as connection:
+        receipt_attempt = connection.execute(
+            "SELECT attempt_id FROM source_access WHERE session_id = ?",
+            ("legacy-worker",),
+        ).fetchone()[0]
+    assert receipt_attempt == migrated.attempt_id
+
+
+def test_initialize_migrates_legacy_coverage_as_untrusted_partial_state(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    store.bind_session(
+        session_id="legacy-coverage-worker",
+        scan_id=scan_id,
+        snapshot_id="snapshot_test",
+        role="baseline",
+        work_unit_id=work_unit_id,
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO snapshot_files VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("snapshot_test", "app.py", "c" * 64, 12, 1, "python", 0),
+        )
+        connection.execute(
+            "CREATE TABLE coverage ("
+            "scan_id TEXT NOT NULL, work_unit_id TEXT NOT NULL, "
+            "payload_json TEXT NOT NULL, updated_at TEXT NOT NULL, "
+            "PRIMARY KEY (scan_id, work_unit_id))"
+        )
+        connection.execute(
+            "INSERT INTO coverage VALUES (?, ?, ?, ?)",
+            (
+                scan_id,
+                work_unit_id,
+                json.dumps(
+                    {
+                        "analyzed_paths": ["app.py"],
+                        "open_questions": [
+                            "Which route reaches this file?",
+                            *(f"Legacy question {index}" for index in range(99)),
+                        ],
+                    }
+                ),
+                "2026-08-25T00:00:00+00:00",
+            ),
+        )
+
+    store.initialize()
+    migrated = store.list_latest_coverage(scan_id)
+
+    assert len(migrated) == 1
+    assert migrated[0]["completeness"] == "partial"
+    assert migrated[0]["counts"] == {
+        "assigned": 1,
+        "read_complete": 0,
+        "failed": 0,
+        "unexamined": 1,
+    }
+    assert migrated[0]["records"] == [
+        {
+            "relative_path": "app.py",
+            "state": "unexamined",
+            "reason": "legacy_coverage_requires_reanalysis",
+            "receipt_digest": None,
+        }
+    ]
+    assert migrated[0]["open_questions"][0]["blocking"] is True
+    assert "legacy untrusted format" in migrated[0]["open_questions"][0]["question"]
+    assert migrated[0]["open_questions"][1]["question"] == (
+        "Which route reaches this file?"
+    )
+    assert len(migrated[0]["open_questions"]) == 100
+
+    store.initialize()
+    assert len(store.list_latest_coverage(scan_id)) == 1

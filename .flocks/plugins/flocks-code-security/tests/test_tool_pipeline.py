@@ -15,7 +15,9 @@ import flocks_code_security.runtime as runtime_module
 import flocks_code_security.tools as tools_module
 from flocks_code_security.contract import validate_document
 from flocks_code_security.coverage import normalize_open_questions
+from flocks_code_security.orchestration import plan_verification_units
 from flocks_code_security.runtime import build_runtime
+from flocks_code_security.service import AuditService
 from flocks_code_security.tools import (
     audit_adjudication_context,
     audit_cancel,
@@ -25,6 +27,7 @@ from flocks_code_security.tools import (
     audit_probe_subject,
     audit_prepare,
     audit_read,
+    audit_repository_summary,
     audit_search,
     audit_run_workers,
     audit_submit_candidate,
@@ -34,6 +37,7 @@ from flocks_code_security.tools import (
     audit_submit_threat_model,
     audit_submit_verdict,
     audit_threat_model_context,
+    audit_verification_subject,
     audit_wait_workers,
 )
 
@@ -43,7 +47,11 @@ def _agent_context(session_id: str, message_id: str, agent: str) -> ToolContext:
         session_id=session_id,
         message_id=message_id,
         agent=agent,
-        extra={"agent_execution_session": True},
+        extra={
+            "agent_execution_session": True,
+            "model": {"providerID": None, "modelID": None},
+            "turn_callable_tool_names": [],
+        },
     )
 
 
@@ -117,6 +125,8 @@ async def _complete_threat_model(
         f"{session_id}-message",
         "code-security-threat-modeler",
     )
+    summary = await audit_repository_summary(modeler)
+    assert summary.success
     inventory = await audit_inventory(modeler)
     assert inventory.success
     source_file = next(item for item in inventory.output["files"] if not item["is_binary"])
@@ -149,6 +159,29 @@ async def _complete_threat_model(
     assert submitted.success
     runtime.store.update_work_unit_status(work_unit_id, "completed")
     return work_unit_id
+
+
+def _create_verification_batch(
+    runtime,
+    *,
+    scan_id: str,
+    candidate_ids: list[str],
+) -> dict:
+    batch = runtime.store.create_worker_batch(
+        scan_id=scan_id,
+        phase="verification",
+        units=[
+            {
+                "role": "verifier",
+                "paths": ["."],
+                "subject_id": candidate_id,
+                "vote_index": 1,
+            }
+            for candidate_id in candidate_ids
+        ],
+    )
+    runtime.store.update_worker_batch_status(batch["batch_id"], "running")
+    return batch
 
 
 def _submit_final_adjudication(runtime, scan_id: str) -> dict:
@@ -196,6 +229,11 @@ async def test_guided_scan_requires_bound_agents_to_read_knowledge_base(
     (target / "app.py").write_text("def handler(value):\n    return value\n", encoding="utf-8")
     runtime = build_runtime(tmp_path / "plugin-data")
     monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    monkeypatch.setattr(
+        reporting_module,
+        "output_dir",
+        lambda scan_id: tmp_path / "outputs" / scan_id,
+    )
     coordinator = _agent_context("coordinator", "message-1", "code-security")
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
@@ -444,6 +482,109 @@ def test_background_task_timestamps_are_projected_as_utc() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transient_worker_failure_resumes_same_session_and_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    parent = SimpleNamespace(
+        id="coordinator",
+        project_id="project",
+        directory=str(tmp_path),
+        provider="provider",
+        model="model",
+    )
+    children: list[SimpleNamespace] = []
+
+    async def create_child(**kwargs):
+        child = SimpleNamespace(
+            id=f"worker-{len(children) + 1}",
+            agent=kwargs["agent"],
+        )
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(Session, "get_by_id", AsyncMock(return_value=parent))
+    monkeypatch.setattr(Session, "create", create_child)
+    monkeypatch.setattr(Message, "create", AsyncMock())
+    monkeypatch.setattr(
+        tools_module,
+        "get_session_callable_tools",
+        AsyncMock(
+            return_value={
+                "audit_repository_summary",
+                "audit_inventory",
+                "audit_read",
+                "audit_search",
+                "audit_submit_threat_model",
+            }
+        ),
+    )
+    manager = _FakeBackgroundManager()
+    monkeypatch.setattr(tools_module, "_background_manager", lambda: manager)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    launched = await audit_run_workers(
+        coordinator,
+        prepared.output["scan_id"],
+        "threat_modeling",
+    )
+    first_worker = launched.output["workers"][0]
+    manager.tasks["task-1"].status = "error"
+    manager.tasks["task-1"].error = "provider 503 stream interrupted"
+
+    resumed = await audit_wait_workers(
+        coordinator,
+        launched.output["batch_id"],
+        timeout_seconds=0,
+    )
+
+    resumed_worker = resumed.output["workers"][0]
+    assert resumed.output["status"] == "running"
+    assert resumed_worker["attempt_id"] == first_worker["attempt_id"]
+    assert resumed_worker["attempt_ordinal"] == 1
+    assert resumed_worker["resume_count"] == 1
+    assert manager.calls[1]["session_id"] == "worker-1"
+    assert (
+        manager.calls[1]["execution_capsule"]["capsule_digest"]
+        == manager.calls[0]["execution_capsule"]["capsule_digest"]
+    )
+
+    manager.tasks["task-2"].status = "error"
+    manager.tasks["task-2"].error = "provider 503 stream interrupted"
+    fresh = await audit_wait_workers(
+        coordinator,
+        launched.output["batch_id"],
+        timeout_seconds=0,
+    )
+    fresh_worker = fresh.output["workers"][0]
+    assert fresh.output["status"] == "running"
+    assert fresh_worker["attempt_id"] != first_worker["attempt_id"]
+    assert fresh_worker["attempt_ordinal"] == 2
+    assert manager.calls[2]["session_id"] == "worker-2"
+
+    manager.tasks["task-3"].status = "completed"
+    exhausted = await audit_wait_workers(
+        coordinator,
+        launched.output["batch_id"],
+        timeout_seconds=0,
+    )
+    assert exhausted.output["status"] == "failed"
+    attempts = runtime.store.list_work_attempts(
+        exhausted.output["workers"][0]["work_unit_id"]
+    )
+    assert [attempt["status"] for attempt in attempts] == ["failed", "failed"]
+    assert attempts[-1]["failure_class"] == "attempts_exhausted"
+
+
+@pytest.mark.asyncio
 async def test_threat_model_without_baseline_cannot_be_finalized(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -534,17 +675,23 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
     )
     assert invalid_type.success is False
     assert "array of at most 100 strings" in str(invalid_type.error)
-    wrong_agent = await audit_submit_threat_model(
-        _agent_context("modeler", "message-3", "code-security-baseline"),
-        payload,
-    )
-    assert wrong_agent.success is False
-    assert "Agent identity" in str(wrong_agent.error)
-
-    missing_inventory = await audit_submit_threat_model(modeler, payload)
-    assert missing_inventory.success is False
-    assert "audit_inventory access" in str(missing_inventory.error)
-    assert (await audit_inventory(modeler)).success
+    missing_summary = await audit_submit_threat_model(modeler, payload)
+    assert missing_summary.success is False
+    assert "repository summary" in str(missing_summary.error)
+    assert missing_summary.metadata["error_code"] == "MANIFEST_NOT_CONSUMED"
+    assert missing_summary.metadata["retryable"] is True
+    assert missing_summary.metadata["rejection_id"].startswith("rejection_")
+    rejection = runtime.store.report_data(scan_id)["submission_rejections"][-1]
+    assert rejection["attempt_id"] == runtime.store.resolve_binding(
+        "modeler"
+    ).attempt_id
+    assert rejection["tool_name"] == "audit_submit_threat_model"
+    assert rejection["error_code"] == "MANIFEST_NOT_CONSUMED"
+    events = runtime.store.list_recent_scan_events(scan_id, limit=10)["items"]
+    assert events[-1]["type"] == "submission.rejected"
+    assert events[-1]["summary"]["rejection_id"] == rejection["rejection_id"]
+    assert runtime.store.get_work_unit(work_unit_id)["status"] == "running"
+    assert (await audit_repository_summary(modeler)).success
 
     wrong_evidence_shape = await audit_submit_threat_model(
         modeler,
@@ -582,10 +729,64 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
     assert submitted.output["operation"] == "updated"
     assert runtime.store.get_threat_model(scan_id)["threat_model"]["summary"] == payload["summary"]
 
+    identity_unit = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="threat_modeling",
+        role="threat_modeler",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="wrong-agent-modeler",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="threat_modeler",
+        work_unit_id=identity_unit,
+    )
+    wrong_agent = await audit_submit_threat_model(
+        _agent_context(
+            "wrong-agent-modeler",
+            "message-3",
+            "code-security-baseline",
+        ),
+        payload,
+    )
+    assert wrong_agent.success is False
+    assert wrong_agent.metadata["error_code"] == "IDENTITY_CAPSULE_MISMATCH"
+    assert wrong_agent.metadata["retryable"] is False
+    assert runtime.store.get_work_unit(identity_unit)["status"] == "failed"
+
+    missing_capsule_unit = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="threat_modeling",
+        role="threat_modeler",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="missing-capsule-modeler",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="threat_modeler",
+        work_unit_id=missing_capsule_unit,
+    )
+    missing_capsule = await audit_read(
+        ToolContext(
+            session_id="missing-capsule-modeler",
+            message_id="message-4",
+            agent="code-security-threat-modeler",
+            extra={"agent_execution_session": True},
+        ),
+        "app.py",
+        start_line=1,
+        end_line=1,
+    )
+    assert missing_capsule.success is False
+    assert missing_capsule.metadata["error_code"] == "IDENTITY_CAPSULE_MISMATCH"
+    assert runtime.store.get_work_unit(missing_capsule_unit)["status"] == "failed"
+
     runtime.store.update_work_unit_status(work_unit_id, "completed")
     late_update = await audit_submit_threat_model(modeler, payload)
     assert late_update.success is False
-    assert "binding is not active" in str(late_update.error)
+    assert late_update.metadata["error_code"] == "ATTEMPT_NOT_ACTIVE"
 
     with runtime.store._connect() as connection:
         connection.execute(
@@ -617,6 +818,75 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
     assert "non-empty string" in invalid_status["integrity_errors"][0]
     with pytest.raises(ValueError, match="failed contract validation"):
         runtime.store.require_threat_model_ready(scan_id)
+
+
+@pytest.mark.asyncio
+async def test_large_repository_threat_model_needs_summary_not_inventory_pagination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("def handler(value):\n    return value\n", encoding="utf-8")
+    for index in range(501):
+        (target / f"module_{index:03d}.py").write_text("safe = True\n", encoding="utf-8")
+
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="threat_modeling",
+        role="threat_modeler",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="modeler-large",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="threat_modeler",
+        work_unit_id=work_unit_id,
+    )
+    modeler = _agent_context(
+        "modeler-large",
+        "message-2",
+        "code-security-threat-modeler",
+    )
+
+    summary = await audit_repository_summary(modeler)
+    assert summary.success is True
+    assert summary.output["file_count"] == 502
+    source = await audit_read(modeler, "app.py", start_line=1, end_line=2)
+    submitted = await audit_submit_threat_model(
+        modeler,
+        {
+            "summary": "A caller invokes a local application handler.",
+            "assets": ["Application integrity."],
+            "trustBoundaries": ["Caller input enters app.py:1."],
+            "attackerCapabilities": ["The caller controls the value argument."],
+            "securityObjectives": ["Input remains data."],
+            "assumptions": [],
+            "evidence": [
+                {
+                    "relative_path": "app.py",
+                    "blob_digest": source.output["blob_digest"],
+                    "start_line": 1,
+                    "end_line": 2,
+                }
+            ],
+        },
+    )
+
+    assert submitted.success is True
+    with runtime.store._connect() as connection:
+        inventory_count = connection.execute(
+            "SELECT COUNT(*) FROM source_access WHERE work_unit_id = ? AND operation = 'inventory'",
+            (work_unit_id,),
+        ).fetchone()[0]
+    assert inventory_count == 0
 
 
 @pytest.mark.asyncio
@@ -666,25 +936,29 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     unconsumed_threat_model = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["app.py"],
-        analyzed_paths=["app.py"],
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
     )
     assert unconsumed_threat_model.success is False
     assert "threat-model context" in str(unconsumed_threat_model.error)
     assert (await audit_threat_model_context(baseline)).success
     unbacked_coverage = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["app.py"],
-        analyzed_paths=["app.py"],
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
     )
     assert unbacked_coverage.success is False
     assert "not backed" in str(unbacked_coverage.error)
     assert (await audit_inventory(baseline)).success
+    assert (await audit_search(baseline, "return", path_glob="app.py")).success
+    search_only_coverage = await audit_submit_coverage(
+        baseline,
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
+    )
+    assert search_only_coverage.success is False
+    assert search_only_coverage.metadata["error_code"] == "COVERAGE_OVERCLAIM"
     assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
     partial_read_coverage = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["app.py"],
-        analyzed_paths=["app.py"],
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
     )
     assert partial_read_coverage.success is False
     assert "complete snapshot source reads" in str(partial_read_coverage.error)
@@ -717,18 +991,20 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert candidate.success is True
     coverage = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["."],
-        analyzed_paths=["."],
+        dispositions=[
+            {"path": "aaa_helper.py", "claim": "analyzed"},
+            {"path": "app.py", "claim": "analyzed"},
+        ],
     )
     assert coverage.success is True
     runtime.store.update_work_unit_status(baseline_unit, "completed")
 
-    verifier_unit = runtime.store.create_work_unit(
+    verification_batch = _create_verification_batch(
+        runtime,
         scan_id=scan_id,
-        phase="verification",
-        role="verifier",
-        paths=["."],
+        candidate_ids=[candidate.output["candidate_id"]],
     )
+    verifier_unit = verification_batch["units"][0]["work_unit_id"]
     runtime.store.bind_session(
         session_id="verifier",
         scan_id=scan_id,
@@ -744,7 +1020,38 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         "Untrusted self-assertion without reading source.",
     )
     assert unbacked_verdict.success is False
-    assert "independently read" in str(unbacked_verdict.error)
+    assert "audit_verification_subject" in str(unbacked_verdict.error)
+    assert (await audit_verification_subject(verifier)).success
+    counter_evidence_bypass = await audit_submit_verdict(
+        verifier,
+        candidate.output["candidate_id"],
+        "confirmed",
+        "Counter-evidence validation must not count as an independent source read.",
+        counter_evidence=[
+            {
+                "relative_path": "app.py",
+                "blob_digest": source.output["blob_digest"],
+                "start_line": 1,
+                "end_line": 2,
+            },
+            {
+                "relative_path": "aaa_helper.py",
+                "blob_digest": auxiliary.output["blob_digest"],
+                "start_line": 1,
+                "end_line": 2,
+            },
+        ],
+    )
+    assert counter_evidence_bypass.success is False
+    assert "independently read" in str(counter_evidence_bypass.error)
+    unread_verdict = await audit_submit_verdict(
+        verifier,
+        candidate.output["candidate_id"],
+        "confirmed",
+        "Candidate was retrieved but source evidence was not read.",
+    )
+    assert unread_verdict.success is False
+    assert "independently read" in str(unread_verdict.error)
     assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
     assert (await audit_read(verifier, "aaa_helper.py", start_line=1, end_line=2)).success
     verdict = await audit_submit_verdict(
@@ -755,6 +1062,10 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     )
     assert verdict.success is True
     runtime.store.update_work_unit_status(verifier_unit, "completed")
+    runtime.store.update_worker_batch_status(
+        verification_batch["batch_id"],
+        "completed",
+    )
     adjudication = _submit_final_adjudication(runtime, scan_id)
     assert adjudication["dynamic_assessments"] is None
 
@@ -899,6 +1210,7 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
     assert source.success
     assert (await audit_search(baseline, "not-present-in-fixture")).success
+    assert (await audit_read(baseline, "Dockerfile", start_line=1, end_line=2)).success
     candidate = await audit_submit_candidate(
         baseline,
         _candidate_payload(
@@ -916,18 +1228,20 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
     assert (
         await audit_submit_coverage(
             baseline,
-            inventoried_paths=["."],
-            analyzed_paths=["."],
+            dispositions=[
+                {"path": "Dockerfile", "claim": "analyzed"},
+                {"path": "app.py", "claim": "analyzed"},
+            ],
         )
     ).success
     runtime.store.update_work_unit_status(baseline_unit, "completed")
 
-    verifier_unit = runtime.store.create_work_unit(
+    verification_batch = _create_verification_batch(
+        runtime,
         scan_id=scan_id,
-        phase="verification",
-        role="verifier",
-        paths=["."],
+        candidate_ids=[candidate.output["candidate_id"]],
     )
+    verifier_unit = verification_batch["units"][0]["work_unit_id"]
     runtime.store.bind_session(
         session_id="dynamic-verifier",
         scan_id=scan_id,
@@ -940,6 +1254,7 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
         "message-3",
         "code-security-verifier",
     )
+    assert (await audit_verification_subject(verifier)).success
     assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
     assert (
         await audit_submit_verdict(
@@ -950,6 +1265,10 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
         )
     ).success
     runtime.store.update_work_unit_status(verifier_unit, "completed")
+    runtime.store.update_worker_batch_status(
+        verification_batch["batch_id"],
+        "completed",
+    )
 
     batch = runtime.store.create_worker_batch(
         scan_id=scan_id,
@@ -1118,8 +1437,7 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
 
     invalid = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["."],
-        analyzed_paths=["app.py"],
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
         open_questions=[
             {
                 "question": "Deployment controls are outside the source snapshot.",
@@ -1133,8 +1451,7 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
 
     submitted = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["."],
-        analyzed_paths=["app.py"],
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
         open_questions=[
             {
                 "question": "Deployment controls are outside the source snapshot.",
@@ -1169,6 +1486,276 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
     report = (output_path / "report.md").read_text(encoding="utf-8")
     assert "Effective source coverage: **100%**" in report
     assert "Static Validation Limitations" in report
+
+
+@pytest.mark.asyncio
+async def test_host_attestation_records_partial_coverage_from_current_attempt_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("first\nsecond\n", encoding="utf-8")
+    (target / "unread.py").write_text("unread = True\n", encoding="utf-8")
+    (target / "empty.py").write_text("", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    monkeypatch.setattr(
+        reporting_module,
+        "output_dir",
+        lambda scan_id: tmp_path / "outputs" / scan_id,
+    )
+
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
+    unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=unit_id,
+    )
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    assert (await audit_read(baseline, "app.py", start_line=1, end_line=2)).success
+
+    submitted = await audit_submit_coverage(
+        baseline,
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
+    )
+
+    assert submitted.success is True
+    assert submitted.output["policy"] == "evidence_backed_partial"
+    assert submitted.output["completeness"] == "partial"
+    assert submitted.output["counts"] == {
+        "assigned": 3,
+        "read_complete": 1,
+        "failed": 0,
+        "unexamined": 1,
+    }
+    records = runtime.store.list_coverage_records(submitted.output["attestation_id"])
+    assert {item["relative_path"]: item["state"] for item in records} == {
+        "app.py": "read_complete",
+        "empty.py": "not_applicable",
+        "unread.py": "inventoried",
+    }
+    assert runtime.store.work_unit_has_required_facts(unit_id, role="baseline") is True
+    summary = AuditService._coverage_attestation_summary(
+        runtime.store.report_data(scan_id)
+    )
+    assert summary == {
+        "policy": "evidence_backed_partial",
+        "completeness": "partial",
+        "assigned_count": 3,
+        "read_complete_count": 1,
+        "failed_count": 0,
+        "unexamined_count": 1,
+    }
+
+    runtime.store.update_work_unit_status(unit_id, "completed")
+    _submit_final_adjudication(runtime, scan_id)
+    finalized = await audit_finalize(coordinator, scan_id)
+    assert finalized.success is True
+    output_path = Path(finalized.output["output_dir"])
+    coverage = json.loads((output_path / "coverage.json").read_text(encoding="utf-8"))
+    assert coverage["completeness"] == "partial"
+    assert any(item.get("paths") == ["unread.py"] for item in coverage["deferred"])
+    receipt_path = coverage["surfaces"][0]["receiptRefs"][0]
+    receipt = json.loads((output_path / receipt_path).read_text(encoding="utf-8"))
+    assert receipt["attestationId"] == submitted.output["attestation_id"]
+    assert receipt["unexamined"] == ["unread.py"]
+    report = (output_path / "report.md").read_text(encoding="utf-8")
+    assert "Unexamined source files: **1**" in report
+
+
+@pytest.mark.asyncio
+async def test_exhaustive_attestation_blocks_until_all_files_have_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("first\nsecond\nthird\n", encoding="utf-8")
+    (target / "other.py").write_text("other = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    snapshot = runtime.snapshots.create(str(target))
+    scan_id = runtime.store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id=snapshot.snapshot_id,
+        mode="standard",
+        ruleset_digest="rules",
+        coverage_policy="exhaustive",
+    )
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+    )
+    unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+        role="baseline",
+        work_unit_id=unit_id,
+    )
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await audit_read(baseline, "app.py", start_line=3, end_line=3)).success
+
+    gap_rejected = await audit_submit_coverage(
+        baseline,
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
+    )
+    assert gap_rejected.success is False
+    assert gap_rejected.metadata["error_code"] == "COVERAGE_OVERCLAIM"
+    assert gap_rejected.metadata["violations"][0]["actual_state"] == "read_partial"
+
+    assert (await audit_read(baseline, "app.py", start_line=2, end_line=2)).success
+
+    blocked = await audit_submit_coverage(
+        baseline,
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
+    )
+
+    assert blocked.success is True
+    assert blocked.output["completeness"] == "blocked"
+    assert blocked.output["counts"]["unexamined"] == 1
+    assert runtime.store.work_unit_has_required_facts(unit_id, role="baseline") is False
+
+    invalid_not_applicable = await audit_submit_coverage(
+        baseline,
+        dispositions=[
+            {"path": "app.py", "claim": "analyzed"},
+            {
+                "path": "other.py",
+                "claim": "not_applicable",
+                "reason": "model-declared irrelevant source",
+            },
+        ],
+    )
+    assert invalid_not_applicable.success is False
+    assert invalid_not_applicable.metadata["error_code"] == "COVERAGE_OVERCLAIM"
+    assert invalid_not_applicable.metadata["violations"] == [
+        {
+            "path": "other.py",
+            "claimed_state": "not_applicable",
+            "actual_state": "inventoried",
+            "required_receipt": "host_determined_not_applicable",
+        }
+    ]
+
+    assert (await audit_read(baseline, "other.py", start_line=1, end_line=1)).success
+    complete = await audit_submit_coverage(
+        baseline,
+        dispositions=[
+            {"path": "app.py", "claim": "analyzed"},
+            {"path": "other.py", "claim": "analyzed"},
+        ],
+    )
+    assert complete.success is True
+    assert complete.output["completeness"] == "complete"
+    assert complete.output["counts"]["unexamined"] == 0
+    assert complete.output["attestation_id"] == blocked.output["attestation_id"]
+    with runtime.store._connect() as connection:
+        attestation_count = connection.execute(
+            "SELECT COUNT(*) FROM coverage_attestations "
+            "WHERE work_unit_id = ? AND attempt_id = ?",
+            (unit_id, complete.output["attempt_id"]),
+        ).fetchone()[0]
+    assert attestation_count == 1
+    assert runtime.store.work_unit_has_required_facts(unit_id, role="baseline") is True
+
+
+@pytest.mark.asyncio
+async def test_fresh_attempt_cannot_attest_with_previous_attempt_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("first\nsecond\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    snapshot = runtime.snapshots.create(str(target))
+    scan_id = runtime.store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id=snapshot.snapshot_id,
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+    )
+    unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="baseline-1",
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+        role="baseline",
+        work_unit_id=unit_id,
+    )
+    first = _agent_context("baseline-1", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(first)).success
+    assert (await audit_inventory(first)).success
+    assert (await audit_read(first, "app.py", start_line=1, end_line=2)).success
+    first_binding = runtime.store.require_binding("baseline-1", {"baseline"})
+    runtime.store.finish_work_attempt(
+        first_binding.attempt_id,
+        status="failed",
+        failure_class="session_missing",
+    )
+    runtime.store.create_work_attempt(
+        work_unit_id=unit_id,
+        session_id="baseline-2",
+        agent_name="code-security-baseline",
+    )
+    second = _agent_context("baseline-2", "message-3", "code-security-baseline")
+
+    rejected = await audit_submit_coverage(
+        second,
+        dispositions=[{"path": "app.py", "claim": "analyzed"}],
+    )
+
+    assert rejected.success is False
+    assert rejected.metadata["error_code"] == "COVERAGE_OVERCLAIM"
+    assert rejected.metadata["violations"] == [
+        {
+            "path": "app.py",
+            "claimed_state": "analyzed",
+            "actual_state": "unexamined",
+            "required_receipt": "read_complete",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1214,16 +1801,20 @@ async def test_failed_coverage_is_sealed_as_deferred_work(
 
     invalid = await audit_submit_coverage(
         baseline,
-        analyzed_paths=["does-not-exist.py"],
+        dispositions=[{"path": "does-not-exist.py", "claim": "analyzed"}],
     )
     assert invalid.success is False
     assert (await audit_inventory(baseline)).success
     assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
     failed = await audit_submit_coverage(
         baseline,
-        inventoried_paths=["app.py"],
-        analyzed_paths=["app.py"],
-        failed_paths=["app.py"],
+        dispositions=[
+            {
+                "path": "app.py",
+                "claim": "failed",
+                "reason": "worker_reported_failure",
+            }
+        ],
     )
     assert failed.success is True
     runtime.store.update_work_unit_status(unit_id, "completed")
@@ -1235,9 +1826,14 @@ async def test_failed_coverage_is_sealed_as_deferred_work(
     manifest = json.loads((Path(finalized.output["output_dir"]) / "scan-manifest.json").read_text(encoding="utf-8"))
     coverage = json.loads((Path(finalized.output["output_dir"]) / "coverage.json").read_text(encoding="utf-8"))
     assert manifest["scan"]["status"] == "completed"
-    assert coverage["completeness"] == "partial"
+    assert coverage["completeness"] == "complete"
     assert any(item.get("paths") == ["app.py"] for item in coverage["deferred"])
-    assert (await audit_submit_coverage(baseline, analyzed_paths=["app.py"])).success is False
+    assert (
+        await audit_submit_coverage(
+            baseline,
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
+        )
+    ).success is False
     assert (await audit_finalize(coordinator, scan_id)).success is False
     assert (await audit_cancel(coordinator, scan_id)).success is False
 
@@ -1289,8 +1885,25 @@ async def test_parent_can_direct_only_one_targeted_rescan(
     assert (
         await audit_submit_coverage(
             baseline,
-            inventoried_paths=["app.py"],
-            analyzed_paths=["app.py"],
+            dispositions=[
+                {
+                    "path": "app.py",
+                    "claim": "failed",
+                    "reason": "analysis_context_missing",
+                }
+            ],
+            open_questions=[
+                {
+                    "question": "Is the unresolved path attacker reachable?",
+                    "category": "coverage_blocking",
+                    "blocking": True,
+                },
+                {
+                    "question": "Runtime configuration was not available.",
+                    "category": "validation_limitation",
+                    "blocking": False,
+                },
+            ],
         )
     ).success
     runtime.store.update_work_unit_status(baseline_unit, "completed")
@@ -1300,6 +1913,13 @@ async def test_parent_can_direct_only_one_targeted_rescan(
     assert first_context.output["view"] == "overview"
     assert first_context.output["adjudication_round"] == 1
     assert first_context.output["candidate_count"] == 0
+    assert first_context.output["coverage_gaps"]["failed_paths"] == ["app.py"]
+    assert first_context.output["coverage_gaps"]["blocking_questions"][0][
+        "question"
+    ] == "Is the unresolved path attacker reachable?"
+    assert first_context.output["validation_limitations"][0]["question"] == (
+        "Runtime configuration was not available."
+    )
     broad_rescan = await audit_submit_adjudication(
         coordinator,
         scan_id,
@@ -1371,8 +1991,7 @@ async def test_parent_can_direct_only_one_targeted_rescan(
     assert (
         await audit_submit_coverage(
             rescan,
-            inventoried_paths=["app.py"],
-            analyzed_paths=["app.py"],
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
         )
     ).success
     runtime.store.update_work_unit_status(rescan_unit, "completed")
@@ -1469,18 +2088,17 @@ async def test_parent_rejection_removes_verifier_confirmed_candidate(
     assert (
         await audit_submit_coverage(
             baseline,
-            inventoried_paths=["app.py"],
-            analyzed_paths=["app.py"],
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
         )
     ).success
     runtime.store.update_work_unit_status(baseline_unit, "completed")
 
-    verifier_unit = runtime.store.create_work_unit(
+    verification_batch = _create_verification_batch(
+        runtime,
         scan_id=scan_id,
-        phase="verification",
-        role="verifier",
-        paths=["app.py"],
+        candidate_ids=[candidate.output["candidate_id"]],
     )
+    verifier_unit = verification_batch["units"][0]["work_unit_id"]
     runtime.store.bind_session(
         session_id="verifier",
         scan_id=scan_id,
@@ -1489,6 +2107,7 @@ async def test_parent_rejection_removes_verifier_confirmed_candidate(
         work_unit_id=verifier_unit,
     )
     verifier = _agent_context("verifier", "message-3", "code-security-verifier")
+    assert (await audit_verification_subject(verifier)).success
     assert (await audit_read(verifier, "app.py", start_line=1, end_line=1)).success
     assert (
         await audit_submit_verdict(
@@ -1499,6 +2118,10 @@ async def test_parent_rejection_removes_verifier_confirmed_candidate(
         )
     ).success
     runtime.store.update_work_unit_status(verifier_unit, "completed")
+    runtime.store.update_worker_batch_status(
+        verification_batch["batch_id"],
+        "completed",
+    )
 
     with runtime.store._connect() as connection:
         connection.execute(
@@ -1618,8 +2241,7 @@ async def test_unverified_candidate_blocks_completed_bundle(
     assert (
         await audit_submit_coverage(
             baseline,
-            inventoried_paths=["app.py"],
-            analyzed_paths=["app.py"],
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
         )
     ).success
     runtime.store.update_work_unit_status(unit_id, "completed")
@@ -1677,8 +2299,7 @@ async def test_report_write_failure_does_not_publish_partial_bundle(
     assert (
         await audit_submit_coverage(
             baseline,
-            inventoried_paths=["app.py"],
-            analyzed_paths=["app.py"],
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
         )
     ).success
     runtime.store.update_work_unit_status(unit_id, "completed")
@@ -1762,28 +2383,41 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
     assert (
         await audit_submit_coverage(
             baseline,
-            inventoried_paths=["app.py"],
-            analyzed_paths=["app.py"],
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
         )
     ).success
     runtime.store.update_work_unit_status(baseline_unit, "completed")
 
-    verifier_unit = runtime.store.create_work_unit(
+    candidate_ids = [
+        first.output["candidate_id"],
+        second.output["candidate_id"],
+    ]
+    verification_batch = _create_verification_batch(
+        runtime,
         scan_id=scan_id,
-        phase="verification",
-        role="verifier",
-        paths=["."],
+        candidate_ids=candidate_ids,
     )
-    runtime.store.bind_session(
-        session_id="verifier",
-        scan_id=scan_id,
-        snapshot_id=snapshot_id,
-        role="verifier",
-        work_unit_id=verifier_unit,
-    )
-    verifier = _agent_context("verifier", "message-3", "code-security-verifier")
-    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
-    for candidate_id in (first.output["candidate_id"], second.output["candidate_id"]):
+    for index, (unit, candidate_id) in enumerate(
+        zip(verification_batch["units"], candidate_ids, strict=True),
+        start=1,
+    ):
+        session_id = f"verifier-{index}"
+        runtime.store.bind_session(
+            session_id=session_id,
+            scan_id=scan_id,
+            snapshot_id=snapshot_id,
+            role="verifier",
+            work_unit_id=unit["work_unit_id"],
+        )
+        verifier = _agent_context(
+            session_id,
+            f"message-{index + 2}",
+            "code-security-verifier",
+        )
+        assert (await audit_verification_subject(verifier)).success
+        assert (
+            await audit_read(verifier, "app.py", start_line=1, end_line=2)
+        ).success
         assert (
             await audit_submit_verdict(
                 verifier,
@@ -1792,14 +2426,19 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
                 "independently confirmed",
             )
         ).success
-    duplicate_verdict = await audit_submit_verdict(
-        verifier,
-        first.output["candidate_id"],
-        "rejected",
-        "conflicting retry",
+        if index == 1:
+            duplicate_verdict = await audit_submit_verdict(
+                verifier,
+                candidate_id,
+                "rejected",
+                "conflicting retry",
+            )
+            assert duplicate_verdict.success is False
+        runtime.store.update_work_unit_status(unit["work_unit_id"], "completed")
+    runtime.store.update_worker_batch_status(
+        verification_batch["batch_id"],
+        "completed",
     )
-    assert duplicate_verdict.success is False
-    runtime.store.update_work_unit_status(verifier_unit, "completed")
     _submit_final_adjudication(runtime, scan_id)
 
     finalized = await audit_finalize(coordinator, scan_id)
@@ -1810,6 +2449,137 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
     assert len(findings[0]["extensions"]["candidateIds"]) == 2
     report = (output_path / "report.md").read_text(encoding="utf-8")
     assert "\\!\\[remote\\]\\(https://invalid.example/image\\)" in report
+
+
+@pytest.mark.asyncio
+async def test_three_independent_votes_produce_one_majority_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text(
+        "def handler(user):\n    return eval(user)\n",
+        encoding="utf-8",
+    )
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(
+        coordinator,
+        str(target),
+        verification_votes=3,
+    )
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
+
+    baseline_unit = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=baseline_unit,
+    )
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
+    candidate = await audit_submit_candidate(
+        baseline,
+        _candidate_payload(
+            [
+                {
+                    "relative_path": "app.py",
+                    "blob_digest": source.output["blob_digest"],
+                    "start_line": 1,
+                    "end_line": 2,
+                }
+            ]
+        ),
+    )
+    assert candidate.success
+    assert (
+        await audit_submit_coverage(
+            baseline,
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
+        )
+    ).success
+    runtime.store.update_work_unit_status(baseline_unit, "completed")
+
+    pending = runtime.store.list_unverified_candidates(scan_id)
+    assert pending[0]["pending_vote_indices"] == [1, 2, 3]
+    batch = runtime.store.create_worker_batch(
+        scan_id=scan_id,
+        phase="verification",
+        units=plan_verification_units(pending),
+    )
+    runtime.store.update_worker_batch_status(batch["batch_id"], "running")
+
+    submitted_verdicts = ["confirmed", "rejected", "confirmed"]
+    subjects = []
+    for index, (unit, submitted_verdict) in enumerate(
+        zip(batch["units"], submitted_verdicts, strict=True),
+        start=1,
+    ):
+        session_id = f"verifier-{index}"
+        runtime.store.bind_session(
+            session_id=session_id,
+            scan_id=scan_id,
+            snapshot_id=snapshot_id,
+            role="verifier",
+            work_unit_id=unit["work_unit_id"],
+        )
+        verifier = _agent_context(
+            session_id,
+            f"verifier-message-{index}",
+            "code-security-verifier",
+        )
+        subject = await audit_verification_subject(verifier)
+        assert subject.success
+        assert set(subject.output) == {
+            "candidate_id",
+            "vote_index",
+            "trust",
+            "claim",
+            "evidence",
+            "threat_context",
+        }
+        assert subject.output["vote_index"] == index
+        assert subject.output["trust"] == "untrusted_candidate_claim"
+        subjects.append(subject.output["claim"])
+        assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
+        vote = await audit_submit_verdict(
+            verifier,
+            candidate.output["candidate_id"],
+            submitted_verdict,
+            f"Independent vote {index} after reading the source.",
+        )
+        assert vote.success
+        assert vote.output["vote_index"] == index
+        if index < 3:
+            assert vote.output["consensus_verdict"] is None
+            assert runtime.store.report_data(scan_id)["verifications"] == []
+        runtime.store.update_work_unit_status(unit["work_unit_id"], "completed")
+
+    runtime.store.update_worker_batch_status(batch["batch_id"], "completed")
+    assert subjects[0] == subjects[1] == subjects[2]
+    report_data = runtime.store.report_data(scan_id)
+    assert len(report_data["verification_votes"]) == 3
+    assert [item["verdict"] for item in report_data["verifications"]] == [
+        "confirmed"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1857,6 +2627,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     get_callable_tools = AsyncMock(
         return_value={
             "audit_knowledge_base",
+            "audit_repository_summary",
             "audit_inventory",
             "audit_read",
             "audit_search",
@@ -1890,6 +2661,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     set_callable_tools.assert_awaited_once_with(
         children[0].id,
         {
+            "audit_repository_summary",
             "audit_inventory",
             "audit_read",
             "audit_search",
@@ -1908,6 +2680,13 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "threat-model-message",
         "code-security-threat-modeler",
     )
+    modeler.extra.update(
+        model={"providerID": "provider", "modelID": "model"},
+        turn_callable_tool_names=sorted(
+            get_callable_tools.return_value - {"audit_knowledge_base"}
+        ),
+    )
+    assert (await audit_repository_summary(modeler)).success
     inventory = await audit_inventory(modeler)
     assert inventory.success
     source = await audit_read(modeler, "app.py", start_line=1, end_line=2)
@@ -1947,8 +2726,17 @@ async def test_background_worker_orchestration_retries_failed_verification(
     baseline_observability = children[1].creation_kwargs["metadata"]["langfuse"]
     assert baseline_observability["session_id"] == scan_id
     assert baseline_observability["metadata"]["phase"] == "baseline"
-    assert baseline_observability["metadata"]["assigned_paths"] == ["app.py"]
-    assert baseline_batch.output["workers"][0]["assigned_paths"] == ["app.py"]
+    assert baseline_observability["metadata"]["assigned_paths"] == ["."]
+    assert len(baseline_observability["metadata"]["assignment_digest"]) == 64
+    assert baseline_batch.output["workers"][0]["assigned_paths"] == ["."]
+    assert (
+        baseline_batch.output["workers"][0]["assignment_digest"]
+        == baseline_observability["metadata"]["assignment_digest"]
+    )
+    persisted_baseline = runtime.store.get_worker_batch(
+        baseline_batch.output["batch_id"]
+    )
+    assert len(persisted_baseline["units"][0]["assignment_digest"]) == 64
     assert manager.calls[1]["parent_session_id"] == "coordinator"
     running_wait = await audit_wait_workers(
         coordinator,
@@ -1962,6 +2750,12 @@ async def test_background_worker_orchestration_retries_failed_verification(
         baseline_session,
         "baseline-message",
         "code-security-baseline",
+    )
+    baseline.extra.update(
+        model={"providerID": "provider", "modelID": "model"},
+        turn_callable_tool_names=sorted(
+            get_callable_tools.return_value - {"audit_knowledge_base"}
+        ),
     )
     assert (await audit_threat_model_context(baseline)).success
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
@@ -1983,8 +2777,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     assert (
         await audit_submit_coverage(
             baseline,
-            inventoried_paths=["app.py"],
-            analyzed_paths=["app.py"],
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
         )
     ).success
     manager.tasks["task-2"].status = "completed"
@@ -2004,24 +2797,30 @@ async def test_background_worker_orchestration_retries_failed_verification(
     verification_observability = children[2].creation_kwargs["metadata"]["langfuse"]
     assert verification_observability["metadata"]["candidate_id"] == candidate.output["candidate_id"]
     manager.tasks["task-3"].status = "error"
+    manager.tasks["task-3"].error = "Session worker-3 not found"
     failed_verification = await audit_wait_workers(
         coordinator,
         verification_batch.output["batch_id"],
         timeout_seconds=0,
     )
-    assert failed_verification.output["status"] == "failed"
-
-    verification_batch = await audit_run_workers(
-        coordinator,
-        scan_id,
-        "verification",
+    assert failed_verification.output["status"] == "running"
+    assert failed_verification.output["workers"][0]["attempt_ordinal"] == 2
+    attempts = runtime.store.list_work_attempts(
+        failed_verification.output["workers"][0]["work_unit_id"]
     )
-    assert verification_batch.success is True
+    assert [attempt["status"] for attempt in attempts] == ["failed", "running"]
     verifier = _agent_context(
         children[3].id,
         "verifier-message",
         "code-security-verifier",
     )
+    verifier.extra.update(
+        model={"providerID": "provider", "modelID": "model"},
+        turn_callable_tool_names=sorted(
+            get_callable_tools.return_value - {"audit_knowledge_base"}
+        ),
+    )
+    assert (await audit_verification_subject(verifier)).success
     assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
     assert (
         await audit_submit_verdict(
@@ -2136,7 +2935,7 @@ async def test_worker_launch_cancels_task_when_runtime_binding_fails(
     def fail_runtime_binding(*_args, **_kwargs):
         raise ValueError("runtime binding failed")
 
-    monkeypatch.setattr(runtime.store, "set_work_unit_runtime", fail_runtime_binding)
+    monkeypatch.setattr(runtime.store, "set_work_attempt_runtime", fail_runtime_binding)
     launched = await audit_run_workers(
         coordinator,
         prepared.output["scan_id"],

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
+from flocks_code_security.manifest import RepositoryManifestService
 from flocks_code_security.paths import (
     data_dir,
     ensure_private_directory,
@@ -22,6 +23,7 @@ from flocks_code_security.store import ScanStore
 class PluginRuntime:
     store: ScanStore
     snapshots: TargetSnapshotService
+    manifests: RepositoryManifestService
     source: AuditSourceRepository
 
 
@@ -40,6 +42,7 @@ def build_runtime(root: Path) -> PluginRuntime:
     return PluginRuntime(
         store=store,
         snapshots=snapshot_service,
+        manifests=snapshot_service.manifests,
         source=AuditSourceRepository(store),
     )
 

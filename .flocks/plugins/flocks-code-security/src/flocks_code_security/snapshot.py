@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
+from flocks_code_security.manifest import RepositoryManifestService
 from flocks_code_security.models import SnapshotFile, SnapshotOmission, SnapshotRef
 from flocks_code_security.store import ScanStore
 
@@ -118,6 +119,7 @@ class TargetSnapshotService:
     ):
         self.snapshots_root = snapshots_root
         self.store = store
+        self.manifests = RepositoryManifestService(store)
         self.protected_roots = tuple(Path(path).expanduser() for path in protected_roots)
 
     def create(
@@ -306,8 +308,11 @@ class TargetSnapshotService:
                 exclude_patterns=tuple(patterns),
             )
             self.store.save_snapshot(snapshot, records, omissions)
+            self.manifests.build(snapshot.snapshot_id)
             return snapshot
         except Exception:
+            if self.store.get_snapshot(snapshot_id) is not None:
+                self.store.delete_snapshot(snapshot_id)
             cleanup_root = (
                 temporary
                 if temporary is not None and temporary.exists()

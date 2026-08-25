@@ -6,6 +6,8 @@ Ported from oh-my-opencode background agent manager behavior.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional, Any, List
@@ -50,6 +52,7 @@ class BackgroundTask:
     allow_user_questions: bool = True
     provider_id: Optional[str] = None
     model_id: Optional[str] = None
+    execution_capsule: Optional[dict] = None
     completion_injected: bool = False
 
 
@@ -148,6 +151,8 @@ class BackgroundManager:
         parent_model: Optional[dict] = None,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
+        execution_capsule: Optional[dict] = None,
+        start_gate: Optional[asyncio.Event] = None,
     ) -> BackgroundTask:
         """Run the session loop on an already-created session.
 
@@ -155,6 +160,13 @@ class BackgroundManager:
         This is used by TaskExecutor which creates the session upfront so that
         the task record can hold sessionID at the moment it becomes RUNNING.
         """
+        self._validate_execution_capsule(
+            execution_capsule,
+            session_id=session_id,
+            agent=agent,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
         task_id = f"bg_{Identifier.ascending('task')[:8]}"
         task = BackgroundTask(
             id=task_id,
@@ -171,18 +183,84 @@ class BackgroundManager:
             allow_user_questions=allow_user_questions,
             provider_id=provider_id,
             model_id=model_id,
+            execution_capsule=(
+                dict(execution_capsule)
+                if execution_capsule is not None
+                else None
+            ),
         )
         self._tasks[task_id] = task
-        handle = asyncio.create_task(self._run_existing_session(task, session_id))
+        handle = asyncio.create_task(
+            self._run_existing_session(task, session_id, start_gate=start_gate)
+        )
         self._task_handles[task_id] = handle
         return task
 
-    async def _run_existing_session(self, task: BackgroundTask, session_id: str) -> None:
+    @staticmethod
+    def _validate_execution_capsule(
+        capsule: Optional[dict],
+        *,
+        session_id: str,
+        agent: str,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+    ) -> None:
+        if capsule is None:
+            return
+        expected = {
+            "session_id": session_id,
+            "agent_name": agent,
+            "provider_id": provider_id,
+            "model_id": model_id,
+        }
+        mismatches = [
+            name
+            for name, value in expected.items()
+            if capsule.get(name) != value
+        ]
+        persisted_digest = capsule.get("capsule_digest")
+        payload = {
+            name: value
+            for name, value in capsule.items()
+            if name != "capsule_digest"
+        }
+        calculated_digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if persisted_digest != calculated_digest:
+            mismatches.append("capsule_digest")
+        if mismatches:
+            raise ValueError(
+                "Background execution capsule does not match: "
+                + ", ".join(mismatches)
+            )
+
+    async def _run_existing_session(
+        self,
+        task: BackgroundTask,
+        session_id: str,
+        *,
+        start_gate: Optional[asyncio.Event] = None,
+    ) -> None:
+        if start_gate is not None:
+            await start_gate.wait()
         async with self._semaphore:
             task.started_at = int(datetime.now().timestamp() * 1000)
             task.last_activity_at = task.started_at
             task.status = "running"
             try:
+                self._validate_execution_capsule(
+                    task.execution_capsule,
+                    session_id=session_id,
+                    agent=task.agent,
+                    provider_id=task.provider_id,
+                    model_id=task.model_id,
+                )
                 callbacks = self._build_activity_callbacks(task)
                 result = await self._run_session_with_watchdog(
                     task,
@@ -191,7 +269,13 @@ class BackgroundManager:
                     allow_user_questions=task.allow_user_questions,
                     provider_id=task.provider_id,
                     model_id=task.model_id,
+                    agent_name=task.agent,
                 )
+                if getattr(result, "action", None) == "error":
+                    raise RuntimeError(
+                        getattr(result, "error", None)
+                        or "Background session loop failed"
+                    )
                 output = ""
                 if result.last_message:
                     output = await Message.get_text_content(result.last_message)
@@ -452,6 +536,7 @@ class BackgroundManager:
         allow_user_questions: bool = True,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
     ):
         """运行 SessionLoop，若超过 timeout_seconds 无任何活跃交互则取消并抛出异常。"""
         inactivity_triggered: list[bool] = [False]
@@ -462,6 +547,7 @@ class BackgroundManager:
                 session_id,
                 provider_id=provider_id,
                 model_id=model_id,
+                agent_name=agent_name,
                 callbacks=callbacks,
             )
         )

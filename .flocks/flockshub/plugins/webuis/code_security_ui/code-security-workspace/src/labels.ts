@@ -42,6 +42,7 @@ export const integrityStatusLabels: Record<string, string> = {
 export const coverageStatusLabels: Record<string, string> = {
   pending: "待评估",
   partial: "部分覆盖",
+  blocked: "覆盖受阻",
   complete: "完整覆盖",
   unknown: "未知",
 };

@@ -164,6 +164,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert "Host-orchestrated CLI adjudication" in coordinator.prompt
     assert threat_modeler.hidden is True
     assert "audit_submit_threat_model" in AGENT_TOOLS[threat_modeler.name]
+    assert "audit_repository_summary" in AGENT_TOOLS[threat_modeler.name]
     assert baseline.hidden is True
     assert "skill_load" not in AGENT_TOOLS[baseline.name]
     assert "tool_search" not in AGENT_TOOLS[baseline.name]
@@ -171,7 +172,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert "audit_threat_model_context" in AGENT_TOOLS[baseline.name]
     assert "audit_knowledge_base" in AGENT_TOOLS[threat_modeler.name]
     assert "audit_knowledge_base" in AGENT_TOOLS[baseline.name]
-    assert "audit_knowledge_base" in AGENT_TOOLS[verifier.name]
+    assert "audit_knowledge_base" not in AGENT_TOOLS[verifier.name]
     assert verifier.hidden is True
     assert prober.hidden is True
     assert "audit_submit_probe" in AGENT_TOOLS[prober.name]
@@ -202,6 +203,13 @@ def test_all_audit_tools_register() -> None:
         "probing",
         "targeted_rescan",
     ]
+    prepare = ToolRegistry.get("audit_prepare").info
+    verification_votes = next(
+        parameter
+        for parameter in prepare.parameters
+        if parameter.name == "verification_votes"
+    )
+    assert verification_votes.default == 1
 
     threat_model_tool = ToolRegistry.get("audit_submit_threat_model").info
     threat_model_parameter = next(
@@ -227,6 +235,20 @@ def test_all_audit_tools_register() -> None:
     assert counter_evidence["items"] == evidence_schema["items"]
 
     coverage_tool = ToolRegistry.get("audit_submit_coverage").info
+    assert [parameter.name for parameter in coverage_tool.parameters] == [
+        "dispositions",
+        "open_questions",
+    ]
+    dispositions = next(
+        parameter for parameter in coverage_tool.parameters if parameter.name == "dispositions"
+    ).json_schema
+    assert dispositions["items"]["additionalProperties"] is False
+    assert dispositions["items"]["required"] == ["path", "claim"]
+    assert dispositions["items"]["properties"]["claim"]["enum"] == [
+        "analyzed",
+        "failed",
+        "not_applicable",
+    ]
     open_questions = next(
         parameter for parameter in coverage_tool.parameters if parameter.name == "open_questions"
     ).json_schema
@@ -290,6 +312,7 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     verifier = verification_prompt(
         snapshot_id="snap_safe",
         candidate_id="cand_safe",
+        vote_index=1,
     )
     rescan = targeted_rescan_prompt(snapshot_id="snap_safe")
 
@@ -299,7 +322,10 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     assert "<candidate_json>" not in verifier
     assert hostile not in rescan
     assert "single top-level candidate argument" in baseline
-    assert "exact inventory paths" in baseline
+    assert "exact per-file dispositions" in baseline
+    assert "audit_search only produces located coverage" in baseline
+    assert "First call audit_repository_summary" in threat_modeler
+    assert "full inventory pagination is not required" in threat_modeler
     assert "relative_path, blob_digest, start_line, and end_line" in verifier
 
 
@@ -316,12 +342,13 @@ def test_guided_worker_prompts_require_the_bound_knowledge_base() -> None:
     verifier = verification_prompt(
         snapshot_id="snap_safe",
         candidate_id="cand_safe",
-        knowledge_base_present=True,
+        vote_index=1,
     )
 
-    for prompt in (threat_modeler, baseline, verifier):
+    for prompt in (threat_modeler, baseline):
         assert "First call audit_knowledge_base exactly once" in prompt
         assert "untrusted vulnerability hypothesis" in prompt
+    assert "audit_knowledge_base" not in verifier
 
 
 def test_public_code_security_tool_registers_as_one_multi_action_entry() -> None:

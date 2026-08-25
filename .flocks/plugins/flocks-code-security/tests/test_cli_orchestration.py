@@ -188,6 +188,82 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
 
 
 @pytest.mark.asyncio
+async def test_threat_modeling_retries_once_with_distinct_attempt_ordinals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: False)
+    phases: list[str] = []
+    batch_phases: dict[str, str] = {}
+    statuses = iter(
+        [
+            {"scan_id": "scan_retry", "threat_model_status": "missing", "counts": {}},
+            {"scan_id": "scan_retry", "threat_model_status": "completed", "counts": {}},
+            {
+                "scan_id": "scan_retry",
+                "threat_model_status": "completed",
+                "counts": {"unverified_candidates": 0},
+            },
+        ]
+    )
+
+    async def prepare(_ctx, _target_path: str) -> ToolResult:
+        return _result({"scan_id": "scan_retry", "snapshot": {"file_count": 1}})
+
+    async def run_workers(_ctx, scan_id: str, phase: str) -> ToolResult:
+        phases.append(phase)
+        batch_id = f"batch_{phase}_{phases.count(phase)}"
+        batch_phases[batch_id] = phase
+        return _result({"scan_id": scan_id, "batch_id": batch_id, "phase": phase})
+
+    async def wait_workers(_ctx, batch_id: str, timeout_seconds: int) -> ToolResult:
+        assert timeout_seconds == 10
+        return _result(
+            {
+                "batch_id": batch_id,
+                "phase": batch_phases[batch_id],
+                "status": "failed" if batch_id == "batch_threat_modeling_1" else "completed",
+            }
+        )
+
+    async def status(_ctx, _scan_id: str) -> ToolResult:
+        return _result(next(statuses))
+
+    async def finalize(_ctx, scan_id: str) -> ToolResult:
+        return _result({"scan_id": scan_id, "status": "completed"})
+
+    async def unexpected_cancel(_ctx, _scan_id: str) -> ToolResult:
+        pytest.fail("bounded threat-model retry must recover the scan")
+
+    monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
+    monkeypatch.setattr(audit_cli, "audit_run_workers", run_workers)
+    monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
+    monkeypatch.setattr(audit_cli, "audit_status", status)
+    monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
+    monkeypatch.setattr(audit_cli, "audit_cancel", unexpected_cancel)
+    monkeypatch.setattr(
+        audit_cli.AuditOrchestrator,
+        "_run_parent_adjudication",
+        _final_adjudication,
+    )
+
+    events: list[tuple[str, dict]] = []
+    result = await audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        lambda event, payload: events.append((event, payload)),
+    ).run()
+
+    assert result["status"] == "completed"
+    assert phases == ["threat_modeling", "threat_modeling", "baseline"]
+    threat_starts = [
+        payload
+        for event, payload in events
+        if event == "batch.started" and payload["phase"] == "threat_modeling"
+    ]
+    assert [payload["attempt_ordinal"] for payload in threat_starts] == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_dynamic_pipeline_probes_and_runs_before_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

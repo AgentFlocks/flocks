@@ -613,12 +613,19 @@ class ReportWriter:
         deferred_candidate_ids: list[str],
     ) -> tuple[dict[str, Any], dict[str, bytes]]:
         scan_id = data["scan"]["scan_id"]
-        coverage_by_unit = {item["work_unit_id"]: item["payload"] for item in data["coverage"]}
+        coverage_by_unit = {item["work_unit_id"]: item for item in data["coverage"]}
         snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
         snapshot_paths = {item.relative_path for item in snapshot_files}
 
-        def covered(path: str, claims: list[str] | set[str]) -> bool:
-            return any(claim == "." or path == claim or path.startswith(f"{claim}/") for claim in claims)
+        def paths_in_states(
+            coverage: dict[str, Any],
+            states: set[str],
+        ) -> list[str]:
+            return [
+                item["relative_path"]
+                for item in coverage["records"]
+                if item["state"] in states
+            ]
 
         candidates_by_unit: dict[str, list[dict[str, Any]]] = {}
         candidates_by_id: dict[str, dict[str, Any]] = {}
@@ -646,7 +653,12 @@ class ReportWriter:
             needs_follow_up = unit["status"] != "completed" or coverage is None
             if coverage is not None:
                 blocking_questions = [question for question in coverage["open_questions"] if question["blocking"]]
-                needs_follow_up = needs_follow_up or bool(coverage["failed_paths"] or blocking_questions)
+                failed_paths = paths_in_states(coverage, {"failed"})
+                needs_follow_up = needs_follow_up or bool(
+                    failed_paths
+                    or blocking_questions
+                    or coverage.get("completeness") in {"partial", "blocked"}
+                )
             if "reported" in unit_outcomes:
                 disposition = "reported"
             elif needs_follow_up or "deferred" in unit_outcomes:
@@ -658,11 +670,33 @@ class ReportWriter:
 
             unit_not_applicable = []
             if coverage is not None:
-                unit_not_applicable = sorted(
-                    item.relative_path
-                    for item in snapshot_files
-                    if item.size_bytes == 0 and covered(item.relative_path, coverage["inventoried_paths"])
+                unit_not_applicable = paths_in_states(
+                    coverage,
+                    {"not_applicable"},
                 )
+            inventory = (
+                []
+                if coverage is None
+                else [item["relative_path"] for item in coverage["records"]]
+            )
+            analyzed = (
+                []
+                if coverage is None
+                else paths_in_states(coverage, {"read_complete"})
+            )
+            failed = (
+                []
+                if coverage is None
+                else paths_in_states(coverage, {"failed"})
+            )
+            unexamined = (
+                []
+                if coverage is None
+                else paths_in_states(
+                    coverage,
+                    {"unexamined", "inventoried", "located", "read_partial"},
+                )
+            )
             receipt_path = f"artifacts/03_coverage/{surface_id}.json"
             receipt = {
                 "documentType": "flocks-code-security.coverage-receipt",
@@ -672,10 +706,16 @@ class ReportWriter:
                 "workUnitId": unit["work_unit_id"],
                 "workUnitStatus": unit["status"],
                 "assignedPaths": paths,
-                "inventory": [] if coverage is None else coverage["inventoried_paths"],
-                "analyzed": [] if coverage is None else coverage["analyzed_paths"],
+                "attestationId": None if coverage is None else coverage.get("attestation_id"),
+                "attemptId": None if coverage is None else coverage.get("attempt_id"),
+                "policy": None if coverage is None else coverage.get("policy"),
+                "completeness": None if coverage is None else coverage.get("completeness"),
+                "counts": None if coverage is None else coverage.get("counts"),
+                "inventory": inventory,
+                "analyzed": analyzed,
                 "notApplicable": unit_not_applicable,
-                "failed": [] if coverage is None else coverage["failed_paths"],
+                "failed": failed,
+                "unexamined": unexamined,
                 "openQuestions": (
                     []
                     if coverage is None
@@ -719,12 +759,26 @@ class ReportWriter:
                     }
                 )
                 continue
-            for failed_path in coverage["failed_paths"]:
+            for failed_path in failed:
                 deferred.append(
                     {
                         "id": stable_id("deferred", unit["work_unit_id"], "failed", failed_path),
                         "reason": "Source path could not be fully analyzed",
                         "paths": [failed_path],
+                        "surfaceIds": [surface_id],
+                    }
+                )
+            if unexamined:
+                deferred.append(
+                    {
+                        "id": stable_id(
+                            "deferred",
+                            unit["work_unit_id"],
+                            "unexamined",
+                            *unexamined,
+                        ),
+                        "reason": "Assigned source remains unexamined in the host coverage attestation",
+                        "paths": unexamined,
                         "surfaceIds": [surface_id],
                     }
                 )
@@ -771,23 +825,27 @@ class ReportWriter:
                 }
             )
 
-        inventoried_paths = {path for coverage in coverage_by_unit.values() for path in coverage["inventoried_paths"]}
-        analyzed_paths = {path for coverage in coverage_by_unit.values() for path in coverage["analyzed_paths"]}
-        failed_paths = {path for coverage in coverage_by_unit.values() for path in coverage["failed_paths"]}
         inventoried_files = {
-            item.relative_path for item in snapshot_files if covered(item.relative_path, inventoried_paths)
-        }
-        not_applicable_paths = {
-            item.relative_path
-            for item in snapshot_files
-            if item.size_bytes == 0 and item.relative_path in inventoried_files
+            path
+            for coverage in coverage_by_unit.values()
+            for path in (item["relative_path"] for item in coverage["records"])
+            if path in snapshot_paths
         }
         analyzed_files = {
-            item.relative_path
-            for item in snapshot_files
-            if item.size_bytes > 0 and covered(item.relative_path, analyzed_paths)
+            path
+            for coverage in coverage_by_unit.values()
+            for path in paths_in_states(coverage, {"read_complete"})
         }
-        failed_files = {item.relative_path for item in snapshot_files if covered(item.relative_path, failed_paths)}
+        failed_files = {
+            path
+            for coverage in coverage_by_unit.values()
+            for path in paths_in_states(coverage, {"failed"})
+        }
+        not_applicable_paths = {
+            path
+            for coverage in coverage_by_unit.values()
+            for path in paths_in_states(coverage, {"not_applicable"})
+        }
         uncovered = sorted(
             path
             for path in snapshot_paths
@@ -851,7 +909,12 @@ class ReportWriter:
         scoped = include_paths != ["."]
         completeness = (
             "complete"
-            if not deferred and all(item["disposition"] != "needs_follow_up" for item in surfaces)
+            if analysis_units
+            and len(coverage_by_unit) == len(analysis_units)
+            and all(
+                coverage["completeness"] == "complete"
+                for coverage in coverage_by_unit.values()
+            )
             else "partial"
         )
         total_files = len(snapshot_files)
@@ -1096,6 +1159,10 @@ class ReportWriter:
                 f"({files.get('analyzed', 0)} analyzed, "
                 f"{files.get('notApplicable', 0)} not applicable, "
                 f"{files.get('failed', 0)} failed)"
+            ),
+            (
+                "- Unexamined source files: **"
+                f"{max(0, files.get('total', 0) - files.get('analyzed', 0) - files.get('notApplicable', 0) - files.get('failed', 0))}**"
             ),
             f"- Deferred work: **{len(coverage['deferred'])}**",
             f"- Static validation limitations: **{len(limitations)}**",

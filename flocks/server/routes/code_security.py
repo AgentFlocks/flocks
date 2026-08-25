@@ -29,6 +29,12 @@ class CreateScanRequest(BaseModel):
     max_file_bytes: int = Field(1_048_576, alias="maxFileBytes", ge=1, le=50 * 1024 * 1024)
     dynamic_enabled: bool = Field(False, alias="dynamicEnabled")
     dynamic_confirmed: bool = Field(False, alias="dynamicConfirmed")
+    coverage_policy: str = Field(
+        "evidence_backed_partial",
+        alias="coveragePolicy",
+        pattern="^(evidence_backed_partial|exhaustive)$",
+    )
+    verification_votes: int = Field(1, alias="verificationVotes", ge=1, le=5)
     idempotency_key: str | None = Field(None, alias="idempotencyKey", max_length=256)
 
 
@@ -163,6 +169,8 @@ async def create_scan(request: Request, payload: CreateScanRequest):
                 exclude_patterns=tuple(payload.exclude_patterns),
                 max_file_bytes=payload.max_file_bytes,
                 dynamic_enabled=payload.dynamic_enabled,
+                coverage_policy=payload.coverage_policy,
+                verification_votes=payload.verification_votes,
                 idempotency_key=payload.idempotency_key,
             ),
             _caller(user, workspace_ref=project.id, authorized_root=root),

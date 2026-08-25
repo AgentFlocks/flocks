@@ -879,7 +879,7 @@ const styles = String.raw`
 .cs-new-audit fieldset { border: 0; border-bottom: 1px solid var(--cs-border); display: grid; gap: 14px; margin: 0; padding: 20px 0; }
 .cs-new-audit legend { font-size: 14px; font-weight: 700; padding: 0; }
 .cs-field { display: grid; gap: 6px; }
-.cs-field > span { font-size: 12px; font-weight: 650; }
+.cs-field > span, .cs-field > label { font-size: 12px; font-weight: 650; }
 .cs-field b { color: var(--cs-danger); }
 .cs-field input, .cs-field select, .cs-field textarea { min-height: 42px; padding: 9px 11px; resize: vertical; width: 100%; }
 .cs-field textarea { min-height: 76px; }

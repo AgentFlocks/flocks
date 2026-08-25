@@ -180,6 +180,8 @@ async def _run_phase(
     phase: str,
     progress: ProgressCallback | None,
     scan_observation: Any = None,
+    *,
+    attempt_ordinal: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     phase_scope = _start_phase_observation(scan_observation, phase)
     phase_parent = None if phase_scope is None else phase_scope.observation
@@ -189,6 +191,8 @@ async def _run_phase(
         ctx.extra["langfuse_trace_context"] = phase_trace_context
     try:
         batch = _require_success(await audit_run_workers(ctx, scan_id, phase))
+        if attempt_ordinal is not None:
+            batch["attempt_ordinal"] = attempt_ordinal
         _emit(
             progress,
             "batch.started",
@@ -548,14 +552,18 @@ class AuditOrchestrator:
                 observation_parent=scan_observation,
             )
 
-            _threat_batch, status = await _run_phase(
-                self.ctx,
-                scan_id,
-                "threat_modeling",
-                self.progress,
-                scan_observation,
-            )
-            if status.get("threat_model_status") != "completed":
+            for threat_attempt in range(1, 3):
+                _threat_batch, status = await _run_phase(
+                    self.ctx,
+                    scan_id,
+                    "threat_modeling",
+                    self.progress,
+                    scan_observation,
+                    attempt_ordinal=threat_attempt,
+                )
+                if status.get("threat_model_status") == "completed":
+                    break
+            else:
                 raise RuntimeError("Threat-modeling phase did not produce a trusted model")
 
             _baseline_batch, status = await _run_phase(
@@ -647,6 +655,8 @@ async def run_standard_audit(
     model: str | None = None,
     progress: ProgressCallback | None = None,
     dynamic_enabled: bool = False,
+    coverage_policy: str = "evidence_backed_partial",
+    verification_votes: int = 1,
     knowledge_base: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the trusted standard audit through the shared service layer."""
@@ -669,6 +679,8 @@ async def run_standard_audit(
             target_path=target,
             model=model,
             dynamic_enabled=dynamic_enabled,
+            coverage_policy=coverage_policy,
+            verification_votes=verification_votes,
             knowledge_base=knowledge_base_input,
         ),
         AuditCaller(

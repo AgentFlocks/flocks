@@ -15,6 +15,8 @@ const EMPTY_VALUES: NewAuditValues = {
   maxFileBytes: 1_048_576,
   dynamicEnabled: false,
   dynamicConfirmed: false,
+  coveragePolicy: "evidence_backed_partial",
+  verificationVotes: 1,
 };
 const CREATE_ERROR_MESSAGES: Record<string, string> = {
   unsafe_target_scope:
@@ -376,6 +378,54 @@ export function NewAuditDrawer({
                   }
                 />
               </label>
+              <label className="cs-field" htmlFor="audit-coveragePolicy">
+                <span>{t("覆盖策略")}</span>
+                <select
+                  id="audit-coveragePolicy"
+                  value={values.coveragePolicy}
+                  onChange={(event) =>
+                    set(
+                      "coveragePolicy",
+                      event.target.value as NewAuditValues["coveragePolicy"],
+                    )
+                  }
+                >
+                  <option value="evidence_backed_partial">
+                    {t("可信部分覆盖（默认）")}
+                  </option>
+                  <option value="exhaustive">{t("穷尽覆盖")}</option>
+                </select>
+                <small>
+                  {t("穷尽覆盖会阻止仍有未检查文件或阻塞问题的工作单元完成。")}
+                </small>
+              </label>
+              <div className="cs-field">
+                <label htmlFor="audit-verificationVotes">
+                  {t("独立复核票数")}
+                </label>
+                <select
+                  id="audit-verificationVotes"
+                  value={values.verificationVotes}
+                  onChange={(event) =>
+                    set(
+                      "verificationVotes",
+                      Number(
+                        event.target.value,
+                      ) as NewAuditValues["verificationVotes"],
+                    )
+                  }
+                  aria-describedby="audit-verificationVotes-help"
+                >
+                  {[1, 2, 3, 4, 5].map((count) => (
+                    <option key={count} value={count}>
+                      {count}
+                    </option>
+                  ))}
+                </select>
+                <small id="audit-verificationVotes-help">
+                  {t("每个候选漏洞独立复核；多票时按严格多数决裁定。")}
+                </small>
+              </div>
             </details>
           </fieldset>
 

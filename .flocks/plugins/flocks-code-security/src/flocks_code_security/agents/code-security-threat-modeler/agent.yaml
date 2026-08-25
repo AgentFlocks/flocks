@@ -17,6 +17,7 @@ memory_enabled: false
 require_dedicated_session: true
 tools:
   - audit_knowledge_base
+  - audit_repository_summary
   - audit_inventory
   - audit_read
   - audit_search

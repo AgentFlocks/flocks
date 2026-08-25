@@ -1102,6 +1102,7 @@ function WorkerList({
               (total, [operation]) => total + (activityCounts[operation] || 0),
               0,
             );
+            const coverageCounts = worker.coverage?.counts;
             const isFullSnapshot =
               worker.paths.length === 1 && worker.paths[0] === ".";
             const verdict = candidate?.verdict || "pending";
@@ -1212,6 +1213,54 @@ function WorkerList({
                         <strong>{activityCounts[operation] || 0}</strong>
                       </span>
                     ))}
+                  </div>
+                )}
+
+                {coverageCounts && (
+                  <div
+                    className="cs-worker-activity"
+                    aria-label={t("覆盖证明统计")}
+                  >
+                    <span>
+                      {t("已分配")}{" "}
+                      <strong>{coverageCounts.assigned || 0}</strong>
+                    </span>
+                    <span>
+                      {t("完整读取")}{" "}
+                      <strong>{coverageCounts.read_complete || 0}</strong>
+                    </span>
+                    <span>
+                      {t("未检查")}{" "}
+                      <strong>{coverageCounts.unexamined || 0}</strong>
+                    </span>
+                    <span>
+                      {t("失败")} <strong>{coverageCounts.failed || 0}</strong>
+                    </span>
+                  </div>
+                )}
+
+                {worker.recent_rejection && (
+                  <div
+                    className="cs-worker-activity"
+                    aria-label={t("最近一次提交拒绝")}
+                  >
+                    <span>
+                      {t("错误码")} {" "}
+                      <strong>
+                        {worker.recent_rejection.error_code || "—"}
+                      </strong>
+                    </span>
+                    <span>
+                      {t("违规项")} {" "}
+                      <strong>
+                        {worker.recent_rejection.violation_count}
+                      </strong>
+                    </span>
+                    <span>
+                      {worker.recent_rejection.retryable
+                        ? t("可在当前执行中修正")
+                        : t("不可重试")}
+                    </span>
                   </div>
                 )}
 

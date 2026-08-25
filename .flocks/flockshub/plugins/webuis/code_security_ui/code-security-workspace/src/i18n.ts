@@ -16,6 +16,20 @@ const englishMessages: Record<string, string> = {
   主智能体裁决: "Primary agent adjudication",
   主智能体: "Primary agent",
   覆盖度: "Coverage",
+  覆盖证明: "Coverage attestation",
+  覆盖证明统计: "Coverage attestation counts",
+  最近一次提交拒绝: "Latest submission rejection",
+  错误码: "Error code",
+  违规项: "Violations",
+  可在当前执行中修正: "Correctable in the current attempt",
+  不可重试: "Not retryable",
+  策略: "Policy",
+  已分配: "Assigned",
+  完整读取: "Read complete",
+  未检查: "Unexamined",
+  可信部分覆盖: "Trusted partial coverage",
+  "这些数字由宿主根据当前执行尝试的源码访问记录计算。":
+    "These counts are computed by the host from source-access receipts for the current attempt.",
   定向复扫: "Targeted rescan",
   产物封装: "Artifact packaging",
   准备中: "Preparing",
@@ -34,6 +48,7 @@ const englishMessages: Record<string, string> = {
   校验失败: "Validation failed",
   待评估: "Pending assessment",
   部分覆盖: "Partial coverage",
+  覆盖受阻: "Coverage blocked",
   完整覆盖: "Complete coverage",
   未知: "Unknown",
   威胁建模员: "Threat modeler",
@@ -178,6 +193,14 @@ const englishMessages: Record<string, string> = {
     "Enter one glob per line, or leave blank to use the plugin defaults.",
   高级设置: "Advanced settings",
   "单文件上限（字节）": "Per-file limit (bytes)",
+  覆盖策略: "Coverage policy",
+  "可信部分覆盖（默认）": "Trusted partial coverage (default)",
+  穷尽覆盖: "Exhaustive coverage",
+  "穷尽覆盖会阻止仍有未检查文件或阻塞问题的工作单元完成。":
+    "Exhaustive coverage prevents work units with unexamined files or blocking questions from completing.",
+  独立复核票数: "Independent verification votes",
+  "每个候选漏洞独立复核；多票时按严格多数决裁定。":
+    "Each candidate is reviewed independently; multiple votes use a strict majority.",
   模型: "Model",
   固定模型: "Fixed model",
   留空使用系统默认模型: "Leave blank to use the system default",
@@ -475,8 +498,7 @@ export function useCodeSecurityI18n(): {
   t: Translator;
 } {
   const runtime = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__ as
-    | ContractRuntime
-    | undefined;
+    ContractRuntime | undefined;
   const language = runtime?.useLanguage
     ? runtime.useLanguage()
     : window.localStorage?.getItem("flocks-language") ||

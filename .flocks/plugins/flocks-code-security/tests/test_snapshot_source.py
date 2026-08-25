@@ -63,6 +63,132 @@ def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
     }
 
 
+def test_fresh_attempt_does_not_inherit_source_receipts(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("first\nsecond\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target))
+    scan_id = runtime.store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id=snapshot.snapshot_id,
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="worker-1",
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+        role="baseline",
+        work_unit_id=work_unit_id,
+    )
+    first_binding = runtime.store.require_binding("worker-1", {"baseline"})
+    runtime.source.inventory("worker-1")
+    runtime.source.read("worker-1", "app.py", start_line=1, end_line=2)
+    runtime.store.finish_work_attempt(
+        first_binding.attempt_id,
+        status="failed",
+        failure_class="agent_exited_no_facts",
+    )
+
+    second_attempt = runtime.store.create_work_attempt(
+        work_unit_id=work_unit_id,
+        session_id="worker-2",
+        agent_name="code-security-baseline",
+    )
+    second_binding = runtime.store.require_binding("worker-2", {"baseline"})
+
+    assert second_attempt["ordinal"] == 2
+    assert second_binding.attempt_id == second_attempt["attempt_id"]
+    assert runtime.store.list_source_accesses(second_binding.attempt_id) == []
+    with runtime.store._connect() as connection:
+        attempt_ids = {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT attempt_id FROM source_access WHERE work_unit_id = ?",
+                (work_unit_id,),
+            ).fetchall()
+        }
+    assert attempt_ids == {first_binding.attempt_id}
+
+
+def test_repository_manifest_is_stable_and_source_views_are_digest_bound(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    (target / "services" / "auth").mkdir(parents=True)
+    (target / "services" / "auth" / "app.py").write_text(
+        "safe = True\n",
+        encoding="utf-8",
+    )
+    (target / "README.md").write_text("documentation\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target))
+
+    first = runtime.manifests.get_or_build(snapshot.snapshot_id)
+    second = runtime.manifests.get_or_build(snapshot.snapshot_id)
+
+    assert first.manifest_id == second.manifest_id
+    assert first.manifest_digest == second.manifest_digest
+    assert first.file_count == 2
+    assert dict(first.languages) == {"other": 1, "python": 1}
+    assert first.components[0].path == "."
+
+    scan_id = runtime.store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id=snapshot.snapshot_id,
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="threat_modeling",
+        role="threat_modeler",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="modeler",
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+        role="threat_modeler",
+        work_unit_id=work_unit_id,
+    )
+
+    binding = runtime.store.require_binding("modeler", {"threat_modeler"})
+    runtime.store.record_source_access(
+        binding,
+        operation="repository_summary",
+        relative_path=".",
+        blob_digest=snapshot.tree_digest,
+    )
+    with pytest.raises(ValueError, match="Canonical repository summary"):
+        runtime.store.require_repository_summary_consumed(binding)
+
+    summary = runtime.source.repository_summary("modeler")
+    inventory = runtime.source.inventory("modeler")
+    runtime.store.require_repository_summary_consumed(binding)
+
+    assert summary["manifest_id"] == first.manifest_id
+    assert summary["manifest_digest"] == first.manifest_digest
+    assert inventory["manifest_id"] == first.manifest_id
+    assert inventory["manifest_digest"] == first.manifest_digest
+    with runtime.store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM repository_manifests WHERE snapshot_id = ?",
+            (snapshot.snapshot_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM manifest_access WHERE work_unit_id = ?",
+            (work_unit_id,),
+        ).fetchone()[0] == 1
+
+
 def test_evidence_context_rejects_snapshot_tampering(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()

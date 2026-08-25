@@ -27,6 +27,7 @@ AGENT_TOOLS = {
     ],
     "code-security-threat-modeler": [
         "audit_knowledge_base",
+        "audit_repository_summary",
         "audit_inventory",
         "audit_read",
         "audit_search",
@@ -42,7 +43,6 @@ AGENT_TOOLS = {
         "audit_submit_coverage",
     ],
     "code-security-verifier": [
-        "audit_knowledge_base",
         "audit_verification_subject",
         "audit_inventory",
         "audit_read",

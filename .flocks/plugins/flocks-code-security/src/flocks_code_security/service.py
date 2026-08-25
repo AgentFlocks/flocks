@@ -119,6 +119,8 @@ class StartScanRequest:
     exclude_patterns: tuple[str, ...] = ()
     max_file_bytes: int = 1_048_576
     dynamic_enabled: bool = False
+    coverage_policy: str = "evidence_backed_partial"
+    verification_votes: int = 1
     idempotency_key: str | None = None
     knowledge_base: KnowledgeBaseInput | None = None
 
@@ -295,9 +297,23 @@ class _ProgressRecorder:
         elif event == "batch.started":
             phase = _public_phase(str(payload.get("phase") or ""))
             if phase:
-                phase_run_id = self.phase_runs.get(phase)
+                phase_run_id = (
+                    self.phase_runs.get(phase)
+                    if phase == "dynamic_validation"
+                    else None
+                )
                 if phase_run_id is None:
-                    run = self.store.start_phase_run(self.scan_id, phase, summary=payload)
+                    attempt_ordinal = payload.get("attempt_ordinal")
+                    run = self.store.start_phase_run(
+                        self.scan_id,
+                        phase,
+                        summary=payload,
+                        ordinal=(
+                            attempt_ordinal
+                            if isinstance(attempt_ordinal, int) and attempt_ordinal > 0
+                            else None
+                        ),
+                    )
                     phase_run_id = run["phase_run_id"]
                     self.phase_runs[phase] = phase_run_id
                 self.phase_runs[str(payload.get("batch_id") or phase)] = phase_run_id
@@ -419,9 +435,11 @@ class _ProgressRecorder:
             "scan_id",
             "status",
             "dynamic_enabled",
+            "coverage_policy",
             "snapshot",
             "batch_id",
             "phase",
+            "attempt_ordinal",
             "status_counts",
             "launched_workers",
             "counts",
@@ -530,6 +548,8 @@ class AuditService:
             exclude_patterns=self._validate_exclude_patterns(request.exclude_patterns),
             max_file_bytes=request.max_file_bytes,
             dynamic_enabled=bool(request.dynamic_enabled),
+            coverage_policy=str(request.coverage_policy or "").strip(),
+            verification_votes=request.verification_votes,
             idempotency_key=(request.idempotency_key or "").strip() or None,
             knowledge_base=self._validate_knowledge_base(request.knowledge_base),
         )
@@ -540,6 +560,20 @@ class AuditService:
             )
         if normalized.model and len(normalized.model) > 256:
             raise AuditServiceError("invalid_parameter", "model may contain at most 256 characters")
+        if normalized.coverage_policy not in {
+            "evidence_backed_partial",
+            "exhaustive",
+        }:
+            raise AuditServiceError("invalid_parameter", "Unsupported coverage_policy")
+        if (
+            not isinstance(normalized.verification_votes, int)
+            or isinstance(normalized.verification_votes, bool)
+            or not 1 <= normalized.verification_votes <= 5
+        ):
+            raise AuditServiceError(
+                "invalid_parameter",
+                "verification_votes must be between 1 and 5",
+            )
         if normalized.idempotency_key and len(normalized.idempotency_key) > 256:
             raise AuditServiceError("invalid_parameter", "idempotency_key may contain at most 256 characters")
         digest = self._request_digest(normalized)
@@ -557,6 +591,8 @@ class AuditService:
                 exclude_patterns=list(normalized.exclude_patterns) or None,
                 max_file_bytes=normalized.max_file_bytes,
                 dynamic_enabled=normalized.dynamic_enabled,
+                coverage_policy=normalized.coverage_policy,
+                verification_votes=normalized.verification_votes,
             )
             try:
                 prepared = _require_success(prepare_result)
@@ -723,6 +759,8 @@ class AuditService:
                 report_data=report_data,
             ),
             "dynamic_enabled": bool(scan["dynamic_enabled"]),
+            "coverage_policy": scan["coverage_policy"],
+            "verification_votes": scan["verification_vote_count"],
             "created_at": scan["created_at"],
             "started_at": scan["created_at"],
             "finished_at": finished_at,
@@ -1166,6 +1204,7 @@ class AuditService:
                 "state": "partial",
                 "content": {
                     "verifications": data["verifications"],
+                    "votes": data["verification_votes"],
                     "conflicts": data["verification_conflicts"],
                 },
             }
@@ -1447,6 +1486,8 @@ class AuditService:
             "exclude_patterns": list(request.exclude_patterns),
             "max_file_bytes": request.max_file_bytes,
             "dynamic_enabled": request.dynamic_enabled,
+            "coverage_policy": request.coverage_policy,
+            "verification_votes": request.verification_votes,
             "knowledge_base": (
                 {
                     "display_name": knowledge_base["display_name"],
@@ -1466,14 +1507,61 @@ class AuditService:
         verified_artifacts: dict[str, str],
         report_data: dict[str, Any] | None = None,
     ) -> str:
-        path = self._artifact_file(scan_id, "coverage")
-        if path and path.name in verified_artifacts:
-            try:
-                return str(json.loads(path.read_text(encoding="utf-8")).get("completeness") or "unknown")
-            except (OSError, json.JSONDecodeError):
-                return "unknown"
+        del verified_artifacts
         data = report_data if report_data is not None else self.store.report_data(scan_id)
-        return "partial" if data["coverage"] else "pending"
+        return self._coverage_attestation_summary(data)["completeness"]
+
+    @staticmethod
+    def _coverage_attestation_summary(data: dict[str, Any]) -> dict[str, Any]:
+        attestations = data["coverage"]
+        analysis_units = {
+            item["work_unit_id"]
+            for item in data["work_units"]
+            if item.get("role") in {"baseline", "investigator"}
+        }
+        covered_units = {
+            item["work_unit_id"]
+            for item in data["coverage"]
+            if item.get("work_unit_id") in analysis_units
+        }
+        completeness_values = {
+            str(item.get("completeness")) for item in attestations
+        }
+        if not attestations:
+            completeness = "pending"
+        elif "blocked" in completeness_values:
+            completeness = "blocked"
+        elif "partial" in completeness_values or covered_units != analysis_units:
+            completeness = "partial"
+        else:
+            completeness = "complete"
+        totals = {
+            "assigned_count": 0,
+            "read_complete_count": 0,
+            "failed_count": 0,
+            "unexamined_count": 0,
+        }
+        count_fields = {
+            "assigned_count": "assigned",
+            "read_complete_count": "read_complete",
+            "failed_count": "failed",
+            "unexamined_count": "unexamined",
+        }
+        for attestation in attestations:
+            counts = attestation.get("counts")
+            if not isinstance(counts, dict):
+                continue
+            for output_key, source_key in count_fields.items():
+                value = counts.get(source_key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    totals[output_key] += value
+        return {
+            "policy": data["scan"].get(
+                "coverage_policy", "evidence_backed_partial"
+            ),
+            "completeness": completeness,
+            **totals,
+        }
 
     def _finding_summary(
         self,
@@ -1519,21 +1607,26 @@ class AuditService:
         report_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         path = self._artifact_file(scan_id, "coverage")
+        data = report_data if report_data is not None else self.store.report_data(scan_id)
+        attestation_summary = self._coverage_attestation_summary(data)
         if path is None or path.name not in (verified_artifacts or {}):
-            data = report_data if report_data is not None else self.store.report_data(scan_id)
             return {
-                "completeness": "partial" if data["coverage"] else "pending",
+                **attestation_summary,
                 "deferred_count": 0,
                 "open_question_count": sum(
-                    len(item.get("payload", {}).get("open_questions", [])) for item in data["coverage"]
+                    len(item.get("open_questions", [])) for item in data["coverage"]
                 ),
             }
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {"completeness": "unknown", "deferred_count": 0, "open_question_count": 0}
+            return {
+                **attestation_summary,
+                "deferred_count": 0,
+                "open_question_count": 0,
+            }
         return {
-            "completeness": document.get("completeness", "unknown"),
+            **attestation_summary,
             "deferred_count": len(document.get("deferred", [])),
             "open_question_count": len(document.get("openQuestions", [])),
         }
@@ -1591,6 +1684,33 @@ class AuditService:
         candidate_ids: dict[str, set[str]] = {}
         candidate_summaries: dict[str, dict[str, Any]] = {}
         record_counts: dict[str, dict[str, int]] = {}
+        coverage_by_unit = {
+            item["work_unit_id"]: {
+                key: item.get(key)
+                for key in (
+                    "attestation_id",
+                    "attempt_id",
+                    "policy",
+                    "completeness",
+                    "counts",
+                    "attestation_digest",
+                )
+            }
+            for item in data["coverage"]
+        }
+        recent_rejection_by_unit = {
+            item["work_unit_id"]: {
+                "rejection_id": item.get("rejection_id"),
+                "attempt_id": item.get("attempt_id"),
+                "tool_name": item.get("tool_name"),
+                "error_code": item.get("error_code"),
+                "retryable": bool(item.get("retryable")),
+                "violation_count": len(item.get("violations", [])),
+                "created_at": item.get("created_at"),
+            }
+            for item in data.get("submission_rejections", [])
+            if isinstance(item.get("work_unit_id"), str)
+        }
 
         def record(work_unit_id: Any, kind: str, candidate_id: Any = None) -> None:
             if not isinstance(work_unit_id, str) or not work_unit_id:
@@ -1680,6 +1800,10 @@ class AuditService:
                         ],
                         "activity_counts": data.get("source_access_counts", {}).get(work_unit_id, {}),
                         "record_counts": record_counts.get(work_unit_id, {}),
+                        "coverage": coverage_by_unit.get(work_unit_id),
+                        "recent_rejection": recent_rejection_by_unit.get(
+                            work_unit_id
+                        ),
                     }
                 )
         return workers

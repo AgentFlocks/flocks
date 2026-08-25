@@ -296,6 +296,7 @@ export function ArtifactInspector({
 
 function Overview({ detail }: { detail: ScanDetail }) {
   const { language, t } = useCodeSecurityI18n();
+  const coverage = detail.coverageSummary;
   const finalArtifacts = detail.artifacts.filter(
     (artifact) => artifact.state === "sealed",
   );
@@ -346,6 +347,40 @@ function Overview({ detail }: { detail: ScanDetail }) {
             ))}
           </div>
         )}
+      </section>
+      <section>
+        <h3>{t("覆盖证明")}</h3>
+        <dl className="cs-definition-list">
+          <div>
+            <dt>{t("策略")}</dt>
+            <dd>
+              {t(
+                coverage.policy === "exhaustive" ? "穷尽覆盖" : "可信部分覆盖",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{t("已分配")}</dt>
+            <dd>{(coverage.assigned_count || 0).toLocaleString(language)}</dd>
+          </div>
+          <div>
+            <dt>{t("完整读取")}</dt>
+            <dd>
+              {(coverage.read_complete_count || 0).toLocaleString(language)}
+            </dd>
+          </div>
+          <div>
+            <dt>{t("未检查")}</dt>
+            <dd>{(coverage.unexamined_count || 0).toLocaleString(language)}</dd>
+          </div>
+          <div>
+            <dt>{t("失败")}</dt>
+            <dd>{(coverage.failed_count || 0).toLocaleString(language)}</dd>
+          </div>
+        </dl>
+        <p className="cs-helper">
+          {t("这些数字由宿主根据当前执行尝试的源码访问记录计算。")}
+        </p>
       </section>
       <section>
         <h3>{t("快照可信边界")}</h3>
