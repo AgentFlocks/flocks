@@ -686,6 +686,54 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
     assert recorded_input_params["kafka_message"]["keys"] == ["alarmData"]
 
 
+@pytest.mark.parametrize("tool_context_required", [False, "false"])
+@pytest.mark.asyncio
+async def test_trigger_workflow_can_skip_unneeded_tool_context(
+    monkeypatch: pytest.MonkeyPatch,
+    trigger_tool_context: SimpleNamespace,
+    tool_context_required: object,
+) -> None:
+    manager = kafka_manager.KafkaManager()
+    captured_run_kwargs: dict = {}
+
+    async def _fake_create_execution_record(  # noqa: ANN001
+        workflow_id, *, input_params=None, exec_id=None
+    ):
+        return {"id": "exec-no-context", "workflowId": workflow_id, "inputParams": input_params}
+
+    async def _fake_record_execution_result(  # noqa: ANN001
+        workflow_id, exec_id, exec_data, *, steps=None
+    ):
+        return None
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        captured_run_kwargs.update(kwargs)
+        return SimpleNamespace(
+            status="SUCCEEDED",
+            error=None,
+            outputs={"ok": True},
+            history=[],
+            last_node_id="done",
+            steps=1,
+        )
+
+    monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+
+    await manager._trigger_workflow(
+        "wf-no-context",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"id": 1},
+        "kafka_message",
+        {"tool_context_required": tool_context_required},
+    )
+
+    assert captured_run_kwargs["tool_context"] is None
+    trigger_tool_context.builder.assert_not_awaited()
+    trigger_tool_context.cleanup.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_trigger_workflow_applies_mapping_and_filter(
     monkeypatch: pytest.MonkeyPatch,
