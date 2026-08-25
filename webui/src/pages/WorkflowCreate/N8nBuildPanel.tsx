@@ -59,6 +59,11 @@ function statusClass(status?: string | null): string {
   return 'border-gray-200 bg-gray-50 text-gray-600';
 }
 
+function httpStatus(err: unknown): number | undefined {
+  const status = (err as any)?.response?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
 export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nBuildPanelProps) {
   const { t } = useTranslation('workflow');
   const toast = useToast();
@@ -135,20 +140,43 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
     }
   }, [irText]);
 
+  const saveConnectionDraft = useCallback(async () => {
+    const payload = {
+      name: connectionName,
+      baseUrl,
+      apiKeySecretRef,
+      apiKey: apiKey.trim() || undefined,
+      isDefault: isDefaultConnection,
+    };
+
+    if (isNewConnection) {
+      try {
+        return await n8nAPI.createConnection(payload);
+      } catch (err) {
+        if (httpStatus(err) !== 404) throw err;
+        // Compatibility with deployments that have the legacy single-connection API.
+        return await n8nAPI.updateConnection({ ...payload, isDefault: true });
+      }
+    }
+
+    try {
+      return await n8nAPI.updateConnectionById(selectedConnectionId, payload);
+    } catch (err) {
+      if (httpStatus(err) !== 404) throw err;
+      try {
+        return await n8nAPI.createConnection(payload);
+      } catch (createErr) {
+        if (httpStatus(createErr) !== 404) throw createErr;
+        return await n8nAPI.updateConnection({ ...payload, isDefault: true });
+      }
+    }
+  }, [apiKey, apiKeySecretRef, baseUrl, connectionName, isDefaultConnection, isNewConnection, selectedConnectionId]);
+
   const handleSave = async () => {
     setBusy('save');
     setError(null);
     try {
-      const payload = {
-        name: connectionName,
-        baseUrl,
-        apiKeySecretRef,
-        apiKey: apiKey.trim() || undefined,
-        isDefault: isDefaultConnection,
-      };
-      const response = isNewConnection
-        ? await n8nAPI.createConnection(payload)
-        : await n8nAPI.updateConnectionById(selectedConnectionId, payload);
+      const response = await saveConnectionDraft();
       setConnection(response.data);
       setSelectedConnectionId(response.data.id);
       setConnections((current) => {
@@ -181,16 +209,7 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
         || connection.apiKeySecretRef !== apiKeySecretRef
         || connection.name !== connectionName
       ) {
-        const payload = {
-          name: connectionName,
-          baseUrl,
-          apiKeySecretRef,
-          apiKey: apiKey.trim() || undefined,
-          isDefault: isDefaultConnection,
-        };
-        const saved = isNewConnection
-          ? await n8nAPI.createConnection(payload)
-          : await n8nAPI.updateConnectionById(selectedConnectionId, payload);
+        const saved = await saveConnectionDraft();
         activeConnection = saved.data;
         setConnection(saved.data);
         setSelectedConnectionId(saved.data.id);
