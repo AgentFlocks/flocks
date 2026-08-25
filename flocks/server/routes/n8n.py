@@ -959,11 +959,34 @@ async def update_n8n_workflow_record(
 
 
 @router.delete("/workflows/{record_id}")
-async def delete_n8n_workflow_record(record_id: str, _admin: object = Depends(require_admin)):
-    deleted = _store().delete_record(record_id)
+async def delete_n8n_workflow_record(
+    record_id: str,
+    delete_remote: bool = Query(False, alias="deleteRemote"),
+    _admin: object = Depends(require_admin),
+):
+    store = _store()
+    record = store.load_record(record_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
+    remote_cleanup: List[Dict[str, Any]] = []
+    if delete_remote:
+        connection = store.load_connection_by_id(record.connection_id)
+        if not connection:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+        remote_cleanup = await asyncio.to_thread(
+            cleanup_workflows,
+            _client_for_connection(connection),
+            [record.n8n_workflow_id],
+        )
+        if not all(item.get("success") or item.get("status") == 404 for item in remote_cleanup):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"message": "failed to delete remote n8n workflow", "remoteCleanup": remote_cleanup},
+            )
+    deleted = store.delete_record(record_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
-    return {"success": True}
+    return {"success": True, "remoteCleanup": remote_cleanup}
 
 
 @router.post("/workflows/{record_id}/sync", response_model=N8nWorkflowRecord)

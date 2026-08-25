@@ -95,6 +95,10 @@ class FakeN8nClient:
     def get_workflow(self, workflow_id: str):
         return {"status": 200, "body": {"id": workflow_id, "active": True}}
 
+    def delete_workflow(self, workflow_id: str):
+        self.deleted.append(workflow_id)
+        return {"status": 200, "body": {"id": workflow_id}}
+
     def list_workflows(self, *, limit: int = 100, cursor: str | None = None):
         if self.workflows is not None:
             return {"status": 200, "body": {"data": self.workflows}}
@@ -311,6 +315,104 @@ async def test_n8n_workflow_record_sync_retry_and_cleanup(client, monkeypatch: p
 
     cleaned = await client.post(f"/api/integrations/n8n/workflows/{record_id}/cleanup")
     assert cleaned.status_code == 403, cleaned.text
+
+
+@pytest.mark.asyncio
+async def test_n8n_workflow_record_delete_removes_local_record_for_any_source(client):
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "readonly n8n",
+            "source": "discovered",
+            "ownership": "readonly",
+            "n8nWorkflowId": "readonly-1",
+            "n8nBaseUrl": "http://localhost:5678",
+        },
+    )
+    assert created.status_code == 200, created.text
+    record_id = created.json()["id"]
+
+    deleted = await client.delete(f"/api/integrations/n8n/workflows/{record_id}")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["success"] is True
+    assert deleted.json()["remoteCleanup"] == []
+
+    detail = await client.get(f"/api/integrations/n8n/workflows/{record_id}")
+    assert detail.status_code == 404, detail.text
+
+
+@pytest.mark.asyncio
+async def test_n8n_workflow_record_delete_can_remove_remote_workflow(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = FakeN8nClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "remote n8n",
+            "source": "discovered",
+            "ownership": "readonly",
+            "n8nWorkflowId": "remote-delete-1",
+            "n8nBaseUrl": "http://localhost:5678",
+        },
+    )
+    assert created.status_code == 200, created.text
+    record_id = created.json()["id"]
+
+    deleted = await client.delete(f"/api/integrations/n8n/workflows/{record_id}?deleteRemote=true")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["remoteCleanup"][0]["success"] is True
+    assert fake_client.deleted == ["remote-delete-1"]
+
+    detail = await client.get(f"/api/integrations/n8n/workflows/{record_id}")
+    assert detail.status_code == 404, detail.text
+
+
+@pytest.mark.asyncio
+async def test_n8n_workflow_record_delete_treats_remote_404_as_already_deleted(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.integrations.n8n.client import N8nClientError
+    from flocks.server.routes import n8n as n8n_routes
+
+    class MissingRemoteClient(FakeN8nClient):
+        def delete_workflow(self, workflow_id: str):
+            self.deleted.append(workflow_id)
+            raise N8nClientError("missing", status=404)
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = MissingRemoteClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "remote missing n8n",
+            "source": "discovered",
+            "ownership": "readonly",
+            "n8nWorkflowId": "remote-missing-1",
+            "n8nBaseUrl": "http://localhost:5678",
+        },
+    )
+    assert created.status_code == 200, created.text
+    record_id = created.json()["id"]
+
+    deleted = await client.delete(f"/api/integrations/n8n/workflows/{record_id}?deleteRemote=true")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["remoteCleanup"][0]["status"] == 404
+    assert fake_client.deleted == ["remote-missing-1"]
+
+    detail = await client.get(f"/api/integrations/n8n/workflows/{record_id}")
+    assert detail.status_code == 404, detail.text
 
 
 @pytest.mark.asyncio

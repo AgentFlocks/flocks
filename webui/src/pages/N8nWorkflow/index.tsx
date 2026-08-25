@@ -62,6 +62,52 @@ function triggerSummary(record: N8nWorkflowRecord): string {
   return record.webhookUrl || '-';
 }
 
+function DeleteWorkflowDialog({
+  record,
+  deleteRemote,
+  busy,
+  onDeleteRemoteChange,
+  onCancel,
+  onConfirm,
+}: {
+  record: N8nWorkflowRecord;
+  deleteRemote: boolean;
+  busy: boolean;
+  onDeleteRemoteChange: (value: boolean) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useTranslation('workflow');
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4" role="dialog" aria-modal="true" aria-label={t('n8n.confirmDeleteTitle')}>
+      <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl">
+        <h2 className="text-base font-semibold text-gray-900">{t('n8n.confirmDeleteTitle')}</h2>
+        <p className="mt-2 text-sm leading-relaxed text-gray-600">{t('n8n.confirmDeleteDescription', { name: record.name })}</p>
+        <label className="mt-4 flex items-start gap-2 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={deleteRemote}
+            onChange={(event) => onDeleteRemoteChange(event.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500"
+          />
+          <span>
+            <span className="block font-medium text-gray-800">{t('n8n.deleteRemoteLabel')}</span>
+            <span className="mt-1 block text-xs leading-relaxed text-gray-500">{t('n8n.deleteRemoteHint')}</span>
+          </span>
+        </label>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} disabled={busy} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+            {t('n8n.cancel')}
+          </button>
+          <button type="button" onClick={onConfirm} disabled={busy} className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">
+            {busy ? t('n8n.deleting') : t('n8n.delete')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function N8nWorkflowPage() {
   const params = useParams();
   const location = useLocation();
@@ -78,6 +124,9 @@ function N8nWorkflowList() {
   const [records, setRecords] = useState<N8nWorkflowRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<N8nWorkflowRecord | null>(null);
+  const [deleteRemote, setDeleteRemote] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadRecords = useCallback(async () => {
@@ -122,14 +171,23 @@ function N8nWorkflowList() {
     }
   };
 
-  const handleCleanup = async (record: N8nWorkflowRecord) => {
-    if (!window.confirm(t('n8n.confirmCleanup', { name: record.name }))) return;
+  const openDeleteDialog = (record: N8nWorkflowRecord) => {
+    setDeleteRemote(false);
+    setDeleteTarget(record);
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeletingId(deleteTarget.id);
     try {
-      const response = await n8nAPI.cleanupWorkflowRecord(record.id);
-      setRecords((current) => current.map((item) => (item.id === record.id ? response.data : item)));
-      toast.success(t('n8n.cleanupSuccess'));
+      await n8nAPI.deleteWorkflowRecord(deleteTarget.id, { deleteRemote });
+      setRecords((current) => current.filter((item) => item.id !== deleteTarget.id));
+      setDeleteTarget(null);
+      toast.success(t('n8n.deleteSuccess'));
     } catch (err) {
-      toast.error(t('n8n.cleanupFailed'), extractErrorMessage(err));
+      toast.error(t('n8n.deleteFailed'), extractErrorMessage(err));
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -225,12 +283,10 @@ function N8nWorkflowList() {
                           <ExternalLink className="h-3 w-3" />
                           {t('n8n.openN8n')}
                         </a>
-                        {record.ownership === 'managed' && record.source !== 'external' && (
-                          <button type="button" onClick={() => void handleCleanup(record)} className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
-                            <Trash2 className="h-3 w-3" />
-                            {t('n8n.cleanup')}
-                          </button>
-                        )}
+                        <button type="button" onClick={() => openDeleteDialog(record)} className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
+                          <Trash2 className="h-3 w-3" />
+                          {t('n8n.delete')}
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -240,6 +296,16 @@ function N8nWorkflowList() {
           </div>
         )}
       </div>
+      {deleteTarget && (
+        <DeleteWorkflowDialog
+          record={deleteTarget}
+          deleteRemote={deleteRemote}
+          busy={deletingId === deleteTarget.id}
+          onDeleteRemoteChange={setDeleteRemote}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => void handleDelete()}
+        />
+      )}
     </div>
   );
 }
@@ -297,6 +363,8 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
   const [record, setRecord] = useState<N8nWorkflowRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteRemote, setDeleteRemote] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadRecord = useCallback(async () => {
@@ -329,6 +397,20 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
       toast.success(t(`n8n.${action}Success`));
     } catch (err) {
       toast.error(t(`n8n.${action}Failed`), extractErrorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!record) return;
+    setBusy('delete');
+    try {
+      await n8nAPI.deleteWorkflowRecord(record.id, { deleteRemote });
+      toast.success(t('n8n.deleteSuccess'));
+      navigate('/workflows/n8n');
+    } catch (err) {
+      toast.error(t('n8n.deleteFailed'), extractErrorMessage(err));
     } finally {
       setBusy(null);
     }
@@ -421,12 +503,10 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
           <ExternalLink className="h-4 w-4" />
           {t('n8n.openN8n')}
         </a>
-        {canManageRemote && (
-          <button type="button" disabled={busy !== null} onClick={() => void applyAction('cleanup')} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50">
-            <Trash2 className="h-4 w-4" />
-            {t('n8n.cleanup')}
-          </button>
-        )}
+        <button type="button" disabled={busy !== null} onClick={() => { setDeleteRemote(false); setShowDeleteDialog(true); }} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50">
+          <Trash2 className="h-4 w-4" />
+          {t('n8n.delete')}
+        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="mx-auto grid max-w-6xl gap-4 lg:grid-cols-[360px,1fr]">
@@ -465,6 +545,16 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
           </div>
         </div>
       </div>
+      {showDeleteDialog && (
+        <DeleteWorkflowDialog
+          record={record}
+          deleteRemote={deleteRemote}
+          busy={busy === 'delete'}
+          onDeleteRemoteChange={setDeleteRemote}
+          onCancel={() => setShowDeleteDialog(false)}
+          onConfirm={() => void handleDelete()}
+        />
+      )}
     </div>
   );
 }

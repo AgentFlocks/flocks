@@ -240,6 +240,9 @@ export const n8nAPI = {
   cleanupWorkflowRecord: (recordId: string) =>
     client.post<N8nWorkflowRecord>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}/cleanup`),
 
-  deleteWorkflowRecord: (recordId: string) =>
-    client.delete<{ success: boolean }>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}`),
+  deleteWorkflowRecord: (recordId: string, options?: { deleteRemote?: boolean }) =>
+    client.delete<{ success: boolean; remoteCleanup?: Array<Record<string, any>> }>(
+      `/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}`,
+      { params: { deleteRemote: options?.deleteRemote || undefined } },
+    ),
 };

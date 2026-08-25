@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import N8nWorkflowPage from './index';
@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   runWorkflowRecord: vi.fn(),
   retryWorkflowRecordTests: vi.fn(),
   cleanupWorkflowRecord: vi.fn(),
+  deleteWorkflowRecord: vi.fn(),
 }));
 
 vi.mock('react-router-dom', async () => {
@@ -53,6 +54,15 @@ vi.mock('react-i18next', () => ({
         'n8n.viewDetail': '查看详情',
         'n8n.openN8n': '打开 n8n',
         'n8n.cleanup': '清理',
+        'n8n.delete': '删除',
+        'n8n.deleting': '删除中',
+        'n8n.cancel': '取消',
+        'n8n.confirmDeleteTitle': '删除 n8n 工作流',
+        'n8n.confirmDeleteDescription': `确认删除「${options?.name || ''}」在 Flocks 中的记录？`,
+        'n8n.deleteRemoteLabel': '同时删除 n8n 远端 workflow',
+        'n8n.deleteRemoteHint': '勾选后会先删除 n8n 上的 workflow，成功后再删除 Flocks 本地记录。',
+        'n8n.deleteSuccess': '删除完成',
+        'n8n.deleteFailed': '删除失败',
         'n8n.confirmCleanup': `确认清理 n8n workflow「${options?.name || ''}」？`,
         'n8n.cleanupSuccess': '清理完成',
         'n8n.cleanupFailed': '清理失败',
@@ -109,6 +119,7 @@ vi.mock('@/api/n8n', () => ({
     runWorkflowRecord: mocks.runWorkflowRecord,
     retryWorkflowRecordTests: mocks.retryWorkflowRecordTests,
     cleanupWorkflowRecord: mocks.cleanupWorkflowRecord,
+    deleteWorkflowRecord: mocks.deleteWorkflowRecord,
   },
 }));
 
@@ -250,9 +261,10 @@ describe('N8nWorkflowPage', () => {
     });
     mocks.retryWorkflowRecordTests.mockResolvedValue({ data: { ...record, lastTestedAt: '2026-08-20T00:02:00Z' } });
     mocks.cleanupWorkflowRecord.mockResolvedValue({ data: { ...record, remoteStatus: 'cleaned' } });
+    mocks.deleteWorkflowRecord.mockResolvedValue({ data: { success: true } });
   });
 
-  it('lists n8n workflow records separately and supports cleanup', async () => {
+  it('lists n8n workflow records separately and supports local delete', async () => {
     const user = userEvent.setup();
     renderPage('/workflows/n8n');
 
@@ -263,10 +275,26 @@ describe('N8nWorkflowPage', () => {
     await user.click(screen.getByRole('button', { name: '查看详情' }));
     expect(mocks.navigate).toHaveBeenCalledWith('/workflows/n8n/n8n-wf-1');
 
-    await user.click(screen.getByRole('button', { name: /清理/ }));
-    await waitFor(() => expect(mocks.cleanupWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
-    expect(window.confirm).toHaveBeenCalledWith('确认清理 n8n workflow「hello n8n」？');
-    expect(mocks.toastSuccess).toHaveBeenCalledWith('清理完成');
+    await user.click(screen.getByRole('button', { name: '删除' }));
+    const dialog = screen.getByRole('dialog', { name: '删除 n8n 工作流' });
+    expect(within(dialog).getByText('确认删除「hello n8n」在 Flocks 中的记录？')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: '删除' }));
+
+    await waitFor(() => expect(mocks.deleteWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1', { deleteRemote: false }));
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('删除完成');
+  });
+
+  it('can delete a listed workflow and request remote deletion', async () => {
+    const user = userEvent.setup();
+    renderPage('/workflows/n8n');
+
+    expect(await screen.findByText('hello n8n')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '删除' }));
+    const dialog = screen.getByRole('dialog', { name: '删除 n8n 工作流' });
+    await user.click(within(dialog).getByRole('checkbox', { name: /同时删除 n8n 远端 workflow/ }));
+    await user.click(within(dialog).getByRole('button', { name: '删除' }));
+
+    await waitFor(() => expect(mocks.deleteWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1', { deleteRemote: true }));
   });
 
   it('keeps the list controls focused on a single Flocks-managed sync action', async () => {
@@ -312,7 +340,7 @@ describe('N8nWorkflowPage', () => {
     expect(screen.queryByText('external workflow')).not.toBeInTheDocument();
   });
 
-  it('shows detail actions for sync, run, retry test, open n8n, and cleanup', async () => {
+  it('shows detail actions for sync, run, retry test, open n8n, and delete', async () => {
     const user = userEvent.setup();
     renderPage('/workflows/n8n/n8n-wf-1');
 
@@ -335,8 +363,9 @@ describe('N8nWorkflowPage', () => {
     await waitFor(() => expect(mocks.retryWorkflowRecordTests).toHaveBeenCalledWith('n8n-wf-1'));
     expect(mocks.toastSuccess).toHaveBeenCalledWith('测试完成');
 
-    await user.click(screen.getByRole('button', { name: /清理/ }));
-    await waitFor(() => expect(mocks.cleanupWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
+    await user.click(screen.getByRole('button', { name: '删除' }));
+    await user.click(within(screen.getByRole('dialog', { name: '删除 n8n 工作流' })).getByRole('button', { name: '删除' }));
+    await waitFor(() => expect(mocks.deleteWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1', { deleteRemote: false }));
   });
 
   it('does not offer run controls for external detail records', async () => {
