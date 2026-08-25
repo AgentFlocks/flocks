@@ -66,10 +66,9 @@ class WorkflowStore:
         db_path = cls.get_db_path()
         if cls._initialized and cls._init_pid == current_pid and cls._db_path == db_path:
             return
-        if cls._initialized and (
-            (cls._init_pid is not None and cls._init_pid != current_pid)
-            or (cls._db_path is not None and cls._db_path != db_path)
-        ):
+        pid_changed = cls._initialized and cls._init_pid is not None and cls._init_pid != current_pid
+        db_path_changed = cls._initialized and cls._db_path is not None and cls._db_path != db_path
+        if pid_changed or db_path_changed:
             log.warn(
                 "workflow.store.fork_detected",
                 {
@@ -79,14 +78,16 @@ class WorkflowStore:
                     "new_db_path": str(db_path),
                 },
             )
-            if cls._conn:
-                await cls._conn.close()
-            if cls._completion_conn:
-                await cls._completion_conn.close()
+            if not pid_changed:
+                if cls._conn:
+                    await cls._conn.close()
+                if cls._completion_conn:
+                    await cls._completion_conn.close()
             cls._conn = None
             cls._completion_conn = None
             cls._initialized = False
             cls._init_pid = None
+            cls._completion_lock = None
 
         await Storage._ensure_init()
         db_path.parent.mkdir(parents=True, exist_ok=True)

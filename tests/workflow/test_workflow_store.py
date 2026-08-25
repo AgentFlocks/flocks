@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -294,14 +295,29 @@ async def test_complete_execution_rolls_back_cancelled_transaction(
 
 
 @pytest.mark.asyncio
-async def test_completion_connection_reinitializes_after_pid_change() -> None:
+async def test_pid_change_drops_inherited_connections_without_closing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     await WorkflowStore.init()
-    original_connection = await WorkflowStore.raw_completion_db()
+    original_db = await WorkflowStore.raw_db()
+    original_completion_db = await WorkflowStore.raw_completion_db()
+    original_db_close = original_db.close
+    original_completion_db_close = original_completion_db.close
+    db_close = AsyncMock()
+    completion_db_close = AsyncMock()
+    monkeypatch.setattr(original_db, "close", db_close)
+    monkeypatch.setattr(original_completion_db, "close", completion_db_close)
     original_lock = WorkflowStore._completion_lock
     WorkflowStore._init_pid = -1
 
-    refreshed_connection = await WorkflowStore.raw_completion_db()
+    try:
+        refreshed_connection = await WorkflowStore.raw_completion_db()
 
-    assert refreshed_connection is not original_connection
-    assert WorkflowStore._completion_lock is not original_lock
-    assert WorkflowStore._init_pid == os.getpid()
+        assert refreshed_connection is not original_completion_db
+        assert WorkflowStore._completion_lock is not original_lock
+        assert WorkflowStore._init_pid == os.getpid()
+        db_close.assert_not_awaited()
+        completion_db_close.assert_not_awaited()
+    finally:
+        await original_db_close()
+        await original_completion_db_close()
