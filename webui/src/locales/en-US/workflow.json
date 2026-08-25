@@ -111,10 +111,17 @@
     "latestExecutionId": "Latest Execution ID",
     "lastSyncedAt": "Last Synced",
     "lastTestedAt": "Last Tested",
+    "lastRunAt": "Last Run",
     "sync": "Sync",
+    "run": "Run",
     "retryTest": "Retry Tests",
     "syncSuccess": "Sync complete",
     "syncFailed": "Sync failed",
+    "runSuccess": "Run triggered",
+    "runFailed": "Run failed",
+    "runSummary": "HTTP {{status}}, execution ID {{executionId}}",
+    "runPayloadPrompt": "Enter the JSON payload for this run. Flocks will not store the payload.",
+    "invalidRunPayload": "Run payload must be valid JSON",
     "retrySuccess": "Tests complete",
     "retryFailed": "Tests failed",
     "notFound": "n8n workflow record not found",
@@ -122,7 +129,8 @@
     "nativeWorkflowJson": "n8n Workflow JSON",
     "lintIssues": "Lint Results",
     "testCases": "Test Cases",
-    "testResults": "Test Results"
+    "testResults": "Test Results",
+    "latestRunResult": "Latest Run Summary"
   },
   "detail": {
     "loadFailed": "Failed to load workflow",

@@ -111,10 +111,17 @@
     "latestExecutionId": "最近执行 ID",
     "lastSyncedAt": "最近同步",
     "lastTestedAt": "最近测试",
+    "lastRunAt": "最近运行",
     "sync": "同步",
+    "run": "运行",
     "retryTest": "重跑测试",
     "syncSuccess": "同步完成",
     "syncFailed": "同步失败",
+    "runSuccess": "运行已触发",
+    "runFailed": "运行失败",
+    "runSummary": "HTTP {{status}}，执行 ID {{executionId}}",
+    "runPayloadPrompt": "输入本次运行的 JSON 请求体。Flocks 不会保存请求体。",
+    "invalidRunPayload": "运行请求体必须是合法 JSON",
     "retrySuccess": "测试完成",
     "retryFailed": "测试失败",
     "notFound": "n8n 工作流记录不存在",
@@ -122,7 +129,8 @@
     "nativeWorkflowJson": "n8n Workflow JSON",
     "lintIssues": "Lint 结果",
     "testCases": "测试用例",
-    "testResults": "测试结果"
+    "testResults": "测试结果",
+    "latestRunResult": "最近运行摘要"
   },
   "detail": {
     "loadFailed": "加载工作流失败",

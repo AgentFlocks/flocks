@@ -63,6 +63,7 @@ export interface N8nWorkflowRecord {
   lintIssues: Array<Record<string, any>>;
   testCases: Array<Record<string, any>>;
   testResults: Array<Record<string, any>>;
+  latestRunResult?: Record<string, any> | null;
   latestBuildRunId?: string | null;
   latestExecutionId?: string | null;
   irPath?: string | null;
@@ -72,6 +73,7 @@ export interface N8nWorkflowRecord {
   updatedAt: string;
   lastSyncedAt?: string | null;
   lastTestedAt?: string | null;
+  lastRunAt?: string | null;
   error?: string | null;
 }
 
@@ -216,6 +218,13 @@ export const n8nAPI = {
 
   retryWorkflowRecordTests: (recordId: string) =>
     client.post<N8nWorkflowRecord>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}/retry-test`),
+
+  runWorkflowRecord: (recordId: string, data?: {
+    payload?: unknown;
+    headers?: Record<string, string>;
+    waitForExecution?: boolean;
+  }) =>
+    client.post<N8nWorkflowRecord>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}/run`, data ?? {}),
 
   openWorkflowRecord: (recordId: string) =>
     client.post<{ url: string }>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}/open-event`),

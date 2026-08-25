@@ -230,12 +230,60 @@ async def test_n8n_workflow_record_sync_retry_and_cleanup(client, monkeypatch: p
     assert retried.status_code == 200, retried.text
     assert retried.json()["testStatus"] == "test_passed"
 
+    ran = await client.post(
+        f"/api/integrations/n8n/workflows/{record_id}/run",
+        json={"payload": {"name": "Alice"}, "waitForExecution": True},
+    )
+    assert ran.status_code == 200, ran.text
+    run_record = ran.json()
+    assert run_record["latestRunResult"]["success"] is True
+    assert run_record["latestRunResult"]["status"] == 200
+    assert run_record["latestRunResult"]["responseBodyStored"] is False
+    assert "response" not in run_record["latestRunResult"]
+    assert run_record["latestExecutionId"] == "exec-route-1"
+
     opened = await client.post(f"/api/integrations/n8n/workflows/{record_id}/open-event")
     assert opened.status_code == 200, opened.text
     assert opened.json()["url"].endswith("/workflow/manual-1")
 
     cleaned = await client.post(f"/api/integrations/n8n/workflows/{record_id}/cleanup")
     assert cleaned.status_code == 403, cleaned.text
+
+
+@pytest.mark.asyncio
+async def test_n8n_workflow_run_blocks_external_and_requires_webhook(client, n8n_route_state):
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+
+    external = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "external n8n",
+            "source": "external",
+            "ownership": "readonly",
+            "n8nWorkflowId": "external-run-1",
+            "n8nBaseUrl": "http://localhost:5678",
+        },
+    )
+    assert external.status_code == 200, external.text
+
+    external_run = await client.post(f"/api/integrations/n8n/workflows/{external.json()['id']}/run", json={})
+    assert external_run.status_code == 403, external_run.text
+
+    no_webhook = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "manual without webhook",
+            "source": "manual",
+            "ownership": "managed",
+            "n8nWorkflowId": "manual-no-webhook",
+            "n8nBaseUrl": "http://localhost:5678",
+        },
+    )
+    assert no_webhook.status_code == 200, no_webhook.text
+
+    no_webhook_run = await client.post(f"/api/integrations/n8n/workflows/{no_webhook.json()['id']}/run", json={})
+    assert no_webhook_run.status_code == 400, no_webhook_run.text
+    assert "webhook path is missing" in no_webhook_run.text
 
 
 @pytest.mark.asyncio

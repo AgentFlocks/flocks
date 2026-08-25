@@ -108,6 +108,7 @@ class N8nWorkflowRecord(BaseModel):
     lint_issues: List[Dict[str, Any]] = Field(default_factory=list, alias="lintIssues")
     test_cases: List[Dict[str, Any]] = Field(default_factory=list, alias="testCases")
     test_results: List[Dict[str, Any]] = Field(default_factory=list, alias="testResults")
+    latest_run_result: Optional[Dict[str, Any]] = Field(None, alias="latestRunResult")
     latest_build_run_id: Optional[str] = Field(None, alias="latestBuildRunId")
     latest_execution_id: Optional[str] = Field(None, alias="latestExecutionId")
     ir_path: Optional[str] = Field(None, alias="irPath")
@@ -117,6 +118,7 @@ class N8nWorkflowRecord(BaseModel):
     updated_at: str = Field(default_factory=utc_now_iso, alias="updatedAt")
     last_synced_at: Optional[str] = Field(None, alias="lastSyncedAt")
     last_tested_at: Optional[str] = Field(None, alias="lastTestedAt")
+    last_run_at: Optional[str] = Field(None, alias="lastRunAt")
     error: Optional[str] = None
 
 

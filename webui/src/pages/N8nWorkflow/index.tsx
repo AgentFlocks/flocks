@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ExternalLink, FlaskConical, Plus, RefreshCw, Trash2, Workflow } from 'lucide-react';
+import { Activity, ArrowLeft, ExternalLink, FlaskConical, Play, Plus, RefreshCw, Trash2, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -321,6 +321,36 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
     }
   };
 
+  const handleRun = async () => {
+    if (!record) return;
+    const rawPayload = window.prompt(t('n8n.runPayloadPrompt'), '{}');
+    if (rawPayload === null) return;
+    let payload: unknown;
+    try {
+      payload = rawPayload.trim() ? JSON.parse(rawPayload) : {};
+    } catch {
+      toast.error(t('n8n.runFailed'), t('n8n.invalidRunPayload'));
+      return;
+    }
+    setBusy('run');
+    try {
+      const response = await n8nAPI.runWorkflowRecord(record.id, {
+        payload,
+        waitForExecution: true,
+      });
+      setRecord(response.data);
+      const result = response.data.latestRunResult;
+      toast.success(
+        t('n8n.runSuccess'),
+        result?.status ? t('n8n.runSummary', { status: String(result.status), executionId: String(response.data.latestExecutionId || '-') }) : undefined,
+      );
+    } catch (err) {
+      toast.error(t('n8n.runFailed'), extractErrorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   if (loading) {
     return <div className="flex h-full items-center justify-center"><LoadingSpinner delayMs={180} /></div>;
   }
@@ -339,9 +369,11 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
     [t('n8n.latestExecutionId'), record.latestExecutionId || '-'],
     [t('n8n.lastSyncedAt'), record.lastSyncedAt || '-'],
     [t('n8n.lastTestedAt'), record.lastTestedAt || '-'],
+    [t('n8n.lastRunAt'), record.lastRunAt || '-'],
   ];
 
   const canManageRemote = record.ownership === 'managed' && record.source !== 'external';
+  const canRunRemote = record.source !== 'external' && Boolean(record.webhookPath || record.webhookUrl);
 
   return (
     <div className="flex h-full flex-col bg-gray-50">
@@ -355,6 +387,12 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
           <Activity className="h-4 w-4" />
           {t('n8n.sync')}
         </button>
+        {canRunRemote && (
+          <button type="button" disabled={busy !== null} onClick={() => void handleRun()} className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+            <Play className="h-4 w-4" />
+            {t('n8n.run')}
+          </button>
+        )}
         {canManageRemote && (
           <button type="button" disabled={busy !== null} onClick={() => void applyAction('retry')} className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">
             <FlaskConical className="h-4 w-4" />
@@ -405,6 +443,7 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
             <JsonBlock title={t('n8n.lintIssues')} value={record.lintIssues} />
             <JsonBlock title={t('n8n.testCases')} value={record.testCases} />
             <JsonBlock title={t('n8n.testResults')} value={record.testResults} />
+            <JsonBlock title={t('n8n.latestRunResult')} value={record.latestRunResult} />
           </div>
         </div>
       </div>

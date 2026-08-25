@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   discoverWorkflowRecords: vi.fn(),
   syncWorkflowRecords: vi.fn(),
   syncWorkflowRecord: vi.fn(),
+  runWorkflowRecord: vi.fn(),
   retryWorkflowRecordTests: vi.fn(),
   cleanupWorkflowRecord: vi.fn(),
 }));
@@ -67,10 +68,17 @@ vi.mock('react-i18next', () => ({
         'n8n.latestExecutionId': '最近执行 ID',
         'n8n.lastSyncedAt': '最近同步',
         'n8n.lastTestedAt': '最近测试',
+        'n8n.lastRunAt': '最近运行',
         'n8n.sync': '同步',
+        'n8n.run': '运行',
         'n8n.retryTest': '重跑测试',
         'n8n.syncSuccess': '同步完成',
         'n8n.syncFailed': '同步失败',
+        'n8n.runSuccess': '运行已触发',
+        'n8n.runFailed': '运行失败',
+        'n8n.runSummary': `HTTP ${options?.status || ''}，执行 ID ${options?.executionId || ''}`,
+        'n8n.runPayloadPrompt': '输入本次运行的 JSON 请求体。Flocks 不会保存请求体。',
+        'n8n.invalidRunPayload': '运行请求体必须是合法 JSON',
         'n8n.retrySuccess': '测试完成',
         'n8n.retryFailed': '测试失败',
         'n8n.userRequest': '用户需求',
@@ -78,6 +86,7 @@ vi.mock('react-i18next', () => ({
         'n8n.lintIssues': 'Lint 结果',
         'n8n.testCases': '测试用例',
         'n8n.testResults': '测试结果',
+        'n8n.latestRunResult': '最近运行摘要',
       };
       return translations[key] ?? key;
     },
@@ -92,6 +101,7 @@ vi.mock('@/api/n8n', () => ({
     discoverWorkflowRecords: mocks.discoverWorkflowRecords,
     syncWorkflowRecords: mocks.syncWorkflowRecords,
     syncWorkflowRecord: mocks.syncWorkflowRecord,
+    runWorkflowRecord: mocks.runWorkflowRecord,
     retryWorkflowRecordTests: mocks.retryWorkflowRecordTests,
     cleanupWorkflowRecord: mocks.cleanupWorkflowRecord,
   },
@@ -170,12 +180,14 @@ const record = {
   lintIssues: [],
   testCases: [{ name: 'ok' }],
   testResults: [{ name: 'ok', success: true }],
+  latestRunResult: null,
   latestBuildRunId: 'run-1',
   latestExecutionId: 'exec-1',
   createdAt: '2026-08-20T00:00:00Z',
   updatedAt: '2026-08-20T00:00:00Z',
   lastSyncedAt: null,
   lastTestedAt: null,
+  lastRunAt: null,
   error: null,
 };
 
@@ -195,6 +207,7 @@ describe('N8nWorkflowPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.spyOn(window, 'prompt').mockReturnValue('{"name":"Alice"}');
     mocks.listWorkflowRecords.mockResolvedValue({ data: [record] });
     mocks.getWorkflowRecord.mockResolvedValue({ data: record });
     mocks.discoverWorkflowRecords.mockResolvedValue({ data: [record] });
@@ -214,6 +227,18 @@ describe('N8nWorkflowPage', () => {
       },
     });
     mocks.syncWorkflowRecord.mockResolvedValue({ data: { ...record, lastSyncedAt: '2026-08-20T00:01:00Z' } });
+    mocks.runWorkflowRecord.mockResolvedValue({
+      data: {
+        ...record,
+        latestExecutionId: 'exec-run-1',
+        lastRunAt: '2026-08-20T00:01:30Z',
+        latestRunResult: {
+          success: true,
+          status: 200,
+          responseBodyStored: false,
+        },
+      },
+    });
     mocks.retryWorkflowRecordTests.mockResolvedValue({ data: { ...record, lastTestedAt: '2026-08-20T00:02:00Z' } });
     mocks.cleanupWorkflowRecord.mockResolvedValue({ data: { ...record, remoteStatus: 'cleaned' } });
   });
@@ -278,7 +303,7 @@ describe('N8nWorkflowPage', () => {
     expect(screen.queryByText('external workflow')).not.toBeInTheDocument();
   });
 
-  it('shows detail actions for sync, retry test, open n8n, and cleanup', async () => {
+  it('shows detail actions for sync, run, retry test, open n8n, and cleanup', async () => {
     const user = userEvent.setup();
     renderPage('/workflows/n8n/n8n-wf-1');
 
@@ -289,12 +314,36 @@ describe('N8nWorkflowPage', () => {
     await waitFor(() => expect(mocks.syncWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
     expect(mocks.toastSuccess).toHaveBeenCalledWith('同步完成');
 
+    await user.click(screen.getByRole('button', { name: '运行' }));
+    await waitFor(() => expect(mocks.runWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1', {
+      payload: { name: 'Alice' },
+      waitForExecution: true,
+    }));
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('运行已触发', 'HTTP 200，执行 ID exec-run-1');
+    expect(await screen.findByText('最近运行摘要')).toBeInTheDocument();
+
     await user.click(screen.getByRole('button', { name: '重跑测试' }));
     await waitFor(() => expect(mocks.retryWorkflowRecordTests).toHaveBeenCalledWith('n8n-wf-1'));
     expect(mocks.toastSuccess).toHaveBeenCalledWith('测试完成');
 
     await user.click(screen.getByRole('button', { name: /清理/ }));
     await waitFor(() => expect(mocks.cleanupWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
+  });
+
+  it('does not offer run controls for external detail records', async () => {
+    mocks.getWorkflowRecord.mockResolvedValue({
+      data: {
+        ...record,
+        source: 'external',
+        ownership: 'readonly',
+      },
+    });
+
+    renderPage('/workflows/n8n/n8n-wf-1');
+
+    expect(await screen.findByRole('heading', { name: 'hello n8n' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '运行' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重跑测试' })).not.toBeInTheDocument();
   });
 
   it('routes to the created n8n record after a build run creates one', async () => {

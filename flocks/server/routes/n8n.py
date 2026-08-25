@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -141,6 +142,14 @@ class N8nSyncRequest(BaseModel):
     prefix: str = "flocks-"
 
 
+class N8nWorkflowRunRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    payload: Any = Field(default_factory=dict)
+    headers: Dict[str, str] = Field(default_factory=dict)
+    wait_for_execution: bool = Field(True, alias="waitForExecution")
+
+
 def _store() -> N8nStateStore:
     return N8nStateStore()
 
@@ -227,6 +236,13 @@ def _latest_execution_id(test_results: List[Dict[str, Any]]) -> Optional[str]:
         execution = result.get("execution") if isinstance(result, dict) else None
         if isinstance(execution, dict) and execution.get("id") is not None:
             return str(execution["id"])
+    return None
+
+
+def _execution_id_from_result(result: Dict[str, Any]) -> Optional[str]:
+    execution = result.get("execution") if isinstance(result, dict) else None
+    if isinstance(execution, dict) and execution.get("id") is not None:
+        return str(execution["id"])
     return None
 
 
@@ -957,6 +973,87 @@ async def retry_n8n_workflow_tests(record_id: str, _admin: object = Depends(requ
         record.test_status = "test_error"
         record.last_tested_at = utc_now_iso()
         record.error = str(exc)
+    return store.save_record(record)
+
+
+@router.post("/workflows/{record_id}/run", response_model=N8nWorkflowRecord)
+async def run_n8n_workflow(
+    record_id: str,
+    request: Optional[N8nWorkflowRunRequest] = None,
+    _admin: object = Depends(require_admin),
+):
+    store = _store()
+    record = store.load_record(record_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
+    if record.source == "external":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="external n8n workflow records cannot be run from Flocks")
+    connection = store.load_connection_by_id(record.connection_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    if not record.webhook_path and not record.webhook_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n webhook path is missing")
+
+    method = record.webhook_method or "POST"
+    webhook_path = record.webhook_path
+    if not webhook_path and record.webhook_url:
+        webhook_path = record.webhook_url.rstrip("/").split("/webhook/")[-1]
+    assert webhook_path is not None
+    run_request = request or N8nWorkflowRunRequest()
+    client = _client_for_connection(connection)
+    started_epoch = time.time()
+    started_at = asyncio.get_running_loop().time()
+    started_wall = utc_now_iso()
+    try:
+        response = await asyncio.to_thread(
+            client.call_webhook,
+            webhook_path,
+            method=method,
+            payload=run_request.payload,
+            headers=run_request.headers,
+        )
+        duration_ms = int((asyncio.get_running_loop().time() - started_at) * 1000)
+        execution = None
+        execution_error = None
+        if run_request.wait_for_execution:
+            try:
+                execution = await asyncio.to_thread(
+                    client.wait_for_recent_execution,
+                    workflow_id=record.n8n_workflow_id,
+                    since_epoch_s=started_epoch,
+                )
+            except N8nClientError as exc:
+                execution_error = str(exc)
+        result = {
+            "success": 200 <= int(response.get("status") or 0) < 400,
+            "status": response.get("status"),
+            "method": method,
+            "webhookPath": webhook_path,
+            "startedAt": started_wall,
+            "durationMs": duration_ms,
+            "responseBodyStored": False,
+            "execution": execution,
+        }
+        if execution_error:
+            result["executionLookupError"] = execution_error
+        record.latest_run_result = result
+        record.latest_execution_id = _execution_id_from_result(result) or record.latest_execution_id
+        record.last_run_at = utc_now_iso()
+        record.error = None if result["success"] else f"n8n webhook returned HTTP {response.get('status')}"
+    except N8nClientError as exc:
+        duration_ms = int((asyncio.get_running_loop().time() - started_at) * 1000)
+        record.latest_run_result = {
+            "success": False,
+            "status": exc.status,
+            "method": method,
+            "webhookPath": webhook_path,
+            "startedAt": started_wall,
+            "durationMs": duration_ms,
+            "responseBodyStored": False,
+            "error": str(exc),
+        }
+        record.error = str(exc)
+        record.last_run_at = utc_now_iso()
     return store.save_record(record)
 
 
