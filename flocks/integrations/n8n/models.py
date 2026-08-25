@@ -22,13 +22,31 @@ N8nStepKind = Literal[
 ]
 
 
+class N8nCredentialRef(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    id: Optional[str] = None
+    name: Optional[str] = None
+    type: Optional[str] = None
+
+
 class N8nTrigger(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    type: Literal["webhook"] = "webhook"
+    type: Literal["webhook", "kafka"] = "webhook"
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "POST"
     path: Optional[str] = None
     response_mode: Literal["responseNode"] = Field("responseNode", alias="responseMode")
+    topic: Optional[str] = None
+    group_id: Optional[str] = Field(None, alias="groupId")
+    credential_ref: Optional[N8nCredentialRef] = Field(None, alias="credentialRef")
+    from_beginning: bool = Field(False, alias="fromBeginning")
+    batch_size: int = Field(1, alias="batchSize")
+    resolve_offset: Literal["onCompletion", "immediately", "onStatus"] = Field("onCompletion", alias="resolveOffset")
+    use_schema_registry: bool = Field(False, alias="useSchemaRegistry")
+    schema_registry_credential_ref: Optional[N8nCredentialRef] = Field(None, alias="schemaRegistryCredentialRef")
+    schema_registry_url: Optional[str] = Field(None, alias="schemaRegistryUrl")
+    options: Dict[str, Any] = Field(default_factory=dict)
 
 
 class N8nStep(BaseModel):

@@ -9,6 +9,8 @@
 
 ## 推荐输入
 
+Webhook 示例：
+
 ```json
 {
   "n8n_base_url": "http://localhost:5678",
@@ -48,6 +50,38 @@
 }
 ```
 
+Kafka Trigger 示例：
+
+```json
+{
+  "n8n_base_url": "http://localhost:5678",
+  "n8n_api_key_secret_ref": "N8N_API_KEY",
+  "publish": true,
+  "cleanup_on_success": false,
+  "ir": {
+    "name": "flocks-kafka-alerts",
+    "trigger": {
+      "type": "kafka",
+      "topic": "security-alerts",
+      "groupId": "flocks-security-alerts",
+      "credentialRef": { "name": "Kafka Production" },
+      "fromBeginning": false,
+      "batchSize": 1,
+      "resolveOffset": "onCompletion"
+    },
+    "steps": [
+      {
+        "id": "normalize",
+        "kind": "code",
+        "name": "Normalize",
+        "js_code": "return $input.all().map((item) => ({ json: { ...item.json, handledBy: 'n8n' } }));"
+      }
+    ],
+    "tests": []
+  }
+}
+```
+
 ## 运行结果
 
 报告写入：
@@ -61,4 +95,3 @@
 ```text
 ~/.flocks/workspace/outputs/<YYYY-MM-DD>/n8n_workflow_autobuilder.generated.json
 ```
-

@@ -38,6 +38,27 @@ SAMPLE_IR = {
 }
 
 
+KAFKA_IR = {
+    "name": "flocks-kafka-route",
+    "trigger": {
+        "type": "kafka",
+        "topic": "security-alerts",
+        "groupId": "flocks-security-alerts",
+        "credentialRef": {"name": "Kafka Production"},
+        "fromBeginning": False,
+    },
+    "steps": [
+        {
+            "id": "normalize",
+            "kind": "code",
+            "name": "Normalize",
+            "js_code": "return $input.all();",
+        },
+    ],
+    "tests": [],
+}
+
+
 class FakeSecrets:
     def __init__(self):
         self.values: dict[str, str] = {}
@@ -56,8 +77,10 @@ class FakeN8nClient:
     def __init__(self, workflows=None):
         self.deleted: list[str] = []
         self.workflows = workflows
+        self.created_payloads: list[dict] = []
 
     def create_workflow(self, payload):
+        self.created_payloads.append(payload)
         return {"status": 200, "body": {"id": "wf-route-1", "active": False, "name": payload.get("name")}}
 
     def activate_workflow(self, workflow_id: str):
@@ -196,6 +219,46 @@ async def test_n8n_build_run_auto_registers_workflow_record(client, monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_n8n_build_run_can_publish_kafka_trigger_without_webhook_tests(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = FakeN8nClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={
+            "userRequest": "route kafka publish",
+            "ir": KAFKA_IR,
+            "publish": True,
+            "activate": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "published"
+    assert run["webhookUrl"] is None
+    assert run["testResults"] == []
+    assert fake_client.created_payloads[0]["nodes"][0]["type"] == "n8n-nodes-base.kafkaTrigger"
+
+    detail = await client.get(f"/api/integrations/n8n/workflows/{run['recordId']}")
+    assert detail.status_code == 200, detail.text
+    record = detail.json()
+    assert record["triggerType"] == "kafka"
+    assert record["kafkaTopic"] == "security-alerts"
+    assert record["kafkaGroupId"] == "flocks-security-alerts"
+    assert record["kafkaCredentialName"] == "Kafka Production"
+    assert record["webhookUrl"] is None
+    assert record["testStatus"] == "not_tested"
+
+
+@pytest.mark.asyncio
 async def test_n8n_workflow_record_sync_retry_and_cleanup(client, monkeypatch: pytest.MonkeyPatch, n8n_route_state):
     from flocks.server.routes import n8n as n8n_routes
 
@@ -287,6 +350,30 @@ async def test_n8n_workflow_run_blocks_external_and_requires_webhook(client, n8n
 
 
 @pytest.mark.asyncio
+async def test_n8n_workflow_run_blocks_kafka_records(client, n8n_route_state):
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+
+    kafka = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "kafka n8n",
+            "source": "flocks_created",
+            "ownership": "managed",
+            "n8nWorkflowId": "kafka-run-1",
+            "n8nBaseUrl": "http://localhost:5678",
+            "triggerType": "kafka",
+            "kafkaTopic": "security-alerts",
+            "kafkaGroupId": "flocks-security-alerts",
+        },
+    )
+    assert kafka.status_code == 200, kafka.text
+
+    run_response = await client.post(f"/api/integrations/n8n/workflows/{kafka.json()['id']}/run", json={})
+    assert run_response.status_code == 400, run_response.text
+    assert "only webhook n8n workflows can be run from Flocks" in run_response.text
+
+
+@pytest.mark.asyncio
 async def test_n8n_build_run_records_inactive_when_not_activated(client, monkeypatch: pytest.MonkeyPatch, n8n_route_state):
     from flocks.server.routes import n8n as n8n_routes
 
@@ -335,6 +422,43 @@ async def test_n8n_discover_registers_flocks_prefixed_remote_workflows(client, m
     assert records[0]["remoteStatus"] == "active"
     assert records[0]["webhookUrl"] == "http://localhost:5678/webhook/flocks-test-discovered"
     assert records[0]["webhookMethod"] == "POST"
+
+
+@pytest.mark.asyncio
+async def test_n8n_discover_registers_flocks_prefixed_kafka_workflows(client, monkeypatch: pytest.MonkeyPatch, n8n_route_state):
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    monkeypatch.setattr(
+        n8n_routes,
+        "_client_for",
+        lambda _base_url, _secret_ref: FakeN8nClient(
+            workflows=[
+                {
+                    "id": "wf-kafka-1",
+                    "name": "flocks-kafka-discovered",
+                    "active": True,
+                    "nodes": [
+                        {
+                            "type": "n8n-nodes-base.kafkaTrigger",
+                            "parameters": {"topic": "security-alerts", "groupId": "flocks-security-alerts"},
+                            "credentials": {"kafka": {"name": "Kafka Production"}},
+                        }
+                    ],
+                }
+            ]
+        ),
+    )
+
+    response = await client.post("/api/integrations/n8n/workflows/discover", json={})
+
+    assert response.status_code == 200, response.text
+    records = response.json()
+    assert records[0]["triggerType"] == "kafka"
+    assert records[0]["kafkaTopic"] == "security-alerts"
+    assert records[0]["kafkaGroupId"] == "flocks-security-alerts"
+    assert records[0]["kafkaCredentialName"] == "Kafka Production"
+    assert records[0]["webhookUrl"] is None
 
 
 @pytest.mark.asyncio

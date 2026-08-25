@@ -12,6 +12,7 @@ from flocks.integrations.n8n.renderer import API_READONLY_FIELDS
 
 SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.webhook",
+    "n8n-nodes-base.kafkaTrigger",
     "n8n-nodes-base.code",
     "n8n-nodes-base.set",
     "n8n-nodes-base.if",
@@ -55,6 +56,21 @@ def _looks_like_expression(value: Any) -> bool:
     return not isinstance(value, str) or not value.startswith("=") or "{{" in value
 
 
+def _credential_label(credentials: Any, key: str) -> Optional[str]:
+    if not isinstance(credentials, dict):
+        return None
+    value = credentials.get(key)
+    if not isinstance(value, dict):
+        return None
+    credential_id = value.get("id")
+    credential_name = value.get("name")
+    if credential_id:
+        return str(credential_id)
+    if credential_name:
+        return str(credential_name)
+    return None
+
+
 def lint_workflow(
     workflow: Dict[str, Any] | str,
     *,
@@ -83,6 +99,7 @@ def lint_workflow(
 
     names = _node_names(workflow)
     webhook_count = 0
+    kafka_count = 0
     respond_count = 0
     for index, node in _iter_nodes(workflow):
         path = f"$.nodes[{index}]"
@@ -101,6 +118,53 @@ def lint_workflow(
                 issues.append(N8nLintIssue("WEBHOOK-PATH", "error", "Webhook path is required", path + ".parameters.path"))
             if params.get("responseMode") == "responseNode":
                 pass
+        if node_type == "n8n-nodes-base.kafkaTrigger":
+            kafka_count += 1
+            topic = str(params.get("topic") or "").strip()
+            group_id = str(params.get("groupId") or "").strip()
+            options = params.get("options") if isinstance(params.get("options"), dict) else {}
+            if not topic:
+                issues.append(N8nLintIssue("KAFKA-TOPIC", "error", "Kafka Trigger requires topic", path + ".parameters.topic"))
+            if not group_id:
+                issues.append(N8nLintIssue("KAFKA-GROUP", "error", "Kafka Trigger requires groupId", path + ".parameters.groupId"))
+            elif not group_id.startswith("flocks-"):
+                issues.append(
+                    N8nLintIssue(
+                        "KAFKA-GROUP-NAME",
+                        "warning",
+                        "Kafka groupId should start with flocks- to avoid consuming with unrelated groups",
+                        path + ".parameters.groupId",
+                    )
+                )
+            if not _credential_label(node.get("credentials"), "kafka"):
+                issues.append(N8nLintIssue("KAFKA-CREDENTIAL", "error", "Kafka Trigger requires a kafka credential name or id", path + ".credentials.kafka"))
+            batch_size = options.get("batchSize", params.get("batchSize"))
+            if batch_size is not None:
+                try:
+                    if int(batch_size) < 1:
+                        issues.append(N8nLintIssue("KAFKA-BATCH", "error", "Kafka batchSize must be greater than zero", path + ".parameters.options.batchSize"))
+                except (TypeError, ValueError):
+                    issues.append(N8nLintIssue("KAFKA-BATCH", "error", "Kafka batchSize must be numeric", path + ".parameters.options.batchSize"))
+            if options.get("fromBeginning") is True:
+                issues.append(
+                    N8nLintIssue(
+                        "KAFKA-FROM-BEGINNING",
+                        "warning",
+                        "fromBeginning=true can replay historical Kafka messages when the consumer group is new",
+                        path + ".parameters.options.fromBeginning",
+                    )
+                )
+            if params.get("useSchemaRegistry") and not (
+                params.get("schemaRegistryUrl") or _credential_label(node.get("credentials"), "schemaRegistryApi")
+            ):
+                issues.append(
+                    N8nLintIssue(
+                        "KAFKA-SCHEMA",
+                        "error",
+                        "Schema Registry mode requires schemaRegistryUrl or schemaRegistryApi credential",
+                        path + ".parameters.useSchemaRegistry",
+                    )
+                )
         if node_type == "n8n-nodes-base.respondToWebhook":
             respond_count += 1
             body = params.get("responseBody")
@@ -118,6 +182,8 @@ def lint_workflow(
 
     if webhook_count and not respond_count:
         issues.append(N8nLintIssue("WEBHOOK-RESPOND", "error", "Webhook workflows must include Respond to Webhook"))
+    if kafka_count and respond_count and not webhook_count:
+        issues.append(N8nLintIssue("KAFKA-RESPOND", "error", "Kafka workflows must not include Respond to Webhook without a Webhook trigger"))
 
     connections = workflow.get("connections")
     if not isinstance(connections, dict):
@@ -130,8 +196,17 @@ def lint_workflow(
                 if target not in names:
                     issues.append(N8nLintIssue("CONN-TARGET", "error", f"Connection target does not exist: {target}", f"$.connections.{source}"))
 
-    if require_tests and not tests:
+    if require_tests and webhook_count and not tests:
         issues.append(N8nLintIssue("TEST-001", "error", "At least one test case is required", "$.tests"))
+    if kafka_count and tests:
+        issues.append(
+            N8nLintIssue(
+                "KAFKA-TESTS-IGNORED",
+                "warning",
+                "Kafka workflow tests are not executed by the webhook test runner",
+                "$.tests",
+            )
+        )
     return issues
 
 
@@ -153,4 +228,3 @@ def _connection_targets(value: Any) -> Iterable[str]:
 
 def has_errors(issues: Iterable[N8nLintIssue]) -> bool:
     return any(issue.severity == "error" for issue in issues)
-

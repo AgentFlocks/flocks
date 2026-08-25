@@ -49,6 +49,19 @@ function isFlocksManagedRecord(record: N8nWorkflowRecord): boolean {
   return record.source !== 'external';
 }
 
+function triggerType(record: N8nWorkflowRecord): string {
+  return record.triggerType || 'webhook';
+}
+
+function triggerSummary(record: N8nWorkflowRecord): string {
+  if (triggerType(record) === 'kafka') {
+    const topic = record.kafkaTopic || '-';
+    const groupId = record.kafkaGroupId || '-';
+    return `Kafka ${topic} / ${groupId}`;
+  }
+  return record.webhookUrl || '-';
+}
+
 export default function N8nWorkflowPage() {
   const params = useParams();
   const location = useLocation();
@@ -183,7 +196,7 @@ function N8nWorkflowList() {
                   <th className="px-4 py-3">{t('n8n.connection')}</th>
                   <th className="px-4 py-3">{t('n8n.remoteStatus')}</th>
                   <th className="px-4 py-3">{t('n8n.testStatus')}</th>
-                  <th className="px-4 py-3">{t('n8n.webhookUrl')}</th>
+                  <th className="px-4 py-3">{t('n8n.trigger')}</th>
                   <th className="px-4 py-3 text-right">{t('n8n.actions')}</th>
                 </tr>
               </thead>
@@ -202,7 +215,7 @@ function N8nWorkflowList() {
                     </td>
                     <td className="px-4 py-3"><span className={`rounded border px-2 py-1 text-xs ${statusClass(record.remoteStatus)}`}>{record.remoteStatus}</span></td>
                     <td className="px-4 py-3"><span className={`rounded border px-2 py-1 text-xs ${statusClass(record.testStatus)}`}>{record.testStatus}</span></td>
-                    <td className="max-w-[360px] truncate px-4 py-3 font-mono text-xs text-gray-500">{record.webhookUrl || '-'}</td>
+                    <td className="max-w-[360px] truncate px-4 py-3 font-mono text-xs text-gray-500">{triggerSummary(record)}</td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-2">
                         <button type="button" onClick={() => navigate(`/workflows/n8n/${record.id}`)} className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
@@ -365,7 +378,11 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
     [t('n8n.n8nWorkflowId'), record.n8nWorkflowId],
     [t('n8n.source'), record.source],
     [t('n8n.ownership'), record.ownership],
+    [t('n8n.triggerType'), triggerType(record)],
     [t('n8n.webhookMethod'), record.webhookMethod || '-'],
+    [t('n8n.kafkaTopic'), record.kafkaTopic || '-'],
+    [t('n8n.kafkaGroupId'), record.kafkaGroupId || '-'],
+    [t('n8n.kafkaCredentialName'), record.kafkaCredentialName || '-'],
     [t('n8n.latestExecutionId'), record.latestExecutionId || '-'],
     [t('n8n.lastSyncedAt'), record.lastSyncedAt || '-'],
     [t('n8n.lastTestedAt'), record.lastTestedAt || '-'],
@@ -373,7 +390,8 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
   ];
 
   const canManageRemote = record.ownership === 'managed' && record.source !== 'external';
-  const canRunRemote = record.source !== 'external' && Boolean(record.webhookPath || record.webhookUrl);
+  const isWebhookRecord = triggerType(record) === 'webhook';
+  const canRunRemote = record.source !== 'external' && isWebhookRecord && Boolean(record.webhookPath || record.webhookUrl);
 
   return (
     <div className="flex h-full flex-col bg-gray-50">
@@ -393,7 +411,7 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
             {t('n8n.run')}
           </button>
         )}
-        {canManageRemote && (
+        {canManageRemote && isWebhookRecord && (
           <button type="button" disabled={busy !== null} onClick={() => void applyAction('retry')} className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">
             <FlaskConical className="h-4 w-4" />
             {t('n8n.retryTest')}

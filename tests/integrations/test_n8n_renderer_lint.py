@@ -36,6 +36,30 @@ def _sample_ir() -> dict:
     }
 
 
+def _sample_kafka_ir() -> dict:
+    return {
+        "name": "flocks-kafka-alerts",
+        "trigger": {
+            "type": "kafka",
+            "topic": "security-alerts",
+            "groupId": "flocks-security-alerts",
+            "credentialRef": {"name": "Kafka Production"},
+            "fromBeginning": False,
+            "batchSize": 1,
+            "resolveOffset": "onCompletion",
+        },
+        "steps": [
+            {
+                "id": "normalize",
+                "kind": "code",
+                "name": "Normalize",
+                "js_code": "return $input.all();",
+            }
+        ],
+        "tests": [],
+    }
+
+
 def test_render_ir_to_workflow_and_lint_success() -> None:
     workflow = render_ir_to_workflow(N8nIR.model_validate(_sample_ir()), workflow_id="wf-cli-id")
 
@@ -49,6 +73,36 @@ def test_render_ir_to_workflow_and_lint_success() -> None:
 
     issues = lint_workflow(workflow, require_tests=True, tests=_sample_ir()["tests"])
     assert [issue.to_dict() for issue in issues if issue.severity == "error"] == []
+
+
+def test_render_kafka_trigger_to_workflow_and_lint_success_without_webhook_tests() -> None:
+    workflow = render_ir_to_workflow(N8nIR.model_validate(_sample_kafka_ir()))
+
+    trigger = workflow["nodes"][0]
+    assert trigger["type"] == "n8n-nodes-base.kafkaTrigger"
+    assert trigger["typeVersion"] == 1.3
+    assert trigger["parameters"]["topic"] == "security-alerts"
+    assert trigger["parameters"]["groupId"] == "flocks-security-alerts"
+    assert trigger["parameters"]["resolveOffset"] == "onCompletion"
+    assert trigger["parameters"]["options"]["fromBeginning"] is False
+    assert trigger["parameters"]["options"]["batchSize"] == 1
+    assert trigger["credentials"]["kafka"]["name"] == "Kafka Production"
+
+    issues = lint_workflow(workflow, require_tests=True, tests=[])
+    assert [issue.to_dict() for issue in issues if issue.severity == "error"] == []
+
+
+def test_lint_catches_invalid_kafka_trigger() -> None:
+    workflow = render_ir_to_workflow(_sample_kafka_ir())
+    trigger = workflow["nodes"][0]
+    trigger["parameters"]["topic"] = ""
+    trigger["parameters"]["groupId"] = ""
+    trigger.pop("credentials", None)
+
+    issues = lint_workflow(workflow, require_tests=True, tests=[])
+    codes = {issue.code for issue in issues if issue.severity == "error"}
+
+    assert {"KAFKA-TOPIC", "KAFKA-GROUP", "KAFKA-CREDENTIAL"} <= codes
 
 
 def test_api_payload_removes_readonly_fields() -> None:

@@ -46,6 +46,8 @@ vi.mock('react-i18next', () => ({
         'n8n.n8nBaseUrl': 'n8n 地址',
         'n8n.remoteStatus': 'n8n 状态',
         'n8n.testStatus': '测试状态',
+        'n8n.trigger': '触发器',
+        'n8n.triggerType': '触发类型',
         'n8n.webhookUrl': 'Webhook URL',
         'n8n.actions': '操作',
         'n8n.viewDetail': '查看详情',
@@ -65,6 +67,9 @@ vi.mock('react-i18next', () => ({
         'n8n.sourceDiscovered': '可发现',
         'n8n.sourceExternal': '外部只读',
         'n8n.webhookMethod': 'Webhook 方法',
+        'n8n.kafkaTopic': 'Kafka Topic',
+        'n8n.kafkaGroupId': 'Kafka 消费组',
+        'n8n.kafkaCredentialName': 'Kafka 凭据',
         'n8n.latestExecutionId': '最近执行 ID',
         'n8n.lastSyncedAt': '最近同步',
         'n8n.lastTestedAt': '最近测试',
@@ -168,9 +173,13 @@ const record = {
   n8nBaseUrl: 'http://localhost:5678',
   apiKeySecretRef: 'N8N_API_KEY',
   workflowUrl: 'http://localhost:5678/workflow/wf-1',
+  triggerType: 'webhook',
   webhookUrl: 'http://localhost:5678/webhook/hello',
   webhookPath: 'hello',
   webhookMethod: 'POST',
+  kafkaTopic: null,
+  kafkaGroupId: null,
+  kafkaCredentialName: null,
   remoteStatus: 'active',
   testStatus: 'test_passed',
   buildStatus: 'success',
@@ -342,6 +351,30 @@ describe('N8nWorkflowPage', () => {
     renderPage('/workflows/n8n/n8n-wf-1');
 
     expect(await screen.findByRole('heading', { name: 'hello n8n' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '运行' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重跑测试' })).not.toBeInTheDocument();
+  });
+
+  it('shows kafka trigger details without webhook run or retry controls', async () => {
+    mocks.getWorkflowRecord.mockResolvedValue({
+      data: {
+        ...record,
+        triggerType: 'kafka',
+        webhookUrl: null,
+        webhookPath: null,
+        webhookMethod: null,
+        kafkaTopic: 'security-alerts',
+        kafkaGroupId: 'flocks-security-alerts',
+        kafkaCredentialName: 'Kafka Production',
+      },
+    });
+
+    renderPage('/workflows/n8n/n8n-wf-1');
+
+    expect(await screen.findByRole('heading', { name: 'hello n8n' })).toBeInTheDocument();
+    expect(screen.getByText('security-alerts')).toBeInTheDocument();
+    expect(screen.getByText('flocks-security-alerts')).toBeInTheDocument();
+    expect(screen.getByText('Kafka Production')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '运行' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '重跑测试' })).not.toBeInTheDocument();
   });

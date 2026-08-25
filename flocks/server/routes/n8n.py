@@ -105,9 +105,13 @@ class N8nWorkflowRecordCreateRequest(BaseModel):
     n8n_base_url: str = Field(DEFAULT_N8N_BASE_URL, alias="n8nBaseUrl")
     api_key_secret_ref: str = Field(DEFAULT_N8N_SECRET_REF, alias="apiKeySecretRef")
     workflow_url: Optional[str] = Field(None, alias="workflowUrl")
+    trigger_type: str = Field("webhook", alias="triggerType")
     webhook_url: Optional[str] = Field(None, alias="webhookUrl")
     webhook_path: Optional[str] = Field(None, alias="webhookPath")
     webhook_method: Optional[str] = Field(None, alias="webhookMethod")
+    kafka_topic: Optional[str] = Field(None, alias="kafkaTopic")
+    kafka_group_id: Optional[str] = Field(None, alias="kafkaGroupId")
+    kafka_credential_name: Optional[str] = Field(None, alias="kafkaCredentialName")
     user_request: Optional[str] = Field(None, alias="userRequest")
     ir: Optional[Dict[str, Any]] = None
     workflow_json: Optional[Dict[str, Any]] = Field(None, alias="workflowJson")
@@ -118,9 +122,13 @@ class N8nWorkflowRecordUpdateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     name: Optional[str] = None
+    trigger_type: Optional[str] = Field(None, alias="triggerType")
     webhook_url: Optional[str] = Field(None, alias="webhookUrl")
     webhook_path: Optional[str] = Field(None, alias="webhookPath")
     webhook_method: Optional[str] = Field(None, alias="webhookMethod")
+    kafka_topic: Optional[str] = Field(None, alias="kafkaTopic")
+    kafka_group_id: Optional[str] = Field(None, alias="kafkaGroupId")
+    kafka_credential_name: Optional[str] = Field(None, alias="kafkaCredentialName")
     test_cases: Optional[List[Dict[str, Any]]] = Field(None, alias="testCases")
 
 
@@ -264,6 +272,63 @@ def _extract_webhook_info(workflow: Dict[str, Any]) -> tuple[Optional[str], Opti
     return None, None
 
 
+def _credential_name(credentials: Any, key: str) -> Optional[str]:
+    if not isinstance(credentials, dict):
+        return None
+    value = credentials.get(key)
+    if not isinstance(value, dict):
+        return None
+    name = value.get("name") or value.get("id")
+    return str(name) if name else None
+
+
+def _extract_kafka_info(workflow: Dict[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, list):
+        return None, None, None
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") != "n8n-nodes-base.kafkaTrigger":
+            continue
+        parameters = node.get("parameters")
+        if not isinstance(parameters, dict):
+            return None, None, None
+        topic = parameters.get("topic")
+        group_id = parameters.get("groupId")
+        credential = _credential_name(node.get("credentials"), "kafka")
+        return (
+            str(topic) if topic else None,
+            str(group_id) if group_id else None,
+            credential,
+        )
+    return None, None, None
+
+
+def _apply_trigger_info(record: N8nWorkflowRecord, workflow: Dict[str, Any], *, base_url: str) -> None:
+    webhook_path, webhook_method = _extract_webhook_info(workflow)
+    kafka_topic, kafka_group_id, kafka_credential_name = _extract_kafka_info(workflow)
+    if kafka_topic or kafka_group_id:
+        record.trigger_type = "kafka"
+        record.webhook_path = None
+        record.webhook_method = None
+        record.webhook_url = None
+        record.kafka_topic = kafka_topic
+        record.kafka_group_id = kafka_group_id
+        record.kafka_credential_name = kafka_credential_name
+        return
+    if not webhook_path and not webhook_method:
+        return
+    record.trigger_type = "webhook" if webhook_path or webhook_method else record.trigger_type
+    record.webhook_path = webhook_path or record.webhook_path
+    record.webhook_method = webhook_method or record.webhook_method
+    if webhook_path:
+        record.webhook_url = f"{base_url}/webhook/{webhook_path}"
+    record.kafka_topic = None
+    record.kafka_group_id = None
+    record.kafka_credential_name = None
+
+
 def _upsert_discovered_record(
     store: N8nStateStore,
     workflow: Dict[str, Any],
@@ -278,7 +343,6 @@ def _upsert_discovered_record(
     workflow_id_text = str(workflow_id)
     record_id = _record_id_for(workflow_id_text, connection.id)
     existing = _load_existing_record_for_workflow(store, workflow_id_text, connection)
-    webhook_path, webhook_method = _extract_webhook_info(workflow)
     workflow_url = f"{connection.base_url}/workflow/{workflow_id_text}"
     record = existing or N8nWorkflowRecord(
         id=record_id,
@@ -301,10 +365,7 @@ def _upsert_discovered_record(
     record.api_key_secret_ref = connection.api_key_secret_ref
     record.workflow_url = workflow_url
     record.remote_status = _remote_status_from_workflow(workflow)
-    record.webhook_path = webhook_path or record.webhook_path
-    record.webhook_method = webhook_method or record.webhook_method
-    if webhook_path:
-        record.webhook_url = f"{connection.base_url}/webhook/{webhook_path}"
+    _apply_trigger_info(record, workflow, base_url=connection.base_url)
     record.last_synced_at = utc_now_iso()
     record.error = None
     return store.save_record(record)
@@ -350,9 +411,22 @@ def _promote_run_to_record(
     record.n8n_base_url = run.base_url
     record.api_key_secret_ref = run.api_key_secret_ref
     record.workflow_url = run.workflow_url or f"{run.base_url}/workflow/{workflow_id}"
-    record.webhook_url = run.webhook_url
-    record.webhook_path = slugify_webhook_path(str(parsed_ir.trigger.path or parsed_ir.name))
-    record.webhook_method = parsed_ir.trigger.method
+    record.trigger_type = parsed_ir.trigger.type
+    if parsed_ir.trigger.type == "webhook":
+        record.webhook_url = run.webhook_url
+        record.webhook_path = slugify_webhook_path(str(parsed_ir.trigger.path or parsed_ir.name))
+        record.webhook_method = parsed_ir.trigger.method
+        record.kafka_topic = None
+        record.kafka_group_id = None
+        record.kafka_credential_name = None
+    else:
+        record.webhook_url = None
+        record.webhook_path = None
+        record.webhook_method = None
+        record.kafka_topic = parsed_ir.trigger.topic
+        record.kafka_group_id = parsed_ir.trigger.group_id
+        credential_ref = parsed_ir.trigger.credential_ref
+        record.kafka_credential_name = credential_ref.name if credential_ref else None
     record.remote_status = "active" if activated else "inactive"
     record.test_status = "test_passed" if test_success else ("test_failed" if tests_attempted else "not_tested")
     record.build_status = "success" if run.status in {"test_passed", "rendered", "published"} else run.status
@@ -555,11 +629,12 @@ def _build_run_sync(request: N8nBuildRunCreateRequest) -> N8nBuildRunState:
         workflow = render_ir_to_workflow(parsed_ir)
         run.workflow = workflow
         run.current_step = "lint"
+        is_webhook_trigger = parsed_ir.trigger.type == "webhook"
         run.lint_issues = [
             issue.to_dict()
             for issue in lint_workflow(
                 workflow,
-                require_tests=True,
+                require_tests=is_webhook_trigger,
                 tests=[case.model_dump(by_alias=True) for case in parsed_ir.tests],
             )
         ]
@@ -594,9 +669,11 @@ def _build_run_sync(request: N8nBuildRunCreateRequest) -> N8nBuildRunState:
             store.save_run(run)
             client.activate_workflow(workflow_id)
 
-        webhook_path = slugify_webhook_path(str(parsed_ir.trigger.path or parsed_ir.name))
-        run.webhook_url = f"{base_url}/webhook/{webhook_path}"
-        if parsed_ir.tests and request.activate:
+        webhook_path = None
+        if is_webhook_trigger:
+            webhook_path = slugify_webhook_path(str(parsed_ir.trigger.path or parsed_ir.name))
+            run.webhook_url = f"{base_url}/webhook/{webhook_path}"
+        if webhook_path and parsed_ir.tests and request.activate:
             run.current_step = "test"
             store.save_run(run)
             run.test_results = [
@@ -686,9 +763,13 @@ async def create_n8n_workflow_record(
         n8nBaseUrl=base_url,
         apiKeySecretRef=request.api_key_secret_ref,
         workflowUrl=workflow_url,
+        triggerType=request.trigger_type,
         webhookUrl=request.webhook_url,
         webhookPath=request.webhook_path,
         webhookMethod=request.webhook_method,
+        kafkaTopic=request.kafka_topic,
+        kafkaGroupId=request.kafka_group_id,
+        kafkaCredentialName=request.kafka_credential_name,
         userRequest=request.user_request,
         ir=request.ir,
         workflowJson=request.workflow_json,
@@ -908,6 +989,7 @@ async def sync_n8n_workflow_record(record_id: str, _admin: object = Depends(requ
         record.api_key_secret_ref = connection.api_key_secret_ref
         record.workflow_url = f"{connection.base_url}/workflow/{record.n8n_workflow_id}"
         record.remote_status = _remote_status_from_workflow(body)
+        _apply_trigger_info(record, body, base_url=connection.base_url)
         record.last_synced_at = utc_now_iso()
         record.error = None
     except N8nClientError as exc:
@@ -941,6 +1023,8 @@ async def retry_n8n_workflow_tests(record_id: str, _admin: object = Depends(requ
     connection = store.load_connection_by_id(record.connection_id)
     if not connection:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    if record.trigger_type != "webhook":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="only webhook n8n workflows can be re-tested from Flocks")
     if not record.webhook_path and not record.webhook_url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n webhook path is missing")
     if not record.test_cases:
@@ -991,6 +1075,8 @@ async def run_n8n_workflow(
     connection = store.load_connection_by_id(record.connection_id)
     if not connection:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    if record.trigger_type != "webhook":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="only webhook n8n workflows can be run from Flocks")
     if not record.webhook_path and not record.webhook_url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n webhook path is missing")
 
@@ -1108,6 +1194,8 @@ async def retry_build_run_tests(run_id: str, _admin: object = Depends(require_ad
     if not connection:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
     parsed_ir = N8nIR.model_validate(run.ir)
+    if parsed_ir.trigger.type != "webhook":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="only webhook n8n build runs can be re-tested from Flocks")
     client = _client_for_connection(connection)
     webhook_path = slugify_webhook_path(str(parsed_ir.trigger.path or parsed_ir.name))
     run.current_step = "test"

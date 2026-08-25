@@ -51,9 +51,13 @@ export interface N8nWorkflowRecord {
   n8nBaseUrl: string;
   apiKeySecretRef: string;
   workflowUrl: string;
+  triggerType?: 'webhook' | 'kafka' | string;
   webhookUrl?: string | null;
   webhookPath?: string | null;
   webhookMethod?: string | null;
+  kafkaTopic?: string | null;
+  kafkaGroupId?: string | null;
+  kafkaCredentialName?: string | null;
   remoteStatus: 'active' | 'inactive' | 'missing' | 'auth_error' | 'sync_error' | 'cleaned' | 'unknown' | string;
   testStatus: 'not_tested' | 'test_passed' | 'test_failed' | 'test_error' | string;
   buildStatus: 'not_built' | 'running' | 'success' | 'failed' | 'lint_failed' | string;
@@ -175,9 +179,13 @@ export const n8nAPI = {
     n8nBaseUrl?: string;
     apiKeySecretRef?: string;
     workflowUrl?: string;
+    triggerType?: string;
     webhookUrl?: string;
     webhookPath?: string;
     webhookMethod?: string;
+    kafkaTopic?: string;
+    kafkaGroupId?: string;
+    kafkaCredentialName?: string;
     userRequest?: string;
     ir?: Record<string, any>;
     workflowJson?: Record<string, any>;

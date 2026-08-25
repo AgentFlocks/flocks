@@ -45,6 +45,29 @@ const SAMPLE_IR = {
   ],
 };
 
+const SAMPLE_KAFKA_IR = {
+  name: 'flocks-kafka-alerts',
+  description: 'Kafka Trigger consumes security alerts and normalizes each message.',
+  trigger: {
+    type: 'kafka',
+    topic: 'security-alerts',
+    groupId: 'flocks-security-alerts',
+    credentialRef: { name: 'Kafka Production' },
+    fromBeginning: false,
+    batchSize: 1,
+    resolveOffset: 'onCompletion',
+  },
+  steps: [
+    {
+      id: 'normalize',
+      kind: 'code',
+      name: 'Normalize',
+      js_code: "return $input.all().map((item) => ({ json: { ...item.json, handledBy: 'n8n' } }));",
+    },
+  ],
+  tests: [],
+};
+
 function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -274,8 +297,8 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
       });
       setRuns((current) => [response.data, ...current.filter((run) => run.runId !== response.data.runId)].slice(0, 8));
       onBuildRunCreated?.(response.data);
-      if (response.data.status === 'test_passed') {
-        toast.success(t('create.n8n.buildPassed'));
+      if (['test_passed', 'published', 'rendered'].includes(response.data.status)) {
+        toast.success(t('create.n8n.buildSucceeded'));
       } else {
         toast.warning(t('create.n8n.buildFinishedWithStatus', { status: response.data.status }));
       }
@@ -474,14 +497,24 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
               <h4 className="text-xs font-semibold text-gray-700">{t('create.n8n.irTitle')}</h4>
               <p className="mt-1 text-[11px] leading-relaxed text-gray-500">{t('create.n8n.irHint')}</p>
             </div>
-            <button
-              type="button"
-              onClick={() => setIrText(formatJson(SAMPLE_IR))}
-              className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50"
-            >
-              <Clipboard className="h-3 w-3" />
-              {t('create.n8n.resetSample')}
-            </button>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={() => setIrText(formatJson(SAMPLE_IR))}
+                className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50"
+              >
+                <Clipboard className="h-3 w-3" />
+                {t('create.n8n.resetSample')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIrText(formatJson(SAMPLE_KAFKA_IR))}
+                className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50"
+              >
+                <Clipboard className="h-3 w-3" />
+                {t('create.n8n.kafkaSample')}
+              </button>
+            </div>
           </div>
           <textarea
             value={irText}

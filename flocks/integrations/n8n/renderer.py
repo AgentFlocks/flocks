@@ -7,7 +7,7 @@ import re
 import uuid
 from typing import Any, Dict, Iterable, List, Tuple
 
-from flocks.integrations.n8n.models import N8nIR, N8nStep
+from flocks.integrations.n8n.models import N8nCredentialRef, N8nIR, N8nStep
 
 
 API_READONLY_FIELDS = frozenset({"id", "versionId", "active", "meta", "createdAt", "updatedAt", "tags"})
@@ -136,6 +136,71 @@ def _assignment_type(value: Any) -> str:
     return "string"
 
 
+def _credential_payload(ref: N8nCredentialRef | None) -> Dict[str, Any] | None:
+    if ref is None:
+        return None
+    payload: Dict[str, Any] = {}
+    if ref.id:
+        payload["id"] = ref.id
+    if ref.name:
+        payload["name"] = ref.name
+    if ref.type:
+        payload["type"] = ref.type
+    return payload or None
+
+
+def _trigger_node(ir: N8nIR) -> tuple[str, Dict[str, Any]]:
+    if ir.trigger.type == "webhook":
+        webhook_path = slugify_webhook_path(ir.trigger.path or ir.name)
+        trigger_name = "Webhook"
+        return trigger_name, {
+            "id": str(uuid.uuid4()),
+            "name": trigger_name,
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2.1,
+            "position": [0, 300],
+            "webhookId": str(uuid.uuid4()),
+            "parameters": {
+                "httpMethod": ir.trigger.method,
+                "path": webhook_path,
+                "responseMode": ir.trigger.response_mode,
+                "options": {},
+            },
+        }
+
+    trigger_name = "Kafka Trigger"
+    options = dict(ir.trigger.options or {})
+    options.setdefault("fromBeginning", ir.trigger.from_beginning)
+    options.setdefault("batchSize", ir.trigger.batch_size)
+    parameters: Dict[str, Any] = {
+        "topic": ir.trigger.topic or "",
+        "groupId": ir.trigger.group_id or "",
+        "resolveOffset": ir.trigger.resolve_offset,
+        "useSchemaRegistry": ir.trigger.use_schema_registry,
+        "options": options,
+    }
+    if ir.trigger.schema_registry_url:
+        parameters["schemaRegistryUrl"] = ir.trigger.schema_registry_url
+    credentials: Dict[str, Any] = {}
+    kafka_credential = _credential_payload(ir.trigger.credential_ref)
+    if kafka_credential:
+        credentials["kafka"] = kafka_credential
+    schema_credential = _credential_payload(ir.trigger.schema_registry_credential_ref)
+    if schema_credential:
+        credentials["schemaRegistryApi"] = schema_credential
+    node: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "name": trigger_name,
+        "type": "n8n-nodes-base.kafkaTrigger",
+        "typeVersion": 1.3,
+        "position": [0, 300],
+        "parameters": parameters,
+    }
+    if credentials:
+        node["credentials"] = credentials
+    return trigger_name, node
+
+
 def _connections(trigger_name: str, steps: List[N8nStep]) -> Dict[str, Any]:
     connections: Dict[str, Any] = {}
     if not steps:
@@ -175,22 +240,7 @@ def _connections(trigger_name: str, steps: List[N8nStep]) -> Dict[str, Any]:
 
 def render_ir_to_workflow(ir_data: N8nIR | Dict[str, Any], *, workflow_id: str | None = None) -> Dict[str, Any]:
     ir = ir_data if isinstance(ir_data, N8nIR) else N8nIR.model_validate(ir_data)
-    webhook_path = slugify_webhook_path(ir.trigger.path or ir.name)
-    trigger_name = "Webhook"
-    trigger_node = {
-        "id": str(uuid.uuid4()),
-        "name": trigger_name,
-        "type": "n8n-nodes-base.webhook",
-        "typeVersion": 2.1,
-        "position": [0, 300],
-        "webhookId": str(uuid.uuid4()),
-        "parameters": {
-            "httpMethod": ir.trigger.method,
-            "path": webhook_path,
-            "responseMode": ir.trigger.response_mode,
-            "options": {},
-        },
-    }
+    trigger_name, trigger_node = _trigger_node(ir)
     nodes = [trigger_node]
     nodes.extend(_node(step, index=index + 1) for index, step in enumerate(ir.steps))
     workflow: Dict[str, Any] = {
