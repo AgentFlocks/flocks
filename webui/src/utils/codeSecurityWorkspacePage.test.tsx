@@ -160,7 +160,6 @@ const scanDetail = {
           severity: "high",
           verdict: "confirmed",
           rationale: "用户输入在进入文件读取前没有经过规范化处理。",
-          rationale_truncated: false,
         },
       ],
       attempts: [
@@ -402,6 +401,7 @@ describe("code security workspace contract page", () => {
       "用户输入在进入文件读取前没有经过规范化处理。",
     );
     expect(rationale).toBeVisible();
+    expect(screen.queryByText("理由已截取显示。")).not.toBeInTheDocument();
     expect(
       screen.getByRole("region", { name: "验证结论详情" }),
     ).toHaveAttribute("tabindex", "0");

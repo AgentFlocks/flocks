@@ -76,7 +76,6 @@ export interface WorkerCandidateSummary {
   severity?: string | null;
   verdict?: string | null;
   rationale?: string | null;
-  rationale_truncated?: boolean;
 }
 
 export interface WorkerAttempt {

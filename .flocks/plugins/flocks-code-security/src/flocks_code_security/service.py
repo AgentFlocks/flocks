@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 PUBLIC_SCHEMA_VERSION = "flocks.code-security.tool.v1"
 MAX_PROJECTED_EVENT_BYTES = 60 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
-MAX_WORKER_RATIONALE_CHARS = 2_000
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 PUBLIC_SCAN_STATUSES = {"running", *TERMINAL_SCAN_STATUSES}
 PUBLIC_PHASES = {
@@ -1754,7 +1753,6 @@ class AuditService:
                     "severity": payload.get("severity") if isinstance(payload.get("severity"), str) else None,
                     "verdict": None,
                     "rationale": None,
-                    "rationale_truncated": False,
                 }
         for item in data["verifications"]:
             record(item.get("work_unit_id"), "verifications", item.get("candidate_id"))
@@ -1766,8 +1764,7 @@ class AuditService:
                 summary.update(
                     {
                         "verdict": item.get("verdict") if isinstance(item.get("verdict"), str) else None,
-                        "rationale": rationale[:MAX_WORKER_RATIONALE_CHARS] if rationale else None,
-                        "rationale_truncated": bool(rationale and len(rationale) > MAX_WORKER_RATIONALE_CHARS),
+                        "rationale": rationale,
                     }
                 )
         vote_summary_by_unit: dict[str, dict[str, Any]] = {}
@@ -1782,8 +1779,7 @@ class AuditService:
             vote_summary_by_unit[work_unit_id] = {
                 **summary,
                 "verdict": item.get("verdict") if isinstance(item.get("verdict"), str) else None,
-                "rationale": rationale[:MAX_WORKER_RATIONALE_CHARS] if rationale else None,
-                "rationale_truncated": bool(rationale and len(rationale) > MAX_WORKER_RATIONALE_CHARS),
+                "rationale": rationale,
             }
         for item in data["coverage"]:
             record(item.get("work_unit_id"), "coverage")

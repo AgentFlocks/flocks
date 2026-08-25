@@ -1426,9 +1426,6 @@ function WorkerList({
                     >
                       <p>{candidate.rationale}</p>
                     </div>
-                    {candidate.rationale_truncated && (
-                      <small>{t("理由已截取显示。")}</small>
-                    )}
                   </details>
                 )}
 

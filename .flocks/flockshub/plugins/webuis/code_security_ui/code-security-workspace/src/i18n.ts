@@ -349,7 +349,6 @@ const englishMessages: Record<string, string> = {
   "关联候选漏洞 ID": "Related candidate finding IDs",
   查看验证结论: "View validation conclusion",
   验证结论详情: "Validation conclusion details",
-  "理由已截取显示。": "The rationale is truncated.",
   查看分配范围: "View assigned scope",
   "仅显示前 {{count}} 条路径。": "Only the first {{count}} paths are shown.",
   "该阶段没有工作单元。": "This phase has no work units.",
