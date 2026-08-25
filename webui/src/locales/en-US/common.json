@@ -181,7 +181,6 @@
       "primaryThreatBookGlobalLink": "Global users claim API key",
       "providerThreatBookCn": "ThreatBook-China free model",
       "providerThreatBookGlobal": "ThreatBook Global free model",
-      "providerFlocksRouterTest": "Flocks Router Test",
       "savePrimary": "Save & Verify Model",
       "saveOptionalThreatBook": "Save & Verify ThreatBook Services",
       "primaryThreatBookCnHint": "After validation, Flocks will also configure the ThreatBook-China model, API, and MCP services.",

@@ -124,16 +124,24 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
     """Resolve runtime pricing for a provider/model pair."""
     model_info = None
     provider = Provider.get(provider_id)
-    if provider:
+    if (
+        provider
+        and getattr(provider, "model_catalog_is_authoritative", False) is True
+    ):
+        model_info = Provider.resolve_model(provider_id, model_id)
+    elif provider:
         for candidate in getattr(provider, "_config_models", []):
             if candidate.id == model_id:
                 model_info = candidate
                 break
 
-    if model_info is None:
-        model_info = Provider.get_model(model_id)
-
     pricing = getattr(model_info, "pricing", None) if model_info else None
+    if pricing is None:
+        # Config snapshots commonly contain only a model name. Resolve the
+        # catalog-enriched/provider-owned definition so bundled or dynamically
+        # refreshed Router prices are still used for usage accounting.
+        model_info = Provider.resolve_model(provider_id, model_id)
+        pricing = getattr(model_info, "pricing", None) if model_info else None
     if pricing is None:
         return None
 

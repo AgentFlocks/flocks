@@ -17,7 +17,6 @@ class TestCuratedCatalogProviders:
     def test_provider_ids_match_curated_list(self):
         assert set(list_catalog_provider_ids()) == {
             "openai-compatible",
-            "flocks-router-test",
             "threatbook-cn-llm",
             "threatbook-io-llm",
             "google",
@@ -339,6 +338,7 @@ class TestCuratedCatalogModels:
             "GLM-5",
             "qwen3.6-plus",
             "qwen3-max",
+            "qwen3.8-max",
             "kimi-k2.6",
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
@@ -350,7 +350,7 @@ class TestCuratedCatalogModels:
         assert kimi_code.capabilities.supports_reasoning is True
         assert kimi_code.capabilities.interleaved["field"] == "reasoning_content"
         assert kimi_code.pricing.currency == "CNY"
-        assert kimi_code.pricing.cache_read == 1.3
+        assert kimi_code.pricing.cache_read is None
         assert kimi_code.pricing.input == 6.5
         assert kimi_code.pricing.output == 27.0
         assert kimi_code.limits.context_window == 256000
@@ -359,11 +359,20 @@ class TestCuratedCatalogModels:
 
         qwen = next(m for m in models if m.id == "qwen3.6-plus")
         assert qwen.capabilities.supports_vision is True
+        qwen38 = next(m for m in models if m.id == "qwen3.8-max")
+        assert qwen38.capabilities.supports_vision is True
+        assert qwen38.limits.context_window == 1000000
+        assert qwen38.limits.max_output_tokens == 65536
+        assert qwen38.pricing.input == 12.0
+        assert qwen38.pricing.output == 36.0
 
         m3 = next(m for m in models if m.id == "minimax-m3")
         assert m3.capabilities.supports_vision is True
         assert m3.capabilities.supports_reasoning is True
         assert m3.capabilities.interleaved["field"] == "reasoning_details"
+        m25 = next(m for m in models if m.id == "minimax-m2.5")
+        assert m25.pricing.input == 2.1
+        assert m25.pricing.output == 8.42
 
         flash_cn = next(m for m in models if m.id == "deepseek-v4-flash")
         assert flash_cn.pricing.input == 1.0
@@ -379,10 +388,6 @@ class TestCuratedCatalogModels:
                 **raw_models["deepseek-v4-flash"]["limits"],
                 "max_input_tokens": 1000000,
             },
-            "pricing": {
-                **raw_models["deepseek-v4-flash"]["pricing"],
-                "cache_read": 0.2,
-            },
         }
 
         kimi = next(m for m in models if m.id == "kimi-k2.6")
@@ -390,7 +395,7 @@ class TestCuratedCatalogModels:
         assert kimi.capabilities.supports_reasoning is True
         assert kimi.capabilities.interleaved["field"] == "reasoning_content"
         assert kimi.pricing.currency == "CNY"
-        assert kimi.pricing.cache_read == 1.3
+        assert kimi.pricing.cache_read is None
         assert kimi.pricing.input == 6.5
         assert kimi.pricing.output == 27.0
         assert kimi.limits.context_window == 256000

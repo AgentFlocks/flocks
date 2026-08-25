@@ -439,6 +439,13 @@ def _merge_config_models(
     provider_id: str,
     config: Any,
 ) -> Dict[str, Dict[str, Any]]:
+    provider = Provider.get(provider_id)
+    if getattr(provider, "model_catalog_is_authoritative", False) is True:
+        # The provider has already merged matching user overrides into its
+        # live Router snapshot (or bundled offline snapshot). Re-adding every
+        # persisted model here would resurrect removed models and stale prices.
+        return models_dict
+
     provider_cfg = (getattr(config, "provider", None) or {}).get(provider_id)
     if not provider_cfg or not getattr(provider_cfg, "models", None):
         return models_dict
@@ -536,6 +543,7 @@ async def list_providers() -> ProviderListResponse:
         try:
             config = await Config.get()
             await Provider.apply_config(config)
+            await Provider.refresh_provider_models(ConfigWriter.list_provider_ids())
             disabled = set(config.disabled_providers or [])
             enabled_set = set(config.enabled_providers) if config.enabled_providers else None
         except Exception:
@@ -826,6 +834,7 @@ async def get_provider(provider_id: str) -> ProviderInfo:
         
         config = await Config.get()
         await Provider.apply_config(config, provider_id=provider_id)
+        await Provider.refresh_provider_models([provider_id])
         
         # Credentials are resolved at config load time via {secret:xxx} in flocks.json.
         # Provider.apply_config() above already configures from resolved config.
@@ -877,6 +886,7 @@ async def list_models(provider_id: str) -> List[Dict[str, Any]]:
             return []
         config = await Config.get()
         await Provider.apply_config(config, provider_id=provider_id)
+        await Provider.refresh_provider_models([provider_id])
         provider_models = Provider.list_models(provider_id)
 
         models_dict: Dict[str, Dict[str, Any]] = {}
