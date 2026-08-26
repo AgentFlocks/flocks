@@ -149,6 +149,8 @@ export interface SessionChatProps {
   placeholder?: string;
   /** Hide the follow-up input box */
   hideInput?: boolean;
+  /** Disable manual composer input while keeping programmatic bottom-slot actions available. */
+  composerDisabled?: boolean;
   /** Extra class for the outer wrapper (which is a flex-col container) */
   className?: string;
   /** Displayed when there are no messages yet (ignored if welcomeContent is set) */
@@ -1602,6 +1604,7 @@ export default function SessionChat({
   live = false,
   placeholder,
   hideInput = false,
+  composerDisabled = false,
   className = '',
   emptyText,
   suggestions,
@@ -1867,7 +1870,7 @@ export default function SessionChat({
     [successfulDocAttachments, successfulImageAttachments],
   );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !hasUploadingFiles &&
+  const canSend = !composerDisabled && !sending && !hasUploadingFiles &&
     (
       !!input.trim()
       || composerReferences.length > 0
@@ -4096,13 +4099,13 @@ export default function SessionChat({
                             : effectivePlaceholder
                     }
                     className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#7b838e] dark:placeholder:text-[#9aa7b4] ${
-                      sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
+                      sending || composerDisabled ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
                     }`}
                     style={{
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
                       maxHeight: `${effectiveComposerTextareaMaxHeight}px`,
                     }}
-                    disabled={sending}
+                    disabled={sending || composerDisabled}
                     rows={1}
                   />
                 </div>
@@ -4113,7 +4116,7 @@ export default function SessionChat({
                     <button
                       type="button"
                       onClick={toggleComposerAddMenu}
-                      disabled={sending}
+                      disabled={sending || composerDisabled}
                       title={t('chat.addMenu.title')}
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"

@@ -120,6 +120,8 @@ type SituationReportRun = {
   error?: { message?: string } | null;
 };
 
+type SituationReportDebugState = 'idle' | 'loading' | 'needs-generate' | 'ready' | 'error';
+
 function ExecutionModeIcon({
   mode,
   className = 'h-3 w-3',
@@ -726,6 +728,7 @@ export default function SessionPage() {
   const [creating, setCreating] = useState(false);
   const [reportPreparing, setReportPreparing] = useState(false);
   const [reportRun, setReportRun] = useState<SituationReportRun | null>(null);
+  const [reportDebugState, setReportDebugState] = useState<SituationReportDebugState>('idle');
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
@@ -1227,6 +1230,9 @@ export default function SessionPage() {
             ? current
             : next
         ));
+        if (next.status === 'succeeded') {
+          setReportDebugState('ready');
+        }
       }
       return;
     }
@@ -1272,13 +1278,30 @@ export default function SessionPage() {
 
   useEffect(() => {
     setReportRun(null);
-    if (!isSituationReportSession) return;
+    if (!isSituationReportSession || !selectedSessionId) {
+      setReportDebugState('idle');
+      return;
+    }
     setSelectedAgent(SITUATION_REPORT_AGENT);
     setSelectedExecutionMode('build');
     setSelectedModelKey(null);
     setShowAgentOptions(false);
     setShowExecutionModeOptions(false);
     setShowModelOptions(false);
+    let cancelled = false;
+    setReportDebugState('loading');
+    void situationReportAPI.getDebugSessionState(selectedSessionId)
+      .then((state) => {
+        if (!cancelled) {
+          setReportDebugState(state.reportExists ? 'ready' : 'needs-generate');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setReportDebugState('error');
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [isSituationReportSession, selectedSessionId]);
 
   useEffect(() => {
@@ -1659,6 +1682,7 @@ export default function SessionPage() {
       setSelectedExecutionMode('build');
       setSelectedModelKey(null);
       setReportRun(null);
+      setReportDebugState('needs-generate');
       setSelectedSessionId(response.data.id);
       writeSessionExecutionMode(response.data.id, 'build');
       await refetchSessions();
@@ -1688,6 +1712,9 @@ export default function SessionPage() {
         agentName: SITUATION_REPORT_AGENT,
       };
     }
+    if (reportDebugState !== 'ready') {
+      throw new Error(t('situationReport.generateFirst'));
+    }
     const prepared = await situationReportAPI.prepareDebugPrompt(
       selectedSessionId,
       'modify',
@@ -1698,13 +1725,17 @@ export default function SessionPage() {
       displayText: prepared.displayText,
       agentName: prepared.agent,
     };
-  }, [isSituationReportSession, selectedAgent, selectedSessionId, t]);
+  }, [isSituationReportSession, reportDebugState, selectedAgent, selectedSessionId, t]);
 
   const prepareSituationReportAction = useCallback(async (
     operation: 'generate' | 'regenerate',
     sendPrompt: (text: string, options?: PromptDisplayOptions) => void,
   ) => {
     if (!selectedSessionId || reportPreparing) return;
+    if (
+      (operation === 'generate' && reportDebugState !== 'needs-generate')
+      || (operation === 'regenerate' && reportDebugState !== 'ready')
+    ) return;
     setReportPreparing(true);
     try {
       const instruction = operation === 'generate'
@@ -1722,7 +1753,7 @@ export default function SessionPage() {
     } finally {
       setReportPreparing(false);
     }
-  }, [reportPreparing, selectedSessionId, t, toast]);
+  }, [reportDebugState, reportPreparing, selectedSessionId, t, toast]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -3040,7 +3071,13 @@ export default function SessionPage() {
             key={activeChatSessionId ?? 'empty-session'}
             sessionId={activeChatSessionId}
             live={Boolean(activeChatSessionId)}
-          hideInput={selectedSession?.canWrite === false}
+            hideInput={selectedSession?.canWrite === false}
+            composerDisabled={isSituationReportSession && reportDebugState !== 'ready'}
+            placeholder={
+              isSituationReportSession && reportDebugState !== 'ready'
+                ? t('situationReport.generateFirst')
+                : undefined
+            }
           display={{
             compact: false,
             pageCanvas: true,
@@ -3281,24 +3318,34 @@ export default function SessionPage() {
             <div className="space-y-2">
               {reportRun && <SituationReportProgress run={reportRun} />}
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void prepareSituationReportAction('generate', sendPrompt)}
-                  disabled={sending || streaming || reportPreparing}
-                  className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {t('situationReport.generate')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void prepareSituationReportAction('regenerate', sendPrompt)}
-                  disabled={sending || streaming || reportPreparing}
-                  className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                >
-                  {t('situationReport.regenerate')}
-                </button>
+                {reportDebugState !== 'ready' && (
+                  <button
+                    type="button"
+                    onClick={() => void prepareSituationReportAction('generate', sendPrompt)}
+                    disabled={sending || streaming || reportPreparing || reportDebugState !== 'needs-generate'}
+                    className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {t('situationReport.generate')}
+                  </button>
+                )}
+                {reportDebugState === 'ready' && (
+                  <button
+                    type="button"
+                    onClick={() => void prepareSituationReportAction('regenerate', sendPrompt)}
+                    disabled={sending || streaming || reportPreparing}
+                    className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  >
+                    {t('situationReport.regenerate')}
+                  </button>
+                )}
                 <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                  {t('situationReport.modifyHint')}
+                  {reportDebugState === 'ready'
+                    ? t('situationReport.modifyHint')
+                    : reportDebugState === 'error'
+                      ? t('situationReport.stateUnavailable')
+                      : reportDebugState === 'loading'
+                        ? t('situationReport.stateLoading')
+                        : t('situationReport.generateFirstHint')}
                 </span>
               </div>
             </div>

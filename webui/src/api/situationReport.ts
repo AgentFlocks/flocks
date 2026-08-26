@@ -13,7 +13,21 @@ export interface PreparedSituationReportPrompt {
   displayText: string;
 }
 
+export interface SituationReportDebugSessionState {
+  sessionID: string;
+  reportExists: boolean;
+  allowedOperations: SituationReportOperation[];
+}
+
 export const situationReportAPI = {
+  getDebugSessionState: async (
+    sessionID: string,
+  ): Promise<SituationReportDebugSessionState> => {
+    const response = await client.get<SituationReportDebugSessionState>(
+      `/api/situation-report/debug/session/${sessionID}/state`,
+    );
+    return response.data;
+  },
   prepareDebugPrompt: async (
     sessionID: string,
     operation: SituationReportOperation,

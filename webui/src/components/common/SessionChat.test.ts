@@ -1456,6 +1456,39 @@ describe('SessionChat instruction display text', () => {
 });
 
 describe('SessionChat composer controls', () => {
+  it('keeps bottom-slot actions usable while manual composer input is disabled', async () => {
+    const user = userEvent.setup();
+    const preparePrompt = vi.fn().mockResolvedValue({
+      text: 'SITUATION_REPORT_REQUEST_V1\n{"action":{}}\n生成报告',
+      displayText: '首次生成',
+      agentName: 'situation-report-product',
+    });
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      composerDisabled: true,
+      preparePrompt,
+      conversationBottomSlot: ({ sendPrompt }) => React.createElement(
+        'button',
+        { type: 'button', onClick: () => sendPrompt('generate') },
+        'generate-report',
+      ),
+    }));
+
+    expect(screen.getByPlaceholderText('请输入消息')).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'generate-report' }));
+
+    await waitFor(() => {
+      expect(preparePrompt).toHaveBeenCalledWith('generate', [], undefined);
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          agent: 'situation-report-product',
+          displayText: '首次生成',
+        }),
+      );
+    });
+  });
+
   it('prepares a strict prompt while preserving the user-visible text and Agent', async () => {
     const user = userEvent.setup();
     const preparePrompt = vi.fn().mockResolvedValue({

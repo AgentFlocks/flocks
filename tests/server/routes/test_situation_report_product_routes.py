@@ -93,6 +93,13 @@ async def test_webui_debug_prepare_initializes_new_session_and_builds_generate_c
     )
     monkeypatch.setattr(debug_routes, "build_webui_debug_synchronizer", lambda: synchronizer)
 
+    debug_state = await debug_routes.get_debug_session_state(
+        session_id,
+        Request({"type": "http", "method": "GET", "path": "/", "headers": []}),
+    )
+    assert debug_state.reportExists is False
+    assert debug_state.allowedOperations == ["generate"]
+
     response = await debug_routes.prepare_debug_prompt(
         session_id,
         debug_routes.DebugPromptRequest(

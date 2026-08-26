@@ -45,8 +45,59 @@ class DebugPromptResponse(BaseModel):
     displayText: str
 
 
+class DebugSessionStateResponse(BaseModel):
+    sessionID: str
+    reportExists: bool
+    allowedOperations: list[Literal["generate", "modify", "regenerate"]]
+
+
 def _debug_identifier(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(16)}"
+
+
+async def _require_debug_session(session_id: str, request: Request):
+    current_user = require_user(request)
+    if current_user.role != "admin" or not webui_debug_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    session = await Session.get_by_id_unfiltered(session_id)
+    if session is None or not is_webui_debug_session(session):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debug report Session not found")
+    if not SessionPolicy.can_write(session, current_user) or session.status != "active":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Debug report Session is not writable")
+    return session
+
+
+@router.get(
+    "/debug/session/{session_id}/state",
+    response_model=DebugSessionStateResponse,
+    summary="Read one development WebUI report Session state",
+)
+async def get_debug_session_state(
+    session_id: str,
+    request: Request,
+) -> DebugSessionStateResponse:
+    session = await _require_debug_session(session_id, request)
+    try:
+        await require_report_project(session)
+        state = ensure_session_state(session_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Debug report state is unavailable: {exc}",
+        ) from exc
+
+    current = dict(state.report_state or {})
+    report_exists = bool(current.get("currentFlocksReportVersion"))
+    return DebugSessionStateResponse(
+        sessionID=session_id,
+        reportExists=report_exists,
+        allowedOperations=(
+            ["modify", "regenerate"]
+            if report_exists
+            else ["generate"]
+        ),
+    )
 
 
 @router.post(
@@ -59,15 +110,7 @@ async def prepare_debug_prompt(
     body: DebugPromptRequest,
     request: Request,
 ) -> DebugPromptResponse:
-    current_user = require_user(request)
-    if current_user.role != "admin" or not webui_debug_enabled():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-
-    session = await Session.get_by_id_unfiltered(session_id)
-    if session is None or not is_webui_debug_session(session):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debug report Session not found")
-    if not SessionPolicy.can_write(session, current_user) or session.status != "active":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Debug report Session is not writable")
+    session = await _require_debug_session(session_id, request)
     try:
         await require_report_project(session)
         state = ensure_session_state(session_id)

@@ -92,6 +92,31 @@ class TestSessionCRUD:
         assert "directory" in data
 
     @pytest.mark.asyncio
+    async def test_webui_debug_report_session_is_listed_in_tasks_group(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("SITUATION_REPORT_WEBUI_DEBUG_ENABLED", "true")
+        _use_webui_admin(monkeypatch)
+
+        created = await client.post(
+            "/api/session",
+            json={"title": "态势报告调试", "category": "situation-report"},
+        )
+        assert created.status_code == status.HTTP_200_OK, created.text
+
+        response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "projectID": "tasks"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        row = next(item for item in response.json() if item["id"] == created.json()["id"])
+        assert row["category"] == "situation-report"
+        assert row["effectiveProjectID"] == "tasks"
+
+    @pytest.mark.asyncio
     async def test_create_ordinary_session_uses_process_cwd(
         self,
         client: AsyncClient,

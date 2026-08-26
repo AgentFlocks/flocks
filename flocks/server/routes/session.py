@@ -817,10 +817,31 @@ async def list_sessions(
             continue
         if directory is not None and session.directory != directory:
             continue
+        webui_debug_report_visible = False
+        if manager:
+            if session.category == "situation-report":
+                from flocks.situation_report.product.webui_debug import (
+                    is_webui_debug_session,
+                    webui_debug_enabled,
+                )
+
+                webui_debug_report_visible = (
+                    current_user.role == "admin"
+                    and webui_debug_enabled()
+                    and is_webui_debug_session(session)
+                )
+                if not webui_debug_report_visible:
+                    continue
+            elif session.category not in manager_categories:
+                continue
         effective_project_id = (
-            session.project_id
-            if session.project_id in visible_project_ids
-            else TASK_SESSION_GROUP_ID
+            TASK_SESSION_GROUP_ID
+            if webui_debug_report_visible
+            else (
+                session.project_id
+                if session.project_id in visible_project_ids
+                else TASK_SESSION_GROUP_ID
+            )
         )
         requested_group_id = (
             TASK_SESSION_GROUP_ID
@@ -833,25 +854,10 @@ async def list_sessions(
             continue
         if start is not None and session.time.updated < start:
             continue
-        if manager:
-            if session.category == "situation-report":
-                from flocks.situation_report.product.webui_debug import (
-                    is_webui_debug_session,
-                    webui_debug_enabled,
-                )
-
-                if (
-                    current_user.role != "admin"
-                    or not webui_debug_enabled()
-                    or not is_webui_debug_session(session)
-                ):
-                    continue
-            elif session.category not in manager_categories:
-                continue
-        elif category is not None:
+        if not manager and category is not None:
             if session.category != category:
                 continue
-        elif session.category == "test":
+        elif not manager and session.category == "test":
             # exclude test sessions from the default listing
             continue
 

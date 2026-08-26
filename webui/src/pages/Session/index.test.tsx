@@ -167,6 +167,8 @@ vi.mock('@/components/common/SessionChat', () => ({
     contextWindowTokens,
     display,
     hideInput,
+    composerDisabled,
+    preparePrompt,
   }: {
     sessionId?: string | null;
     agentName?: string;
@@ -194,6 +196,12 @@ vi.mock('@/components/common/SessionChat', () => ({
     supportsVision?: boolean;
     contextWindowTokens?: number | null;
     hideInput?: boolean;
+    composerDisabled?: boolean;
+    preparePrompt?: (
+      text: string,
+      imageParts: unknown[],
+      options?: { displayText?: string },
+    ) => Promise<{ text: string }>;
     display?: {
       compact?: boolean;
       showActions?: boolean;
@@ -213,6 +221,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     onSSEEvent?: (event: { type: string; properties?: Record<string, unknown> }) => void;
   }) {
     const [input, setInput] = React.useState('');
+    const [prepareResult, setPrepareResult] = React.useState('');
     return (
       <div
         data-testid="session-chat"
@@ -226,11 +235,13 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-process-groups-default-open={String(Boolean(display?.processGroupsDefaultOpen))}
         data-process-groups-open-while-active={String(Boolean(display?.processGroupsOpenWhileActive))}
         data-hide-input={String(Boolean(hideInput))}
+        data-composer-disabled={String(Boolean(composerDisabled))}
         data-initial-message={initialMessage ?? ''}
         data-initial-display={initialDisplayText ?? ''}
         data-optimistic-id={initialOptimisticMessage?.id ?? ''}
         data-optimistic-text={initialOptimisticMessage?.parts.find((part) => part.type === 'text')?.text ?? ''}
         data-focus-message={focusMessageId ?? ''}
+        data-prepare-result={prepareResult}
       >
         {sessionId ?? 'no-session'}
         <button type="button" onClick={() => onComposerAddMenuOpenChange?.(true)}>
@@ -271,6 +282,18 @@ vi.mock('@/components/common/SessionChat', () => ({
           onClick={() => executionMode && onExecutionModeAccepted?.(executionMode)}
         >
           mock-accept-mode
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (!preparePrompt) return;
+            void preparePrompt(
+              'SITUATION_REPORT_REQUEST_V1\n{"action":{}}\n生成报告',
+              [],
+            ).then(() => setPrepareResult('ok')).catch(() => setPrepareResult('error'));
+          }}
+        >
+          mock-prepare-internal-report-prompt
         </button>
         <button
           type="button"
@@ -770,6 +793,48 @@ describe('SessionPage session actions menu', () => {
         category: 'situation-report',
       });
       expect(addSession).toHaveBeenCalledWith(debugSession);
+    });
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-composer-disabled', 'true');
+    await user.click(screen.getByRole('button', { name: 'mock-prepare-internal-report-prompt' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-prepare-result', 'ok');
+    });
+  });
+
+  it('restores an existing report session as modifiable after its state loads', async () => {
+    const reportSession = {
+      ...session,
+      id: 'ses-report-ready',
+      title: 'Ready report',
+      category: 'situation-report',
+    };
+    useSessions.mockReturnValue({
+      sessions: [reportSession],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/situation-report/debug/session/ses-report-ready/state') {
+        return Promise.resolve({
+          data: {
+            sessionID: 'ses-report-ready',
+            reportExists: true,
+            allowedOperations: ['modify', 'regenerate'],
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    renderSessionPage('/sessions?session=ses-report-ready');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-composer-disabled', 'false');
     });
   });
 
