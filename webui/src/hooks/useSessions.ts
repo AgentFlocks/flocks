@@ -3,7 +3,7 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Session, Message } from '@/types';
 
-const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config']);
+const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config', 'situation-report']);
 const ABORTED_TOOL_ERROR = 'Tool execution was interrupted';
 const SESSION_LIST_PAGE_SIZE = 100;
 

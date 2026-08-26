@@ -735,6 +735,43 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
+  it('creates an isolated situation-report debug session from the admin entry', async () => {
+    const user = userEvent.setup();
+    const debugSession = {
+      ...session,
+      id: 'ses-report-debug',
+      title: 'situationReport.newTitle',
+      category: 'situation-report',
+    };
+    useAgents.mockReturnValue({
+      agents: [{
+        name: 'situation-report-product',
+        description: 'Situation report',
+        mode: 'primary',
+        permission: [],
+        options: {},
+        skills: [],
+        tools: [],
+      }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    client.post.mockResolvedValue({ data: debugSession });
+    refetchSessions.mockResolvedValue(undefined);
+
+    renderSessionPage();
+    await user.click(screen.getByRole('button', { name: 'situationReport.newSession' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'situationReport.newTitle',
+        category: 'situation-report',
+      });
+      expect(addSession).toHaveBeenCalledWith(debugSession);
+    });
+  });
+
   it('keeps the workbench canvas, sidebar, selected row, and dark palette classes stable', async () => {
     renderSessionPage('/sessions?session=session-1');
 

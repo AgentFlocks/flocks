@@ -23,6 +23,7 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
+import { situationReportAPI, type SituationReportOperation } from '@/api/situationReport';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
@@ -102,8 +103,22 @@ const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 const RECENT_SEARCH_SESSION_LIMIT = 5;
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
+const SITUATION_REPORT_AGENT = 'situation-report-product';
+const SITUATION_REPORT_REQUEST_SENTINEL = 'SITUATION_REPORT_REQUEST_V1\n';
 const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+
+type SituationReportRun = {
+  sessionID: string;
+  generationID: string;
+  operation: SituationReportOperation;
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  stage: string;
+  progress: number;
+  eventSequence: number;
+  output?: { path?: string; downloadAPI?: string };
+  error?: { message?: string } | null;
+};
 
 function ExecutionModeIcon({
   mode,
@@ -644,6 +659,35 @@ function SessionChatSkeleton() {
   );
 }
 
+function SituationReportProgress({ run }: { run: SituationReportRun }) {
+  const { t } = useTranslation('session');
+  const downloadHref = run.status === 'succeeded' && run.output?.path
+    ? `/api/file/download?path=${encodeURIComponent(run.output.path)}`
+    : null;
+  return (
+    <div className="rounded-xl border border-blue-200/70 bg-blue-50/70 px-3 py-2.5 text-xs text-blue-950 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-100">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-medium">
+          {t(`situationReport.stage.${run.stage}`, { defaultValue: run.stage })}
+        </span>
+        <span className="tabular-nums text-blue-700 dark:text-blue-300">{run.progress}%</span>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100 dark:bg-blue-950">
+        <div
+          className={`h-full rounded-full transition-[width] ${run.status === 'failed' ? 'bg-red-500' : 'bg-blue-500'}`}
+          style={{ width: `${Math.max(0, Math.min(100, run.progress))}%` }}
+        />
+      </div>
+      {run.error?.message && <div className="mt-2 text-red-600 dark:text-red-300">{run.error.message}</div>}
+      {downloadHref && (
+        <a className="mt-2 inline-flex font-medium text-blue-700 underline dark:text-blue-300" href={downloadHref}>
+          {t('situationReport.download')}
+        </a>
+      )}
+    </div>
+  );
+}
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const { user } = useAuth();
@@ -680,6 +724,8 @@ export default function SessionPage() {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const [relativeTimeClock, setRelativeTimeClock] = useState(0);
   const [creating, setCreating] = useState(false);
+  const [reportPreparing, setReportPreparing] = useState(false);
+  const [reportRun, setReportRun] = useState<SituationReportRun | null>(null);
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
@@ -784,6 +830,9 @@ export default function SessionPage() {
       : sortedSessions.slice(0, RECENT_SEARCH_SESSION_LIMIT);
   }, [searchQuery, sessions]);
   const { agents, loading: loadingAgents } = useAgents();
+  const reportDebugAvailable = Boolean(
+    user?.role === 'admin' && agents.some((agent) => agent.name === SITUATION_REPORT_AGENT),
+  );
   const { providers, loading: loadingProviders } = useProviders();
   const {
     data: enabledModelDefinitions,
@@ -909,6 +958,7 @@ export default function SessionPage() {
   const selectedSession = listedSelectedSession
     ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
   const activeChatSessionId = selectedSession ? selectedSessionId : null;
+  const isSituationReportSession = selectedSession?.category === 'situation-report';
   const resolvingSelectedSession = Boolean(selectedSessionId && !selectedSession);
   const pinnedModelKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
     ? makeModelKey(selectedSession.provider, selectedSession.model)
@@ -940,6 +990,7 @@ export default function SessionPage() {
     : selectedModelOption
       ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
       : null;
+  const effectivePromptModel = isSituationReportSession ? null : selectedPromptModel;
   const effectiveSupportsVision = effectiveModelOption?.supportsVision ?? supportsVision;
   const autoStatusLabel = !autoSelectionAllowed
     ? t('modelPicker.autoUserSessionsOnly')
@@ -1155,6 +1206,27 @@ export default function SessionPage() {
   }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    if (event.type === 'situation.report.status') {
+      const value = event.properties;
+      if (
+        value?.sessionID === selectedSessionId
+        && typeof value.generationID === 'string'
+        && typeof value.operation === 'string'
+        && typeof value.status === 'string'
+        && typeof value.stage === 'string'
+        && typeof value.progress === 'number'
+        && typeof value.eventSequence === 'number'
+      ) {
+        const next = value as SituationReportRun;
+        setReportRun((current) => (
+          current?.generationID === next.generationID
+          && current.eventSequence >= next.eventSequence
+            ? current
+            : next
+        ));
+      }
+      return;
+    }
     if (
       event.type === 'session.execution_mode.changed'
       && event.properties?.sessionID === selectedSessionId
@@ -1194,6 +1266,17 @@ export default function SessionPage() {
     toast,
     updateSessionTitle,
   ]);
+
+  useEffect(() => {
+    setReportRun(null);
+    if (!isSituationReportSession) return;
+    setSelectedAgent(SITUATION_REPORT_AGENT);
+    setSelectedExecutionMode('build');
+    setSelectedModelKey(null);
+    setShowAgentOptions(false);
+    setShowExecutionModeOptions(false);
+    setShowModelOptions(false);
+  }, [isSituationReportSession, selectedSessionId]);
 
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);
@@ -1557,6 +1640,86 @@ export default function SessionPage() {
       setCreating(false);
     }
   }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
+
+  const handleCreateSituationReportSession = useCallback(async () => {
+    if (creating || !reportDebugAvailable) return;
+    setCreating(true);
+    try {
+      const response = await client.post('/api/session', {
+        title: t('situationReport.newTitle'),
+        category: 'situation-report',
+      });
+      addSession(response.data);
+      setSelectedSessionFallback(response.data);
+      setSelectedProjectId(TASK_SESSION_GROUP_ID);
+      setSelectedAgent(SITUATION_REPORT_AGENT);
+      setSelectedExecutionMode('build');
+      setSelectedModelKey(null);
+      setReportRun(null);
+      setSelectedSessionId(response.data.id);
+      writeSessionExecutionMode(response.data.id, 'build');
+      await refetchSessions();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(t('situationReport.createFailed'), message);
+    } finally {
+      setCreating(false);
+    }
+  }, [addSession, creating, refetchSessions, reportDebugAvailable, t, toast]);
+
+  const prepareSituationReportPrompt = useCallback(async (
+    text: string,
+    imageParts: ImagePartData[],
+    options?: PromptDisplayOptions,
+  ) => {
+    if (!selectedSessionId || !isSituationReportSession) {
+      return { text, displayText: options?.displayText, agentName: selectedAgent };
+    }
+    if (imageParts.length > 0) {
+      throw new Error(t('situationReport.attachmentsUnsupported'));
+    }
+    if (text.startsWith(SITUATION_REPORT_REQUEST_SENTINEL)) {
+      return {
+        text,
+        displayText: options?.displayText,
+        agentName: SITUATION_REPORT_AGENT,
+      };
+    }
+    const prepared = await situationReportAPI.prepareDebugPrompt(
+      selectedSessionId,
+      'modify',
+      text,
+    );
+    return {
+      text: prepared.prompt,
+      displayText: prepared.displayText,
+      agentName: prepared.agent,
+    };
+  }, [isSituationReportSession, selectedAgent, selectedSessionId, t]);
+
+  const prepareSituationReportAction = useCallback(async (
+    operation: 'generate' | 'regenerate',
+    sendPrompt: (text: string, options?: PromptDisplayOptions) => void,
+  ) => {
+    if (!selectedSessionId || reportPreparing) return;
+    setReportPreparing(true);
+    try {
+      const instruction = operation === 'generate'
+        ? t('situationReport.generateInstruction')
+        : t('situationReport.regenerateInstruction');
+      const prepared = await situationReportAPI.prepareDebugPrompt(
+        selectedSessionId,
+        operation,
+        instruction,
+      );
+      sendPrompt(prepared.prompt, { displayText: prepared.displayText });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(t('situationReport.prepareFailed'), message);
+    } finally {
+      setReportPreparing(false);
+    }
+  }, [reportPreparing, selectedSessionId, t, toast]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -2237,6 +2400,11 @@ export default function SessionPage() {
             <Settings2 className="w-3 h-3 text-purple-400" />
           </span>
         )}
+        {session.category === 'situation-report' && (
+          <span title={t('situationReport.agentLabel')} className="flex-shrink-0">
+            <ClipboardList className="h-3 w-3 text-blue-500" />
+          </span>
+        )}
         {renamingSessionId === session.id ? (
           <input
             ref={renameInputRef}
@@ -2352,6 +2520,21 @@ export default function SessionPage() {
                 {t('newSession')}
               </button>
             </div>
+            {reportDebugAvailable && (
+              <div className="relative mt-1 h-[34px] rounded-lg transition-colors hover:bg-blue-50 dark:hover:bg-blue-950/30">
+                {creating
+                  ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-blue-600" />
+                  : <ClipboardList className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-blue-600 dark:text-blue-400" />}
+                <button
+                  type="button"
+                  onClick={() => void handleCreateSituationReportSession()}
+                  disabled={creating}
+                  className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-blue-700 transition-colors disabled:cursor-not-allowed disabled:opacity-60 dark:text-blue-300"
+                >
+                  {t('situationReport.newSession')}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2865,9 +3048,9 @@ export default function SessionPage() {
             processGroupsOpenWhileActive: true,
           }}
           agentName={selectedAgent}
-          executionMode={selectedExecutionMode}
+          executionMode={isSituationReportSession ? 'build' : selectedExecutionMode}
           onExecutionModeAccepted={handleExecutionModeAccepted}
-          mentionAgents={chatAgents}
+          mentionAgents={isSituationReportSession ? [] : chatAgents}
           className="flex-1 min-h-0"
           composerTextareaMinHeight={56}
           initialMessage={pendingInitialMessage}
@@ -2889,13 +3072,15 @@ export default function SessionPage() {
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
           onCreateNewSession={handleStartNewSession}
+          preparePrompt={isSituationReportSession ? prepareSituationReportPrompt : undefined}
+          queuePromptsWhileStreaming={!isSituationReportSession}
           onStreamingDone={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
           }}
-          supportsVision={effectiveSupportsVision}
+          supportsVision={isSituationReportSession ? false : effectiveSupportsVision}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
-          model={selectedPromptModel}
+          model={effectivePromptModel}
           welcomeContent={(setInput) => (
             <WelcomeScreen
               onSuggestion={setInput}
@@ -2912,7 +3097,7 @@ export default function SessionPage() {
             setShowModelOptions(false);
             void loadComposerResources();
           }}
-          composerAddMenuSlot={({ closeMenu, insertMention, insertReference }) => (
+          composerAddMenuSlot={isSituationReportSession ? undefined : ({ closeMenu, insertMention, insertReference }) => (
             <>
             <div className="relative" data-agent-selector>
               <button
@@ -3089,11 +3274,38 @@ export default function SessionPage() {
             />
             </>
           )}
+          conversationBottomSlot={isSituationReportSession ? ({ sendPrompt, sending, streaming }) => (
+            <div className="space-y-2">
+              {reportRun && <SituationReportProgress run={reportRun} />}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void prepareSituationReportAction('generate', sendPrompt)}
+                  disabled={sending || streaming || reportPreparing}
+                  className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {t('situationReport.generate')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void prepareSituationReportAction('regenerate', sendPrompt)}
+                  disabled={sending || streaming || reportPreparing}
+                  className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                >
+                  {t('situationReport.regenerate')}
+                </button>
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {t('situationReport.modifyHint')}
+                </span>
+              </div>
+            </div>
+          ) : undefined}
           toolbarSlot={
             <div className="flex min-w-0 items-center gap-0.5">
               <div className="relative" data-execution-mode-selector>
                 <button
                   type="button"
+                  disabled={isSituationReportSession}
                   onClick={() => {
                     setShowExecutionModeOptions(!showExecutionModeOptions);
                     setShowAgentOptions(false);
@@ -3241,7 +3453,12 @@ export default function SessionPage() {
             )}
             </div>
           }
-          centerToolbarSlot={
+          centerToolbarSlot={isSituationReportSession ? (
+            <div className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-blue-700 dark:text-blue-300">
+              <ClipboardList className="h-3 w-3" />
+              {t('situationReport.agentLabel')}
+            </div>
+          ) : (
             <div ref={modelSelectorRef} className="relative" data-model-selector>
               <button
                 type="button"
@@ -3385,7 +3602,7 @@ export default function SessionPage() {
                 </div>
               )}
             </div>
-          }
+          )}
           />
         )}
       </div>

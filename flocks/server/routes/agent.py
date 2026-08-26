@@ -24,13 +24,16 @@ Flocks TUI expects Agent format:
 import asyncio
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo as AgentInfoModel, AgentModel as AgentModelConfig
 from flocks.agent.agent_factory import find_yaml_agent, read_yaml_agent, update_yaml_agent, delete_yaml_agent
+from flocks.server.auth import API_TOKEN_SERVICE_USER_ID, require_user
+from flocks.situation_report.product.orchestrator import PRODUCTION_AGENT
+from flocks.situation_report.product.webui_debug import webui_debug_enabled
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -292,9 +295,10 @@ async def refresh_agents():
 # =============================================================================
 
 @router.get("", response_model=List[AgentResponse], summary="List agents")
-async def list_agents():
+async def list_agents(request: Request):
     """List all available agents with model overrides applied."""
     try:
+        current_user = require_user(request)
         agents = await Agent.list()
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()
@@ -302,8 +306,22 @@ async def list_agents():
         result = []
         for agent in agents:
             if agent.hidden:
-                continue
-            result.append(await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names))
+                if (
+                    agent.name != PRODUCTION_AGENT
+                    or current_user.role != "admin"
+                    or current_user.id == API_TOKEN_SERVICE_USER_ID
+                    or not webui_debug_enabled()
+                ):
+                    continue
+            response = await _build_single_agent_response(
+                agent,
+                overrides,
+                delegatable_overrides,
+                all_tool_names,
+            )
+            if agent.hidden:
+                response = response.model_copy(update={"hidden": False})
+            result.append(response)
         return result
     except Exception as e:
         log.error("agent.list.error", {"error": str(e)})

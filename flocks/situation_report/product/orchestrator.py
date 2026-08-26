@@ -481,6 +481,17 @@ async def run_managed_report_turn(
                 backend_synchronizer=backend_synchronizer,
             )
             current_stage = "modifying" if action.operation == "modify" else "generating"
+            await publish_status(
+                {
+                    "requestID": action.request_id,
+                    "operation": action.operation,
+                    "status": "running",
+                    "stage": current_stage,
+                    "progress": 20,
+                    "baseBackendReportVersion": action.base_backend_report_version,
+                    "error": None,
+                }
+            )
 
             async def publish_recovery_status(recovery_turn: int) -> None:
                 nonlocal current_stage
@@ -509,6 +520,17 @@ async def run_managed_report_turn(
                     on_recovery=publish_recovery_status,
                 )
             current_stage = "validating"
+            await publish_status(
+                {
+                    "requestID": action.request_id,
+                    "operation": action.operation,
+                    "status": "running",
+                    "stage": current_stage,
+                    "progress": 90,
+                    "baseBackendReportVersion": action.base_backend_report_version,
+                    "error": None,
+                }
+            )
             finalization = await publish_validated_candidate(
                 session_id=session.id,
                 generation_id=action.generation_id,
@@ -517,6 +539,13 @@ async def run_managed_report_turn(
             metadata = read_json(workspace_dir / "output" / "versions" / version / "metadata.json")
             output = dict(metadata["output"])
             output["path"] = str((workspace_dir / output["path"]).resolve())
+            from .webui_debug import is_webui_debug_session, publish_webui_debug_report
+
+            if is_webui_debug_session(session):
+                await publish_webui_debug_report(
+                    session_id=session.id,
+                    report_path=Path(output["path"]),
+                )
             terminal_payload = await link_terminal_message(
                 {
                     "requestID": action.request_id,

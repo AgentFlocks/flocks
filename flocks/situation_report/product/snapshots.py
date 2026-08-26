@@ -13,17 +13,21 @@ class SnapshotDownloadError(RuntimeError):
     """A snapshot could not be securely downloaded or verified."""
 
 
-def _configured_origin() -> tuple[str, str]:
-    base_url = os.getenv("SITUATION_REPORT_BACKEND_BASE_URL", "").strip().rstrip("/")
+def _configured_origin(base_url: str | None = None) -> tuple[str, str]:
+    base_url = (
+        base_url
+        if base_url is not None
+        else os.getenv("SITUATION_REPORT_BACKEND_BASE_URL", "")
+    ).strip().rstrip("/")
     parsed = urlparse(base_url)
     origin = f"{parsed.scheme}://{parsed.netloc}" if base_url else ""
     return base_url, origin
 
 
-def resolve_download_url(value: str) -> str:
+def resolve_download_url(value: str, *, base_url: str | None = None) -> str:
     """Resolve a relative backend URL and enforce the configured origin allowlist."""
 
-    base_url, allowed_origin = _configured_origin()
+    base_url, allowed_origin = _configured_origin(base_url)
     parsed = urlparse(value)
     if parsed.scheme or parsed.netloc:
         resolved = value

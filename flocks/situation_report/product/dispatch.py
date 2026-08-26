@@ -37,7 +37,20 @@ async def dispatch_product_prompt(
     """Validate and schedule one service-authenticated report turn."""
 
     session_id = session.id
-    if current_user is None or current_user.id != API_TOKEN_SERVICE_USER_ID:
+    from .webui_debug import (
+        build_webui_debug_synchronizer,
+        is_webui_debug_session,
+        webui_debug_enabled,
+    )
+
+    is_service_request = current_user is not None and current_user.id == API_TOKEN_SERVICE_USER_ID
+    is_debug_admin_request = bool(
+        current_user is not None
+        and current_user.role == "admin"
+        and webui_debug_enabled()
+        and is_webui_debug_session(session)
+    )
+    if not is_service_request and not is_debug_admin_request:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="The production report Agent is restricted to the API-token service identity",
@@ -88,6 +101,11 @@ async def dispatch_product_prompt(
                 decision=decision,
                 working_directory=working_directory,
                 generic_runner=generic_runner,
+                backend_synchronizer=(
+                    build_webui_debug_synchronizer()
+                    if is_debug_admin_request
+                    else None
+                ),
             )
         except Exception as exc:
             log.error(

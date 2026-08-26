@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient
+from starlette.requests import Request
 
 from flocks.auth.context import AuthUser
 from flocks.config.config import Config
@@ -19,6 +20,7 @@ from flocks.session.session import Session
 from flocks.situation_report.product.contracts import ReportAction, build_report_prompt_text
 from flocks.situation_report.product.files import session_root
 from flocks.situation_report.product.orchestrator import persist_terminal_status_message
+from flocks.situation_report.product.webui_debug import webui_debug_metadata
 
 
 def _product_prompt(*, operation: str = "generate", instruction: str | None = None) -> dict:
@@ -48,6 +50,65 @@ def _product_prompt(*, operation: str = "generate", instruction: str | None = No
             }
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_webui_debug_prepare_initializes_new_session_and_builds_generate_contract(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import situation_report as debug_routes
+    from flocks.situation_report.product.backend_sync import LatestReportStateResponse
+
+    monkeypatch.setenv("SITUATION_REPORT_WEBUI_DEBUG_ENABLED", "true")
+    session_id = "ses_webui_debug_prepare"
+    session = SimpleNamespace(
+        id=session_id,
+        category="situation-report",
+        metadata=webui_debug_metadata(),
+        status="active",
+    )
+    monkeypatch.setattr(
+        debug_routes,
+        "require_user",
+        lambda _request: AuthUser(id="usr_admin", username="admin", role="admin"),
+    )
+    monkeypatch.setattr(
+        debug_routes.Session,
+        "get_by_id_unfiltered",
+        AsyncMock(return_value=session),
+    )
+    monkeypatch.setattr(debug_routes, "require_report_project", AsyncMock())
+    monkeypatch.setattr(debug_routes.SessionPolicy, "can_write", lambda *_args: True)
+    synchronizer = SimpleNamespace(
+        get_latest=AsyncMock(
+            return_value=LatestReportStateResponse.model_validate(
+                {
+                    "sessionId": session_id,
+                    "report": {"exists": False, "version": 0, "changed": False},
+                    "template": {"exists": True, "version": 1, "changed": True},
+                    "materials": {"exists": True, "version": 1, "changed": True},
+                }
+            )
+        )
+    )
+    monkeypatch.setattr(debug_routes, "build_webui_debug_synchronizer", lambda: synchronizer)
+
+    response = await debug_routes.prepare_debug_prompt(
+        session_id,
+        debug_routes.DebugPromptRequest(
+            operation="generate",
+            instruction="生成完整报告",
+            language="zh-CN",
+        ),
+        Request({"type": "http", "method": "POST", "path": "/", "headers": []}),
+    )
+
+    assert response.sessionID == session_id
+    assert response.operation == "generate"
+    assert response.agent == "situation-report-product"
+    assert response.baseBackendReportVersion is None
+    assert response.prompt.startswith("SITUATION_REPORT_REQUEST_V1\n")
+    assert '"name":"situation_report.generate"' in response.prompt
 
 
 @pytest.mark.asyncio

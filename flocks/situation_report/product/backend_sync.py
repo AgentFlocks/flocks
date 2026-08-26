@@ -77,25 +77,31 @@ RESOURCE_DOWNLOADS: dict[str, tuple[str, str, int]] = {
 
 
 class BackendReportSynchronizer:
-    def __init__(self, client_factory: Optional[Callable[[], httpx.AsyncClient]] = None) -> None:
+    def __init__(
+        self,
+        client_factory: Optional[Callable[[], httpx.AsyncClient]] = None,
+        *,
+        base_url: Optional[str] = None,
+        token: Optional[str] = None,
+    ) -> None:
         self._client_factory = client_factory
+        self._base_url = base_url.strip().rstrip("/") if base_url else None
+        self._token = token.strip() if token else None
 
     def _client(self) -> httpx.AsyncClient:
         if self._client_factory is not None:
             return self._client_factory()
         return httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0), follow_redirects=False)
 
-    @staticmethod
-    def _headers(request_id: str) -> dict[str, str]:
-        token = os.getenv("SITUATION_REPORT_BACKEND_TOKEN", "").strip()
+    def _headers(self, request_id: str) -> dict[str, str]:
+        token = self._token or os.getenv("SITUATION_REPORT_BACKEND_TOKEN", "").strip()
         if not token:
             raise BackendReportSyncError("SITUATION_REPORT_BACKEND_TOKEN is not configured")
         return {"X-Request-ID": request_id, "Authorization": f"Bearer {token}"}
 
-    @staticmethod
-    def _url(path: str) -> str:
+    def _url(self, path: str) -> str:
         try:
-            return resolve_download_url(path)
+            return resolve_download_url(path, base_url=self._base_url)
         except SnapshotDownloadError as exc:
             raise BackendReportSyncError(f"Backend resource URL is invalid: {exc}") from exc
 

@@ -573,7 +573,19 @@ async def test_a1_orchestrator_runs_preflight_publish_and_event_end_to_end(
     )
 
     statuses = [value for event_type, value in published_events if event_type == "situation.report.status"]
-    assert [value["status"] for value in statuses] == ["running", "succeeded"]
+    assert [value["status"] for value in statuses] == [
+        "running",
+        "running",
+        "running",
+        "succeeded",
+    ]
+    assert [value["stage"] for value in statuses] == [
+        "downloading_resources",
+        "generating",
+        "validating",
+        "output_ready",
+    ]
+    assert [value["progress"] for value in statuses] == [5, 20, 90, 100]
     output = statuses[-1]["output"]
     assert Path(output["path"]).is_absolute()
     assert Path(output["path"]).read_bytes()

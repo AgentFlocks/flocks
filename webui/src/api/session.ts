@@ -135,7 +135,7 @@ export const sessionApi = {
   /**
    * 创建会话
    */
-  create: async (data?: { title?: string; parentID?: string; projectID?: string; model_auto?: boolean }) => {
+  create: async (data?: { title?: string; parentID?: string; projectID?: string; category?: string; model_auto?: boolean }) => {
     const response = await client.post('/api/session', data || {});
     return response.data;
   },

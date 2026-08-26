@@ -1456,6 +1456,38 @@ describe('SessionChat instruction display text', () => {
 });
 
 describe('SessionChat composer controls', () => {
+  it('prepares a strict prompt while preserving the user-visible text and Agent', async () => {
+    const user = userEvent.setup();
+    const preparePrompt = vi.fn().mockResolvedValue({
+      text: 'SITUATION_REPORT_REQUEST_V1\n{"action":{}}\n修改报告',
+      displayText: '请优化摘要',
+      agentName: 'situation-report-product',
+    });
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'rex',
+      preparePrompt,
+      model: null,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '请优化摘要{enter}');
+
+    await waitFor(() => {
+      expect(preparePrompt).toHaveBeenCalledWith('请优化摘要', [], undefined);
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          agent: 'situation-report-product',
+          displayText: '请优化摘要',
+          parts: [{
+            type: 'text',
+            text: 'SITUATION_REPORT_REQUEST_V1\n{"action":{}}\n修改报告',
+          }],
+        }),
+      );
+    });
+  });
+
   it('enables Auto on an existing session before sending without a model override', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {

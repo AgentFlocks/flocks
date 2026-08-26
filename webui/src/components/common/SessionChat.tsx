@@ -113,6 +113,12 @@ export interface ConversationBottomSlotActions {
   hasMessages: boolean;
 }
 
+export interface PreparedSessionPrompt {
+  text: string;
+  displayText?: string;
+  agentName?: string;
+}
+
 export interface ComposerAddMenuActions {
   closeMenu: () => void;
   insertMention: (agentName: string) => void;
@@ -187,6 +193,14 @@ export interface SessionChatProps {
   welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
   /** Extra content rendered below the conversation area and above the composer. */
   conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
+  /** Transform a user-visible prompt into a strict API prompt before sending. */
+  preparePrompt?: (
+    text: string,
+    imageParts: ImagePartData[],
+    options?: PromptDisplayOptions,
+  ) => Promise<PreparedSessionPrompt>;
+  /** Whether prompts may be queued while the current response is streaming. */
+  queuePromptsWhileStreaming?: boolean;
   /** Called when SSE connection status changes */
   onSseStatusChange?: (status: SSEConnectionStatus) => void;
   /** Forward SSE events with properties to parent (global events like session.updated) */
@@ -1605,6 +1619,8 @@ export default function SessionChat({
   display,
   welcomeContent,
   conversationBottomSlot,
+  preparePrompt,
+  queuePromptsWhileStreaming = true,
   onSseStatusChange,
   onSSEEvent,
   onError,
@@ -2777,8 +2793,12 @@ export default function SessionChat({
   ) => {
     if (!sessionId) return;
     await ensureAutoModelSession();
-    const effectiveAgent = agentOverride || agentName;
-    const visibleText = options?.displayText || text;
+    const prepared = preparePrompt
+      ? await preparePrompt(text, imageParts, options)
+      : { text, displayText: options?.displayText, agentName: agentOverride };
+    const requestText = prepared.text;
+    const effectiveAgent = prepared.agentName || agentOverride || agentName;
+    const visibleText = prepared.displayText || options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -2807,12 +2827,12 @@ export default function SessionChat({
 
     try {
       const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
+        parts: buildPromptParts(requestText, imageParts),
         messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
-      if (options?.displayText) payload.displayText = options.displayText;
+      if (visibleText !== requestText) payload.displayText = visibleText;
       payload.executionMode = executionMode;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
@@ -2845,14 +2865,18 @@ export default function SessionChat({
     options?: PromptDisplayOptions,
   ) => {
     if (!sessionId) return;
-    const effectiveAgent = agentOverride || agentName;
     try {
       await ensureAutoModelSession();
+      const prepared = preparePrompt
+        ? await preparePrompt(text, imageParts, options)
+        : { text, displayText: options?.displayText, agentName: agentOverride };
+      const effectiveAgent = prepared.agentName || agentOverride || agentName;
+      const visibleText = prepared.displayText || options?.displayText || text;
       await enqueuePrompt({
-        parts: buildPromptParts(text, imageParts),
+        parts: buildPromptParts(prepared.text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
-        ...(options?.displayText ? { displayText: options.displayText } : {}),
+        ...(visibleText !== prepared.text ? { displayText: visibleText } : {}),
         executionMode,
       });
       onExecutionModeAccepted?.(executionMode);
@@ -2877,6 +2901,11 @@ export default function SessionChat({
     setAttachments([]);
 
     if (sessionId && isStreaming) {
+      if (!queuePromptsWhileStreaming) {
+        toast.warning(t('chat.placeholderStreaming'));
+        setInput(trimmed);
+        return;
+      }
       try {
         await enqueueText(trimmed, [], undefined, options);
       } catch {
@@ -2958,6 +2987,11 @@ export default function SessionChat({
     }
 
     if (sessionId && isStreaming) {
+      if (!queuePromptsWhileStreaming) {
+        toast.warning(t('chat.placeholderStreaming'));
+        restoreDraft();
+        return;
+      }
       try {
         await enqueueText(text, imageParts, mentionedAgent || undefined);
         setAttachments([]);

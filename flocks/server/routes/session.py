@@ -834,7 +834,19 @@ async def list_sessions(
         if start is not None and session.time.updated < start:
             continue
         if manager:
-            if session.category not in manager_categories:
+            if session.category == "situation-report":
+                from flocks.situation_report.product.webui_debug import (
+                    is_webui_debug_session,
+                    webui_debug_enabled,
+                )
+
+                if (
+                    current_user.role != "admin"
+                    or not webui_debug_enabled()
+                    or not is_webui_debug_session(session)
+                ):
+                    continue
+            elif session.category not in manager_categories:
                 continue
         elif category is not None:
             if session.category != category:
@@ -988,10 +1000,20 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     )
 
     if request.category == REPORT_SESSION_CATEGORY:
-        if current_user.id != API_TOKEN_SERVICE_USER_ID:
+        from flocks.situation_report.product.webui_debug import (
+            webui_debug_enabled,
+            webui_debug_metadata,
+        )
+
+        create_webui_debug_session = (
+            current_user.role == "admin"
+            and current_user.id != API_TOKEN_SERVICE_USER_ID
+            and webui_debug_enabled()
+        )
+        if current_user.id != API_TOKEN_SERVICE_USER_ID and not create_webui_debug_session:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Managed report Sessions can only be created by the API service identity",
+                detail="Managed report Sessions can only be created by the API service identity or debug admin",
             )
         if request.parentID is not None or request.projectID is not None:
             raise HTTPException(
@@ -1109,6 +1131,18 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             "id": report_session_id,
             "agent": PRODUCTION_AGENT,
         }
+        if current_user.id != API_TOKEN_SERVICE_USER_ID:
+            managed_session_fields.update(
+                {
+                    "metadata": webui_debug_metadata(),
+                }
+            )
+
+    session_owner_user_id = parent_session.owner_user_id if parent_session else current_user.id
+    session_owner_username = parent_session.owner_username if parent_session else current_user.username
+    if report_session_id is not None and current_user.id != API_TOKEN_SERVICE_USER_ID:
+        session_owner_user_id = API_TOKEN_SERVICE_USER_ID
+        session_owner_username = API_TOKEN_SERVICE_USER_ID
 
     try:
         session = await Session.create(
@@ -1117,8 +1151,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             title=request.title,
             parent_id=request.parentID,
             permission=permission,
-            owner_user_id=(parent_session.owner_user_id if parent_session else current_user.id),
-            owner_username=(parent_session.owner_username if parent_session else current_user.username),
+            owner_user_id=session_owner_user_id,
+            owner_username=session_owner_username,
             model_auto=request.model_auto,
             model_pinned=False,
             **managed_session_fields,
