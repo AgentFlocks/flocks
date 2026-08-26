@@ -31,6 +31,11 @@ Use this skill when the user wants Flocks to create, validate, publish, test, or
 - Do not ask the user to provide service API keys when Flocks already has the needed secret or credential reference. Use `credentialRequirements` to declare which Flocks secret should create or reuse which n8n credential.
 - If the workflow cannot be safely generated because required business data, secrets, credentials, network reachability, or n8n permissions are missing, ask for the missing prerequisite and stop. If the prerequisite is still unavailable, do not publish or activate a broken workflow. Return a precise blocker such as `缺少密钥 THREATBOOK_API_KEY，请先在 Flocks 密钥配置中添加` or `n8n API key 缺少创建 credential 的权限`。
 - Do not put `{secret:...}`, `{{secrets.NAME}}`, plaintext keys, or bearer tokens into n8n workflow JSON. `{secret}` is allowed only inside `credentialRequirements[].data`, where the publisher replaces it while creating n8n credentials.
+- For n8n `2.35.4`, Code nodes must not depend on unavailable local modules such as `fs`, `os`, `path`, or `child_process`. Use n8n-native nodes or a direct external API instead of local filesystem writes.
+- For Kafka workflows, start with a minimal Kafka Trigger smoke workflow before building a complex playbook when the broker/topic/credential path has not been proven in that n8n instance.
+- For Kafka credentials using `SASL_PLAINTEXT`, set n8n Kafka credential data with `ssl=false`, `authentication=true`, `username`, `password="{secret}"`, and the correct `saslMechanism` such as `scram-sha-256`.
+- For Kafka Trigger, use `resolveOffset="onCompletion"` by default, `fromBeginning=false`, and `batchSize=1` for the first validation. Never use `resolveOffset="latest"`; n8n `2.35.4` does not accept it as a Kafka Trigger offset commit strategy.
+- If the Kafka application/console exposes a consumer group prefix such as `groupPrefix`, put it in IR as `trigger.groupPrefix` and let Flocks derive `groupId`. Do not invent a generic `flocks-n8n-*` group when Kafka ACL requires the application prefix.
 - Do not modify or activate production workflows unless the user explicitly confirms that scope.
 - Do not remove core business steps just to pass one sample test.
 - Do not hard-code a test fixture response unless the user's requested workflow is intentionally constant.
@@ -62,6 +67,53 @@ Use this policy before asking any implementation-choice question:
 - `webhook.response` -> Respond to Webhook, only for webhook-triggered workflows.
 
 If no complete n8n-native or direct non-Flocks external API mapping exists, stop before IR generation or publish. Ask the user to confirm terminating the workflow creation because the requested Flocks-only capability cannot be migrated to an autonomous n8n runtime. Do not offer a Flocks MCP/webhook/API bridge.
+
+## Kafka Minimal Pattern
+
+Use this pattern first when validating a Kafka workflow in n8n:
+
+```json
+{
+  "name": "flocks-test-kafka-min",
+  "description": "Minimal Kafka Trigger smoke workflow for n8n 2.35.4.",
+  "credentialRequirements": [
+    {
+      "name": "Kafka TDP Flocks",
+      "type": "kafka",
+      "secretRef": "KAFKA_PASSWORD",
+      "data": {
+        "brokers": "10.42.19.106:9093,10.42.112.31:9093,10.42.80.112:9093",
+        "clientId": "flocks-n8n",
+        "ssl": false,
+        "authentication": true,
+        "username": "appId_002074_cn",
+        "password": "{secret}",
+        "saslMechanism": "scram-sha-256"
+      }
+    }
+  ],
+  "trigger": {
+    "type": "kafka",
+    "topic": "TDP_Flocks_Kafka",
+    "groupPrefix": "flocks_kafka",
+    "credentialRef": { "name": "Kafka TDP Flocks", "type": "kafka" },
+    "fromBeginning": false,
+    "batchSize": 1,
+    "resolveOffset": "onCompletion"
+  },
+  "steps": [
+    {
+      "id": "mark_received",
+      "kind": "code",
+      "name": "Mark Received",
+      "js_code": "return $input.all().map((item) => ({ json: { topic: item.json.topic, partition: item.json.partition, offset: item.json.offset, receivedAt: new Date().toISOString(), payload: item.json.message ?? item.json.value ?? item.json } }));"
+    }
+  ],
+  "tests": []
+}
+```
+
+For other Kafka applications, replace brokers, topic, username, `secretRef`, credential name, and `groupPrefix` with the values owned by that application. Keep the same offset and replay defaults until a dedicated consumption test passes.
 
 ## IR Pattern
 

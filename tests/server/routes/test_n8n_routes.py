@@ -43,9 +43,11 @@ KAFKA_IR = {
     "trigger": {
         "type": "kafka",
         "topic": "security-alerts",
-        "groupId": "flocks-security-alerts",
+        "groupPrefix": "flocks_kafka",
         "credentialRef": {"name": "Kafka Production"},
         "fromBeginning": False,
+        "batchSize": 1,
+        "resolveOffset": "onCompletion",
     },
     "steps": [
         {
@@ -134,16 +136,30 @@ class FakeN8nClient:
         return {"status": 200, "body": credential}
 
     def get_credential_schema(self, credential_type_name: str):
+        if credential_type_name == "kafka":
+            properties = {
+                "brokers": {"type": "string"},
+                "clientId": {"type": "string"},
+                "ssl": {"type": "boolean"},
+                "authentication": {"type": "boolean"},
+                "username": {"type": "string"},
+                "password": {"type": "string"},
+                "saslMechanism": {"type": "string"},
+                "ca": {"type": "string"},
+                "cert": {"type": "string"},
+                "key": {"type": "string"},
+                "allowUnauthorizedCerts": {"type": "boolean"},
+            }
+        elif credential_type_name == "httpQueryAuth":
+            properties = {"name": {"type": "string"}, "value": {"type": "string"}}
+        else:
+            properties = {"password": {"type": "string"}}
         return {
             "status": 200,
             "body": {
                 "type": "object",
                 "required": ["name", "value"] if credential_type_name == "httpQueryAuth" else [],
-                "properties": (
-                    {"name": {"type": "string"}, "value": {"type": "string"}}
-                    if credential_type_name == "httpQueryAuth"
-                    else {"password": {"type": "string"}}
-                ),
+                "properties": properties,
             },
         }
 
@@ -473,6 +489,71 @@ async def test_n8n_build_run_fails_before_publish_when_credential_permission_mis
 
 
 @pytest.mark.asyncio
+async def test_n8n_build_run_creates_kafka_sasl_plaintext_credential_from_flocks_secret(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    ir = {
+        **KAFKA_IR,
+        "credentialRequirements": [
+            {
+                "name": "Kafka TDP Flocks",
+                "type": "kafka",
+                "secretRef": "KAFKA_PASSWORD",
+                "data": {
+                    "brokers": "10.42.19.106:9093,10.42.112.31:9093,10.42.80.112:9093",
+                    "clientId": "flocks-n8n",
+                    "ssl": False,
+                    "authentication": True,
+                    "username": "appId_002074_cn",
+                    "password": "{secret}",
+                    "saslMechanism": "scram-sha-256",
+                },
+            }
+        ],
+        "trigger": {
+            **KAFKA_IR["trigger"],
+            "credentialRef": {"name": "Kafka TDP Flocks", "type": "kafka"},
+        },
+    }
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    n8n_route_state["secrets"].set("KAFKA_PASSWORD", "kafka-secret-value")
+    fake_client = FakeN8nClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={"userRequest": "route kafka sasl plaintext", "ir": ir, "publish": True, "activate": True},
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "published"
+    assert run["credentialResults"] == [
+        {"name": "Kafka TDP Flocks", "type": "kafka", "status": "created", "id": "cred-1"}
+    ]
+    assert fake_client.created_credentials[0]["data"] == {
+        "brokers": "10.42.19.106:9093,10.42.112.31:9093,10.42.80.112:9093",
+        "clientId": "flocks-n8n",
+        "ssl": False,
+        "authentication": True,
+        "username": "appId_002074_cn",
+        "password": "kafka-secret-value",
+        "saslMechanism": "scram-sha-256",
+    }
+    published_trigger = fake_client.created_payloads[0]["nodes"][0]
+    assert published_trigger["credentials"]["kafka"] == {
+        "id": "cred-1",
+        "name": "Kafka TDP Flocks",
+        "type": "kafka",
+    }
+    assert "kafka-secret-value" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_n8n_build_run_can_publish_kafka_trigger_without_webhook_tests(
     client,
     monkeypatch: pytest.MonkeyPatch,
@@ -506,10 +587,42 @@ async def test_n8n_build_run_can_publish_kafka_trigger_without_webhook_tests(
     record = detail.json()
     assert record["triggerType"] == "kafka"
     assert record["kafkaTopic"] == "security-alerts"
-    assert record["kafkaGroupId"] == "flocks-security-alerts"
+    assert record["kafkaGroupId"] == "flocks_kafka_n8n_flocks_kafka_route"
     assert record["kafkaCredentialName"] == "Kafka Production"
     assert record["webhookUrl"] is None
     assert record["testStatus"] == "not_tested"
+
+
+@pytest.mark.asyncio
+async def test_n8n_build_run_blocks_kafka_group_id_outside_declared_prefix(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    ir = {
+        **KAFKA_IR,
+        "trigger": {
+            **KAFKA_IR["trigger"],
+            "groupPrefix": "flocks_kafka",
+            "groupId": "flocks-n8n-security-alerts",
+        },
+    }
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = FakeN8nClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    response = await client.post(
+        "/api/integrations/n8n/build-runs",
+        json={"userRequest": "route kafka publish bad group", "ir": ir, "publish": True, "activate": True},
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "lint_failed"
+    assert {issue["code"] for issue in run["lintIssues"] if issue["severity"] == "error"} == {"KAFKA-GROUP-PREFIX"}
+    assert fake_client.created_payloads == []
 
 
 @pytest.mark.asyncio

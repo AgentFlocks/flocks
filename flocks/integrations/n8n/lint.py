@@ -66,6 +66,18 @@ SENSITIVE_QUERY_PARAM_NAMES = {
     "password",
 }
 
+KAFKA_RESOLVE_OFFSET_VALUES = {"onCompletion", "onSuccess", "onStatus", "immediately"}
+
+N8N_2354_UNAVAILABLE_CODE_MODULES = {
+    "fs",
+    "os",
+    "path",
+    "child_process",
+}
+
+CODE_REQUIRE_PATTERN = re.compile(r"\brequire\(\s*['\"](?P<module>[^'\"]+)['\"]\s*\)")
+CODE_IMPORT_PATTERN = re.compile(r"(?m)^\s*import\s+.*?\s+from\s+['\"](?P<module>[^'\"]+)['\"]")
+
 
 @dataclass(frozen=True)
 class N8nLintIssue:
@@ -199,6 +211,7 @@ def lint_workflow(
     for_api_create: bool = False,
     require_tests: bool = False,
     tests: Optional[List[Dict[str, Any]]] = None,
+    kafka_group_prefixes: Optional[Iterable[str]] = None,
 ) -> List[N8nLintIssue]:
     issues: List[N8nLintIssue] = []
     if isinstance(workflow, str):
@@ -221,6 +234,11 @@ def lint_workflow(
         return issues
 
     names = _node_names(workflow)
+    kafka_prefixes = tuple(
+        str(prefix).strip().rstrip("_-")
+        for prefix in (kafka_group_prefixes or [])
+        if str(prefix).strip()
+    )
     webhook_count = 0
     kafka_count = 0
     respond_count = 0
@@ -245,18 +263,37 @@ def lint_workflow(
             kafka_count += 1
             topic = str(params.get("topic") or "").strip()
             group_id = str(params.get("groupId") or "").strip()
+            resolve_offset = str(params.get("resolveOffset") or "").strip()
             options = params.get("options") if isinstance(params.get("options"), dict) else {}
             if not topic:
                 issues.append(N8nLintIssue("KAFKA-TOPIC", "error", "Kafka Trigger requires topic", path + ".parameters.topic"))
             if not group_id:
                 issues.append(N8nLintIssue("KAFKA-GROUP", "error", "Kafka Trigger requires groupId", path + ".parameters.groupId"))
-            elif not group_id.startswith("flocks-"):
+            elif kafka_prefixes and not any(group_id.startswith(prefix) for prefix in kafka_prefixes):
+                issues.append(
+                    N8nLintIssue(
+                        "KAFKA-GROUP-PREFIX",
+                        "error",
+                        "Kafka groupId must start with the configured Kafka application groupPrefix",
+                        path + ".parameters.groupId",
+                    )
+                )
+            elif group_id.startswith("flocks-n8n"):
                 issues.append(
                     N8nLintIssue(
                         "KAFKA-GROUP-NAME",
                         "warning",
-                        "Kafka groupId should start with flocks- to avoid consuming with unrelated groups",
+                        "Kafka groupId should follow the Kafka application's groupPrefix instead of the generic flocks-n8n prefix",
                         path + ".parameters.groupId",
+                    )
+                )
+            if resolve_offset not in KAFKA_RESOLVE_OFFSET_VALUES:
+                issues.append(
+                    N8nLintIssue(
+                        "KAFKA-RESOLVE-OFFSET",
+                        "error",
+                        "Kafka resolveOffset must be one of onCompletion, onSuccess, onStatus, or immediately",
+                        path + ".parameters.resolveOffset",
                     )
                 )
             if not _credential_label(node.get("credentials"), "kafka"):
@@ -339,6 +376,17 @@ def lint_workflow(
             for pattern in SECRET_PATTERNS:
                 if pattern.search(code):
                     issues.append(N8nLintIssue("SECRET-CODE", "error", "Potential secret literal in Code node", path + ".parameters.jsCode"))
+            for match in [*CODE_REQUIRE_PATTERN.finditer(code), *CODE_IMPORT_PATTERN.finditer(code)]:
+                module = match.group("module").split("/", 1)[0]
+                if module in N8N_2354_UNAVAILABLE_CODE_MODULES:
+                    issues.append(
+                        N8nLintIssue(
+                            "CODE-MODULE-UNAVAILABLE",
+                            "error",
+                            f"n8n 2.35.4 Code node cannot rely on local module {module!r}; use n8n-native nodes or an external API",
+                            path + ".parameters.jsCode",
+                        )
+                    )
 
     if webhook_count and not respond_count:
         issues.append(N8nLintIssue("WEBHOOK-RESPOND", "error", "Webhook workflows must include Respond to Webhook"))

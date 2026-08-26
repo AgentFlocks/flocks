@@ -56,10 +56,18 @@ describe('i18n lazy namespaces', () => {
     expect(zhPrompt).toContain('不要建议由 Flocks 新增一个 HTTP 服务给 n8n 调用');
     expect(zhPrompt).toContain('无法完整迁移时，不要生成 IR，不要发布 workflow');
     expect(zhPrompt).toContain('必须先向用户确认是否终止本次 workflow 创建');
+    expect(zhPrompt).toContain('resolveOffset=onCompletion');
+    expect(zhPrompt).toContain('trigger.groupPrefix');
+    expect(zhPrompt).toContain('SASL_PLAINTEXT credential 必须映射为 ssl=false');
+    expect(zhPrompt).toContain('Code 节点不要依赖 fs/os/path/child_process');
 
     const enPrompt = enWorkflow.create.n8n.guidePrompt;
     expect(enPrompt).toContain('Do not suggest adding an HTTP service in Flocks for n8n to call');
     expect(enPrompt).toContain('do not generate IR, do not publish a workflow');
     expect(enPrompt).toContain('ask the user to confirm terminating this workflow creation');
+    expect(enPrompt).toContain('resolveOffset=onCompletion');
+    expect(enPrompt).toContain('trigger.groupPrefix');
+    expect(enPrompt).toContain('SASL_PLAINTEXT credentials must map to ssl=false');
+    expect(enPrompt).toContain('Code nodes must not rely on fs/os/path/child_process');
   });
 });

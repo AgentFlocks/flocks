@@ -57,14 +57,23 @@ class N8nTrigger(BaseModel):
     response_mode: Literal["responseNode"] = Field("responseNode", alias="responseMode")
     topic: Optional[str] = None
     group_id: Optional[str] = Field(None, alias="groupId")
+    group_prefix: Optional[str] = Field(None, alias="groupPrefix")
     credential_ref: Optional[N8nCredentialRef] = Field(None, alias="credentialRef")
     from_beginning: bool = Field(False, alias="fromBeginning")
     batch_size: int = Field(1, alias="batchSize")
-    resolve_offset: Literal["onCompletion", "immediately", "onStatus"] = Field("onCompletion", alias="resolveOffset")
+    resolve_offset: Literal["onCompletion", "onSuccess", "immediately", "onStatus"] = Field("onCompletion", alias="resolveOffset")
     use_schema_registry: bool = Field(False, alias="useSchemaRegistry")
     schema_registry_credential_ref: Optional[N8nCredentialRef] = Field(None, alias="schemaRegistryCredentialRef")
     schema_registry_url: Optional[str] = Field(None, alias="schemaRegistryUrl")
     options: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("topic", "group_id", "group_prefix", "path")
+    @classmethod
+    def _strip_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class N8nStep(BaseModel):

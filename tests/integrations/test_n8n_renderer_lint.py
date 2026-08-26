@@ -42,7 +42,7 @@ def _sample_kafka_ir() -> dict:
         "trigger": {
             "type": "kafka",
             "topic": "security-alerts",
-            "groupId": "flocks-security-alerts",
+            "groupPrefix": "flocks_kafka",
             "credentialRef": {"name": "Kafka Production"},
             "fromBeginning": False,
             "batchSize": 1,
@@ -82,14 +82,27 @@ def test_render_kafka_trigger_to_workflow_and_lint_success_without_webhook_tests
     assert trigger["type"] == "n8n-nodes-base.kafkaTrigger"
     assert trigger["typeVersion"] == 1.3
     assert trigger["parameters"]["topic"] == "security-alerts"
-    assert trigger["parameters"]["groupId"] == "flocks-security-alerts"
+    assert trigger["parameters"]["groupId"] == "flocks_kafka_n8n_flocks_kafka_alerts"
     assert trigger["parameters"]["resolveOffset"] == "onCompletion"
     assert trigger["parameters"]["options"]["fromBeginning"] is False
     assert trigger["parameters"]["options"]["batchSize"] == 1
     assert trigger["credentials"]["kafka"]["name"] == "Kafka Production"
 
-    issues = lint_workflow(workflow, require_tests=True, tests=[])
+    issues = lint_workflow(workflow, require_tests=True, tests=[], kafka_group_prefixes=["flocks_kafka"])
     assert [issue.to_dict() for issue in issues if issue.severity == "error"] == []
+
+
+def test_render_kafka_trigger_accepts_explicit_group_id_and_on_success() -> None:
+    ir = _sample_kafka_ir()
+    ir["trigger"]["groupId"] = "flocks_kafka_prod_consumer"
+    ir["trigger"]["resolveOffset"] = "onSuccess"
+
+    workflow = render_ir_to_workflow(N8nIR.model_validate(ir))
+    trigger = workflow["nodes"][0]
+
+    assert trigger["parameters"]["groupId"] == "flocks_kafka_prod_consumer"
+    assert trigger["parameters"]["resolveOffset"] == "onSuccess"
+    assert [issue for issue in lint_workflow(workflow, kafka_group_prefixes=["flocks_kafka"]) if issue.severity == "error"] == []
 
 
 def test_lint_catches_invalid_kafka_trigger() -> None:
@@ -103,6 +116,19 @@ def test_lint_catches_invalid_kafka_trigger() -> None:
     codes = {issue.code for issue in issues if issue.severity == "error"}
 
     assert {"KAFKA-TOPIC", "KAFKA-GROUP", "KAFKA-CREDENTIAL"} <= codes
+
+
+def test_lint_blocks_invalid_kafka_offset_and_group_prefix() -> None:
+    workflow = render_ir_to_workflow(_sample_kafka_ir())
+    trigger = workflow["nodes"][0]
+    trigger["parameters"]["groupId"] = "flocks-n8n-security-alerts"
+    trigger["parameters"]["resolveOffset"] = "latest"
+
+    issues = lint_workflow(workflow, require_tests=True, tests=[], kafka_group_prefixes=["flocks_kafka"])
+    codes = {issue.code for issue in issues if issue.severity == "error"}
+
+    assert "KAFKA-GROUP-PREFIX" in codes
+    assert "KAFKA-RESOLVE-OFFSET" in codes
 
 
 def test_render_http_request_with_n8n_credentials() -> None:
@@ -232,6 +258,33 @@ def test_lint_blocks_literal_secret_query_params() -> None:
     codes = {issue.code for issue in lint_workflow(workflow, require_tests=True, tests=[{"name": "blocked"}])}
 
     assert "SECRET-URL" in codes
+
+
+def test_lint_blocks_unavailable_code_modules_for_n8n_2354() -> None:
+    workflow = render_ir_to_workflow(
+        {
+            "name": "flocks-test-local-file-code",
+            "trigger": {"type": "webhook", "method": "POST", "path": "local-file-code"},
+            "steps": [
+                {
+                    "id": "write_file",
+                    "kind": "code",
+                    "js_code": "const fs = require('fs'); fs.writeFileSync('/tmp/out.json', '{}'); return $input.all();",
+                    "next": "respond",
+                },
+                {
+                    "id": "respond",
+                    "kind": "respond_to_webhook",
+                    "response_body": "={{ $json }}",
+                },
+            ],
+            "tests": [{"name": "blocked", "input": {"name": "Alice"}}],
+        }
+    )
+
+    codes = {issue.code for issue in lint_workflow(workflow, require_tests=True, tests=[{"name": "blocked"}])}
+
+    assert "CODE-MODULE-UNAVAILABLE" in codes
 
 
 def test_lint_allows_mcp_text_in_non_runtime_metadata() -> None:

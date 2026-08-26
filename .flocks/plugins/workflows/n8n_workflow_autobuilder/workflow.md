@@ -52,7 +52,7 @@ run_autobuilder
 1. 校验输入 IR。
 2. 使用 `render_ir_to_workflow` 生成 n8n workflow JSON。
 3. 使用 `lint_workflow` 做静态校验。
-4. lint 会拒绝 Flocks secret 占位、明文敏感 header/token、Flocks runtime callback 和不支持节点。
+4. lint 会拒绝 Flocks secret 占位、明文敏感 header/token、Flocks runtime callback、不支持节点、n8n 2.35.4 Code 节点不可用模块，以及 Kafka offset/group 前缀风险。
 5. 将 JSON 和报告写入 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/`。
 6. 如果 `publish=true` 且 lint 无错误，则通过 n8n Public API 创建 workflow。
 7. 如果 trigger 是 Webhook，激活后运行 IR 中的 webhook 测试。
@@ -70,6 +70,7 @@ run_autobuilder
 | `workflow_url` | n8n 编辑器链接 |
 | `webhook_url` | production webhook URL |
 | `trigger_type` | 触发器类型，支持 `webhook` / `kafka` |
+| `kafka_group_id` | Kafka workflow 最终使用的 consumer group id |
 | `generated_json_path` | 生成的 n8n JSON |
 | `report_path` | Markdown 报告 |
 | `lint_issues` | lint 结果 |
@@ -83,7 +84,7 @@ run_autobuilder
 | 用户能力意图 | n8n 生成策略 | Flocks 运行时参与 |
 | --- | --- | --- |
 | Webhook 接收和响应 | Webhook + Code/Set/IF + Respond to Webhook | 仅可测试触发 |
-| Kafka 消费 | Kafka Trigger + 后续 n8n 节点 | 不参与 |
+| Kafka 消费 | Kafka Trigger + 后续 n8n 节点；首次验证使用最小 workflow | 不参与 |
 | IOC/情报查询 | HTTP Request 调外部 API，并引用 n8n credential | 不参与 |
 | 数据格式化/路由 | Code/Set/IF | 不参与 |
 | Flocks 私有 MCP/skill/tool/agent 能力且无外部 API | 标记 unsupported/missing prerequisite，并在生成/发布前确认终止 | 不参与 |
@@ -99,7 +100,9 @@ run_autobuilder
 
 Kafka 验证：
 
-1. 传入 `trigger.type=kafka`、`topic`、`groupId` 和 `credentialRef` 的 IR。
-2. 确认 lint 无 error，且生成节点类型为 `n8n-nodes-base.kafkaTrigger`。
-3. 创建并激活 workflow。
-4. 在 n8n 中确认 Kafka Trigger 已绑定正确凭据；消息输入、消费位点和执行结果由 n8n 自身负责。
+1. 传入 `trigger.type=kafka`、`topic`、`groupPrefix` 或符合 Kafka ACL 的 `groupId`、`credentialRef` 的 IR。
+2. 首次验证使用 `resolveOffset="onCompletion"`、`fromBeginning=false`、`batchSize=1`。
+3. 如果 Kafka 使用 `SASL_PLAINTEXT`，n8n credential 必须是 `ssl=false`、`authentication=true`、正确用户名、`password="{secret}"` 和正确 `saslMechanism`。
+4. 确认 lint 无 error，且生成节点类型为 `n8n-nodes-base.kafkaTrigger`。
+5. 创建并激活 workflow。
+6. 在 n8n 中确认 Kafka Trigger 已绑定正确凭据；消息输入、消费位点和执行结果由 n8n 自身负责。

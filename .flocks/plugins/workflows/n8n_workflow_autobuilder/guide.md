@@ -19,6 +19,10 @@
 - 如果缺少 Flocks 无法自动提供的业务参数、密钥、credential、网络连通性或 n8n 权限，必须作为阻断项询问/报错并停止。前置条件仍不可用时，不继续发布或激活坏 workflow。
 - 不允许在 n8n workflow JSON 中写入 `{secret:...}`、`{{secrets.NAME}}` 或明文 token。
 - `credentialRequirements[].data` 可使用 `{secret}` 占位符；它只会在服务端创建 n8n credential 时替换，不会写入 workflow JSON。
+- n8n `2.35.4` Code 节点不要依赖 `fs`、`os`、`path`、`child_process` 等本地模块；需要写文件或访问系统资源时，必须改用 n8n 原生节点或非 Flocks 外部 API。
+- Kafka 首次验证先生成最小 Kafka Trigger workflow：`resolveOffset="onCompletion"`、`fromBeginning=false`、`batchSize=1`，确认 n8n 能消费后再叠加复杂节点。
+- Kafka 应用若提供 `groupPrefix`，IR 中写 `trigger.groupPrefix`，由 Flocks 自动派生 `groupId`；不要随意生成 `flocks-n8n-*` 这类可能不满足 ACL 的消费组。
+- Kafka `SASL_PLAINTEXT` 凭据在 n8n credential 中应写 `ssl=false`、`authentication=true`、正确的 `username`、`password="{secret}"` 和 `saslMechanism`（例如 `scram-sha-256`）。
 
 ## 推荐输入
 
@@ -72,22 +76,39 @@ Kafka Trigger 示例：
   "publish": true,
   "cleanup_on_success": false,
   "ir": {
-    "name": "flocks-kafka-alerts",
+    "name": "flocks-test-kafka-min",
+    "description": "Minimal Kafka Trigger smoke workflow for n8n 2.35.4.",
+    "credentialRequirements": [
+      {
+        "name": "Kafka TDP Flocks",
+        "type": "kafka",
+        "secretRef": "KAFKA_PASSWORD",
+        "data": {
+          "brokers": "10.42.19.106:9093,10.42.112.31:9093,10.42.80.112:9093",
+          "clientId": "flocks-n8n",
+          "ssl": false,
+          "authentication": true,
+          "username": "appId_002074_cn",
+          "password": "{secret}",
+          "saslMechanism": "scram-sha-256"
+        }
+      }
+    ],
     "trigger": {
       "type": "kafka",
-      "topic": "security-alerts",
-      "groupId": "flocks-security-alerts",
-      "credentialRef": { "name": "Kafka Production" },
+      "topic": "TDP_Flocks_Kafka",
+      "groupPrefix": "flocks_kafka",
+      "credentialRef": { "name": "Kafka TDP Flocks", "type": "kafka" },
       "fromBeginning": false,
       "batchSize": 1,
       "resolveOffset": "onCompletion"
     },
     "steps": [
       {
-        "id": "normalize",
+        "id": "mark_received",
         "kind": "code",
-        "name": "Normalize",
-        "js_code": "return $input.all().map((item) => ({ json: { ...item.json, handledBy: 'n8n' } }));"
+        "name": "Mark Received",
+        "js_code": "return $input.all().map((item) => ({ json: { topic: item.json.topic, partition: item.json.partition, offset: item.json.offset, receivedAt: new Date().toISOString(), payload: item.json.message ?? item.json.value ?? item.json } }));"
       }
     ],
     "tests": []

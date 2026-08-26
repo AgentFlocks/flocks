@@ -46,23 +46,39 @@ const SAMPLE_IR = {
 };
 
 const SAMPLE_KAFKA_IR = {
-  name: 'flocks-kafka-alerts',
-  description: 'Kafka Trigger consumes security alerts and normalizes each message.',
+  name: 'flocks-test-kafka-min',
+  description: 'Minimal Kafka Trigger smoke workflow for n8n 2.35.4.',
+  credentialRequirements: [
+    {
+      name: 'Kafka TDP Flocks',
+      type: 'kafka',
+      secretRef: 'KAFKA_PASSWORD',
+      data: {
+        brokers: '10.42.19.106:9093,10.42.112.31:9093,10.42.80.112:9093',
+        clientId: 'flocks-n8n',
+        ssl: false,
+        authentication: true,
+        username: 'appId_002074_cn',
+        password: '{secret}',
+        saslMechanism: 'scram-sha-256',
+      },
+    },
+  ],
   trigger: {
     type: 'kafka',
-    topic: 'security-alerts',
-    groupId: 'flocks-security-alerts',
-    credentialRef: { name: 'Kafka Production' },
+    topic: 'TDP_Flocks_Kafka',
+    groupPrefix: 'flocks_kafka',
+    credentialRef: { name: 'Kafka TDP Flocks', type: 'kafka' },
     fromBeginning: false,
     batchSize: 1,
     resolveOffset: 'onCompletion',
   },
   steps: [
     {
-      id: 'normalize',
+      id: 'mark_received',
       kind: 'code',
-      name: 'Normalize',
-      js_code: "return $input.all().map((item) => ({ json: { ...item.json, handledBy: 'n8n' } }));",
+      name: 'Mark Received',
+      js_code: "return $input.all().map((item) => ({ json: { topic: item.json.topic, partition: item.json.partition, offset: item.json.offset, receivedAt: new Date().toISOString(), payload: item.json.message ?? item.json.value ?? item.json } }));",
     },
   ],
   tests: [],

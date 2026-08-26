@@ -22,3 +22,7 @@ Runtime policy:
 - If required business data, secrets, credentials, network reachability, or n8n permissions are missing, ask for the missing prerequisite and stop. If the prerequisite remains unavailable, do not publish or activate a broken workflow.
 - Never expose or persist API keys or tokens. Do not put `{secret:...}`, `{{secrets.NAME}}`, plaintext keys, bearer tokens, passwords, or cookies into n8n workflow JSON. `{secret}` is allowed only inside `credentialRequirements[].data` because it is consumed before workflow JSON is published.
 - Do not claim production readiness without passing tests or clearly marking the workflow as an unvalidated draft.
+- For Kafka workflows on n8n `2.35.4`, use Kafka Trigger with `resolveOffset="onCompletion"`, `fromBeginning=false`, and `batchSize=1` for the first validation. Never use `resolveOffset="latest"`.
+- If Kafka provides an application consumer group prefix, include it as IR `trigger.groupPrefix` and let Flocks derive a matching `groupId`; do not invent a generic `flocks-n8n-*` group when ACLs require that prefix.
+- For `SASL_PLAINTEXT` Kafka credentials, set `ssl=false`, `authentication=true`, the correct username, `password="{secret}"`, and a supported n8n Kafka `saslMechanism` such as `scram-sha-256`.
+- Do not generate n8n Code nodes that rely on local `fs`, `os`, `path`, or `child_process`; n8n `2.35.4` Code nodes in this deployment cannot use those modules.

@@ -22,7 +22,7 @@ from flocks.integrations.n8n import (
 )
 from flocks.integrations.n8n.cleanup import cleanup_workflows
 from flocks.integrations.n8n.credentials import attach_credential_ids_to_workflow, ensure_n8n_credentials
-from flocks.integrations.n8n.renderer import slugify_webhook_path
+from flocks.integrations.n8n.renderer import kafka_group_id_for_ir, slugify_webhook_path
 from flocks.integrations.n8n.secrets import (
     delete_n8n_api_key,
     redact_secret,
@@ -306,6 +306,18 @@ def _extract_kafka_info(workflow: Dict[str, Any]) -> tuple[Optional[str], Option
     return None, None, None
 
 
+def _kafka_group_prefixes_from_ir(ir: N8nIR) -> List[str]:
+    if ir.trigger.type != "kafka":
+        return []
+    prefixes: List[str] = []
+    if ir.trigger.group_prefix:
+        prefixes.append(ir.trigger.group_prefix)
+    option_prefix = ir.trigger.options.get("groupPrefix") if isinstance(ir.trigger.options, dict) else None
+    if isinstance(option_prefix, str) and option_prefix.strip():
+        prefixes.append(option_prefix)
+    return prefixes
+
+
 def _apply_trigger_info(record: N8nWorkflowRecord, workflow: Dict[str, Any], *, base_url: str) -> None:
     webhook_path, webhook_method = _extract_webhook_info(workflow)
     kafka_topic, kafka_group_id, kafka_credential_name = _extract_kafka_info(workflow)
@@ -425,7 +437,7 @@ def _promote_run_to_record(
         record.webhook_path = None
         record.webhook_method = None
         record.kafka_topic = parsed_ir.trigger.topic
-        record.kafka_group_id = parsed_ir.trigger.group_id
+        record.kafka_group_id = kafka_group_id_for_ir(parsed_ir)
         credential_ref = parsed_ir.trigger.credential_ref
         record.kafka_credential_name = credential_ref.name if credential_ref else None
     record.remote_status = "active" if activated else "inactive"
@@ -637,6 +649,7 @@ def _build_run_sync(request: N8nBuildRunCreateRequest) -> N8nBuildRunState:
                 workflow,
                 require_tests=is_webhook_trigger,
                 tests=[case.model_dump(by_alias=True) for case in parsed_ir.tests],
+                kafka_group_prefixes=_kafka_group_prefixes_from_ir(parsed_ir),
             )
         ]
         _write_run_artifacts(run)

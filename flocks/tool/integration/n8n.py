@@ -18,7 +18,7 @@ from flocks.integrations.n8n import (
 )
 from flocks.integrations.n8n.cleanup import cleanup_workflows
 from flocks.integrations.n8n.repair import build_repair_context
-from flocks.integrations.n8n.renderer import slugify_webhook_path
+from flocks.integrations.n8n.renderer import kafka_group_id_for_ir, slugify_webhook_path
 from flocks.integrations.n8n.secrets import resolve_n8n_api_key
 from flocks.tool.registry import (
     ParameterType,
@@ -63,6 +63,18 @@ def _json_obj(value: Any, *, name: str) -> Dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     raise ValueError(f"{name} must be an object or JSON object string")
+
+
+def _kafka_group_prefixes_from_ir(ir: N8nIR) -> List[str]:
+    if ir.trigger.type != "kafka":
+        return []
+    prefixes: List[str] = []
+    if ir.trigger.group_prefix:
+        prefixes.append(ir.trigger.group_prefix)
+    option_prefix = ir.trigger.options.get("groupPrefix") if isinstance(ir.trigger.options, dict) else None
+    if isinstance(option_prefix, str) and option_prefix.strip():
+        prefixes.append(option_prefix)
+    return prefixes
 
 
 COMMON_N8N_PARAMS = [
@@ -174,6 +186,13 @@ async def n8n_workflow_render_tool(
             required=False,
             json_schema={"type": "array", "items": {"type": "object"}},
         ),
+        ToolParameter(
+            name="kafka_group_prefixes",
+            type=ParameterType.ARRAY,
+            description="Optional Kafka application consumer group prefixes allowed for Kafka Trigger groupId.",
+            required=False,
+            json_schema={"type": "array", "items": {"type": "string"}},
+        ),
     ],
 )
 async def n8n_workflow_lint_tool(
@@ -182,8 +201,15 @@ async def n8n_workflow_lint_tool(
     for_api_create: bool = False,
     require_tests: bool = False,
     tests: Optional[List[Dict[str, Any]]] = None,
+    kafka_group_prefixes: Optional[List[str]] = None,
 ) -> ToolResult:
-    issues = lint_workflow(workflow, for_api_create=for_api_create, require_tests=require_tests, tests=tests)
+    issues = lint_workflow(
+        workflow,
+        for_api_create=for_api_create,
+        require_tests=require_tests,
+        tests=tests,
+        kafka_group_prefixes=kafka_group_prefixes,
+    )
     return ToolResult(
         success=not any(issue.severity == "error" for issue in issues),
         output={"issues": [issue.to_dict() for issue in issues]},
@@ -443,7 +469,13 @@ async def n8n_test_run_tool(
     try:
         parsed_ir = N8nIR.model_validate(ir)
         workflow = render_ir_to_workflow(parsed_ir)
-        issues = lint_workflow(workflow, require_tests=True, tests=[case.model_dump(by_alias=True) for case in parsed_ir.tests])
+        is_webhook_trigger = parsed_ir.trigger.type == "webhook"
+        issues = lint_workflow(
+            workflow,
+            require_tests=is_webhook_trigger,
+            tests=[case.model_dump(by_alias=True) for case in parsed_ir.tests],
+            kafka_group_prefixes=_kafka_group_prefixes_from_ir(parsed_ir),
+        )
         if any(issue.severity == "error" for issue in issues):
             return ToolResult(success=False, error="n8n workflow lint failed", output={"issues": [i.to_dict() for i in issues], "workflow": workflow})
 
@@ -454,6 +486,23 @@ async def n8n_test_run_tool(
         if not workflow_id:
             return ToolResult(success=False, error="n8n create response did not contain workflow id", output=create)
         client.activate_workflow(workflow_id)
+        if parsed_ir.trigger.type == "kafka":
+            cleanup = cleanup_workflows(client, [workflow_id]) if cleanup_on_success else []
+            return ToolResult(
+                success=True,
+                output={
+                    "workflow_id": workflow_id,
+                    "workflow_url": base_url.rstrip("/") + "/workflow/" + workflow_id,
+                    "webhook_url": "",
+                    "trigger_type": "kafka",
+                    "kafka_topic": parsed_ir.trigger.topic or "",
+                    "kafka_group_id": kafka_group_id_for_ir(parsed_ir),
+                    "workflow": workflow,
+                    "lint_issues": [issue.to_dict() for issue in issues],
+                    "test_results": [],
+                    "cleanup": cleanup,
+                },
+            )
         webhook_path = slugify_webhook_path(str(parsed_ir.trigger.path or parsed_ir.name))
         test_results = run_webhook_tests(
             client,

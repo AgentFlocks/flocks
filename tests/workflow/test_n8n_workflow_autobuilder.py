@@ -53,7 +53,7 @@ def test_n8n_workflow_autobuilder_runs_kafka_offline_publish_false(isolated_work
             "trigger": {
                 "type": "kafka",
                 "topic": "security-alerts",
-                "groupId": "flocks-security-alerts",
+                "groupPrefix": "flocks_kafka",
                 "credentialRef": {"name": "Kafka Production"},
             },
             "steps": [

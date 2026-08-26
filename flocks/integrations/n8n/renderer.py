@@ -20,6 +20,22 @@ def slugify_webhook_path(value: str) -> str:
     return text or "flocks-n8n-webhook"
 
 
+def slugify_kafka_group_suffix(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9_]+", "_", text)
+    text = re.sub(r"_{2,}", "_", text).strip("_")
+    return text or "workflow"
+
+
+def kafka_group_id_for_ir(ir: N8nIR) -> str:
+    if ir.trigger.group_id:
+        return ir.trigger.group_id
+    if ir.trigger.group_prefix:
+        prefix = ir.trigger.group_prefix.rstrip("_-")
+        return f"{prefix}_n8n_{slugify_kafka_group_suffix(ir.name)}"
+    return ""
+
+
 def node_name(step: N8nStep) -> str:
     if step.name:
         return step.name
@@ -189,7 +205,7 @@ def _trigger_node(ir: N8nIR) -> tuple[str, Dict[str, Any]]:
     options.setdefault("batchSize", ir.trigger.batch_size)
     parameters: Dict[str, Any] = {
         "topic": ir.trigger.topic or "",
-        "groupId": ir.trigger.group_id or "",
+        "groupId": kafka_group_id_for_ir(ir),
         "resolveOffset": ir.trigger.resolve_offset,
         "useSchemaRegistry": ir.trigger.use_schema_registry,
         "options": options,
