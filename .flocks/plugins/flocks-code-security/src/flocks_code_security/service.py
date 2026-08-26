@@ -29,7 +29,6 @@ from flocks_code_security.cli import (
     _resolve_model,
 )
 from flocks_code_security.artifact_integrity import find_output_directory
-from flocks_code_security.coverage import merge_analysis_coverage
 from flocks_code_security.paths import data_dir, outputs_root, runtime_dir
 from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
@@ -777,17 +776,18 @@ class AuditService:
             current_phase = running_phase or phases[-1]["phase"]
         integrity_artifacts = status.get("integrity_artifacts", {})
         knowledge_base = self.store.get_knowledge_base_metadata(scan_id)
+        coverage_summary = self._coverage_summary(
+            scan_id,
+            verified_artifacts=integrity_artifacts,
+            report_data=report_data,
+        )
         public_scan = {
             "scan_id": scan_id,
             "lifecycle_status": _public_lifecycle(str(scan["status"])),
             "current_phase": current_phase,
             "integrity_status": status.get("integrity_status", "pending"),
             "integrity_errors": status.get("integrity_errors", []),
-            "coverage_status": self._coverage_status(
-                scan_id,
-                verified_artifacts=integrity_artifacts,
-                report_data=report_data,
-            ),
+            "coverage_status": coverage_summary["completeness"],
             "dynamic_enabled": bool(scan["dynamic_enabled"]),
             "coverage_policy": scan["coverage_policy"],
             "verification_votes": scan["verification_vote_count"],
@@ -813,11 +813,7 @@ class AuditService:
                 scan_id,
                 verified_artifacts=integrity_artifacts,
             ),
-            "coverage_summary": self._coverage_summary(
-                scan_id,
-                verified_artifacts=integrity_artifacts,
-                report_data=report_data,
-            ),
+            "coverage_summary": coverage_summary,
             "dynamic_validation": self._dynamic_summary(
                 status,
                 enabled=bool(scan["dynamic_enabled"]),
@@ -1531,64 +1527,6 @@ class AuditService:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def _coverage_status(
-        self,
-        scan_id: str,
-        *,
-        verified_artifacts: dict[str, str],
-        report_data: dict[str, Any] | None = None,
-    ) -> str:
-        del verified_artifacts
-        data = report_data if report_data is not None else self.store.report_data(scan_id)
-        return self._coverage_attestation_summary(data)["completeness"]
-
-    @staticmethod
-    def _coverage_attestation_summary(data: dict[str, Any]) -> dict[str, Any]:
-        attestations = data["coverage"]
-        analysis_unit_rows = {
-            item["work_unit_id"]: item
-            for item in data["work_units"]
-            if item.get("role") in {"baseline", "investigator"}
-        }
-        analysis_units = set(analysis_unit_rows)
-        covered_units = {
-            item["work_unit_id"]
-            for item in data["coverage"]
-            if item.get("work_unit_id") in analysis_units
-        }
-        merged = merge_analysis_coverage(
-            [
-                {
-                    **item,
-                    "role": analysis_unit_rows.get(item["work_unit_id"], {}).get("role"),
-                    "phase": analysis_unit_rows.get(item["work_unit_id"], {}).get("phase"),
-                    "paths": analysis_unit_rows.get(item["work_unit_id"], {}).get("paths", []),
-                }
-                for item in attestations
-            ]
-        )
-        if not attestations:
-            completeness = "pending"
-        elif covered_units != analysis_units:
-            completeness = (
-                "blocked"
-                if data["scan"].get("coverage_policy") == "exhaustive"
-                else "partial"
-            )
-        else:
-            completeness = merged["completeness"]
-        counts = merged["counts"]
-        return {
-            "policy": data["scan"].get(
-                "coverage_policy", "evidence_backed_partial"
-            ),
-            "completeness": completeness,
-            "assigned_count": counts["assigned"],
-            "read_complete_count": counts["read_complete"],
-            "failed_count": counts["failed"],
-            "unexamined_count": counts["unexamined"],
-        }
-
     def _finding_summary(
         self,
         scan_id: str,
@@ -1634,7 +1572,16 @@ class AuditService:
     ) -> dict[str, Any]:
         path = self._artifact_file(scan_id, "coverage")
         data = report_data if report_data is not None else self.store.report_data(scan_id)
-        attestation_summary = self._coverage_attestation_summary(data)
+        analysis = self.store.analysis_coverage_summary(scan_id)
+        counts = analysis["counts"]
+        attestation_summary = {
+            "policy": analysis["policy"],
+            "completeness": analysis["completeness"],
+            "assigned_count": counts["assigned"],
+            "read_complete_count": counts["read_complete"],
+            "failed_count": counts["failed"],
+            "unexamined_count": counts["unexamined"],
+        }
         if path is None or path.name not in (verified_artifacts or {}):
             return {
                 **attestation_summary,

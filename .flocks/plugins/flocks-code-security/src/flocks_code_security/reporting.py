@@ -30,7 +30,7 @@ from flocks_code_security.contract import (
     stable_id,
     validate_bundle,
 )
-from flocks_code_security.coverage import merge_analysis_coverage, public_open_question
+from flocks_code_security.coverage import public_open_question
 from flocks_code_security.paths import output_dir
 from flocks_code_security.snapshot import DEFAULT_EXCLUDES, TargetSnapshotService
 from flocks_code_security.store import ScanStore
@@ -614,18 +614,7 @@ class ReportWriter:
     ) -> tuple[dict[str, Any], dict[str, bytes]]:
         scan_id = data["scan"]["scan_id"]
         coverage_by_unit = {item["work_unit_id"]: item for item in data["coverage"]}
-        units_by_id = {item["work_unit_id"]: item for item in data["work_units"]}
-        merged_coverage = merge_analysis_coverage(
-            [
-                {
-                    **item,
-                    "role": units_by_id.get(item["work_unit_id"], {}).get("role"),
-                    "phase": units_by_id.get(item["work_unit_id"], {}).get("phase"),
-                    "paths": units_by_id.get(item["work_unit_id"], {}).get("paths", []),
-                }
-                for item in data["coverage"]
-            ]
-        )
+        merged_coverage = self.store.analysis_coverage_summary(scan_id)
         all_snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
         snapshot_files = all_snapshot_files
         snapshot_paths = {item.relative_path for item in snapshot_files}

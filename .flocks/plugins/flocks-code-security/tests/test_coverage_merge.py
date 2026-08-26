@@ -123,6 +123,37 @@ def test_investigator_does_not_replace_later_targeted_rescan_question() -> None:
     assert merged["open_questions"] == [rescan_question]
 
 
+def test_targeted_rescan_resolves_investigator_blocking_question() -> None:
+    investigator_question = {
+        "question": "Trace the handler through the wrapper.",
+        "category": "coverage_blocking",
+        "blocking": True,
+        "related_paths": ["app.py"],
+    }
+
+    merged = merge_analysis_coverage(
+        [
+            _attestation(
+                "investigator",
+                "investigator",
+                [{"relative_path": "app.py", "state": "read_partial"}],
+                questions=[investigator_question],
+                policy="exhaustive",
+            ),
+            _attestation(
+                "rescan",
+                "baseline",
+                [{"relative_path": "app.py", "state": "read_complete"}],
+                phase="targeted_rescan",
+                policy="exhaustive",
+            ),
+        ]
+    )
+
+    assert merged["open_questions"] == []
+    assert merged["completeness"] == "complete"
+
+
 def test_merge_normalizes_question_and_related_path_order() -> None:
     first_question = {
         "question": "Confirm the deployment control.",

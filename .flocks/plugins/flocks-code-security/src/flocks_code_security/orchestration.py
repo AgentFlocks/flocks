@@ -301,7 +301,9 @@ def targeted_rescan_prompt(*, snapshot_id: str, knowledge_base_present: bool = F
         "scope, answer only those questions through audit_search and audit_read, "
         "submit any newly supported candidates, and call audit_submit_coverage with "
         "exact per-file dispositions backed by current-attempt reads. Correct and "
-        "resubmit any retryable rejection or blocked exhaustive attestation. Do not "
-        "expand beyond the bound paths and do not repeat the "
+        "resubmit only retryable contract or overclaim rejections. A valid complete, "
+        "partial, or blocked attestation ends this work unit. Re-submit each blocking "
+        "coverage question that remains unresolved; omit it only when this review "
+        "resolved it. Do not expand beyond the bound paths and do not repeat the "
         "repository-wide baseline audit."
     )

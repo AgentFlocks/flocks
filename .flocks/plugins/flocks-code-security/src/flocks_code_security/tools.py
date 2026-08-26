@@ -1801,6 +1801,58 @@ async def _start_fresh_worker_attempt(
     return True
 
 
+async def _ensure_capsule_mismatch_terminal(
+    batch_id: str,
+    work_unit_id: str,
+    *,
+    source: str,
+) -> None:
+    """Fail an active unit when capsule verification did not persist a terminal state."""
+    runtime = get_runtime()
+    batch = await asyncio.to_thread(runtime.store.get_worker_batch, batch_id)
+    if batch is None:
+        return
+    unit = next(
+        (item for item in batch["units"] if item["work_unit_id"] == work_unit_id),
+        None,
+    )
+    if unit is None or unit["status"] not in {"pending", "running"}:
+        return
+    attempt_id = unit.get("attempt_id")
+    attempt_status = unit.get("attempt_status")
+    if isinstance(attempt_id, str) and attempt_status in {
+        None,
+        "pending",
+        "running",
+        "recovering",
+    }:
+        await asyncio.to_thread(
+            runtime.store.finish_work_attempt,
+            attempt_id,
+            status="failed",
+            failure_class="identity_capsule_mismatch",
+            work_unit_status="failed",
+        )
+    else:
+        await asyncio.to_thread(
+            runtime.store.update_work_unit_status,
+            work_unit_id,
+            "failed",
+        )
+    await asyncio.to_thread(
+        runtime.store.append_scan_event,
+        batch["scan_id"],
+        "identity.mismatch",
+        "Execution capsule mismatch",
+        {
+            "attempt_id": attempt_id,
+            "work_unit_id": work_unit_id,
+            "source": source,
+        },
+        level="error",
+    )
+
+
 async def _refresh_worker_batch(
     batch_id: str,
     *,
@@ -1860,6 +1912,11 @@ async def _refresh_worker_batch(
                         await _resume_worker_attempt(ctx, unit, coverage_only=True)
                         continue
                     except ExecutionCapsuleError:
+                        await _ensure_capsule_mismatch_terminal(
+                            batch_id,
+                            unit["work_unit_id"],
+                            source="coverage_resume",
+                        )
                         continue
                     except (OSError, RuntimeError, ValueError, sqlite3.Error):
                         pass
@@ -1880,6 +1937,11 @@ async def _refresh_worker_batch(
                     await _resume_worker_attempt(ctx, unit)
                     continue
                 except ExecutionCapsuleError:
+                    await _ensure_capsule_mismatch_terminal(
+                        batch_id,
+                        unit["work_unit_id"],
+                        source="missing_task_resume",
+                    )
                     continue
                 except (OSError, RuntimeError, ValueError, sqlite3.Error):
                     pass
@@ -1926,24 +1988,10 @@ async def _refresh_worker_batch(
                 getattr(task, "error", None)
             )
             if failure_class == "identity_capsule_mismatch":
-                await asyncio.to_thread(
-                    runtime.store.finish_work_attempt,
-                    unit.get("attempt_id"),
-                    status="failed",
-                    failure_class=failure_class,
-                    work_unit_status="failed",
-                )
-                await asyncio.to_thread(
-                    runtime.store.append_scan_event,
-                    batch["scan_id"],
-                    "identity.mismatch",
-                    "Execution capsule mismatch",
-                    {
-                        "attempt_id": unit.get("attempt_id"),
-                        "work_unit_id": unit["work_unit_id"],
-                        "source": "background_task",
-                    },
-                    level="error",
+                await _ensure_capsule_mismatch_terminal(
+                    batch_id,
+                    unit["work_unit_id"],
+                    source="background_task",
                 )
                 continue
             facts_complete = await asyncio.to_thread(
@@ -1977,6 +2025,11 @@ async def _refresh_worker_batch(
                     await _resume_worker_attempt(ctx, unit, coverage_only=True)
                     continue
                 except ExecutionCapsuleError:
+                    await _ensure_capsule_mismatch_terminal(
+                        batch_id,
+                        unit["work_unit_id"],
+                        source="coverage_resume",
+                    )
                     continue
                 except (OSError, RuntimeError, ValueError, sqlite3.Error):
                     pass
@@ -2001,6 +2054,11 @@ async def _refresh_worker_batch(
                 await _resume_worker_attempt(ctx, unit)
                 continue
             except ExecutionCapsuleError:
+                await _ensure_capsule_mismatch_terminal(
+                    batch_id,
+                    unit["work_unit_id"],
+                    source="transient_resume",
+                )
                 continue
             except (OSError, RuntimeError, ValueError, sqlite3.Error):
                 pass
@@ -2014,6 +2072,11 @@ async def _refresh_worker_batch(
                 ):
                     continue
             except ExecutionCapsuleError:
+                await _ensure_capsule_mismatch_terminal(
+                    batch_id,
+                    unit["work_unit_id"],
+                    source="fresh_attempt",
+                )
                 continue
             except (OSError, RuntimeError, ValueError, sqlite3.Error):
                 pass

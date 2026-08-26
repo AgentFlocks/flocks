@@ -52,6 +52,13 @@ class CoverageBlockedError(ValueError):
         self.summary = summary
 
 
+def _analysis_phase(attestation: dict[str, Any]) -> str:
+    phase = attestation.get("phase")
+    if isinstance(phase, str) and phase:
+        return phase
+    return "investigation" if attestation.get("role") == "investigator" else "baseline"
+
+
 def merge_analysis_coverage(
     attestations: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -87,11 +94,15 @@ def merge_analysis_coverage(
                 selected[path] = (key, candidate)
 
     records = [selected[path][1] for path in sorted(selected)]
-    investigator_states: dict[str, str] = {}
-    investigator_blocking_path_sets: list[set[str]] = []
+    follow_up_states: dict[str, dict[str, str]] = {
+        "investigation": {},
+        "targeted_rescan": {},
+    }
     for item in ordered:
-        if item.get("role") != "investigator":
+        phase = _analysis_phase(item)
+        if phase not in follow_up_states:
             continue
+        states = follow_up_states[phase]
         for record in item.get("records", []):
             if not isinstance(record, dict):
                 continue
@@ -99,24 +110,18 @@ def merge_analysis_coverage(
             state = record.get("state")
             if not isinstance(path, str) or state not in COVERAGE_STATE_STRENGTH:
                 continue
-            current = investigator_states.get(path)
+            current = states.get(path)
             if (
                 current is None
                 or COVERAGE_STATE_STRENGTH[state] > COVERAGE_STATE_STRENGTH[current]
             ):
-                investigator_states[path] = state
-        for question in item.get("open_questions", []):
-            if not isinstance(question, dict) or question.get("blocking") is not True:
-                continue
-            related_paths = {
-                path
-                for path in question.get("related_paths", [])
-                if isinstance(path, str)
-            }
-            if related_paths:
-                investigator_blocking_path_sets.append(related_paths)
+                states[path] = state
 
     resolved_states = {"read_complete", "not_applicable"}
+    replaced_phases = {
+        "investigation": {"baseline"},
+        "targeted_rescan": {"baseline", "investigation"},
+    }
     questions: list[dict[str, Any]] = []
     for attestation in ordered:
         for question in attestation.get("open_questions", []):
@@ -129,24 +134,14 @@ def merge_analysis_coverage(
                     if isinstance(path, str)
                 }
             )
-            related_path_set = set(related_paths)
-            investigator_resolved = bool(related_paths) and all(
-                investigator_states.get(path) in resolved_states
-                for path in related_paths
-            )
-            investigator_resubmitted = any(
-                related_path_set <= investigator_paths
-                for investigator_paths in investigator_blocking_path_sets
-            )
-            investigator_replaced = (
-                attestation.get("role") == "baseline"
-                and attestation.get("phase", "baseline") == "baseline"
-                and question.get("blocking") is True
+            question_phase = _analysis_phase(attestation)
+            resolved_by_follow_up = question.get("blocking") is True and any(
+                question_phase in replaced_phases[follow_up_phase]
                 and bool(related_paths)
-                and all(path in investigator_states for path in related_paths)
-                and (investigator_resolved or investigator_resubmitted)
+                and all(states.get(path) in resolved_states for path in related_paths)
+                for follow_up_phase, states in follow_up_states.items()
             )
-            if not investigator_replaced:
+            if not resolved_by_follow_up:
                 questions.append({**question, "related_paths": related_paths})
 
     def question_key(item: dict[str, Any]) -> tuple[Any, ...]:

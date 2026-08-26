@@ -15,6 +15,7 @@ import flocks_code_security.runtime as runtime_module
 import flocks_code_security.tools as tools_module
 from flocks_code_security.contract import validate_document
 from flocks_code_security.coverage import normalize_open_questions
+from flocks_code_security.execution import ExecutionCapsuleError
 from flocks_code_security.orchestration import (
     plan_baseline_units,
     plan_verification_units,
@@ -761,6 +762,90 @@ async def test_analysis_progress_without_coverage_gets_one_coverage_only_resume(
     assert exhausted.output["workers"][0]["failure_class"] == "coverage_attestation_missing"
     assert len(children) == 1
     assert runtime.store.list_source_accesses(worker["attempt_id"])
+
+
+@pytest.mark.asyncio
+async def test_coverage_resume_capsule_mismatch_fails_the_work_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unit = {
+        "work_unit_id": "unit_baseline",
+        "status": "running",
+        "role": "baseline",
+        "attempt_id": "attempt_baseline",
+        "resume_count": 0,
+        "background_task_id": "task_baseline",
+        "started_at": None,
+        "finished_at": None,
+    }
+    batch = {
+        "batch_id": "batch_baseline",
+        "scan_id": "scan_test",
+        "status": "running",
+        "units": [unit],
+    }
+
+    class Store:
+        def __init__(self) -> None:
+            self.events: list[tuple] = []
+
+        @staticmethod
+        def work_unit_has_required_facts(*_args, **_kwargs):
+            return False
+
+        @staticmethod
+        def work_attempt_has_analysis_progress(_attempt_id: str):
+            return True
+
+        @staticmethod
+        def get_worker_batch(_batch_id: str):
+            return batch
+
+        @staticmethod
+        def finish_work_attempt(
+            attempt_id: str,
+            *,
+            status: str,
+            failure_class: str,
+            work_unit_status: str,
+        ) -> None:
+            assert attempt_id == "attempt_baseline"
+            assert status == "failed"
+            unit["status"] = work_unit_status
+            unit["failure_class"] = failure_class
+
+        def append_scan_event(self, *args, **kwargs) -> None:
+            self.events.append((args, kwargs))
+
+        @staticmethod
+        def update_worker_batch_status(_batch_id: str, status: str) -> None:
+            batch["status"] = status
+
+    store = Store()
+    task = SimpleNamespace(
+        status="completed",
+        started_at=None,
+        completed_at=None,
+        error=None,
+    )
+    manager = SimpleNamespace(get_task=lambda _task_id: task)
+    resume = AsyncMock(side_effect=ExecutionCapsuleError("digest mismatch"))
+    monkeypatch.setattr(
+        tools_module,
+        "get_runtime",
+        lambda: SimpleNamespace(store=store),
+    )
+    monkeypatch.setattr(tools_module, "_background_manager", lambda: manager)
+    monkeypatch.setattr(tools_module, "_resume_worker_attempt", resume)
+
+    refreshed = await tools_module._refresh_worker_batch(
+        "batch_baseline",
+        ctx=SimpleNamespace(),
+    )
+
+    assert refreshed["status"] == "failed"
+    assert unit["failure_class"] == "identity_capsule_mismatch"
+    assert store.events[0][0][1] == "identity.mismatch"
 
 
 @pytest.mark.asyncio
@@ -1767,16 +1852,15 @@ async def test_host_attestation_records_partial_coverage_from_current_attempt_re
         "unread.py": "inventoried",
     }
     assert runtime.store.work_unit_has_required_facts(unit_id, role="baseline") is True
-    summary = AuditService._coverage_attestation_summary(
-        runtime.store.report_data(scan_id)
-    )
-    assert summary == {
-        "policy": "evidence_backed_partial",
-        "completeness": "partial",
-        "assigned_count": 3,
-        "read_complete_count": 1,
-        "failed_count": 0,
-        "unexamined_count": 1,
+    summary = runtime.store.analysis_coverage_summary(scan_id)
+    assert summary["policy"] == "evidence_backed_partial"
+    assert summary["completeness"] == "partial"
+    assert summary["counts"] == {
+        "assigned": 3,
+        "read_complete": 1,
+        "failed": 0,
+        "unexamined": 1,
+        "active_gaps": 1,
     }
 
     runtime.store.update_work_unit_status(unit_id, "completed")
@@ -1793,6 +1877,40 @@ async def test_host_attestation_records_partial_coverage_from_current_attempt_re
     assert receipt["unexamined"] == ["unread.py"]
     report = (output_path / "report.md").read_text(encoding="utf-8")
     assert "Unexamined source files: **1**" in report
+
+
+def test_service_coverage_status_uses_terminal_scan_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    snapshot = runtime.snapshots.create(str(target))
+    service = AuditService()
+
+    for policy, expected in (
+        ("evidence_backed_partial", "partial"),
+        ("exhaustive", "blocked"),
+    ):
+        scan_id = runtime.store.create_scan(
+            parent_session_id=f"coordinator-{policy}",
+            snapshot_id=snapshot.snapshot_id,
+            mode="standard",
+            ruleset_digest="rules",
+            coverage_policy=policy,
+        )
+        runtime.store.create_work_unit(
+            scan_id=scan_id,
+            phase="baseline",
+            role="baseline",
+            paths=["."],
+            status="failed",
+        )
+
+        assert service._coverage_summary(scan_id)["completeness"] == expected
 
 
 @pytest.mark.asyncio

@@ -349,6 +349,8 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     assert "First call audit_repository_summary" in threat_modeler
     assert "full inventory pagination is not required" in threat_modeler
     assert "relative_path, blob_digest, start_line, and end_line" in verifier
+    assert "blocked exhaustive attestation" not in rescan
+    assert "valid complete, partial, or blocked attestation ends" in rescan
 
 
 def test_guided_worker_prompts_require_the_bound_knowledge_base() -> None:
