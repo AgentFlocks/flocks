@@ -82,13 +82,19 @@ class FakeN8nClient:
         self.created_payloads: list[dict] = []
         self.credentials: list[dict] = []
         self.created_credentials: list[dict] = []
+        self.active: dict[str, bool] = {}
 
     def create_workflow(self, payload):
         self.created_payloads.append(payload)
         return {"status": 200, "body": {"id": "wf-route-1", "active": False, "name": payload.get("name")}}
 
     def activate_workflow(self, workflow_id: str):
+        self.active[workflow_id] = True
         return {"status": 200, "body": {"id": workflow_id, "active": True}}
+
+    def deactivate_workflow(self, workflow_id: str):
+        self.active[workflow_id] = False
+        return {"status": 200, "body": {"id": workflow_id, "active": False}}
 
     def call_webhook(self, webhook_path: str, *, method: str = "POST", payload=None, headers=None, timeout_s=None):
         return {"status": 200, "body": {"message": "ok"}, "headers": {}, "raw": '{"message":"ok"}'}
@@ -97,7 +103,35 @@ class FakeN8nClient:
         return {"id": "exec-route-1", "workflowId": workflow_id, "status": "success"}
 
     def get_workflow(self, workflow_id: str):
-        return {"status": 200, "body": {"id": workflow_id, "active": True}}
+        return {"status": 200, "body": {"id": workflow_id, "active": self.active.get(workflow_id, True)}}
+
+    def get_execution(self, execution_id: str, *, include_data: bool = True):
+        return {
+            "status": 200,
+            "body": {
+                "id": execution_id,
+                "data": {
+                    "resultData": {
+                        "runData": {
+                            "Webhook": [
+                                {
+                                    "data": {
+                                        "main": [[{"json": {"body": {"name": "Alice"}}}]],
+                                    },
+                                }
+                            ],
+                            "Build Response": [
+                                {
+                                    "data": {
+                                        "main": [[{"json": {"message": "ok"}}]],
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                },
+            },
+        }
 
     def delete_workflow(self, workflow_id: str):
         self.deleted.append(workflow_id)
@@ -671,6 +705,8 @@ async def test_n8n_workflow_record_sync_retry_and_cleanup(client, monkeypatch: p
     assert run_record["latestRunResult"]["responseBodyStored"] is False
     assert "response" not in run_record["latestRunResult"]
     assert run_record["latestExecutionId"] == "exec-route-1"
+    assert run_record["latestRunResult"]["deepDebug"]["status"] == "completed"
+    assert run_record["deepDebugResults"][0]["nodeTraces"][0]["nodeName"] == "Webhook"
 
     opened = await client.post(f"/api/integrations/n8n/workflows/{record_id}/open-event")
     assert opened.status_code == 200, opened.text
@@ -678,6 +714,43 @@ async def test_n8n_workflow_record_sync_retry_and_cleanup(client, monkeypatch: p
 
     cleaned = await client.post(f"/api/integrations/n8n/workflows/{record_id}/cleanup")
     assert cleaned.status_code == 403, cleaned.text
+
+
+@pytest.mark.asyncio
+async def test_n8n_workflow_record_can_activate_and_deactivate_from_flocks(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = FakeN8nClient()
+    fake_client.active["manual-toggle"] = False
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "manual toggle",
+            "source": "flocks_created",
+            "ownership": "managed",
+            "n8nWorkflowId": "manual-toggle",
+            "n8nBaseUrl": "http://localhost:5678",
+            "webhookPath": "manual-toggle",
+            "webhookMethod": "POST",
+        },
+    )
+    assert created.status_code == 200, created.text
+    record_id = created.json()["id"]
+
+    activated = await client.post(f"/api/integrations/n8n/workflows/{record_id}/activate")
+    assert activated.status_code == 200, activated.text
+    assert activated.json()["remoteStatus"] == "active"
+
+    deactivated = await client.post(f"/api/integrations/n8n/workflows/{record_id}/deactivate")
+    assert deactivated.status_code == 200, deactivated.text
+    assert deactivated.json()["remoteStatus"] == "inactive"
 
 
 @pytest.mark.asyncio

@@ -237,6 +237,25 @@ describe('WorkflowCreate CreateChatTab', () => {
     expect(within(container).getByRole('button', { name: /创建 IP 情报工作流/ })).toBeDisabled();
   });
 
+  it('uses plain display text for launched user requests', async () => {
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      launchRequest: {
+        id: 1,
+        prompt: 'internal n8n generation prompt',
+        displayLabel: '发送到工作台生成',
+        displayText: '创建 Kafka consumer，消费 TDP_Flocks_Kafka 后写入结果 topic。',
+      },
+    });
+
+    await waitFor(() => {
+      expect(mockSendPrompt).toHaveBeenCalledWith(
+        'internal n8n generation prompt',
+        { displayText: '创建 Kafka consumer，消费 TDP_Flocks_Kafka 后写入结果 topic。' },
+      );
+    });
+  });
+
   it('reuses the workflow workbench chat controls', async () => {
     renderCreateChatTab();
 

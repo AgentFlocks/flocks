@@ -113,6 +113,7 @@ function getRouteChatLaunchRequest(value: unknown): CreateWorkflowChatLaunchRequ
     id: candidate.id,
     prompt: candidate.prompt,
     displayLabel: typeof candidate.displayLabel === 'string' ? candidate.displayLabel : undefined,
+    displayText: typeof candidate.displayText === 'string' ? candidate.displayText : undefined,
   };
 }
 

@@ -77,6 +77,7 @@ class N8nBuildRunState(BaseModel):
     lint_issues: List[Dict[str, Any]] = Field(default_factory=list, alias="lintIssues")
     credential_results: List[Dict[str, Any]] = Field(default_factory=list, alias="credentialResults")
     test_results: List[Dict[str, Any]] = Field(default_factory=list, alias="testResults")
+    deep_debug_results: List[Dict[str, Any]] = Field(default_factory=list, alias="deepDebugResults")
     cleanup: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
     created_at: str = Field(default_factory=utc_now_iso, alias="createdAt")
@@ -113,6 +114,7 @@ class N8nWorkflowRecord(BaseModel):
     lint_issues: List[Dict[str, Any]] = Field(default_factory=list, alias="lintIssues")
     test_cases: List[Dict[str, Any]] = Field(default_factory=list, alias="testCases")
     test_results: List[Dict[str, Any]] = Field(default_factory=list, alias="testResults")
+    deep_debug_results: List[Dict[str, Any]] = Field(default_factory=list, alias="deepDebugResults")
     latest_run_result: Optional[Dict[str, Any]] = Field(None, alias="latestRunResult")
     latest_build_run_id: Optional[str] = Field(None, alias="latestBuildRunId")
     latest_execution_id: Optional[str] = Field(None, alias="latestExecutionId")

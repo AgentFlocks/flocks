@@ -34,6 +34,7 @@ export interface N8nBuildRun {
   lintIssues: Array<Record<string, any>>;
   credentialResults: Array<Record<string, any>>;
   testResults: Array<Record<string, any>>;
+  deepDebugResults?: Array<Record<string, any>>;
   cleanup: Array<Record<string, any>>;
   error?: string | null;
   createdAt: string;
@@ -68,6 +69,7 @@ export interface N8nWorkflowRecord {
   lintIssues: Array<Record<string, any>>;
   testCases: Array<Record<string, any>>;
   testResults: Array<Record<string, any>>;
+  deepDebugResults?: Array<Record<string, any>>;
   latestRunResult?: Record<string, any> | null;
   latestBuildRunId?: string | null;
   latestExecutionId?: string | null;
@@ -227,6 +229,12 @@ export const n8nAPI = {
 
   retryWorkflowRecordTests: (recordId: string) =>
     client.post<N8nWorkflowRecord>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}/retry-test`),
+
+  activateWorkflowRecord: (recordId: string) =>
+    client.post<N8nWorkflowRecord>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}/activate`),
+
+  deactivateWorkflowRecord: (recordId: string) =>
+    client.post<N8nWorkflowRecord>(`/api/integrations/n8n/workflows/${encodeURIComponent(recordId)}/deactivate`),
 
   runWorkflowRecord: (recordId: string, data?: {
     payload?: unknown;

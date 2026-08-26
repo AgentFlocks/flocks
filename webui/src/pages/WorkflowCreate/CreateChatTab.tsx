@@ -38,6 +38,7 @@ export interface CreateWorkflowChatLaunchRequest {
   id: number;
   prompt: string;
   displayLabel?: string;
+  displayText?: string;
 }
 
 function normalizeGuideActions(value: unknown): ChatGuideAction[] {
@@ -396,9 +397,7 @@ export default function CreateChatTab({
           <CreateWorkflowLaunchRequestRunner
             launchRequest={launchRequest}
             onLaunchRequestHandled={onLaunchRequestHandled}
-            onStartPrompt={(prompt, label) => sendPrompt(prompt, {
-              displayText: label ? buildInstructionDisplayText(label) : undefined,
-            })}
+            onStartPrompt={(prompt, options) => sendPrompt(prompt, options)}
           />
           {sessionId || sending || streaming ? (
             <ChatGuideDock
@@ -424,14 +423,16 @@ function CreateWorkflowLaunchRequestRunner({
 }: {
   launchRequest?: CreateWorkflowChatLaunchRequest | null;
   onLaunchRequestHandled?: (id: number) => void;
-  onStartPrompt: (text: string, label?: string) => void;
+  onStartPrompt: (text: string, options?: PromptDisplayOptions) => void;
 }) {
   const handledLaunchRequestRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!launchRequest || handledLaunchRequestRef.current === launchRequest.id) return;
     handledLaunchRequestRef.current = launchRequest.id;
-    onStartPrompt(launchRequest.prompt, launchRequest.displayLabel);
+    const displayText = launchRequest.displayText
+      || (launchRequest.displayLabel ? buildInstructionDisplayText(launchRequest.displayLabel) : undefined);
+    onStartPrompt(launchRequest.prompt, displayText ? { displayText } : undefined);
     onLaunchRequestHandled?.(launchRequest.id);
   }, [launchRequest, onLaunchRequestHandled, onStartPrompt]);
 

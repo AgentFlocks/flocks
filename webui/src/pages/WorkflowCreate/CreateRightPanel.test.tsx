@@ -22,11 +22,14 @@ vi.mock('./CreateOverviewTab', () => ({
 }));
 
 vi.mock('./N8nBuildPanel', () => ({
-  default: ({ onGuidePrompt }: { onGuidePrompt?: (prompt: string, label: string) => void }) => (
+  default: ({ onGuidePrompt }: { onGuidePrompt?: (prompt: string, label: string, displayText?: string) => void }) => (
     <div>
       <div>n8n build content</div>
       <button type="button" onClick={() => onGuidePrompt?.('n8n prompt', 'n8n 生成')}>
         n8n 生成
+      </button>
+      <button type="button" onClick={() => onGuidePrompt?.('n8n prompt with display', '发送到工作台生成', '创建 Kafka consumer')}>
+        n8n 生成用户原文
       </button>
     </div>
   ),
@@ -132,6 +135,28 @@ describe('WorkflowCreate CreateRightPanel', () => {
     expect(latestChatProps.launchRequest).toMatchObject({
       prompt: 'n8n prompt',
       displayLabel: 'n8n 生成',
+    });
+  });
+
+  it('preserves the n8n user request as normal chat display text', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreateRightPanel
+        workflow={null}
+        open
+        width={420}
+        onWorkflowCreated={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'n8n' }));
+    await user.click(screen.getByRole('button', { name: 'n8n 生成用户原文' }));
+
+    const latestChatProps = capturedCreateChatTabProps[capturedCreateChatTabProps.length - 1];
+    expect(latestChatProps.launchRequest).toMatchObject({
+      prompt: 'n8n prompt with display',
+      displayLabel: '发送到工作台生成',
+      displayText: '创建 Kafka consumer',
     });
   });
 

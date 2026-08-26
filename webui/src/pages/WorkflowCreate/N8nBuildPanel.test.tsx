@@ -151,7 +151,8 @@ describe('N8nBuildPanel', () => {
 
     expect(onGuidePrompt).toHaveBeenCalledWith(
       expect.any(String),
-      `创建 n8n 工作流\n\n${requestText}`,
+      '发送到工作台生成',
+      requestText,
     );
   });
 
@@ -165,7 +166,8 @@ describe('N8nBuildPanel', () => {
 
     expect(onGuidePrompt).toHaveBeenCalledWith(
       expect.any(String),
-      '创建 n8n 工作流\n\n创建一个可在 n8n 运行的测试 workflow。',
+      '发送到工作台生成',
+      '创建一个可在 n8n 运行的测试 workflow。',
     );
   });
 });

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 from flocks.integrations.n8n.client import N8nClient, N8nClientError
+from flocks.integrations.n8n.deep_debug import build_deep_debug_report
 from flocks.integrations.n8n.models import N8nTestCase
 
 
@@ -20,6 +21,7 @@ class N8nTestResult:
     error: Optional[str] = None
     assertions: List[Dict[str, Any]] = field(default_factory=list)
     execution: Optional[Dict[str, Any]] = None
+    deep_debug: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -30,6 +32,7 @@ class N8nTestResult:
             "error": self.error,
             "assertions": self.assertions,
             "execution": self.execution,
+            "deepDebug": self.deep_debug,
         }
 
 
@@ -40,6 +43,7 @@ def run_webhook_tests(
     tests: Iterable[N8nTestCase | Dict[str, Any]],
     method: str = "POST",
     workflow_id: Optional[str] = None,
+    workflow: Optional[Dict[str, Any]] = None,
     wait_for_execution: bool = False,
 ) -> List[N8nTestResult]:
     results: List[N8nTestResult] = []
@@ -57,6 +61,7 @@ def run_webhook_tests(
             execution = None
             if wait_for_execution and workflow_id:
                 execution = client.wait_for_recent_execution(workflow_id=workflow_id, since_epoch_s=started)
+            deep_debug = _load_deep_debug_report(client, workflow=workflow, execution=execution, trigger_input=case.input)
             results.append(
                 N8nTestResult(
                     name=case.name,
@@ -65,6 +70,7 @@ def run_webhook_tests(
                     response=response["body"],
                     assertions=assertions,
                     execution=execution,
+                    deep_debug=deep_debug,
                 )
             )
         except N8nClientError as exc:
@@ -78,6 +84,28 @@ def run_webhook_tests(
                 )
             )
     return results
+
+
+def _load_deep_debug_report(
+    client: N8nClient,
+    *,
+    workflow: Optional[Dict[str, Any]],
+    execution: Optional[Dict[str, Any]],
+    trigger_input: Any,
+) -> Optional[Dict[str, Any]]:
+    if not execution or execution.get("id") is None:
+        return None
+    try:
+        detailed = client.get_execution(str(execution["id"]), include_data=True)
+        return build_deep_debug_report(workflow=workflow, execution=detailed, trigger_input=trigger_input)
+    except Exception as exc:
+        return {
+            "mode": "execution_trace",
+            "status": "unavailable",
+            "executionId": str(execution.get("id")),
+            "nodeTraces": [],
+            "limitations": [f"failed to load n8n execution detail: {exc}"],
+        }
 
 
 def _parse_body(raw: Optional[str]) -> Any:

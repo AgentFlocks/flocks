@@ -7,7 +7,7 @@ import { extractErrorMessage } from '@/utils/error';
 import type { CreateWorkflowChatLaunchRequest } from './CreateChatTab';
 
 interface N8nBuildPanelProps {
-  onGuidePrompt?: (prompt: string, label: string) => void;
+  onGuidePrompt?: (prompt: string, label: string, displayText?: string) => void;
   onBuildRunCreated?: (run: N8nBuildRun) => void;
 }
 
@@ -277,19 +277,23 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
     }
   };
 
-  const buildGuidePrompt = (): CreateWorkflowChatLaunchRequest => ({
-    id: Date.now(),
-    displayLabel: `${t('create.n8n.workbenchDisplayTitle')}\n\n${userRequest.trim() || t('create.n8n.defaultUserRequest')}`,
-    prompt: t('create.n8n.guidePrompt', {
-      baseUrl,
-      secretRef: apiKeySecretRef,
-      request: userRequest.trim() || t('create.n8n.defaultUserRequest'),
-    }),
-  });
+  const buildGuidePrompt = (): CreateWorkflowChatLaunchRequest => {
+    const requestText = userRequest.trim() || t('create.n8n.defaultUserRequest');
+    return {
+      id: Date.now(),
+      displayLabel: t('create.n8n.sendToWorkbench'),
+      displayText: requestText,
+      prompt: `${t('create.n8n.guidePrompt', {
+        baseUrl,
+        secretRef: apiKeySecretRef,
+        request: requestText,
+      })}\n\n${t('create.n8n.deepDebugPrompt')}`,
+    };
+  };
 
   const handleSendToWorkbench = () => {
     const launch = buildGuidePrompt();
-    onGuidePrompt?.(launch.prompt, launch.displayLabel || t('create.n8n.sendToWorkbench'));
+    onGuidePrompt?.(launch.prompt, launch.displayLabel || t('create.n8n.sendToWorkbench'), launch.displayText);
   };
 
   const handleBuildRun = async () => {

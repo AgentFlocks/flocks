@@ -352,6 +352,7 @@ describe('WorkflowCreate page', () => {
             id: 42,
             prompt: 'n8n prompt',
             displayLabel: '发送到工作台生成',
+            displayText: '创建 Kafka consumer',
           },
         },
       },
@@ -362,6 +363,7 @@ describe('WorkflowCreate page', () => {
       id: 42,
       prompt: 'n8n prompt',
       displayLabel: '发送到工作台生成',
+      displayText: '创建 Kafka consumer',
     });
   });
 });

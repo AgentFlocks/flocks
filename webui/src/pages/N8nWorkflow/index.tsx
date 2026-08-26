@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ExternalLink, FlaskConical, Play, Plus, RefreshCw, Trash2, Workflow } from 'lucide-react';
+import { Activity, ArrowLeft, ExternalLink, FlaskConical, Play, Plus, Power, PowerOff, RefreshCw, Trash2, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -321,7 +321,7 @@ function N8nWorkflowCreate() {
     }
   }, [latestRun?.recordId, navigate]);
 
-  const handleGuidePrompt = useCallback((prompt: string, displayLabel: string) => {
+  const handleGuidePrompt = useCallback((prompt: string, displayLabel: string, displayText?: string) => {
     navigate('/workflows/new', {
       state: {
         freshCreate: true,
@@ -329,6 +329,7 @@ function N8nWorkflowCreate() {
           id: Date.now(),
           prompt,
           displayLabel,
+          ...(displayText ? { displayText } : {}),
         },
       },
     });
@@ -383,7 +384,7 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
     void loadRecord();
   }, [loadRecord]);
 
-  const applyAction = async (action: 'sync' | 'retry' | 'cleanup') => {
+  const applyAction = async (action: 'sync' | 'retry' | 'cleanup' | 'activate' | 'deactivate') => {
     if (!record) return;
     if (action === 'cleanup' && !window.confirm(t('n8n.confirmCleanup', { name: record.name }))) return;
     setBusy(action);
@@ -392,7 +393,11 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
         ? await n8nAPI.syncWorkflowRecord(record.id)
         : action === 'retry'
           ? await n8nAPI.retryWorkflowRecordTests(record.id)
-          : await n8nAPI.cleanupWorkflowRecord(record.id);
+          : action === 'activate'
+            ? await n8nAPI.activateWorkflowRecord(record.id)
+            : action === 'deactivate'
+              ? await n8nAPI.deactivateWorkflowRecord(record.id)
+              : await n8nAPI.cleanupWorkflowRecord(record.id);
       setRecord(response.data);
       toast.success(t(`n8n.${action}Success`));
     } catch (err) {
@@ -473,7 +478,8 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
 
   const canManageRemote = record.ownership === 'managed' && record.source !== 'external';
   const isWebhookRecord = triggerType(record) === 'webhook';
-  const canRunRemote = record.source !== 'external' && isWebhookRecord && Boolean(record.webhookPath || record.webhookUrl);
+  const canRunRemote = record.source !== 'external' && record.remoteStatus === 'active' && isWebhookRecord && Boolean(record.webhookPath || record.webhookUrl);
+  const canToggleRemote = canManageRemote && !['missing', 'missing_remote', 'cleaned', 'connection_missing'].includes(record.remoteStatus);
 
   return (
     <div className="flex h-full flex-col bg-gray-50">
@@ -491,6 +497,18 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
           <button type="button" disabled={busy !== null} onClick={() => void handleRun()} className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">
             <Play className="h-4 w-4" />
             {t('n8n.run')}
+          </button>
+        )}
+        {canToggleRemote && record.remoteStatus !== 'active' && (
+          <button type="button" disabled={busy !== null} onClick={() => void applyAction('activate')} className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 px-3 py-1.5 text-sm text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
+            <Power className="h-4 w-4" />
+            {t('n8n.activate')}
+          </button>
+        )}
+        {canToggleRemote && record.remoteStatus === 'active' && (
+          <button type="button" disabled={busy !== null} onClick={() => void applyAction('deactivate')} className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-50">
+            <PowerOff className="h-4 w-4" />
+            {t('n8n.deactivate')}
           </button>
         )}
         {canManageRemote && isWebhookRecord && (
@@ -541,6 +559,7 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
             <JsonBlock title={t('n8n.lintIssues')} value={record.lintIssues} />
             <JsonBlock title={t('n8n.testCases')} value={record.testCases} />
             <JsonBlock title={t('n8n.testResults')} value={record.testResults} />
+            <JsonBlock title={t('n8n.deepDebugResults')} value={record.deepDebugResults} />
             <JsonBlock title={t('n8n.latestRunResult')} value={record.latestRunResult} />
           </div>
         </div>

@@ -46,12 +46,13 @@ export default function CreateRightPanel({
     }
   }, [effectiveChatLaunchRequest]);
 
-  const handlePublishGuidePrompt = (prompt: string, displayLabel: string) => {
+  const handlePublishGuidePrompt = (prompt: string, displayLabel: string, displayText?: string) => {
     publishGuideLaunchSeqRef.current += 1;
     setPublishGuideLaunchRequest({
       id: publishGuideLaunchSeqRef.current,
       prompt,
       displayLabel,
+      ...(displayText ? { displayText } : {}),
     });
     setActiveTab('chat');
   };

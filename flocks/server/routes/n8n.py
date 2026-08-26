@@ -22,6 +22,7 @@ from flocks.integrations.n8n import (
 )
 from flocks.integrations.n8n.cleanup import cleanup_workflows
 from flocks.integrations.n8n.credentials import attach_credential_ids_to_workflow, ensure_n8n_credentials
+from flocks.integrations.n8n.deep_debug import build_deep_debug_report
 from flocks.integrations.n8n.renderer import kafka_group_id_for_ir, slugify_webhook_path
 from flocks.integrations.n8n.secrets import (
     delete_n8n_api_key,
@@ -255,6 +256,17 @@ def _execution_id_from_result(result: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _deep_debug_results_from_tests(test_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for result in test_results:
+        if not isinstance(result, dict):
+            continue
+        deep_debug = result.get("deepDebug")
+        if isinstance(deep_debug, dict):
+            out.append({"testName": result.get("name"), **deep_debug})
+    return out
+
+
 def _extract_webhook_info(workflow: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
     nodes = workflow.get("nodes")
     if not isinstance(nodes, list):
@@ -449,6 +461,7 @@ def _promote_run_to_record(
     record.lint_issues = run.lint_issues
     record.test_cases = [case.model_dump(by_alias=True) for case in parsed_ir.tests]
     record.test_results = run.test_results
+    record.deep_debug_results = run.deep_debug_results
     record.latest_build_run_id = run.run_id
     record.latest_execution_id = _latest_execution_id(run.test_results)
     record.workflow_json_path = run.workflow_json_path
@@ -708,9 +721,11 @@ def _build_run_sync(request: N8nBuildRunCreateRequest) -> N8nBuildRunState:
                     tests=parsed_ir.tests,
                     method=parsed_ir.trigger.method,
                     workflow_id=workflow_id,
+                    workflow=workflow,
                     wait_for_execution=request.wait_for_execution,
                 )
             ]
+            run.deep_debug_results = _deep_debug_results_from_tests(run.test_results)
         tests_attempted = bool(run.test_results)
         success = all(item.get("success") for item in run.test_results) if tests_attempted else True
         run.status = ("test_passed" if success else "test_failed") if tests_attempted else "published"
@@ -1051,6 +1066,55 @@ async def sync_n8n_workflow_record(record_id: str, _admin: object = Depends(requ
     return store.save_record(record)
 
 
+@router.post("/workflows/{record_id}/activate", response_model=N8nWorkflowRecord)
+async def activate_n8n_workflow_record(record_id: str, _admin: object = Depends(require_admin)):
+    return await _set_n8n_workflow_active(record_id, active=True)
+
+
+@router.post("/workflows/{record_id}/deactivate", response_model=N8nWorkflowRecord)
+async def deactivate_n8n_workflow_record(record_id: str, _admin: object = Depends(require_admin)):
+    return await _set_n8n_workflow_active(record_id, active=False)
+
+
+async def _set_n8n_workflow_active(record_id: str, *, active: bool) -> N8nWorkflowRecord:
+    store = _store()
+    record = store.load_record(record_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
+    if record.source == "external" or record.ownership == "readonly":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="readonly n8n workflow records cannot be activated from Flocks")
+    connection = store.load_connection_by_id(record.connection_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    client = _client_for_connection(connection)
+    try:
+        if active:
+            await asyncio.to_thread(client.activate_workflow, record.n8n_workflow_id)
+        else:
+            await asyncio.to_thread(client.deactivate_workflow, record.n8n_workflow_id)
+        workflow = await asyncio.to_thread(client.get_workflow, record.n8n_workflow_id)
+        body = workflow.get("body") if isinstance(workflow.get("body"), dict) else {}
+        remote_status = _remote_status_from_workflow(body)
+        record.remote_status = remote_status if remote_status != "unknown" else ("active" if active else "inactive")
+        record.connection_name = connection.name
+        record.n8n_base_url = connection.base_url
+        record.api_key_secret_ref = connection.api_key_secret_ref
+        record.workflow_url = f"{connection.base_url}/workflow/{record.n8n_workflow_id}"
+        _apply_trigger_info(record, body, base_url=connection.base_url)
+        record.last_synced_at = utc_now_iso()
+        record.error = None
+    except N8nClientError as exc:
+        if exc.status in {401, 403}:
+            record.remote_status = "auth_error"
+        elif exc.status == 404:
+            record.remote_status = "missing"
+        else:
+            record.remote_status = "sync_error"
+        record.error = str(exc)
+        record.last_synced_at = utc_now_iso()
+    return store.save_record(record)
+
+
 @router.post("/workflows/{record_id}/open-event")
 async def open_n8n_workflow(record_id: str, _admin: object = Depends(require_admin)):
     record = _store().load_record(record_id)
@@ -1093,9 +1157,11 @@ async def retry_n8n_workflow_tests(record_id: str, _admin: object = Depends(requ
                 tests=record.test_cases,
                 method=method,
                 workflow_id=record.n8n_workflow_id,
+                workflow=record.workflow_json,
                 wait_for_execution=True,
             )
         ]
+        record.deep_debug_results = _deep_debug_results_from_tests(record.test_results)
         record.test_status = "test_passed" if all(item.get("success") for item in record.test_results) else "test_failed"
         record.latest_execution_id = _latest_execution_id(record.test_results)
         record.last_tested_at = utc_now_iso()
@@ -1157,6 +1223,23 @@ async def run_n8n_workflow(
                 )
             except N8nClientError as exc:
                 execution_error = str(exc)
+        deep_debug = None
+        if execution and execution.get("id") is not None:
+            try:
+                detailed_execution = await asyncio.to_thread(client.get_execution, str(execution["id"]), include_data=True)
+                deep_debug = build_deep_debug_report(
+                    workflow=record.workflow_json,
+                    execution=detailed_execution,
+                    trigger_input=run_request.payload,
+                )
+            except Exception as exc:
+                deep_debug = {
+                    "mode": "execution_trace",
+                    "status": "unavailable",
+                    "executionId": str(execution.get("id")),
+                    "nodeTraces": [],
+                    "limitations": [f"failed to load n8n execution detail: {exc}"],
+                }
         result = {
             "success": 200 <= int(response.get("status") or 0) < 400,
             "status": response.get("status"),
@@ -1166,11 +1249,14 @@ async def run_n8n_workflow(
             "durationMs": duration_ms,
             "responseBodyStored": False,
             "execution": execution,
+            "deepDebug": deep_debug,
         }
         if execution_error:
             result["executionLookupError"] = execution_error
         record.latest_run_result = result
         record.latest_execution_id = _execution_id_from_result(result) or record.latest_execution_id
+        if deep_debug:
+            record.deep_debug_results = [{"run": True, **deep_debug}]
         record.last_run_at = utc_now_iso()
         record.error = None if result["success"] else f"n8n webhook returned HTTP {response.get('status')}"
     except N8nClientError as exc:
@@ -1255,9 +1341,11 @@ async def retry_build_run_tests(run_id: str, _admin: object = Depends(require_ad
             tests=parsed_ir.tests,
             method=parsed_ir.trigger.method,
             workflow_id=run.n8n_workflow_id,
+            workflow=run.workflow,
             wait_for_execution=True,
         )
     ]
+    run.deep_debug_results = _deep_debug_results_from_tests(run.test_results)
     run.status = "test_passed" if all(item.get("success") for item in run.test_results) else "test_failed"
     run.current_step = "complete"
     _write_run_artifacts(run)

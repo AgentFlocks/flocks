@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   discoverWorkflowRecords: vi.fn(),
   syncWorkflowRecords: vi.fn(),
   syncWorkflowRecord: vi.fn(),
+  activateWorkflowRecord: vi.fn(),
+  deactivateWorkflowRecord: vi.fn(),
   runWorkflowRecord: vi.fn(),
   retryWorkflowRecordTests: vi.fn(),
   cleanupWorkflowRecord: vi.fn(),
@@ -86,9 +88,15 @@ vi.mock('react-i18next', () => ({
         'n8n.lastRunAt': '最近运行',
         'n8n.sync': '同步',
         'n8n.run': '运行',
+        'n8n.activate': '启用',
+        'n8n.deactivate': '停用',
         'n8n.retryTest': '重跑测试',
         'n8n.syncSuccess': '同步完成',
         'n8n.syncFailed': '同步失败',
+        'n8n.activateSuccess': 'n8n workflow 已启用',
+        'n8n.activateFailed': '启用失败',
+        'n8n.deactivateSuccess': 'n8n workflow 已停用',
+        'n8n.deactivateFailed': '停用失败',
         'n8n.runSuccess': '运行已触发',
         'n8n.runFailed': '运行失败',
         'n8n.runSummary': `HTTP ${options?.status || ''}，执行 ID ${options?.executionId || ''}`,
@@ -101,6 +109,7 @@ vi.mock('react-i18next', () => ({
         'n8n.lintIssues': 'Lint 结果',
         'n8n.testCases': '测试用例',
         'n8n.testResults': '测试结果',
+        'n8n.deepDebugResults': '逐节点调试结果',
         'n8n.latestRunResult': '最近运行摘要',
       };
       return translations[key] ?? key;
@@ -116,6 +125,8 @@ vi.mock('@/api/n8n', () => ({
     discoverWorkflowRecords: mocks.discoverWorkflowRecords,
     syncWorkflowRecords: mocks.syncWorkflowRecords,
     syncWorkflowRecord: mocks.syncWorkflowRecord,
+    activateWorkflowRecord: mocks.activateWorkflowRecord,
+    deactivateWorkflowRecord: mocks.deactivateWorkflowRecord,
     runWorkflowRecord: mocks.runWorkflowRecord,
     retryWorkflowRecordTests: mocks.retryWorkflowRecordTests,
     cleanupWorkflowRecord: mocks.cleanupWorkflowRecord,
@@ -158,11 +169,11 @@ vi.mock('@/pages/WorkflowCreate/N8nBuildPanel', () => ({
     onGuidePrompt,
     onBuildRunCreated,
   }: {
-    onGuidePrompt?: (prompt: string, label: string) => void;
+    onGuidePrompt?: (prompt: string, label: string, displayText?: string) => void;
     onBuildRunCreated?: (run: { recordId: string }) => void;
   }) => (
     <div>
-      <button type="button" onClick={() => onGuidePrompt?.('n8n prompt', '发送到工作台生成')}>
+      <button type="button" onClick={() => onGuidePrompt?.('n8n prompt', '发送到工作台生成', '创建 Kafka consumer')}>
         mock send to workbench
       </button>
       <button type="button" onClick={() => onBuildRunCreated?.({ recordId: 'n8n-created-1' })}>
@@ -200,6 +211,7 @@ const record = {
   lintIssues: [],
   testCases: [{ name: 'ok' }],
   testResults: [{ name: 'ok', success: true }],
+  deepDebugResults: [],
   latestRunResult: null,
   latestBuildRunId: 'run-1',
   latestExecutionId: 'exec-1',
@@ -247,6 +259,8 @@ describe('N8nWorkflowPage', () => {
       },
     });
     mocks.syncWorkflowRecord.mockResolvedValue({ data: { ...record, lastSyncedAt: '2026-08-20T00:01:00Z' } });
+    mocks.activateWorkflowRecord.mockResolvedValue({ data: { ...record, remoteStatus: 'active' } });
+    mocks.deactivateWorkflowRecord.mockResolvedValue({ data: { ...record, remoteStatus: 'inactive' } });
     mocks.runWorkflowRecord.mockResolvedValue({
       data: {
         ...record,
@@ -256,7 +270,12 @@ describe('N8nWorkflowPage', () => {
           success: true,
           status: 200,
           responseBodyStored: false,
+          deepDebug: {
+            status: 'completed',
+            nodeTraces: [{ nodeName: 'Build Response', status: 'success' }],
+          },
         },
+        deepDebugResults: [{ status: 'completed', nodeTraces: [{ nodeName: 'Build Response' }] }],
       },
     });
     mocks.retryWorkflowRecordTests.mockResolvedValue({ data: { ...record, lastTestedAt: '2026-08-20T00:02:00Z' } });
@@ -358,6 +377,8 @@ describe('N8nWorkflowPage', () => {
     }));
     expect(mocks.toastSuccess).toHaveBeenCalledWith('运行已触发', 'HTTP 200，执行 ID exec-run-1');
     expect(await screen.findByText('最近运行摘要')).toBeInTheDocument();
+    expect(await screen.findByText('逐节点调试结果')).toBeInTheDocument();
+    expect(screen.getAllByText(/Build Response/).length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole('button', { name: '重跑测试' }));
     await waitFor(() => expect(mocks.retryWorkflowRecordTests).toHaveBeenCalledWith('n8n-wf-1'));
@@ -366,6 +387,21 @@ describe('N8nWorkflowPage', () => {
     await user.click(screen.getByRole('button', { name: '删除' }));
     await user.click(within(screen.getByRole('dialog', { name: '删除 n8n 工作流' })).getByRole('button', { name: '删除' }));
     await waitFor(() => expect(mocks.deleteWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1', { deleteRemote: false }));
+  });
+
+  it('can activate and deactivate a managed n8n workflow from detail', async () => {
+    const user = userEvent.setup();
+    renderPage('/workflows/n8n/n8n-wf-1');
+
+    expect(await screen.findByRole('heading', { name: 'hello n8n' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '停用' }));
+    await waitFor(() => expect(mocks.deactivateWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('n8n workflow 已停用');
+
+    await user.click(screen.getByRole('button', { name: '启用' }));
+    await waitFor(() => expect(mocks.activateWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('n8n workflow 已启用');
   });
 
   it('does not offer run controls for external detail records', async () => {
@@ -429,6 +465,7 @@ describe('N8nWorkflowPage', () => {
         chatLaunchRequest: expect.objectContaining({
           prompt: 'n8n prompt',
           displayLabel: '发送到工作台生成',
+          displayText: '创建 Kafka consumer',
         }),
       },
     });
