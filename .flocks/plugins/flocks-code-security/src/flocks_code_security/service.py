@@ -1838,6 +1838,7 @@ class AuditService:
                             for candidate_id in sorted(related)
                             if candidate_id in candidate_summaries
                         ],
+                        # Backward-compatible name; values count evidence receipts, not tool calls.
                         "activity_counts": data.get("source_access_counts", {}).get(work_unit_id, {}),
                         "record_counts": record_counts.get(work_unit_id, {}),
                         "attempts": attempts_by_unit.get(work_unit_id, []),

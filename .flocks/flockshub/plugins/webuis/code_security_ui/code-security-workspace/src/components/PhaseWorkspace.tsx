@@ -54,10 +54,10 @@ const verdictLabels: Record<string, string> = {
   insufficient_evidence: "证据不足",
 };
 
-const sourceActivityLabels: Array<[string, string]> = [
-  ["inventory", "清单"],
-  ["search", "搜索"],
-  ["read", "读取"],
+const sourceReceiptLabels: Array<[string, string]> = [
+  ["inventory", "清单条目"],
+  ["search", "搜索命中回执"],
+  ["read", "读取片段"],
 ];
 
 const artifactStateLabels: Record<string, string> = {
@@ -1187,9 +1187,10 @@ function WorkerList({
               worker.role === "verifier"
                 ? worker.candidate_summaries?.[0]
                 : undefined;
-            const activityCounts = worker.activity_counts || {};
-            const sourceActivityCount = sourceActivityLabels.reduce(
-              (total, [operation]) => total + (activityCounts[operation] || 0),
+            const sourceReceiptCounts = worker.activity_counts || {};
+            const sourceReceiptCount = sourceReceiptLabels.reduce(
+              (total, [operation]) =>
+                total + (sourceReceiptCounts[operation] || 0),
               0,
             );
             const coverageCounts = worker.coverage?.counts;
@@ -1331,24 +1332,24 @@ function WorkerList({
                     </dd>
                   </div>
                   <div>
-                    <dt>{t("源码访问记录")}</dt>
+                    <dt>{t("源码证据回执")}</dt>
                     <dd>
-                      {sourceActivityCount
-                        ? t("{{count}} 条", { count: sourceActivityCount })
+                      {sourceReceiptCount
+                        ? t("{{count}} 条", { count: sourceReceiptCount })
                         : "—"}
                     </dd>
                   </div>
                 </dl>
 
-                {sourceActivityCount > 0 && (
+                {sourceReceiptCount > 0 && (
                   <div
                     className="cs-worker-activity"
-                    aria-label={t("源码访问记录统计")}
+                    aria-label={t("源码证据回执统计")}
                   >
-                    {sourceActivityLabels.map(([operation, label]) => (
+                    {sourceReceiptLabels.map(([operation, label]) => (
                       <span key={operation}>
                         {t(label)}{" "}
-                        <strong>{activityCounts[operation] || 0}</strong>
+                        <strong>{sourceReceiptCounts[operation] || 0}</strong>
                       </span>
                     ))}
                   </div>

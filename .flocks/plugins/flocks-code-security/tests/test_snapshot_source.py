@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from flocks_code_security.coverage import (
+    CoverageAttestationService,
+    CoverageSubmissionError,
+)
 from flocks_code_security.runtime import build_runtime
 
 
@@ -59,8 +63,66 @@ def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
     assert runtime.source.search("worker", "input")["matches"][0]["relative_path"] == "app.py"
     assert runtime.source.inventory("worker")["languages"]["python"] == 1
     assert runtime.store.report_data(scan_id)["source_access_counts"] == {
-        work_unit_id: {"inventory": 2, "read": 2, "search": 2}
+        work_unit_id: {"inventory": 2, "read": 2, "search": 1}
     }
+
+
+def test_search_records_only_unique_matching_files(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "a.py").write_text("needle = 1\nneedle = 2\n", encoding="utf-8")
+    (target / "b.py").write_text("safe = True\nneedle = 3\n", encoding="utf-8")
+    (target / "unmatched.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target))
+    scan_id = runtime.store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id=snapshot.snapshot_id,
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="worker",
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+        role="baseline",
+        work_unit_id=work_unit_id,
+    )
+    binding = runtime.store.require_binding("worker", {"baseline"})
+
+    assert runtime.source.search("worker", "absent")["matches"] == []
+    assert runtime.store.list_source_accesses(binding.attempt_id) == []
+
+    result = runtime.source.search("worker", "needle")
+    assert len(result["matches"]) == 3
+    accesses = runtime.store.list_source_accesses(binding.attempt_id)
+    assert {item["relative_path"] for item in accesses} == {"a.py", "b.py"}
+
+    with pytest.raises(CoverageSubmissionError) as exc_info:
+        CoverageAttestationService(runtime.store).attest(
+            binding,
+            dispositions=[
+                {"path": "a.py", "claim": "analyzed"},
+                {"path": "unmatched.py", "claim": "analyzed"},
+            ],
+        )
+    assert {
+        item["path"]: item["actual_state"]
+        for item in exc_info.value.violations
+    } == {
+        "a.py": "located",
+        "unmatched.py": "unexamined",
+    }
+
+    limited = runtime.source.search("worker", "needle", max_results=1)
+    assert len(limited["matches"]) == 1
+    assert len(runtime.store.list_source_accesses(binding.attempt_id)) == len(accesses) + 1
 
 
 def test_fresh_attempt_does_not_inherit_source_receipts(tmp_path: Path) -> None:

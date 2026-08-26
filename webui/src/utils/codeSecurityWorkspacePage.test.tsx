@@ -387,8 +387,8 @@ describe("code security workspace contract page", () => {
     expect(screen.getByText("已确认")).toBeInTheDocument();
     expect(screen.getByText("2 个路径")).toBeInTheDocument();
     expect(screen.getByText("12 条")).toBeInTheDocument();
-    expect(screen.getByLabelText("源码访问记录统计")).toHaveTextContent(
-      "搜索 8",
+    expect(screen.getByLabelText("源码证据回执统计")).toHaveTextContent(
+      "搜索命中回执 8",
     );
     expect(screen.getByLabelText("最近一次提交拒绝")).toHaveTextContent(
       "EVIDENCE_NOT_READ",

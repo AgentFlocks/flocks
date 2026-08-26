@@ -211,19 +211,12 @@ class AuditSourceRepository:
             if path_glob and not fnmatch.fnmatch(record.relative_path, path_glob):
                 continue
             data = self._verified_bytes(binding.snapshot_id, record)
-            accesses.append(
-                {
-                    "operation": "search",
-                    "relative_path": record.relative_path,
-                    "blob_digest": record.blob_digest,
-                    "start_line": 1,
-                    "end_line": record.line_count,
-                }
-            )
+            matched_record = False
             for line_number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), start=1):
                 comparable_line = line if case_sensitive else line.casefold()
                 if comparable_needle not in comparable_line:
                     continue
+                matched_record = True
                 matches.append(
                     {
                         "relative_path": record.relative_path,
@@ -235,6 +228,16 @@ class AuditSourceRepository:
                 if len(matches) >= limit:
                     truncated = True
                     break
+            if matched_record:
+                accesses.append(
+                    {
+                        "operation": "search",
+                        "relative_path": record.relative_path,
+                        "blob_digest": record.blob_digest,
+                        "start_line": 1,
+                        "end_line": record.line_count,
+                    }
+                )
             if truncated:
                 break
         self.store.record_source_accesses(binding, accesses)

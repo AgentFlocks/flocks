@@ -100,6 +100,7 @@ export interface WorkerRun {
   candidate_ids: string[];
   candidate_summaries?: WorkerCandidateSummary[];
   attempts?: WorkerAttempt[];
+  /** Source-evidence receipt rows, not source-tool invocation counts. */
   activity_counts?: Record<string, number>;
   record_counts: Record<string, number>;
   coverage?: {

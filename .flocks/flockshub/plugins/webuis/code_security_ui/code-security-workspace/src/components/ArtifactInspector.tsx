@@ -379,7 +379,7 @@ function Overview({ detail }: { detail: ScanDetail }) {
           </div>
         </dl>
         <p className="cs-helper">
-          {t("这些数字由宿主根据当前执行尝试的源码访问记录计算。")}
+          {t("这些数字由宿主根据当前执行尝试的源码证据回执计算。")}
         </p>
       </section>
       <section>
