@@ -193,6 +193,17 @@ def _client_for_connection(connection: N8nConnectionState) -> N8nClient:
     return _client_for(connection.base_url, connection.api_key_secret_ref)
 
 
+def _ensure_n8n_remote_control_allowed(record: N8nWorkflowRecord, *, operation: str) -> None:
+    # `ownership=readonly` means Flocks should not re-test or mutate generated
+    # artifacts. Registered non-external records can still be remotely toggled
+    # or deleted when the user explicitly acts from the n8n page.
+    if record.source == "external":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"external n8n workflow records cannot be {operation} from Flocks",
+        )
+
+
 def _record_id_for(workflow_id: str, connection_id: str = "default") -> str:
     clean_connection = "".join(ch for ch in str(connection_id or "default") if ch.isalnum() or ch in {"-", "_"})
     clean_workflow = "".join(ch for ch in str(workflow_id) if ch.isalnum() or ch in {"-", "_"})
@@ -1009,9 +1020,8 @@ async def delete_n8n_workflow_record(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
     remote_cleanup: List[Dict[str, Any]] = []
     if delete_remote:
-        connection = store.load_connection_by_id(record.connection_id)
-        if not connection:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+        _ensure_n8n_remote_control_allowed(record, operation="deleted")
+        record, connection = await _sync_n8n_workflow_record_or_raise(store, record)
         remote_cleanup = await asyncio.to_thread(
             cleanup_workflows,
             _client_for_connection(connection),
@@ -1034,12 +1044,20 @@ async def sync_n8n_workflow_record(record_id: str, _admin: object = Depends(requ
     record = store.load_record(record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
+    record, _connection = await _sync_n8n_workflow_record(store, record)
+    return record
+
+
+async def _sync_n8n_workflow_record(
+    store: N8nStateStore,
+    record: N8nWorkflowRecord,
+) -> tuple[N8nWorkflowRecord, Optional[N8nConnectionState]]:
     connection = store.load_connection_by_id(record.connection_id)
     if not connection:
         record.remote_status = "connection_missing"
         record.error = "n8n connection is missing"
         record.last_synced_at = utc_now_iso()
-        return store.save_record(record)
+        return store.save_record(record), None
     try:
         workflow = await asyncio.to_thread(
             _client_for_connection(connection).get_workflow,
@@ -1063,7 +1081,59 @@ async def sync_n8n_workflow_record(record_id: str, _admin: object = Depends(requ
             record.remote_status = "sync_error"
         record.last_synced_at = utc_now_iso()
         record.error = str(exc)
-    return store.save_record(record)
+    return store.save_record(record), connection
+
+
+async def _sync_n8n_workflow_record_or_raise(
+    store: N8nStateStore,
+    record: N8nWorkflowRecord,
+) -> tuple[N8nWorkflowRecord, N8nConnectionState]:
+    record, connection = await _sync_n8n_workflow_record(store, record)
+    if connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"n8n sync failed before operation: {record.error or record.remote_status}",
+        )
+    if record.remote_status in {"missing", "auth_error", "sync_error", "connection_missing"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"n8n sync failed before operation: {record.error or record.remote_status}",
+        )
+    return record, connection
+
+
+async def _sync_n8n_build_run_workflow_or_raise(
+    store: N8nStateStore,
+    run: N8nBuildRunState,
+) -> N8nConnectionState:
+    if run.record_id:
+        record = store.load_record(run.record_id)
+        if record:
+            try:
+                _synced_record, connection = await _sync_n8n_workflow_record_or_raise(store, record)
+                return connection
+            except HTTPException as exc:
+                run.current_step = "sync"
+                run.status = "sync_error"
+                run.error = str(exc.detail)
+                store.save_run(run)
+                raise
+    connection = store.load_connection_by_id(run.connection_id)
+    if not connection:
+        run.current_step = "sync"
+        run.status = "sync_error"
+        run.error = "n8n connection is missing"
+        store.save_run(run)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n sync failed before operation: n8n connection is missing")
+    try:
+        await asyncio.to_thread(_client_for_connection(connection).get_workflow, run.n8n_workflow_id)
+    except N8nClientError as exc:
+        run.current_step = "sync"
+        run.status = "sync_error"
+        run.error = str(exc)
+        store.save_run(run)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"n8n sync failed before operation: {exc}") from exc
+    return connection
 
 
 @router.post("/workflows/{record_id}/activate", response_model=N8nWorkflowRecord)
@@ -1081,11 +1151,8 @@ async def _set_n8n_workflow_active(record_id: str, *, active: bool) -> N8nWorkfl
     record = store.load_record(record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
-    if record.source == "external":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="external n8n workflow records cannot be activated from Flocks")
-    connection = store.load_connection_by_id(record.connection_id)
-    if not connection:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    _ensure_n8n_remote_control_allowed(record, operation="activated" if active else "deactivated")
+    record, connection = await _sync_n8n_workflow_record_or_raise(store, record)
     client = _client_for_connection(connection)
     try:
         if active:
@@ -1112,6 +1179,11 @@ async def _set_n8n_workflow_active(record_id: str, *, active: bool) -> N8nWorkfl
             record.remote_status = "sync_error"
         record.error = str(exc)
         record.last_synced_at = utc_now_iso()
+        store.save_record(record)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"failed to {'activate' if active else 'deactivate'} n8n workflow: {exc}",
+        ) from exc
     return store.save_record(record)
 
 
@@ -1131,9 +1203,7 @@ async def retry_n8n_workflow_tests(record_id: str, _admin: object = Depends(requ
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
     if record.ownership == "readonly" or record.source == "external":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="readonly n8n workflow records cannot be re-tested")
-    connection = store.load_connection_by_id(record.connection_id)
-    if not connection:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    record, connection = await _sync_n8n_workflow_record_or_raise(store, record)
     if record.trigger_type != "webhook":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="only webhook n8n workflows can be re-tested from Flocks")
     if not record.webhook_path and not record.webhook_url:
@@ -1183,15 +1253,14 @@ async def run_n8n_workflow(
     record = store.load_record(record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
-    if record.source == "external":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="external n8n workflow records cannot be run from Flocks")
-    connection = store.load_connection_by_id(record.connection_id)
-    if not connection:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    _ensure_n8n_remote_control_allowed(record, operation="run")
+    record, connection = await _sync_n8n_workflow_record_or_raise(store, record)
     if record.trigger_type != "webhook":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="only webhook n8n workflows can be run from Flocks")
     if not record.webhook_path and not record.webhook_url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n webhook path is missing")
+    if record.remote_status != "active":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n workflow must be active before running from Flocks")
 
     method = record.webhook_method or "POST"
     webhook_path = record.webhook_path
@@ -1284,9 +1353,7 @@ async def cleanup_n8n_workflow(record_id: str, _admin: object = Depends(require_
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
     if record.ownership != "managed" or record.source not in {"flocks_created", "generated"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="only Flocks-managed n8n workflow records can be cleaned remotely")
-    connection = store.load_connection_by_id(record.connection_id)
-    if not connection:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    record, connection = await _sync_n8n_workflow_record_or_raise(store, record)
     try:
         result = await asyncio.to_thread(
             cleanup_workflows,
@@ -1323,9 +1390,7 @@ async def retry_build_run_tests(run_id: str, _admin: object = Depends(require_ad
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n build run not found")
     if not run.n8n_workflow_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n workflow id is missing")
-    connection = store.load_connection_by_id(run.connection_id)
-    if not connection:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    connection = await _sync_n8n_build_run_workflow_or_raise(store, run)
     parsed_ir = N8nIR.model_validate(run.ir)
     if parsed_ir.trigger.type != "webhook":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="only webhook n8n build runs can be re-tested from Flocks")
@@ -1360,9 +1425,7 @@ async def cleanup_build_run(run_id: str, _admin: object = Depends(require_admin)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n build run not found")
     if not run.n8n_workflow_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="n8n workflow id is missing")
-    connection = store.load_connection_by_id(run.connection_id)
-    if not connection:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")
+    connection = await _sync_n8n_build_run_workflow_or_raise(store, run)
     client = _client_for_connection(connection)
     run.current_step = "cleanup"
     run.cleanup = await asyncio.to_thread(cleanup_workflows, client, [run.n8n_workflow_id])

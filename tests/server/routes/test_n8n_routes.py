@@ -791,6 +791,56 @@ async def test_n8n_workflow_record_can_toggle_discovered_flocks_record(
 
 
 @pytest.mark.asyncio
+async def test_n8n_workflow_record_blocks_activation_when_pre_sync_fails(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.integrations.n8n.client import N8nClientError
+    from flocks.server.routes import n8n as n8n_routes
+
+    class AuthFailedSyncClient(FakeN8nClient):
+        def __init__(self):
+            super().__init__()
+            self.activate_calls = 0
+
+        def get_workflow(self, workflow_id: str):
+            raise N8nClientError("n8n HTTP 401 for GET /api/v1/workflows/pre-sync-fail", status=401)
+
+        def activate_workflow(self, workflow_id: str):
+            self.activate_calls += 1
+            return super().activate_workflow(workflow_id)
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = AuthFailedSyncClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "pre sync fails",
+            "source": "flocks_created",
+            "ownership": "managed",
+            "n8nWorkflowId": "pre-sync-fail",
+            "n8nBaseUrl": "http://localhost:5678",
+            "webhookPath": "pre-sync-fail",
+            "webhookMethod": "POST",
+        },
+    )
+    assert created.status_code == 200, created.text
+    record_id = created.json()["id"]
+
+    activated = await client.post(f"/api/integrations/n8n/workflows/{record_id}/activate")
+    assert activated.status_code == 409, activated.text
+    assert "n8n sync failed before operation" in activated.text
+    assert fake_client.activate_calls == 0
+
+    detail = await client.get(f"/api/integrations/n8n/workflows/{record_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["remoteStatus"] == "auth_error"
+
+
+@pytest.mark.asyncio
 async def test_n8n_workflow_record_delete_removes_local_record_for_any_source(client):
     created = await client.post(
         "/api/integrations/n8n/workflows",
@@ -849,6 +899,93 @@ async def test_n8n_workflow_record_delete_can_remove_remote_workflow(
 
 
 @pytest.mark.asyncio
+async def test_n8n_workflow_record_delete_remote_blocks_when_pre_sync_fails(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.integrations.n8n.client import N8nClientError
+    from flocks.server.routes import n8n as n8n_routes
+
+    class MissingOnSyncClient(FakeN8nClient):
+        def get_workflow(self, workflow_id: str):
+            raise N8nClientError("n8n HTTP 404 for GET /api/v1/workflows/pre-delete-fail", status=404)
+
+    cleanup_called = False
+
+    def cleanup_spy(_client, ids):
+        nonlocal cleanup_called
+        cleanup_called = True
+        return [{"workflow_id": ids[0], "success": True, "status": 200}]
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: MissingOnSyncClient())
+    monkeypatch.setattr(n8n_routes, "cleanup_workflows", cleanup_spy)
+
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "pre delete fails",
+            "source": "discovered",
+            "ownership": "readonly",
+            "n8nWorkflowId": "pre-delete-fail",
+            "n8nBaseUrl": "http://localhost:5678",
+        },
+    )
+    assert created.status_code == 200, created.text
+    record_id = created.json()["id"]
+
+    deleted = await client.delete(f"/api/integrations/n8n/workflows/{record_id}?deleteRemote=true")
+    assert deleted.status_code == 409, deleted.text
+    assert "n8n sync failed before operation" in deleted.text
+    assert cleanup_called is False
+
+    detail = await client.get(f"/api/integrations/n8n/workflows/{record_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["remoteStatus"] == "missing"
+
+
+@pytest.mark.asyncio
+async def test_n8n_build_run_retry_blocks_when_pre_sync_fails(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.integrations.n8n.client import N8nClientError
+    from flocks.integrations.n8n.state import N8nBuildRunState, N8nStateStore
+    from flocks.server.routes import n8n as n8n_routes
+
+    class BuildRunSyncFailedClient(FakeN8nClient):
+        def get_workflow(self, workflow_id: str):
+            raise N8nClientError("n8n HTTP 401 for GET /api/v1/workflows/build-run-sync-fail", status=401)
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: BuildRunSyncFailedClient())
+
+    store = N8nStateStore()
+    store.save_run(
+        N8nBuildRunState(
+            runId="build-run-sync-fail",
+            connectionId="default",
+            status="published",
+            currentStep="complete",
+            ir=SAMPLE_IR,
+            workflow={"name": "build-run-sync-fail"},
+            n8nWorkflowId="build-run-sync-fail",
+        )
+    )
+
+    response = await client.post("/api/integrations/n8n/build-runs/build-run-sync-fail/retry-test")
+    assert response.status_code == 409, response.text
+    assert "n8n sync failed before operation" in response.text
+
+    run = await client.get("/api/integrations/n8n/build-runs/build-run-sync-fail")
+    assert run.status_code == 200, run.text
+    assert run.json()["status"] == "sync_error"
+    assert run.json()["currentStep"] == "sync"
+
+
+@pytest.mark.asyncio
 async def test_n8n_workflow_record_delete_treats_remote_404_as_already_deleted(
     client,
     monkeypatch: pytest.MonkeyPatch,
@@ -889,8 +1026,15 @@ async def test_n8n_workflow_record_delete_treats_remote_404_as_already_deleted(
 
 
 @pytest.mark.asyncio
-async def test_n8n_workflow_run_blocks_external_and_requires_webhook(client, n8n_route_state):
+async def test_n8n_workflow_run_blocks_external_and_requires_webhook(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
     n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: FakeN8nClient())
 
     external = await client.post(
         "/api/integrations/n8n/workflows",
@@ -925,8 +1069,57 @@ async def test_n8n_workflow_run_blocks_external_and_requires_webhook(client, n8n
 
 
 @pytest.mark.asyncio
-async def test_n8n_workflow_run_blocks_kafka_records(client, n8n_route_state):
+async def test_n8n_workflow_run_blocks_inactive_after_pre_sync(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    class InactiveWorkflowClient(FakeN8nClient):
+        def __init__(self):
+            super().__init__()
+            self.active["inactive-run"] = False
+            self.webhook_calls = 0
+
+        def call_webhook(self, *args, **kwargs):
+            self.webhook_calls += 1
+            return super().call_webhook(*args, **kwargs)
+
     n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = InactiveWorkflowClient()
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "inactive run",
+            "source": "flocks_created",
+            "ownership": "managed",
+            "n8nWorkflowId": "inactive-run",
+            "n8nBaseUrl": "http://localhost:5678",
+            "webhookPath": "inactive-run",
+            "webhookMethod": "POST",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    run_response = await client.post(f"/api/integrations/n8n/workflows/{created.json()['id']}/run", json={})
+    assert run_response.status_code == 409, run_response.text
+    assert "must be active" in run_response.text
+    assert fake_client.webhook_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_n8n_workflow_run_blocks_kafka_records(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: FakeN8nClient())
 
     kafka = await client.post(
         "/api/integrations/n8n/workflows",
