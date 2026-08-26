@@ -263,7 +263,7 @@ export default function N8nBuildPanel({ onGuidePrompt, onBuildRunCreated }: N8nB
 
   const buildGuidePrompt = (): CreateWorkflowChatLaunchRequest => ({
     id: Date.now(),
-    displayLabel: t('create.n8n.sendToWorkbench'),
+    displayLabel: `${t('create.n8n.workbenchDisplayTitle')}\n\n${userRequest.trim() || t('create.n8n.defaultUserRequest')}`,
     prompt: t('create.n8n.guidePrompt', {
       baseUrl,
       secretRef: apiKeySecretRef,

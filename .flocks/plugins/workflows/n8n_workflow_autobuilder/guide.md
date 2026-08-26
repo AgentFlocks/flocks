@@ -12,8 +12,9 @@
 - n8n 是最终运行时，创建好的 workflow 必须可以脱离 Flocks 独立运行。
 - Flocks 只负责编排、渲染、发布、激活和管理，不作为业务节点参与输入、输出、查询或研判。
 - 目标兼容版本为 n8n `2.35.4` Public API v1。发布 API key 至少需要 `workflow:create`、`workflow:list`、`workflow:read`、`workflow:activate`；使用 `credentialRequirements` 时还需要 `credential:list`、`credential:read`、`credential:create`。
-- 不允许把 Flocks MCP、Flocks 工作流 API、Flocks webhook、`/api/mcp`、`/api/tools`、`/api/workflows` 等本地回调写进 n8n 节点。
-- 需要 ThreatBook、Kafka 等能力时，优先生成 n8n 原生节点或 HTTP Request 节点，并引用 n8n credential。
+- 不允许把 Flocks MCP、Flocks skill、Flocks tool、Flocks agent、Flocks 工作流 API、Flocks webhook、Flocks 对外 HTTP 包装接口、`/api/mcp`、`/api/tools`、`/api/workflows` 等回调写进 n8n 节点。
+- 需要 ThreatBook、Kafka 等能力时，优先生成 n8n 原生节点或 HTTP Request 节点直连非 Flocks 外部服务，并引用 n8n credential。
+- 如果某个 Flocks-only 的 skill/tool/agent 能力无法完全迁移为 n8n 原生节点或非 Flocks 外部 API，必须在生成 IR 或发布前停止，并询问用户确认是否终止本次 workflow 创建；不要提供“由 Flocks 暴露 HTTP 接口给 n8n 调用”的方案。
 - Flocks 已有密钥或 credential 引用时不追问；在 `credentialRequirements` 声明从哪个 Flocks secret 创建/复用哪个 n8n credential。
 - 如果缺少 Flocks 无法自动提供的业务参数、密钥、credential、网络连通性或 n8n 权限，必须作为阻断项询问/报错并停止。前置条件仍不可用时，不继续发布或激活坏 workflow。
 - 不允许在 n8n workflow JSON 中写入 `{secret:...}`、`{{secrets.NAME}}` 或明文 token。

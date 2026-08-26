@@ -56,6 +56,8 @@ vi.mock('react-i18next', () => ({
         'create.n8n.userRequest': '自然语言需求',
         'create.n8n.userRequestPlaceholder': '描述需求',
         'create.n8n.sendToWorkbench': '发送到工作台生成',
+        'create.n8n.workbenchDisplayTitle': '创建 n8n 工作流',
+        'create.n8n.defaultUserRequest': '创建一个可在 n8n 运行的测试 workflow。',
         'create.n8n.irTitle': 'IR 快速构建',
         'create.n8n.irHint': '粘贴 IR',
         'create.n8n.resetSample': '示例',
@@ -135,5 +137,35 @@ describe('N8nBuildPanel', () => {
       apiKeySecretRef: 'N8N_API_KEY',
     }));
     expect(toastMock.success).toHaveBeenCalledWith('保存成功');
+  });
+
+  it('shows the full user request as the workbench launch display text', async () => {
+    const user = userEvent.setup();
+    const onGuidePrompt = vi.fn();
+    const requestText = '帮我创建一个 n8n 工作流，从 Kafka security-alerts 消费告警，调用外部情报 API 研判 IOC，然后把高危结果写入告警 topic。';
+
+    render(<N8nBuildPanel onGuidePrompt={onGuidePrompt} />);
+
+    await user.type(await screen.findByRole('textbox', { name: '自然语言需求' }), requestText);
+    await user.click(screen.getByRole('button', { name: '发送到工作台生成' }));
+
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      `创建 n8n 工作流\n\n${requestText}`,
+    );
+  });
+
+  it('uses the default request as the workbench launch display text when user request is empty', async () => {
+    const user = userEvent.setup();
+    const onGuidePrompt = vi.fn();
+
+    render(<N8nBuildPanel onGuidePrompt={onGuidePrompt} />);
+
+    await user.click(await screen.findByRole('button', { name: '发送到工作台生成' }));
+
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      '创建 n8n 工作流\n\n创建一个可在 n8n 运行的测试 workflow。',
+    );
   });
 });

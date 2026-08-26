@@ -10,7 +10,7 @@ Use this skill when the user wants Flocks to create, validate, publish, test, or
 
 ## Required Flow
 
-1. Clarify only business intent that is impossible to infer safely: automation goal, trigger, sample input, expected output, and high-risk side-effect boundaries. Do not ask the user how to bridge Flocks MCP/tools into n8n.
+1. Clarify only business intent that is impossible to infer safely: automation goal, trigger, sample input, expected output, and high-risk side-effect boundaries. Do not ask the user how to bridge Flocks MCP/skills/tools/agents or Flocks wrapper services into n8n.
 2. Build a stable n8n IR first. Do not ask the model to directly author native n8n JSON.
 3. Call `n8n_workflow_render` to render native n8n workflow JSON.
 4. Call `n8n_workflow_lint` before any publish call.
@@ -26,8 +26,8 @@ Use this skill when the user wants Flocks to create, validate, publish, test, or
 - Never write API keys, tokens, passwords, cookies, or Authorization headers into workflow files, reports, prompts, or generated n8n JSON.
 - Prefer `api_key_secret_ref` such as `N8N_API_KEY`; direct `api_key` inputs are transient only.
 - Target n8n compatibility is `2.35.4` Public API v1. The API key must have the needed scopes before publish: `workflow:create`, `workflow:list`, `workflow:read`, `workflow:activate`, plus `credential:list`, `credential:read`, and `credential:create` when `credentialRequirements` is present.
-- The generated n8n workflow must be runtime-independent from Flocks. Do not use Flocks MCP tools, Flocks workflow endpoints, Flocks webhooks, or any local Flocks callback as a business node.
-- When the user asks for a capability that exists in Flocks/MCP, translate it to n8n-native nodes or external HTTP APIs. For example, IOC enrichment should become an HTTP Request/API workflow in n8n, not a call back into Flocks MCP.
+- The generated n8n workflow must be runtime-independent from Flocks. Do not use Flocks MCP tools, Flocks skills, Flocks agents, Flocks tools, Flocks workflow endpoints, Flocks webhooks, a Flocks-provided public HTTP wrapper, or any local Flocks callback as a business node.
+- When the user asks for a capability that exists in Flocks/MCP/skill/tool/agent, migrate the capability completely into n8n-native nodes or a direct non-Flocks external service API. For example, IOC enrichment should become an HTTP Request/API workflow in n8n, not a call back into Flocks MCP or a Flocks wrapper API.
 - Do not ask the user to provide service API keys when Flocks already has the needed secret or credential reference. Use `credentialRequirements` to declare which Flocks secret should create or reuse which n8n credential.
 - If the workflow cannot be safely generated because required business data, secrets, credentials, network reachability, or n8n permissions are missing, ask for the missing prerequisite and stop. If the prerequisite is still unavailable, do not publish or activate a broken workflow. Return a precise blocker such as `缺少密钥 THREATBOOK_API_KEY，请先在 Flocks 密钥配置中添加` or `n8n API key 缺少创建 credential 的权限`。
 - Do not put `{secret:...}`, `{{secrets.NAME}}`, plaintext keys, or bearer tokens into n8n workflow JSON. `{secret}` is allowed only inside `credentialRequirements[].data`, where the publisher replaces it while creating n8n credentials.
@@ -61,7 +61,7 @@ Use this policy before asking any implementation-choice question:
 - `format/normalize/enrich/route` -> Code, Set, and IF nodes.
 - `webhook.response` -> Respond to Webhook, only for webhook-triggered workflows.
 
-If no n8n-native mapping exists, mark the request as unsupported for autonomous n8n runtime instead of offering a Flocks MCP/webhook bridge.
+If no complete n8n-native or direct non-Flocks external API mapping exists, stop before IR generation or publish. Ask the user to confirm terminating the workflow creation because the requested Flocks-only capability cannot be migrated to an autonomous n8n runtime. Do not offer a Flocks MCP/webhook/API bridge.
 
 ## IR Pattern
 

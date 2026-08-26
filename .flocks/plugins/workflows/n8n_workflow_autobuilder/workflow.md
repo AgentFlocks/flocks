@@ -9,7 +9,7 @@
 - 将自然语言 Agent 已确认的 n8n IR 转为 n8n 原生 JSON。
 - 在发布前执行结构化 lint，拦截节点、连线、表达式、只读字段和密钥泄露风险。
 - 发布测试 workflow、激活、按触发器类型输出报告；Webhook 支持 Flocks 侧一次性测试调用，Kafka 和业务处理不依赖 Flocks 运行。
-- 拦截 n8n workflow 内部对 Flocks MCP、Flocks workflow API、Flocks webhook 或本地 Flocks 服务的运行时依赖。
+- 拦截 n8n workflow 内部对 Flocks MCP、Flocks skill/tool/agent、Flocks workflow API、Flocks webhook、Flocks 对外 HTTP 包装接口或本地 Flocks 服务的运行时依赖。
 
 不适合做的事：
 
@@ -78,7 +78,7 @@ run_autobuilder
 
 ## 6. 能力映射边界
 
-生成阶段遵循 n8n `2.35.4` Public API v1 兼容策略，不再询问用户选择 Flocks MCP / Flocks webhook / n8n 原生实现。若缺少 Flocks 无法自动提供的业务参数、密钥、credential、网络连通性或 n8n API 权限，则作为阻断项停止，不创建坏 workflow：
+生成阶段遵循 n8n `2.35.4` Public API v1 兼容策略，不再询问用户选择 Flocks MCP / Flocks skill/tool/agent / Flocks webhook / Flocks 对外 HTTP 包装接口 / n8n 原生实现。若缺少 Flocks 无法自动提供的业务参数、密钥、credential、网络连通性或 n8n API 权限，则作为阻断项停止，不创建坏 workflow。若某个 Flocks-only 能力无法完全迁移为 n8n 原生节点或非 Flocks 外部 API，必须在生成 IR 或发布前询问用户确认终止 workflow 创建：
 
 | 用户能力意图 | n8n 生成策略 | Flocks 运行时参与 |
 | --- | --- | --- |
@@ -86,7 +86,7 @@ run_autobuilder
 | Kafka 消费 | Kafka Trigger + 后续 n8n 节点 | 不参与 |
 | IOC/情报查询 | HTTP Request 调外部 API，并引用 n8n credential | 不参与 |
 | 数据格式化/路由 | Code/Set/IF | 不参与 |
-| Flocks 私有 MCP 能力且无外部 API | 标记 unsupported/missing prerequisite | 不参与 |
+| Flocks 私有 MCP/skill/tool/agent 能力且无外部 API | 标记 unsupported/missing prerequisite，并在生成/发布前确认终止 | 不参与 |
 
 ## 7. 验证方式
 

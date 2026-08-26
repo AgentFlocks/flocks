@@ -3,9 +3,11 @@ import i18n, { preloadI18nNamespaces } from './i18n';
 import enHome from './locales/en-US/home.json';
 import enNav from './locales/en-US/nav.json';
 import enSession from './locales/en-US/session.json';
+import enWorkflow from './locales/en-US/workflow.json';
 import zhHome from './locales/zh-CN/home.json';
 import zhNav from './locales/zh-CN/nav.json';
 import zhSession from './locales/zh-CN/session.json';
+import zhWorkflow from './locales/zh-CN/workflow.json';
 
 describe('i18n lazy namespaces', () => {
   it('loads route namespaces on demand instead of bundling them up front', async () => {
@@ -47,5 +49,17 @@ describe('i18n lazy namespaces', () => {
     expect(enSession.projectDialog.newSessionAction).toBe('New task');
     expect(enSession.filterConversations).toBe('Search tasks');
     expect(enSession.noResults).toBe('No matching tasks');
+  });
+
+  it('keeps n8n workflow generation independent from Flocks runtime wrappers', () => {
+    const zhPrompt = zhWorkflow.create.n8n.guidePrompt;
+    expect(zhPrompt).toContain('不要建议由 Flocks 新增一个 HTTP 服务给 n8n 调用');
+    expect(zhPrompt).toContain('无法完整迁移时，不要生成 IR，不要发布 workflow');
+    expect(zhPrompt).toContain('必须先向用户确认是否终止本次 workflow 创建');
+
+    const enPrompt = enWorkflow.create.n8n.guidePrompt;
+    expect(enPrompt).toContain('Do not suggest adding an HTTP service in Flocks for n8n to call');
+    expect(enPrompt).toContain('do not generate IR, do not publish a workflow');
+    expect(enPrompt).toContain('ask the user to confirm terminating this workflow creation');
   });
 });
