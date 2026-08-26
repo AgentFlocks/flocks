@@ -30,8 +30,8 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
     assert agent.options == {"strict_tools": True}
     assert set(agent.tools or []) == allowed
     assert set(declared["tools"]) == allowed
-    assert agent.model.provider_id == "threatbook-cn-llm"
-    assert agent.model.model_id == "bailian:deepseek-v4-pro"
+    assert agent.model.provider_id == "anthropic"
+    assert agent.model.model_id == "claude-opus-4-8"
     assert ALLOWED_PRODUCT_MODELS == {
         ("threatbook-cn-llm", "bailian:deepseek-v4-pro"),
         ("threatbook-cn-llm", "bailian:deepseek-v4-flash-0731"),
