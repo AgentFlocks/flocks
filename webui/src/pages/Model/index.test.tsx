@@ -580,6 +580,85 @@ describe('ModelPage default model selector', () => {
     expect(tooltip).toHaveTextContent(/USD|\$/);
   });
 
+  it('force-refreshes Router models and shows every authoritative pricing tier', async () => {
+    const user = userEvent.setup();
+    const routerProvider = {
+      id: 'threatbook-cn-llm',
+      name: 'ThreatBook-cn-llm',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    };
+    const routerModel = {
+      id: 'deepseek-v4-flash-0731',
+      name: 'DeepSeek-V4-Flash-0731',
+      provider_id: 'threatbook-cn-llm',
+      model_type: 'llm',
+      status: 'active',
+      fetch_from: 'predefined',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+      limits: { context_window: 1000000, max_output_tokens: 384000 },
+      pricing: {
+        input: 1,
+        output: 2,
+        unit: 1000000,
+        currency: 'CNY',
+        price_version: '2026081405',
+        price_tiers: [
+          { max_input_tokens: 100000, input_price: 1, output_price: 2 },
+          { max_input_tokens: 10000000, input_price: 2, output_price: 4 },
+          { max_input_tokens: 100000000, input_price: 1, output_price: 2 },
+          { max_input_tokens: null, input_price: 3, output_price: 6 },
+        ],
+      },
+    };
+    mocks.useProviders.mockReturnValue({
+      providers: [routerProvider],
+      connectedIds: ['threatbook-cn-llm'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getResolved.mockResolvedValue({
+      data: { provider_id: 'threatbook-cn-llm', model_id: 'deepseek-v4-flash-0731' },
+    });
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [routerModel], total: 1 } });
+
+    renderWithRouter(<ModelPage />);
+
+    await waitFor(() => {
+      expect(mocks.listDefinitions).toHaveBeenCalledWith({
+        provider: 'threatbook-cn-llm',
+        refresh: true,
+      });
+    });
+    await user.click(await screen.findByText('DeepSeek-V4-Flash-0731'));
+
+    expect(await screen.findByText('form.routerPricingManaged')).toBeInTheDocument();
+    expect(screen.getByText(/form.priceVersion: 2026081405/)).toBeInTheDocument();
+    expect(screen.getByText('≤ 100,000')).toBeInTheDocument();
+    expect(screen.getByText('100,000 < Token ≤ 10,000,000')).toBeInTheDocument();
+    expect(screen.getByText('10,000,000 < Token ≤ 100,000,000')).toBeInTheDocument();
+    expect(screen.getByText('> 100,000,000')).toBeInTheDocument();
+    expect(screen.getAllByText('¥1')).toHaveLength(2);
+    expect(screen.getAllByText('¥2')).toHaveLength(3);
+    expect(screen.getByText('¥3')).toBeInTheDocument();
+    expect(screen.getByText('¥4')).toBeInTheDocument();
+    expect(screen.getByText('¥6')).toBeInTheDocument();
+
+    const inputPrice = screen.getByText('form.input').parentElement?.querySelector('input');
+    const outputPrice = screen.getByText('form.output').parentElement?.querySelector('input');
+    const currencySelect = screen.getByText('form.currency').parentElement?.querySelector('select');
+    expect(inputPrice).toHaveAttribute('readonly');
+    expect(outputPrice).toHaveAttribute('readonly');
+    expect(currencySelect).toBeDisabled();
+  });
+
   it('shows and saves cache-read pricing in model details', async () => {
     const user = userEvent.setup();
     mocks.listDefinitions.mockResolvedValue({

@@ -424,6 +424,7 @@ async def list_model_definitions(
     provider: Optional[str] = Query(None, description="Filter by provider ID"),
     model_type: Optional[ModelType] = Query(None, description="Filter by model type"),
     enabled_only: bool = Query(False, description="Only return enabled models"),
+    refresh: bool = Query(False, description="Force refresh dynamic provider catalogs"),
 ) -> ModelDefinitionListResponse:
     """List model definitions with full metadata."""
     try:
@@ -435,7 +436,7 @@ async def list_model_definitions(
             await Provider.apply_config(config, provider_id=provider)
             connected = _connected_provider_ids()
             refresh_ids = [provider] if provider and provider in connected else list(connected)
-            await Provider.refresh_provider_models(refresh_ids)
+            await Provider.refresh_provider_models(refresh_ids, force=refresh)
         except Exception:
             pass
 

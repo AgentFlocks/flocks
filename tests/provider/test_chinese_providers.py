@@ -343,7 +343,6 @@ class TestCuratedCatalogModels:
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
             "testadd",
-            "gpt-4o",
         }
 
         assert models[0].id == "deepseek-v4-flash-0731"

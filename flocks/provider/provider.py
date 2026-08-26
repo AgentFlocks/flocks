@@ -741,6 +741,8 @@ class Provider:
     async def refresh_provider_models(
         cls,
         provider_ids: Optional[List[str]] = None,
+        *,
+        force: bool = False,
     ) -> None:
         """Refresh provider-owned dynamic model catalogs when supported.
 
@@ -763,7 +765,7 @@ class Provider:
             refresh = getattr(provider, "refresh_models", None) if provider else None
             if callable(refresh):
                 refresh_ids.append(pid)
-                refreshes.append(refresh())
+                refreshes.append(refresh(force=force))
 
         if not refreshes:
             return

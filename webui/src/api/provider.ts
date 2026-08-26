@@ -198,13 +198,14 @@ export const catalogAPI = {
 
 export const modelV2API = {
   /** List model definitions with full metadata */
-  listDefinitions: (options?: { provider?: string; enabled_only?: boolean }) =>
+  listDefinitions: (options?: { provider?: string; enabled_only?: boolean; refresh?: boolean }) =>
     client.get<{ models: ModelDefinitionV2[]; total: number }>(
       '/api/model/v2/definitions',
       {
         params: {
           ...(options?.provider ? { provider: options.provider } : {}),
           ...(options?.enabled_only ? { enabled_only: true } : {}),
+          ...(options?.refresh ? { refresh: true } : {}),
         },
       }
     ),

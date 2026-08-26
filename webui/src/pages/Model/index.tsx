@@ -86,6 +86,25 @@ function convertEditablePrice(
   return String(Number(converted.toFixed(precision)));
 }
 
+function pricingCurrencySymbol(currency: string): string {
+  if (currency === 'CNY') return '¥';
+  if (currency === 'USD') return '$';
+  return `${currency} `;
+}
+
+function formatTierTokenRange(
+  tiers: NonNullable<PriceConfigV2['price_tiers']>,
+  index: number,
+): string {
+  const previousMax = index === 0 ? null : tiers[index - 1]?.max_input_tokens;
+  const currentMax = tiers[index]?.max_input_tokens;
+  if (currentMax == null) {
+    return previousMax == null ? 'All' : `> ${previousMax.toLocaleString('en-US')}`;
+  }
+  if (previousMax == null) return `≤ ${currentMax.toLocaleString('en-US')}`;
+  return `${previousMax.toLocaleString('en-US')} < Token ≤ ${currentMax.toLocaleString('en-US')}`;
+}
+
 // ==================== Connection Cache ====================
 
 const CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache';
@@ -283,7 +302,7 @@ export default function ModelPage() {
 
     try {
       const modelsRes = await modelV2API
-        .listDefinitions({ provider: provider.id })
+        .listDefinitions({ provider: provider.id, refresh: true })
         .catch(() => ({ data: { models: [], total: 0 } }));
 
       if (providerLoadSeqRef.current !== requestSeq) return;
@@ -2874,6 +2893,9 @@ function ModelDetailSheet({
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
   const isPredefined = model.fetch_from === 'predefined';
   const visionToggleLocked = isPredefined && !allowsBuiltInVisionToggle(model.id);
+  const isRouterManagedPricing = provider.id === 'threatbook-cn-llm';
+  const priceTiers = model.pricing?.price_tiers ?? [];
+  const priceSymbol = pricingCurrencySymbol(model.pricing?.currency ?? 'USD');
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
@@ -3047,17 +3069,41 @@ function ModelDetailSheet({
               </div>
             </div>
 
-            {/* 价格 — 可编辑 */}
+            {/* Router prices are authoritative; other providers remain editable. */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
+              {isRouterManagedPricing && (
+                <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {t('form.routerPricingManaged')}
+                  {model.pricing?.price_version && (
+                    <span className="ml-2">
+                      {t('form.priceVersion')}: {model.pricing.price_version}
+                    </span>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
-                  <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={inputCls} />
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={inputPrice}
+                    readOnly={isRouterManagedPricing}
+                    onChange={e => setInputPrice(e.target.value)}
+                    className={isRouterManagedPricing ? inputClsReadOnly : inputCls}
+                  />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
-                  <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={inputCls} />
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={outputPrice}
+                    readOnly={isRouterManagedPricing}
+                    onChange={e => setOutputPrice(e.target.value)}
+                    className={isRouterManagedPricing ? inputClsReadOnly : inputCls}
+                  />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
@@ -3065,14 +3111,20 @@ function ModelDetailSheet({
                     type="number"
                     step="0.01"
                     value={cacheReadPrice}
+                    readOnly={isRouterManagedPricing}
                     onChange={e => setCacheReadPrice(e.target.value)}
-                    className={inputCls}
+                    className={isRouterManagedPricing ? inputClsReadOnly : inputCls}
                     placeholder="—"
                   />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
-                  <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={inputCls}>
+                  <select
+                    value={currency}
+                    disabled={isRouterManagedPricing}
+                    onChange={e => handleCurrencyChange(e.target.value)}
+                    className={isRouterManagedPricing ? inputClsReadOnly : inputCls}
+                  >
                     {currency !== 'USD' && currency !== 'CNY' && (
                       <option value={currency}>{currency}</option>
                     )}
@@ -3081,6 +3133,25 @@ function ModelDetailSheet({
                   </select>
                 </div>
               </div>
+              {priceTiers.length > 0 && (
+                <div className="mt-3 overflow-hidden rounded-lg border border-gray-200">
+                  <div className="grid grid-cols-3 bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">
+                    <span>{t('form.inputTokenRange')}</span>
+                    <span className="text-right">{t('form.inputUnitPrice')}</span>
+                    <span className="text-right">{t('form.outputUnitPrice')}</span>
+                  </div>
+                  {priceTiers.map((tier, index) => (
+                    <div
+                      key={`${tier.max_input_tokens ?? 'unlimited'}-${index}`}
+                      className="grid grid-cols-3 border-t border-gray-200 px-3 py-2 text-xs text-gray-700"
+                    >
+                      <span>{formatTierTokenRange(priceTiers, index)}</span>
+                      <span className="text-right font-medium">{priceSymbol}{tier.input_price}</span>
+                      <span className="text-right font-medium">{priceSymbol}{tier.output_price}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* 启用此模型 — 可编辑 */}

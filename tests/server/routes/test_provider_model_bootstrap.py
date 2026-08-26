@@ -8,13 +8,30 @@ from flocks.provider.model_catalog import (
     get_provider_model_definitions,
     sync_catalog_models_to_config,
 )
-from flocks.provider.provider import ModelInfo, ProviderConfig
+from flocks.provider.provider import ModelInfo, Provider, ProviderConfig
 from flocks.provider.sdk import threatbook
 from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
 from flocks.server.routes import provider as provider_routes
 
 
 class TestThreatBookProviderModelBootstrap:
+    @pytest.mark.asyncio
+    async def test_provider_refresh_forwards_force_to_dynamic_catalog(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = []
+
+        class DynamicProvider:
+            async def refresh_models(self, force: bool = False):
+                calls.append(force)
+
+        monkeypatch.setattr(Provider, "_initialized", True)
+        monkeypatch.setattr(Provider, "_providers", {"dynamic": DynamicProvider()})
+
+        await Provider.refresh_provider_models(["dynamic"], force=True)
+
+        assert calls == [True]
+
     @pytest.mark.asyncio
     async def test_router_refresh_discovers_models_and_uses_first_tier_price(
         self, monkeypatch: pytest.MonkeyPatch

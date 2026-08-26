@@ -410,33 +410,6 @@
           "currency": "CNY",
           "price_version": "2026081401"
         }
-      },
-      "gpt-4o": {
-        "name": "gpt-4o",
-        "family": "gpt-4o",
-        "capabilities": {
-          "supports_tools": true,
-          "supports_vision": true,
-          "thinking_level_map": {
-            "minimal": null,
-            "low": null,
-            "medium": null,
-            "high": null,
-            "xhigh": null,
-            "max": null
-          },
-          "supports_streaming": true
-        },
-        "limits": {
-          "context_window": 128000,
-          "max_output_tokens": 16384
-        },
-        "pricing": {
-          "input": 50.0,
-          "output": 60.0,
-          "currency": "CNY",
-          "price_version": "2026082501"
-        }
       }
     }
   },
