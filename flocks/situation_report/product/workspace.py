@@ -274,11 +274,13 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         heading for heading in _template_h2(template) if not any(heading in actual for actual in report_h2)
     ]
     missing_material_ids = [material_id for material_id in material_ids if material_id and material_id not in report]
-    leaked_internal_markers = sorted(
-        marker
-        for marker in ("generation_context_", "work/", "templates/snapshots/", "materials/snapshots/")
-        if marker in report
+    internal_markers = (
+        "generation_context_",
+        f"work/{generation_id}/report.md",
+        "templates/snapshots/",
+        "materials/snapshots/",
     )
+    leaked_internal_markers = sorted(marker for marker in internal_markers if marker in report)
     issues: list[dict[str, Any]] = []
     if len(h1_lines) != 1:
         issues.append({"code": "h1_count", "detail": f"Expected one H1, found {len(h1_lines)}"})

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -361,6 +362,68 @@ async def test_generate_uses_original_session_id_and_backend_latest(
 
 
 @pytest.mark.asyncio
+async def test_validator_only_rejects_the_actual_internal_candidate_path(
+    product_session: SessionInfo,
+    real_inputs: tuple[bytes, bytes, bytes],
+):
+    """A normal URL segment such as network/ is not an internal path leak."""
+    template, materials, _ = real_inputs
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/state/latest"):
+            return _state_response(
+                request,
+                report=_missing(),
+                template=_changed(version=1, content=template, url="/template-v1"),
+                materials=_changed(version=1, content=materials, url="/materials-v1"),
+            )
+        if request.url.path.endswith("/template/download"):
+            return _download_response(request, resource="template", version=1, content=template)
+        if request.url.path.endswith("/materials/download"):
+            return _download_response(request, resource="materials", version=1, content=materials)
+        return httpx.Response(404)
+
+    sync = BackendReportSynchronizer(lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    generation_id = "gen-validator-path"
+    await initialize_report_action(
+        session_id=product_session.id,
+        prompt=_prompt("generate", generation_id),
+        synchronizer=sync,
+    )
+
+    valid_with_network_url = (
+        _valid_report(template, materials)
+        + "\n\n参考链接：https://security.example/network/advisory\n"
+    )
+    initial_write = await write_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+        content=valid_with_network_url,
+    )
+    first_validation = await validate_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+    )
+    assert first_validation["status"] == "passed"
+
+    leaked_path = f"work/{generation_id}/report.md"
+    await write_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+        content=valid_with_network_url + f"\n内部路径：{leaked_path}\n",
+        expected_sha256=initial_write["sha256"],
+    )
+    second_validation = await validate_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+    )
+    assert second_validation["status"] == "needs_revision"
+    assert second_validation["issues"] == [
+        {"code": "internal_path_leakage", "markers": [leaked_path]}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_generate_allows_new_attempt_until_initial_report_is_published(
     product_session: SessionInfo,
     real_inputs: tuple[bytes, bytes, bytes],
@@ -623,6 +686,107 @@ async def test_a1_orchestrator_runs_preflight_publish_and_event_end_to_end(
     assert published_events.index(("message.part.updated", terminal_part_events[0])) < published_events.index(
         ("situation.report.status", terminal)
     )
+
+
+@pytest.mark.asyncio
+async def test_abort_stops_report_before_recovery_write_and_validation(
+    product_session: SessionInfo,
+    real_inputs: tuple[bytes, bytes, bytes],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The public Abort path must persist cancelled as the only terminal state."""
+    from flocks.server.routes import session as session_routes
+    from flocks.session.background_tasks import track_background_task
+
+    template, materials, _ = real_inputs
+    generation_id = "gen-aborted"
+    wire_text = build_report_prompt_text(
+        action=_action("generate", generation_id),
+        user_instruction="使用当前配置生成中文态势报告。",
+    )
+    parsed = parse_report_prompt_parts([{"type": "text", "text": wire_text}])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/state/latest"):
+            return _state_response(
+                request,
+                report=_missing(),
+                template=_changed(version=1, content=template, url="/template-abort"),
+                materials=_changed(version=1, content=materials, url="/materials-abort"),
+            )
+        if request.url.path.endswith("/template/download"):
+            return _download_response(request, resource="template", version=1, content=template)
+        if request.url.path.endswith("/materials/download"):
+            return _download_response(request, resource="materials", version=1, content=materials)
+        return httpx.Response(404)
+
+    sync = BackendReportSynchronizer(lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    published_events: list[tuple[str, dict]] = []
+    runner_started = asyncio.Event()
+    runner_stopped = asyncio.Event()
+
+    async def capture_event(event_type: str, properties: dict) -> None:
+        published_events.append((event_type, properties))
+
+    async def blocking_agent(*_args, **_kwargs) -> None:
+        runner_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            runner_stopped.set()
+
+    monkeypatch.setattr("flocks.situation_report.product.events.publish_event", capture_event)
+    monkeypatch.setattr("flocks.situation_report.product.orchestrator.publish_event", capture_event)
+    monkeypatch.setattr("flocks.server.routes.event.publish_event", capture_event)
+    monkeypatch.setattr(
+        "flocks.server.routes.question.reject_session_questions",
+        AsyncMock(return_value=0),
+    )
+
+    task = asyncio.create_task(
+        run_managed_report_turn(
+            session=product_session,
+            event=UserInputEvent(
+                source_type="webui",
+                sessionID=product_session.id,
+                text=wire_text,
+                parts=[{"type": "text", "text": wire_text}],
+                agent=PRODUCTION_AGENT,
+                metadata={},
+            ),
+            decision=ReportPolicyDecision(kind="execute", prompt=parsed),
+            working_directory=product_session.directory,
+            generic_runner=blocking_agent,
+            backend_synchronizer=sync,
+        )
+    )
+    track_background_task(task, session_id=product_session.id)
+    await asyncio.wait_for(runner_started.wait(), timeout=1)
+
+    assert await session_routes._abort_session_processing(product_session.id) is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    statuses = [
+        value
+        for event_type, value in published_events
+        if event_type == "situation.report.status"
+    ]
+    assert [value["status"] for value in statuses] == ["running", "running", "cancelled"]
+    assert [value["stage"] for value in statuses] == [
+        "downloading_resources",
+        "generating",
+        "generating",
+    ]
+    assert runner_stopped.is_set() is True
+    workspace = session_root(product_session.id)
+    assert not (workspace / "work" / generation_id / "report.md").exists()
+    assert not (workspace / "runs" / generation_id / "validation.json").exists()
+    assert json.loads((workspace / "output" / "status.json").read_text(encoding="utf-8"))["status"] == "cancelled"
+    terminal = statuses[-1]
+    result_message = await Message.get_with_parts(product_session.id, terminal["messageID"])
+    assert result_message is not None
+    assert result_message.parts[0].metadata["situationReport"]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

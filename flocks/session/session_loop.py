@@ -2019,7 +2019,15 @@ class SessionLoop:
             try:
                 step_result = await step_task
             except asyncio.CancelledError:
-                log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
+                owner_task = asyncio.current_task()
+                owner_cancelled = bool(owner_task and owner_task.cancelling())
+                log.info("loop.step_cancelled", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "owner_task_cancelled": owner_cancelled,
+                })
+                if owner_cancelled:
+                    raise
                 break
             finally:
                 ctx._current_step_task = None

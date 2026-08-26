@@ -2599,6 +2599,59 @@ class TestSessionUtilities:
         assert resp.status_code == status.HTTP_200_OK
 
     @pytest.mark.asyncio
+    async def test_abort_cancels_route_owned_session_background_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Abort must join prompt_async work tracked outside SessionLoop."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.background_tasks import has_pending_session_tasks
+
+        session_id = "ses_abort_route_background"
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def background_work() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        monkeypatch.setattr(
+            "flocks.server.routes.question.reject_session_questions",
+            AsyncMock(return_value=0),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            AsyncMock(),
+        )
+
+        session_routes._set_prompt_chain_active(session_id, True)
+        session_routes._schedule_background_coro(
+            background_work(),
+            session_id=session_id,
+            action="test.abort.route_background",
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert has_pending_session_tasks(session_id) is True
+
+        try:
+            assert await session_routes._abort_session_processing(session_id) is True
+            assert stopped.is_set() is True
+            assert has_pending_session_tasks(session_id) is False
+            assert session_routes._is_prompt_chain_active(session_id) is False
+        finally:
+            session_routes._set_prompt_chain_active(session_id, False)
+            for task in list(session_routes.router._pending_tasks):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *list(session_routes.router._pending_tasks),
+                return_exceptions=True,
+            )
+
+    @pytest.mark.asyncio
     async def test_session_statistics(self, client: AsyncClient, session_id: str):
         """GET /api/session/{id}/statistics reports stored session messages."""
         payload = {

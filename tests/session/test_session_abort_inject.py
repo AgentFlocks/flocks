@@ -197,6 +197,43 @@ class TestSessionLoopAbort:
             # Clean up
             SessionLoop._active_loops.pop("test_loop_abort", None)
 
+    @pytest.mark.asyncio
+    async def test_external_task_cancellation_is_not_swallowed_by_step_loop(self):
+        """Cancelling the owner task must propagate past the step boundary."""
+        session_info = _make_session_info("test_loop_owner_cancel")
+        session_info.memory_enabled = False
+        ctx = LoopContext(
+            session=session_info,
+            provider_id="test",
+            model_id="test",
+            agent_name="rex",
+        )
+        user = SimpleNamespace(id="msg_001", role="user", finish=None)
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=[user]))
+        step_started = asyncio.Event()
+
+        async def blocking_step(*_args, **_kwargs):
+            step_started.set()
+            await asyncio.Event().wait()
+
+        with patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch.object(
+            SessionLoop,
+            "_prepare_auto_turn",
+            AsyncMock(return_value=False),
+        ), patch.object(
+            SessionLoop,
+            "_process_step_with_failover",
+            side_effect=blocking_step,
+        ):
+            owner = asyncio.create_task(SessionLoop._run_loop(ctx, LoopCallbacks()))
+            await asyncio.wait_for(step_started.wait(), timeout=1)
+            owner.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner
+
     def test_is_running(self):
         """is_running should reflect _active_loops state."""
         assert SessionLoop.is_running("not_there") is False

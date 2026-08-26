@@ -28,6 +28,7 @@ from flocks.session.context_usage import (
     token_usage_to_dict,
 )
 from flocks.session.background_tasks import (
+    cancel_session_background_tasks,
     has_pending_session_tasks,
     pending_background_tasks,
     track_background_task,
@@ -1841,6 +1842,13 @@ async def _abort_session_processing(sessionID: str) -> bool:
     # Also cancel through the runner's own path (sets status to idle)
     SessionRunner.cancel(sessionID)
 
+    # prompt_async/report orchestration is owned by the route layer rather
+    # than SessionLoop.  Cancel and join it before any later await gives a
+    # stopped loop a chance to enter recovery or finalization.
+    route_tasks_cancelled = has_pending_session_tasks(sessionID)
+    await cancel_session_background_tasks(sessionID)
+    _set_prompt_chain_active(sessionID, False)
+
     # Unblock any pending Question tool waiting for user input
     questions_rejected = await reject_session_questions(sessionID)
 
@@ -1863,6 +1871,7 @@ async def _abort_session_processing(sessionID: str) -> bool:
         "children_loops_aborted": children_loops_aborted,
         "children_runners_cancelled": children_runners_cancelled,
         "bg_tasks_cancelled": bg_cancelled,
+        "route_tasks_cancelled": route_tasks_cancelled,
     })
 
     # Publish SSE event so frontend knows execution stopped
