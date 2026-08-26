@@ -18,8 +18,8 @@ steps: 50
 options:
   strict_tools: true
 model:
-  provider_id: anthropic
-  model_id: claude-opus-4-8
+  provider_id: threatbook-cn-llm
+  model_id: bailian:deepseek-v4-pro
 tools:
   - skill_load
   - situation_product_context_read
