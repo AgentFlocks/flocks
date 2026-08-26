@@ -21,6 +21,15 @@ OPEN_QUESTION_CATEGORIES = {
 COVERAGE_POLICIES = {"evidence_backed_partial", "exhaustive"}
 COVERAGE_CLAIMS = {"analyzed", "failed", "not_applicable"}
 TERMINAL_COVERAGE_STATES = {"read_complete", "failed", "not_applicable"}
+COVERAGE_STATE_STRENGTH = {
+    "unexamined": 0,
+    "failed": 1,
+    "inventoried": 2,
+    "located": 3,
+    "read_partial": 4,
+    "not_applicable": 5,
+    "read_complete": 6,
+}
 
 
 class CoverageSubmissionError(ValueError):
@@ -34,6 +43,157 @@ class CoverageSubmissionError(ValueError):
         super().__init__(message)
         self.code = code
         self.violations = violations
+
+
+class CoverageBlockedError(ValueError):
+    def __init__(self, summary: dict[str, Any]) -> None:
+        super().__init__("coverage_blocked: exhaustive coverage policy has active gaps")
+        self.code = "coverage_blocked"
+        self.summary = summary
+
+
+def merge_analysis_coverage(
+    attestations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Merge analysis attestations by strongest per-path state with stable output."""
+    ordered = sorted(
+        attestations,
+        key=lambda item: (
+            str(item.get("work_unit_id") or ""),
+            str(item.get("created_at") or ""),
+            str(item.get("attestation_id") or ""),
+        ),
+    )
+    selected: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+    for attestation in ordered:
+        role_priority = 1 if attestation.get("role") == "investigator" else 0
+        for record in attestation.get("records", []):
+            if not isinstance(record, dict):
+                continue
+            path = record.get("relative_path")
+            state = record.get("state")
+            if not isinstance(path, str) or state not in COVERAGE_STATE_STRENGTH:
+                continue
+            candidate = dict(record)
+            key = (
+                COVERAGE_STATE_STRENGTH[state],
+                role_priority,
+                str(attestation.get("created_at") or ""),
+                str(attestation.get("attestation_id") or ""),
+                json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            )
+            current = selected.get(path)
+            if current is None or key > current[0]:
+                selected[path] = (key, candidate)
+
+    records = [selected[path][1] for path in sorted(selected)]
+    investigator_states: dict[str, str] = {}
+    investigator_blocking_path_sets: list[set[str]] = []
+    for item in ordered:
+        if item.get("role") != "investigator":
+            continue
+        for record in item.get("records", []):
+            if not isinstance(record, dict):
+                continue
+            path = record.get("relative_path")
+            state = record.get("state")
+            if not isinstance(path, str) or state not in COVERAGE_STATE_STRENGTH:
+                continue
+            current = investigator_states.get(path)
+            if (
+                current is None
+                or COVERAGE_STATE_STRENGTH[state] > COVERAGE_STATE_STRENGTH[current]
+            ):
+                investigator_states[path] = state
+        for question in item.get("open_questions", []):
+            if not isinstance(question, dict) or question.get("blocking") is not True:
+                continue
+            related_paths = {
+                path
+                for path in question.get("related_paths", [])
+                if isinstance(path, str)
+            }
+            if related_paths:
+                investigator_blocking_path_sets.append(related_paths)
+
+    resolved_states = {"read_complete", "not_applicable"}
+    questions: list[dict[str, Any]] = []
+    for attestation in ordered:
+        for question in attestation.get("open_questions", []):
+            if not isinstance(question, dict):
+                continue
+            related_paths = sorted(
+                {
+                    str(path)
+                    for path in question.get("related_paths", [])
+                    if isinstance(path, str)
+                }
+            )
+            related_path_set = set(related_paths)
+            investigator_resolved = bool(related_paths) and all(
+                investigator_states.get(path) in resolved_states
+                for path in related_paths
+            )
+            investigator_resubmitted = any(
+                related_path_set <= investigator_paths
+                for investigator_paths in investigator_blocking_path_sets
+            )
+            investigator_replaced = (
+                attestation.get("role") == "baseline"
+                and attestation.get("phase", "baseline") == "baseline"
+                and question.get("blocking") is True
+                and bool(related_paths)
+                and all(path in investigator_states for path in related_paths)
+                and (investigator_resolved or investigator_resubmitted)
+            )
+            if not investigator_replaced:
+                questions.append({**question, "related_paths": related_paths})
+
+    def question_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            str(item.get("category") or ""),
+            str(item.get("question") or ""),
+            bool(item.get("blocking")),
+            tuple(item.get("related_paths", [])),
+            str(item.get("follow_up") or ""),
+        )
+
+    questions = sorted(
+        {question_key(item): item for item in questions}.values(),
+        key=question_key,
+    )
+    policies = {
+        str(item.get("policy"))
+        for item in ordered
+        if item.get("policy") in COVERAGE_POLICIES
+    }
+    policy = "exhaustive" if "exhaustive" in policies else "evidence_backed_partial"
+    active_gap_count = sum(
+        item["state"] not in {"read_complete", "not_applicable"}
+        for item in records
+    )
+    has_blocking_question = any(item.get("blocking") is True for item in questions)
+    if ordered and active_gap_count == 0 and not has_blocking_question:
+        completeness = "complete"
+    elif policy == "exhaustive":
+        completeness = "blocked"
+    else:
+        completeness = "partial"
+    return {
+        "policy": policy,
+        "completeness": completeness,
+        "counts": {
+            "assigned": len(records),
+            "read_complete": sum(item["state"] == "read_complete" for item in records),
+            "failed": sum(item["state"] == "failed" for item in records),
+            "unexamined": sum(
+                item["state"] not in TERMINAL_COVERAGE_STATES for item in records
+            ),
+            "active_gaps": active_gap_count,
+        },
+        "records": records,
+        "open_questions": questions,
+    }
 
 
 def normalize_open_questions(raw_items: Any) -> list[dict[str, Any]]:
@@ -345,18 +505,15 @@ class CoverageAttestationService:
             disposition = claims.get(omission.relative_path)
             state = "failed"
             reason = f"snapshot_omission:{omission.reason}"
-            if disposition is not None and disposition["claim"] == "analyzed":
+            if disposition is not None and disposition["claim"] != "failed":
                 overclaims.append(
                     {
                         "path": omission.relative_path,
-                        "claimed_state": "analyzed",
+                        "claimed_state": disposition["claim"],
                         "actual_state": "failed",
-                        "required_receipt": "read_complete",
+                        "required_receipt": "host_determined_snapshot_omission",
                     }
                 )
-            elif disposition is not None:
-                state = disposition["claim"]
-                reason = disposition["reason"]
             records.append(
                 CoverageRecord(
                     relative_path=omission.relative_path,
@@ -383,7 +540,7 @@ class CoverageAttestationService:
             item.state not in TERMINAL_COVERAGE_STATES for item in records
         )
         has_blocking_question = any(item["blocking"] for item in questions)
-        if unexamined_count == 0 and not has_blocking_question:
+        if unexamined_count == 0 and failed_count == 0 and not has_blocking_question:
             completeness = "complete"
         elif policy == "exhaustive":
             completeness = "blocked"

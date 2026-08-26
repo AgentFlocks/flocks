@@ -27,6 +27,7 @@ from flocks.tool.registry import (
 from flocks_code_security.contract import SLUG_RE
 from flocks_code_security.coverage import (
     CoverageAttestationService,
+    CoverageBlockedError,
     CoverageSubmissionError,
     normalize_open_questions,
     public_open_question,
@@ -40,7 +41,10 @@ from flocks_code_security.execution import (
 )
 from flocks_code_security.models import SessionBinding
 from flocks_code_security.orchestration import (
+    FollowUpPlanningError,
     baseline_prompt,
+    build_follow_up_unit,
+    investigator_prompt,
     plan_baseline_units,
     plan_probe_units,
     plan_threat_model_units,
@@ -58,6 +62,7 @@ ROLE_AGENTS = {
     "coordinator": "code-security",
     "threat_modeler": "code-security-threat-modeler",
     "baseline": "code-security-baseline",
+    "investigator": "code-security-investigator",
     "verifier": "code-security-verifier",
     "prober": "code-security-prober",
 }
@@ -94,8 +99,8 @@ def _ruleset_digest() -> str:
 RULESET_DIGEST = _ruleset_digest()
 COORDINATOR_ROLE = {"coordinator"}
 THREAT_MODELER_ROLE = {"threat_modeler"}
-SOURCE_SUBMIT_ROLES = {"baseline"}
-THREAT_MODEL_CONSUMER_ROLES = {"baseline"}
+SOURCE_SUBMIT_ROLES = {"baseline", "investigator"}
+THREAT_MODEL_CONSUMER_ROLES = {"baseline", "investigator"}
 VERIFIER_ROLE = {"verifier"}
 PROBER_ROLE = {"prober"}
 KNOWLEDGE_BASE_ROLES = COORDINATOR_ROLE | THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES
@@ -147,6 +152,18 @@ def _error(error: Exception | str, *, title: str) -> ToolResult:
             "error_code": error.code,
             "retryable": False,
             "binding_state": "terminated",
+        }
+        return ToolResult(
+            success=False,
+            output=details,
+            error=str(error),
+            metadata=details,
+            title=title,
+        )
+    if isinstance(error, FollowUpPlanningError):
+        details = {
+            "error_code": error.code,
+            "retryable": False,
         }
         return ToolResult(
             success=False,
@@ -1173,6 +1190,25 @@ async def audit_finalize(ctx: ToolContext, scan_id: str) -> ToolResult:
         await asyncio.to_thread(get_runtime().store.ensure_ready_to_finalize, scan_id)
         output = await asyncio.to_thread(ReportWriter(get_runtime().store).write, scan_id)
         return ToolResult(success=True, output=output, title=f"Finalized audit {scan_id}")
+    except CoverageBlockedError as exc:
+        await asyncio.to_thread(
+            get_runtime().store.mark_scan_terminal,
+            scan_id,
+            "failed",
+            failure_code=exc.code,
+            failure_summary=str(exc),
+        )
+        return ToolResult(
+            success=True,
+            output={
+                "scan_id": scan_id,
+                "status": "failed",
+                "failure_code": exc.code,
+                "coverage_completeness": "blocked",
+                "coverage": exc.summary,
+            },
+            title=f"Coverage blocked audit {scan_id}",
+        )
     except STORE_ERRORS as exc:
         return _error(exc, title="Audit finalization failed")
 
@@ -1205,6 +1241,14 @@ async def audit_cancel(ctx: ToolContext, scan_id: str) -> ToolResult:
         return _error(exc, title="Audit cancellation failed")
 
 
+def _baseline_attestation(store: Any, scan_id: str) -> dict[str, Any]:
+    for attestation in store.list_latest_coverage(scan_id):
+        unit = store.get_work_unit(attestation["work_unit_id"])
+        if unit is not None and unit["phase"] == "baseline" and unit["role"] == "baseline":
+            return attestation
+    raise ValueError("A baseline coverage attestation is required for investigation")
+
+
 async def audit_run_workers(
     ctx: ToolContext,
     scan_id: str,
@@ -1232,6 +1276,21 @@ async def audit_run_workers(
                 include_paths=snapshot.include_paths,
             )
             candidates_by_id: dict[str, dict[str, Any]] = {}
+        elif phase == "investigation":
+            manifest = await asyncio.to_thread(
+                runtime.manifests.get_or_build,
+                binding.snapshot_id,
+            )
+            baseline_attestation = await asyncio.to_thread(
+                _baseline_attestation,
+                runtime.store,
+                scan_id,
+            )
+            follow_up = build_follow_up_unit(baseline_attestation, manifest)
+            if follow_up is None:
+                raise ValueError("No valid coverage-blocking follow-up is available")
+            units = [follow_up]
+            candidates_by_id = {}
         elif phase == "verification":
             candidates = await asyncio.to_thread(
                 runtime.store.list_unverified_candidates,
@@ -1277,6 +1336,9 @@ async def audit_run_workers(
             phase=phase,
             units=units,
         )
+        for created, planned in zip(batch["units"], units, strict=True):
+            if planned.get("open_questions") is not None:
+                created["open_questions"] = planned["open_questions"]
         launched = 0
         launch_failures = 0
         LAUNCHING_BATCH_IDS.add(batch["batch_id"])
@@ -1291,6 +1353,7 @@ async def audit_run_workers(
                         phase,
                         unit,
                         candidate=candidate,
+                        open_questions=unit.get("open_questions"),
                     )
                     launched += 1
                 except Exception:
@@ -1327,7 +1390,7 @@ async def audit_run_workers(
             title=f"Launched {phase} audit workers",
             metadata={"scan_id": scan_id, "batch_id": batch["batch_id"]},
         )
-    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+    except (FollowUpPlanningError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
         return _error(exc, title="Worker launch failed")
 
 
@@ -1378,6 +1441,7 @@ async def _launch_worker(
     unit: dict[str, Any],
     *,
     candidate: dict[str, Any] | None,
+    open_questions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from flocks.session.message import Message, MessageRole
     from flocks.session.session import Session
@@ -1483,6 +1547,13 @@ async def _launch_worker(
             paths=unit["paths"],
             knowledge_base_present=knowledge_base_present,
         )
+    elif phase == "investigation":
+        prompt = investigator_prompt(
+            snapshot_id=snapshot_id,
+            paths=unit["paths"],
+            open_questions=open_questions or [],
+            knowledge_base_present=knowledge_base_present,
+        )
     elif phase == "targeted_rescan":
         prompt = targeted_rescan_prompt(
             snapshot_id=snapshot_id,
@@ -1566,7 +1637,10 @@ async def _launch_worker(
 async def _resume_worker_attempt(
     ctx: ToolContext,
     unit: dict[str, Any],
+    *,
+    coverage_only: bool = False,
 ) -> None:
+    from flocks.session.message import Message, MessageRole
     from flocks.session.session import Session
 
     runtime = get_runtime()
@@ -1593,6 +1667,20 @@ async def _resume_worker_attempt(
         model_id=unit.get("model_id"),
         toolset_digest_value=unit.get("toolset_digest"),
     )
+    if coverage_only:
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content=(
+                "Recovery continuation: persisted source access or candidates exist, but "
+                "this attempt has no valid coverage attestation. Do not restart or broaden "
+                "the audit. If this is a guided audit and the knowledge base has not yet "
+                "been consumed, call audit_knowledge_base exactly once. Then submit the "
+                "honest current complete, partial, or blocked coverage facts with "
+                "audit_submit_coverage."
+            ),
+            agent=unit["agent_name"],
+        )
     attempt = await asyncio.to_thread(
         runtime.store.prepare_work_attempt_resume,
         attempt_id,
@@ -1676,6 +1764,19 @@ async def _start_fresh_worker_attempt(
     scan = await asyncio.to_thread(runtime.store.get_scan, batch["scan_id"])
     if scan is None:
         raise ValueError("Scan not found")
+    open_questions = None
+    if batch["phase"] == "investigation":
+        manifest = await asyncio.to_thread(
+            runtime.manifests.get_or_build,
+            scan["snapshot_id"],
+        )
+        follow_up = build_follow_up_unit(
+            _baseline_attestation(runtime.store, batch["scan_id"]),
+            manifest,
+        )
+        if follow_up is None or follow_up["paths"] != unit["paths"]:
+            raise ValueError("Focused investigation scope no longer matches baseline facts")
+        open_questions = follow_up["open_questions"]
     attempt = await _launch_worker(
         ctx,
         batch["scan_id"],
@@ -1683,6 +1784,7 @@ async def _start_fresh_worker_attempt(
         batch["phase"],
         unit,
         candidate=candidate,
+        open_questions=open_questions,
     )
     await asyncio.to_thread(
         runtime.store.append_scan_event,
@@ -1729,7 +1831,51 @@ async def _refresh_worker_batch(
         if task is None:
             if batch_id in LAUNCHING_BATCH_IDS and not task_id:
                 continue
-            if ctx is not None and unit.get("attempt_id") is not None:
+            facts_complete = await asyncio.to_thread(
+                runtime.store.work_unit_has_required_facts,
+                unit["work_unit_id"],
+                role=unit["role"],
+            )
+            if facts_complete:
+                await asyncio.to_thread(
+                    runtime.store.finish_work_attempt,
+                    unit.get("attempt_id"),
+                    status="completed",
+                )
+                continue
+            analysis_progress = (
+                unit["role"] in {"baseline", "investigator"}
+                and isinstance(unit.get("attempt_id"), str)
+                and await asyncio.to_thread(
+                    runtime.store.work_attempt_has_analysis_progress,
+                    unit["attempt_id"],
+                )
+            )
+            if analysis_progress:
+                if (
+                    ctx is not None
+                    and int(unit.get("resume_count") or 0) < MAX_SAME_SESSION_RESUMES
+                ):
+                    try:
+                        await _resume_worker_attempt(ctx, unit, coverage_only=True)
+                        continue
+                    except ExecutionCapsuleError:
+                        continue
+                    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                        pass
+                await asyncio.to_thread(
+                    runtime.store.finish_work_attempt,
+                    unit.get("attempt_id"),
+                    status="failed",
+                    failure_class="coverage_attestation_missing",
+                    work_unit_status="failed",
+                )
+                continue
+            if (
+                unit["role"] not in {"baseline", "investigator"}
+                and ctx is not None
+                and unit.get("attempt_id") is not None
+            ):
                 try:
                     await _resume_worker_attempt(ctx, unit)
                     continue
@@ -1812,6 +1958,34 @@ async def _refresh_worker_batch(
                 runtime.store.finish_work_attempt,
                 unit.get("attempt_id"),
                 status="completed",
+            )
+            continue
+        analysis_progress = (
+            unit["role"] in {"baseline", "investigator"}
+            and isinstance(unit.get("attempt_id"), str)
+            and await asyncio.to_thread(
+                runtime.store.work_attempt_has_analysis_progress,
+                unit["attempt_id"],
+            )
+        )
+        if analysis_progress:
+            if (
+                ctx is not None
+                and int(unit.get("resume_count") or 0) < MAX_SAME_SESSION_RESUMES
+            ):
+                try:
+                    await _resume_worker_attempt(ctx, unit, coverage_only=True)
+                    continue
+                except ExecutionCapsuleError:
+                    continue
+                except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                    pass
+            await asyncio.to_thread(
+                runtime.store.finish_work_attempt,
+                unit.get("attempt_id"),
+                status="failed",
+                failure_class="coverage_attestation_missing",
+                work_unit_status="failed",
             )
             continue
         failure_class = failure_class or classify_execution_failure(
@@ -2587,7 +2761,7 @@ def register_tools() -> None:
         _register(name, description, handler, [_parameter("scan_id", ParameterType.STRING, "Bound scan identifier.")])
     _register(
         "audit_run_workers",
-        "Create and launch isolated standard-audit workers, including the one allowed parent-directed targeted rescan.",
+        "Create and launch isolated standard-audit workers, including at most one focused investigation and one allowed parent-directed targeted rescan.",
         audit_run_workers,
         [
             _parameter("scan_id", ParameterType.STRING, "Bound scan identifier."),
@@ -2600,6 +2774,7 @@ def register_tools() -> None:
                 enum=[
                     "threat_modeling",
                     "baseline",
+                    "investigation",
                     "verification",
                     "probing",
                     "targeted_rescan",

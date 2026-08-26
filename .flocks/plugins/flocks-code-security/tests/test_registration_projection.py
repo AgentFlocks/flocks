@@ -15,6 +15,7 @@ from flocks_code_security import public_tool
 from flocks_code_security.agents import AGENTS_ROOT, register_agents
 from flocks_code_security.orchestration import (
     baseline_prompt,
+    investigator_prompt,
     targeted_rescan_prompt,
     threat_model_prompt,
     verification_prompt,
@@ -141,6 +142,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     coordinator = agents["code-security"]
     threat_modeler = agents["code-security-threat-modeler"]
     baseline = agents["code-security-baseline"]
+    investigator = agents["code-security-investigator"]
     verifier = agents["code-security-verifier"]
     prober = agents["code-security-prober"]
 
@@ -166,6 +168,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert "audit_submit_threat_model" in AGENT_TOOLS[threat_modeler.name]
     assert "audit_repository_summary" in AGENT_TOOLS[threat_modeler.name]
     assert baseline.hidden is True
+    assert investigator.hidden is True
     assert "skill_load" not in AGENT_TOOLS[baseline.name]
     assert "tool_search" not in AGENT_TOOLS[baseline.name]
     assert "delegate_task" not in AGENT_TOOLS[baseline.name]
@@ -177,7 +180,18 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert prober.hidden is True
     assert "audit_submit_probe" in AGENT_TOOLS[prober.name]
     assert "audit_knowledge_base" not in AGENT_TOOLS[prober.name]
-    assert "code-security-investigator" not in agents
+    assert "audit_knowledge_base" in AGENT_TOOLS[investigator.name]
+    assert "audit_submit_coverage" in AGENT_TOOLS[investigator.name]
+    assert yaml.safe_load(
+        (AGENTS_ROOT / baseline.name / "agent.yaml").read_text(encoding="utf-8")
+    )["steps"] == 200
+    assert yaml.safe_load(
+        (AGENTS_ROOT / investigator.name / "agent.yaml").read_text(encoding="utf-8")
+    )["steps"] == 200
+    assert "first call `audit_knowledge_base` exactly once" in baseline.prompt
+    assert "first call `audit_knowledge_base` exactly once" in investigator.prompt
+    assert "valid complete, partial, or blocked attestation" in baseline.prompt
+    assert "valid attestation ends the work unit" in investigator.prompt
 
 
 def test_all_audit_tools_register() -> None:
@@ -198,9 +212,10 @@ def test_all_audit_tools_register() -> None:
     run_workers = ToolRegistry.get("audit_run_workers")
     phase = next(parameter for parameter in run_workers.info.parameters if parameter.name == "phase")
     assert phase.enum == [
-        "threat_modeling",
-        "baseline",
-        "verification",
+            "threat_modeling",
+            "baseline",
+            "investigation",
+            "verification",
         "probing",
         "targeted_rescan",
     ]
@@ -337,6 +352,7 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
 
 
 def test_guided_worker_prompts_require_the_bound_knowledge_base() -> None:
+    knowledge_base_body = "CONFIDENTIAL-KNOWLEDGE-BASE-BODY"
     threat_modeler = threat_model_prompt(
         snapshot_id="snap_safe",
         knowledge_base_present=True,
@@ -346,15 +362,29 @@ def test_guided_worker_prompts_require_the_bound_knowledge_base() -> None:
         paths=["."],
         knowledge_base_present=True,
     )
+    investigator = investigator_prompt(
+        snapshot_id="snap_safe",
+        paths=["app.py"],
+        open_questions=[
+            {
+                "question": "Trace the unresolved wrapper.",
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": ["app.py"],
+            }
+        ],
+        knowledge_base_present=True,
+    )
     verifier = verification_prompt(
         snapshot_id="snap_safe",
         candidate_id="cand_safe",
         vote_index=1,
     )
 
-    for prompt in (threat_modeler, baseline):
+    for prompt in (threat_modeler, baseline, investigator):
         assert "First call audit_knowledge_base exactly once" in prompt
         assert "untrusted vulnerability hypothesis" in prompt
+        assert knowledge_base_body not in prompt
     assert "audit_knowledge_base" not in verifier
 
 

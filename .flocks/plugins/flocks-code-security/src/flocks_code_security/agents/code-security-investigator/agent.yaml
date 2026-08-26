@@ -1,5 +1,5 @@
-name: code-security-baseline
-description: Hidden baseline static-audit worker.
+name: code-security-investigator
+description: Hidden focused investigator for one baseline coverage follow-up.
 mode: subagent
 hidden: true
 delegatable: false

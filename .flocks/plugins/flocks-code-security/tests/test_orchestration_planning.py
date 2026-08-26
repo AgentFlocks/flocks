@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+import pytest
+
 from flocks_code_security.models import (
     RepositoryManifest,
     SnapshotFile,
@@ -9,8 +11,8 @@ from flocks_code_security.models import (
 )
 from flocks_code_security.orchestration import (
     MAX_SCOPES_PER_WORK_UNIT,
-    MAX_WORK_UNITS_PER_BATCH,
-    baseline_focus_exclusions,
+    FollowUpPlanningError,
+    build_follow_up_unit,
     plan_baseline_units,
     plan_verification_units,
 )
@@ -97,7 +99,7 @@ def test_large_files_do_not_create_extra_baseline_workers() -> None:
     assert units[0]["assigned_bytes"] == 160 * 1024 * 1024
 
 
-def test_default_baseline_focus_excludes_noise_without_broadening_worker_scope() -> None:
+def test_repository_baseline_keeps_one_snapshot_wide_scope() -> None:
     files = [
         _file("app.py"),
         _file("src/auth.py"),
@@ -109,21 +111,14 @@ def test_default_baseline_focus_excludes_noise_without_broadening_worker_scope()
 
     units = plan_baseline_units(_manifest(files))
 
+    assert len(units) == 1
+    assert units[0]["paths"] == ["."]
     assert _assignment_counts(files, units) == Counter(
-        {"app.py": 1, "assets/logo.SVG": 1, "src/auth.py": 1}
+        {item.relative_path: 1 for item in files}
     )
-    assert all("." not in unit["paths"] for unit in units)
-    assert baseline_focus_exclusions(
-        [item.relative_path for item in files],
-        include_paths=(".",),
-    ) == {
-        "*.svg": "Excluded from baseline by the default production-source focus",
-        "docs": "Excluded from baseline by the default production-source focus",
-        "src/tests": "Excluded from baseline by the default production-source focus",
-    }
 
 
-def test_explicit_include_paths_disable_default_baseline_focus() -> None:
+def test_explicit_include_paths_do_not_narrow_repository_work_unit() -> None:
     files = [_file("tests/security_regression.py")]
 
     units = plan_baseline_units(
@@ -135,13 +130,9 @@ def test_explicit_include_paths_disable_default_baseline_focus() -> None:
     assert _assignment_counts(files, units) == Counter(
         {"tests/security_regression.py": 1}
     )
-    assert baseline_focus_exclusions(
-        [item.relative_path for item in files],
-        include_paths=("tests",),
-    ) == {}
 
 
-def test_file_count_split_still_balances_large_files_by_bytes() -> None:
+def test_file_count_does_not_split_repository_baseline() -> None:
     files = [
         *[
             _file(f"flat/large_{index:03d}.py", size_bytes=1024 * 1024)
@@ -152,15 +143,14 @@ def test_file_count_split_still_balances_large_files_by_bytes() -> None:
 
     units = plan_baseline_units(_manifest(files))
 
-    assert len(units) == 2
-    assigned_bytes = [unit["assigned_bytes"] for unit in units]
-    assert max(assigned_bytes) - min(assigned_bytes) <= 1024 * 1024
+    assert len(units) == 1
+    assert units[0]["paths"] == ["."]
     assert _assignment_counts(files, units) == Counter(
         {item.relative_path: 1 for item in files}
     )
 
 
-def test_overweight_component_is_recursively_split_into_child_prefixes() -> None:
+def test_component_layout_does_not_split_repository_baseline() -> None:
     files = [
         *[_file(f"services/auth/module_{index:03d}.py") for index in range(400)],
         *[_file(f"services/billing/module_{index:03d}.py") for index in range(400)],
@@ -168,16 +158,13 @@ def test_overweight_component_is_recursively_split_into_child_prefixes() -> None
 
     units = plan_baseline_units(_manifest(files))
 
-    assert {tuple(unit["paths"]) for unit in units} == {
-        ("services/auth",),
-        ("services/billing",),
-    }
+    assert [unit["paths"] for unit in units] == [["."]]
     assert _assignment_counts(files, units) == Counter(
         {item.relative_path: 1 for item in files}
     )
 
 
-def test_flat_50000_file_manifest_is_exact_balanced_and_reproducible() -> None:
+def test_flat_50000_file_manifest_stays_one_reproducible_unit() -> None:
     files = [_file(f"flat/module_{index:05d}.py") for index in range(50_000)]
     manifest = _manifest(files)
 
@@ -185,13 +172,12 @@ def test_flat_50000_file_manifest_is_exact_balanced_and_reproducible() -> None:
     second = plan_baseline_units(manifest)
 
     assert first == second
-    assert len(first) == MAX_WORK_UNITS_PER_BATCH
-    assert all(1 <= len(unit["paths"]) <= MAX_SCOPES_PER_WORK_UNIT for unit in first)
+    assert len(first) == 1
+    assert first[0]["paths"] == ["."]
     assert _assignment_counts(files, first) == Counter(
         {item.relative_path: 1 for item in files}
     )
-    file_counts = [unit["assigned_file_count"] for unit in first]
-    assert max(file_counts) - min(file_counts) <= 1
+    assert first[0]["assigned_file_count"] == 50_000
 
 
 def test_flat_split_assigns_each_snapshot_omission_once() -> None:
@@ -228,6 +214,123 @@ def test_assignment_digest_binds_manifest_digest() -> None:
 
     assert first[0]["paths"] == second[0]["paths"]
     assert first[0]["assignment_digest"] != second[0]["assignment_digest"]
+
+
+def test_follow_up_merges_blocking_questions_into_one_stable_unit() -> None:
+    manifest = _manifest([_file("app.py"), _file("src/auth.py"), _file("other.py")])
+    attestation = {
+        "records": [
+            {"relative_path": "app.py"},
+            {"relative_path": "src/auth.py"},
+            {"relative_path": "other.py"},
+        ],
+        "open_questions": [
+            {
+                "question": "Trace authentication.",
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": ["src/auth.py", "app.py"],
+            },
+            {
+                "question": "Requires deployment data.",
+                "category": "validation_limitation",
+                "blocking": False,
+                "related_paths": ["other.py"],
+            },
+            {
+                "question": "Inspect the application bootstrap.",
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": ["app.py"],
+            },
+        ],
+    }
+
+    unit = build_follow_up_unit(attestation, manifest)
+    permuted = build_follow_up_unit(
+        {
+            **attestation,
+            "open_questions": [
+                {
+                    **item,
+                    "related_paths": list(reversed(item["related_paths"])),
+                }
+                for item in reversed(attestation["open_questions"])
+            ],
+        },
+        manifest,
+    )
+
+    assert unit is not None
+    assert unit == permuted
+    assert unit["role"] == "investigator"
+    assert unit["paths"] == ["app.py", "src/auth.py"]
+    assert [item["question"] for item in unit["open_questions"]] == [
+        "Inspect the application bootstrap.",
+        "Trace authentication.",
+    ]
+    assert unit["open_questions"][1]["related_paths"] == ["app.py", "src/auth.py"]
+
+
+def test_follow_up_skips_when_no_eligible_blocking_question_exists() -> None:
+    manifest = _manifest([_file("app.py")])
+
+    unit = build_follow_up_unit(
+        {
+            "records": [{"relative_path": "app.py"}],
+            "open_questions": [
+                {
+                    "question": "Requires deployment data.",
+                    "category": "validation_limitation",
+                    "blocking": False,
+                    "related_paths": ["app.py"],
+                }
+            ],
+        },
+        manifest,
+    )
+
+    assert unit is None
+
+
+def test_follow_up_rejects_non_snapshot_and_oversized_scopes() -> None:
+    manifest = _manifest([_file("app.py")])
+    with pytest.raises(FollowUpPlanningError, match="follow_up_scope_invalid") as invalid:
+        build_follow_up_unit(
+            {
+                "records": [{"relative_path": "app.py"}],
+                "open_questions": [
+                    {
+                        "question": "Unknown path.",
+                        "category": "coverage_blocking",
+                        "blocking": True,
+                        "related_paths": ["missing.py"],
+                    }
+                ],
+            },
+            manifest,
+        )
+    assert invalid.value.code == "follow_up_scope_invalid"
+
+    files = [_file(f"src/{index:04d}.py") for index in range(MAX_SCOPES_PER_WORK_UNIT + 1)]
+    manifest = _manifest(files)
+    paths = [item.relative_path for item in files]
+    with pytest.raises(FollowUpPlanningError, match="follow_up_scope_too_large") as oversized:
+        build_follow_up_unit(
+            {
+                "records": [{"relative_path": path} for path in paths],
+                "open_questions": [
+                    {
+                        "question": "Oversized scope.",
+                        "category": "coverage_blocking",
+                        "blocking": True,
+                        "related_paths": paths,
+                    }
+                ],
+            },
+            manifest,
+        )
+    assert oversized.value.code == "follow_up_scope_too_large"
 
 
 def test_verification_plan_expands_only_pending_votes() -> None:

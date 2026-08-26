@@ -42,6 +42,15 @@ AGENT_TOOLS = {
         "audit_submit_candidate",
         "audit_submit_coverage",
     ],
+    "code-security-investigator": [
+        "audit_knowledge_base",
+        "audit_threat_model_context",
+        "audit_inventory",
+        "audit_read",
+        "audit_search",
+        "audit_submit_candidate",
+        "audit_submit_coverage",
+    ],
     "code-security-verifier": [
         "audit_verification_subject",
         "audit_inventory",

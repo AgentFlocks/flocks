@@ -30,11 +30,7 @@ from flocks_code_security.contract import (
     stable_id,
     validate_bundle,
 )
-from flocks_code_security.coverage import public_open_question
-from flocks_code_security.orchestration import (
-    baseline_focus_exclusion,
-    baseline_focus_exclusions,
-)
+from flocks_code_security.coverage import merge_analysis_coverage, public_open_question
 from flocks_code_security.paths import output_dir
 from flocks_code_security.snapshot import DEFAULT_EXCLUDES, TargetSnapshotService
 from flocks_code_security.store import ScanStore
@@ -618,23 +614,20 @@ class ReportWriter:
     ) -> tuple[dict[str, Any], dict[str, bytes]]:
         scan_id = data["scan"]["scan_id"]
         coverage_by_unit = {item["work_unit_id"]: item for item in data["coverage"]}
-        all_snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
-        all_scope_paths = [
-            item.relative_path for item in all_snapshot_files
-        ] + [item["relative_path"] for item in data["omissions"]]
-        focus_exclusions = baseline_focus_exclusions(
-            all_scope_paths,
-            include_paths=snapshot.include_paths,
+        units_by_id = {item["work_unit_id"]: item for item in data["work_units"]}
+        merged_coverage = merge_analysis_coverage(
+            [
+                {
+                    **item,
+                    "role": units_by_id.get(item["work_unit_id"], {}).get("role"),
+                    "phase": units_by_id.get(item["work_unit_id"], {}).get("phase"),
+                    "paths": units_by_id.get(item["work_unit_id"], {}).get("paths", []),
+                }
+                for item in data["coverage"]
+            ]
         )
-        snapshot_files = [
-            item
-            for item in all_snapshot_files
-            if baseline_focus_exclusion(
-                item.relative_path,
-                include_paths=snapshot.include_paths,
-            )
-            is None
-        ]
+        all_snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
+        snapshot_files = all_snapshot_files
         snapshot_paths = {item.relative_path for item in snapshot_files}
 
         def paths_in_states(
@@ -779,48 +772,8 @@ class ReportWriter:
                     }
                 )
                 continue
-            for failed_path in failed:
-                deferred.append(
-                    {
-                        "id": stable_id("deferred", unit["work_unit_id"], "failed", failed_path),
-                        "reason": "Source path could not be fully analyzed",
-                        "paths": [failed_path],
-                        "surfaceIds": [surface_id],
-                    }
-                )
-            if unexamined:
-                deferred.append(
-                    {
-                        "id": stable_id(
-                            "deferred",
-                            unit["work_unit_id"],
-                            "unexamined",
-                            *unexamined,
-                        ),
-                        "reason": "Assigned source remains unexamined in the host coverage attestation",
-                        "paths": unexamined,
-                        "surfaceIds": [surface_id],
-                    }
-                )
-            for question in coverage["open_questions"]:
-                public_question = public_open_question(question)
-                open_questions.append(public_question)
-                if question["blocking"]:
-                    row: dict[str, Any] = {
-                        "id": stable_id(
-                            "deferred",
-                            unit["work_unit_id"],
-                            "question",
-                            question["question"],
-                        ),
-                        "reason": question["question"],
-                        "surfaceIds": [surface_id],
-                    }
-                    if question["related_paths"]:
-                        row["paths"] = question["related_paths"]
-                    deferred.append(row)
-                else:
-                    limitations.append(public_question)
+            # Raw per-unit gaps and questions remain in the immutable receipt above.
+            # Active gaps are emitted from the strongest scan-level merge below.
 
         for candidate_id in deferred_candidate_ids:
             candidate = candidates_by_id[candidate_id]
@@ -837,11 +790,6 @@ class ReportWriter:
             deferred.append(row)
 
         for omission in data["omissions"]:
-            if baseline_focus_exclusion(
-                omission["relative_path"],
-                include_paths=snapshot.include_paths,
-            ) is not None:
-                continue
             deferred.append(
                 {
                     "id": stable_id("deferred", "omission", omission["relative_path"]),
@@ -850,29 +798,26 @@ class ReportWriter:
                 }
             )
 
+        merged_records = merged_coverage["records"]
         inventoried_files = {
-            path
-            for coverage in coverage_by_unit.values()
-            for path in (item["relative_path"] for item in coverage["records"])
-            if path in snapshot_paths
+            item["relative_path"]
+            for item in merged_records
+            if item["relative_path"] in snapshot_paths
         }
         analyzed_files = {
-            path
-            for coverage in coverage_by_unit.values()
-            for path in paths_in_states(coverage, {"read_complete"})
-            if path in snapshot_paths
+            item["relative_path"]
+            for item in merged_records
+            if item["relative_path"] in snapshot_paths and item["state"] == "read_complete"
         }
         failed_files = {
-            path
-            for coverage in coverage_by_unit.values()
-            for path in paths_in_states(coverage, {"failed"})
-            if path in snapshot_paths
+            item["relative_path"]
+            for item in merged_records
+            if item["relative_path"] in snapshot_paths and item["state"] == "failed"
         }
         not_applicable_paths = {
-            path
-            for coverage in coverage_by_unit.values()
-            for path in paths_in_states(coverage, {"not_applicable"})
-            if path in snapshot_paths
+            item["relative_path"]
+            for item in merged_records
+            if item["relative_path"] in snapshot_paths and item["state"] == "not_applicable"
         }
         uncovered = sorted(
             path
@@ -887,6 +832,27 @@ class ReportWriter:
                     "paths": uncovered,
                 }
             )
+        for failed_path in sorted(failed_files):
+            deferred.append(
+                {
+                    "id": stable_id("deferred", "merged", "failed", failed_path),
+                    "reason": "Source path could not be fully analyzed",
+                    "paths": [failed_path],
+                }
+            )
+        for question in merged_coverage["open_questions"]:
+            public_question = public_open_question(question)
+            open_questions.append(public_question)
+            if question["blocking"]:
+                row: dict[str, Any] = {
+                    "id": stable_id("deferred", "merged", "question", question["question"]),
+                    "reason": question["question"],
+                }
+                if question["related_paths"]:
+                    row["paths"] = question["related_paths"]
+                deferred.append(row)
+            else:
+                limitations.append(public_question)
         if not analysis_units:
             deferred.append(
                 {
@@ -924,10 +890,6 @@ class ReportWriter:
             {"pattern": pattern, "reason": exclusion_reason(pattern)}
             for pattern in dict.fromkeys(snapshot.exclude_patterns)
         ]
-        explicit_exclusions.extend(
-            {"pattern": pattern, "reason": reason}
-            for pattern, reason in focus_exclusions.items()
-        )
         if snapshot.target_kind.startswith("git_"):
             explicit_exclusions.append(
                 {
@@ -936,18 +898,15 @@ class ReportWriter:
                 }
             )
         include_paths = list(snapshot.include_paths)
-        exclude_paths = list(
-            dict.fromkeys((*snapshot.exclude_patterns, *focus_exclusions))
-        )
+        exclude_paths = list(dict.fromkeys(snapshot.exclude_patterns))
         scoped = include_paths != ["."]
         completeness = (
             "complete"
             if analysis_units
             and len(coverage_by_unit) == len(analysis_units)
-            and all(
-                coverage["completeness"] == "complete"
-                for coverage in coverage_by_unit.values()
-            )
+            and merged_coverage["completeness"] == "complete"
+            and not uncovered
+            and not failed_files
             else "partial"
         )
         total_files = len(snapshot_files)

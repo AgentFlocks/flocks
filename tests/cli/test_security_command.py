@@ -205,6 +205,51 @@ def test_security_audit_forwards_coverage_policy(monkeypatch, tmp_path) -> None:
     assert observed["coverage_policy"] == "exhaustive"
 
 
+def test_security_audit_coverage_blocked_exits_nonzero(monkeypatch, tmp_path) -> None:
+    async def run_audit(target, *, model, progress, coverage_policy):
+        assert target == tmp_path
+        assert coverage_policy == "exhaustive"
+        payload = {
+            "scan_id": "scan_blocked",
+            "status": "failed",
+            "failure_code": "coverage_blocked",
+            "coverage_completeness": "blocked",
+        }
+        progress("scan.coverage_blocked", payload)
+        return payload
+
+    monkeypatch.setattr(
+        security_cmd,
+        "_load_plugin_cli",
+        lambda: (run_audit, lambda _scan_id: {}),
+    )
+    monkeypatch.setattr(security_cmd, "shutdown_langfuse", lambda: None)
+
+    plain = runner.invoke(
+        security_cmd.security_app,
+        ["audit", str(tmp_path), "--coverage-policy", "exhaustive"],
+    )
+    structured = runner.invoke(
+        security_cmd.security_app,
+        [
+            "audit",
+            str(tmp_path),
+            "--coverage-policy",
+            "exhaustive",
+            "--json",
+        ],
+    )
+
+    assert plain.exit_code == 1
+    assert "Coverage blocked" in plain.stdout
+    assert structured.exit_code == 1
+    events = [json.loads(line) for line in structured.stdout.splitlines()]
+    assert [item["event"] for item in events] == [
+        "scan.coverage_blocked",
+        "scan.result",
+    ]
+
+
 def test_security_audit_forwards_verification_votes(monkeypatch, tmp_path) -> None:
     observed: dict[str, object] = {}
 

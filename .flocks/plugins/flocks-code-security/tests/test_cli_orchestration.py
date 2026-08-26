@@ -100,6 +100,11 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
             {
                 "scan_id": "scan_test",
                 "threat_model_status": "completed",
+                "counts": {"unverified_candidates": 2},
+            },
+            {
+                "scan_id": "scan_test",
+                "threat_model_status": "completed",
                 "counts": {"unverified_candidates": 0},
             },
         ]
@@ -150,12 +155,51 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
     async def unexpected_cancel(_ctx, _scan_id: str) -> ToolResult:
         pytest.fail("successful pipeline must not be cancelled")
 
+    class Store:
+        @staticmethod
+        def get_scan(_scan_id: str):
+            return {"snapshot_id": "snapshot_test"}
+
+        @staticmethod
+        def list_latest_coverage(_scan_id: str):
+            return [
+                {
+                    "work_unit_id": "unit_baseline",
+                    "records": [{"relative_path": "app.py", "state": "read_partial"}],
+                    "open_questions": [
+                        {
+                            "question": "Trace the unresolved wrapper.",
+                            "category": "coverage_blocking",
+                            "blocking": True,
+                            "related_paths": ["app.py"],
+                        }
+                    ],
+                }
+            ]
+
+        @staticmethod
+        def get_work_unit(_work_unit_id: str):
+            return {"phase": "baseline", "role": "baseline"}
+
+    class Manifests:
+        @staticmethod
+        def get_or_build(_snapshot_id: str):
+            return SimpleNamespace(
+                files=(SimpleNamespace(relative_path="app.py"),),
+                omissions=(),
+            )
+
     monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
     monkeypatch.setattr(audit_cli, "audit_run_workers", run_workers)
     monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
     monkeypatch.setattr(audit_cli, "audit_status", status)
     monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
     monkeypatch.setattr(audit_cli, "audit_cancel", unexpected_cancel)
+    monkeypatch.setattr(
+        audit_cli,
+        "get_runtime",
+        lambda: SimpleNamespace(store=Store(), manifests=Manifests()),
+    )
     monkeypatch.setattr(
         audit_cli.AuditOrchestrator,
         "_run_parent_adjudication",
@@ -169,7 +213,7 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         lambda event, payload: events.append((event, payload)),
     ).run()
 
-    assert phases == ["threat_modeling", "baseline", "verification"]
+    assert phases == ["threat_modeling", "baseline", "investigation", "verification"]
     assert result["report_path"] == "/output/report.md"
     assert [event for event, _payload in events] == [
         "scan.prepared",
@@ -182,8 +226,147 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         "batch.started",
         "batch.status",
         "scan.status",
+        "batch.started",
+        "batch.status",
+        "scan.status",
         "scan.adjudicated",
         "scan.finalized",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_optional_investigation_runs_once_for_valid_blocking_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = {
+        "work_unit_id": "unit_baseline",
+        "records": [{"relative_path": "app.py", "state": "read_partial"}],
+        "open_questions": [
+            {
+                "question": "Trace the unresolved wrapper.",
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": ["app.py"],
+            }
+        ],
+    }
+
+    class Store:
+        @staticmethod
+        def get_scan(_scan_id: str):
+            return {"snapshot_id": "snapshot_test"}
+
+        @staticmethod
+        def list_latest_coverage(_scan_id: str):
+            return [attestation]
+
+        @staticmethod
+        def get_work_unit(_work_unit_id: str):
+            return {"phase": "baseline", "role": "baseline"}
+
+    class Manifests:
+        @staticmethod
+        def get_or_build(_snapshot_id: str):
+            return SimpleNamespace(
+                files=(SimpleNamespace(relative_path="app.py"),),
+                omissions=(),
+            )
+
+    phases: list[str] = []
+
+    async def run_phase(_ctx, _scan_id, phase, _progress, _observation):
+        phases.append(phase)
+        return {"phase": phase}, {"counts": {"unverified_candidates": 0}}
+
+    monkeypatch.setattr(
+        audit_cli,
+        "get_runtime",
+        lambda: SimpleNamespace(store=Store(), manifests=Manifests()),
+    )
+    monkeypatch.setattr(audit_cli, "_run_phase", run_phase)
+    orchestrator = audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+    )
+
+    status = await orchestrator._run_optional_investigation(
+        "scan_test",
+        {"counts": {}},
+        None,
+    )
+
+    assert phases == ["investigation"]
+    assert status["counts"]["unverified_candidates"] == 0
+
+
+@pytest.mark.asyncio
+async def test_optional_investigation_reports_stable_invalid_scope_and_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Store:
+        @staticmethod
+        def get_scan(_scan_id: str):
+            return {"snapshot_id": "snapshot_test"}
+
+        @staticmethod
+        def list_latest_coverage(_scan_id: str):
+            return [
+                {
+                    "work_unit_id": "unit_baseline",
+                    "records": [{"relative_path": "app.py", "state": "read_partial"}],
+                    "open_questions": [
+                        {
+                            "question": "Trace a path outside the snapshot.",
+                            "category": "coverage_blocking",
+                            "blocking": True,
+                            "related_paths": ["missing.py"],
+                        }
+                    ],
+                }
+            ]
+
+        @staticmethod
+        def get_work_unit(_work_unit_id: str):
+            return {"phase": "baseline", "role": "baseline"}
+
+    class Manifests:
+        @staticmethod
+        def get_or_build(_snapshot_id: str):
+            return SimpleNamespace(
+                files=(SimpleNamespace(relative_path="app.py"),),
+                omissions=(),
+            )
+
+    async def unexpected_phase(*_args, **_kwargs):
+        pytest.fail("invalid follow-up scope must not launch an investigator")
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        audit_cli,
+        "get_runtime",
+        lambda: SimpleNamespace(store=Store(), manifests=Manifests()),
+    )
+    monkeypatch.setattr(audit_cli, "_run_phase", unexpected_phase)
+    orchestrator = audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        lambda event, payload: events.append((event, payload)),
+    )
+    initial = {"counts": {"unverified_candidates": 1}}
+
+    status = await orchestrator._run_optional_investigation(
+        "scan_test",
+        initial,
+        None,
+    )
+
+    assert status is initial
+    assert events == [
+        (
+            "investigation.skipped",
+            {"scan_id": "scan_test", "reason": "follow_up_scope_invalid"},
+        )
     ]
 
 

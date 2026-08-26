@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
-from flocks_code_security.coverage import normalize_open_questions
+from flocks_code_security.coverage import (
+    CoverageBlockedError,
+    merge_analysis_coverage,
+    normalize_open_questions,
+)
 from flocks_code_security.execution import (
     ExecutionCapsuleError,
     MAX_FRESH_ATTEMPTS,
@@ -1387,12 +1391,40 @@ class ScanStore:
                     raise ValueError("Threat model has already been created")
             if phase == "baseline":
                 self._require_threat_model_ready(connection, scan_id)
+                if len(units) != 1 or units[0].get("paths") != ["."]:
+                    raise ValueError("Standard baseline must be one repository-level work unit")
                 prior = connection.execute(
                     "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = 'baseline'",
                     (scan_id,),
                 ).fetchone()
                 if prior is not None:
                     raise ValueError("Baseline workers have already been created")
+            if phase == "investigation":
+                self._require_threat_model_ready(connection, scan_id)
+                baseline = connection.execute(
+                    "SELECT status FROM work_units WHERE scan_id = ? AND phase = 'baseline'",
+                    (scan_id,),
+                ).fetchall()
+                if len(baseline) != 1 or baseline[0]["status"] in {"pending", "running"}:
+                    raise ValueError("Investigation requires one terminated baseline work unit")
+                prior = connection.execute(
+                    "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = 'investigation'",
+                    (scan_id,),
+                ).fetchone()
+                if prior is not None:
+                    raise ValueError("A focused investigator has already been created")
+                if len(units) != 1:
+                    raise ValueError("Investigation must contain exactly one work unit")
+            if phase == "verification":
+                analysis = connection.execute(
+                    "SELECT role, status FROM work_units WHERE scan_id = ? "
+                    "AND role IN ('baseline', 'investigator')",
+                    (scan_id,),
+                ).fetchall()
+                if not any(item["role"] == "baseline" for item in analysis):
+                    raise ValueError("Verification requires a baseline analysis work unit")
+                if any(item["status"] in {"pending", "running"} for item in analysis):
+                    raise ValueError("Verification requires all analysis workers to terminate")
             if phase == "targeted_rescan":
                 self._require_threat_model_ready(connection, scan_id)
                 directive = self._require_targeted_rescan_directive(
@@ -1465,6 +1497,21 @@ class ScanStore:
                     raise ValueError(
                         "Only baseline work units accept assignment_digest"
                     )
+                if phase == "investigation":
+                    snapshot_paths = {
+                        row["relative_path"]
+                        for row in connection.execute(
+                            "SELECT relative_path FROM snapshot_files WHERE snapshot_id = ? "
+                            "UNION SELECT relative_path FROM snapshot_omissions WHERE snapshot_id = ?",
+                            (scan["snapshot_id"], scan["snapshot_id"]),
+                        ).fetchall()
+                    }
+                    invalid_paths = sorted(set(paths) - snapshot_paths)
+                    if invalid_paths:
+                        raise ValueError(
+                            "Investigation paths must be exact snapshot paths: "
+                            + ", ".join(invalid_paths[:20])
+                        )
                 if subject_id is not None:
                     candidate = connection.execute(
                         "SELECT scan_id FROM candidates WHERE candidate_id = ?",
@@ -1983,10 +2030,28 @@ class ScanStore:
                 )
             except (json.JSONDecodeError, TypeError, ValueError):
                 return False
-        elif role in {"baseline", "investigator"}:
-            if row["completeness"] == "blocked":
-                return False
         return True
+
+    def work_attempt_has_analysis_progress(self, attempt_id: str) -> bool:
+        """Return whether an analysis attempt persisted source access or a candidate."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT wa.work_unit_id, wu.role FROM work_attempts wa "
+                "JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id "
+                "WHERE wa.attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None or row["role"] not in {"baseline", "investigator"}:
+                return False
+            source_access = connection.execute(
+                "SELECT 1 FROM source_access WHERE attempt_id = ? LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+            candidate = connection.execute(
+                "SELECT 1 FROM candidates WHERE work_unit_id = ? LIMIT 1",
+                (row["work_unit_id"],),
+            ).fetchone()
+        return source_access is not None or candidate is not None
 
     def list_unverified_candidates(
         self,
@@ -2696,7 +2761,7 @@ class ScanStore:
 
     def ensure_ready_to_finalize(self, scan_id: str) -> None:
         with self._connect() as connection:
-            self._require_scan_status(connection, scan_id, {"running"})
+            scan = self._require_scan_status(connection, scan_id, {"running"})
             self._require_threat_model_ready(connection, scan_id)
             self._require_analysis_ready(connection, scan_id)
             self._require_dynamic_ready(connection, scan_id)
@@ -2706,6 +2771,10 @@ class ScanStore:
             ).fetchone()
         if latest is None or latest["action"] != "finalize":
             raise ValueError("A final parent-agent adjudication is required")
+        if scan["coverage_policy"] == "exhaustive":
+            coverage = self.analysis_coverage_summary(scan_id)
+            if coverage["completeness"] != "complete":
+                raise CoverageBlockedError(coverage)
 
     def get_work_unit(self, work_unit_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -4433,6 +4502,85 @@ class ScanStore:
                 item["records"] = [dict(record) for record in record_rows]
                 output.append(item)
         return output
+
+    def analysis_coverage_summary(self, scan_id: str) -> dict[str, Any]:
+        """Return deduplicated active scan coverage while preserving raw attestations."""
+        scan = self.get_scan(scan_id)
+        if scan is None:
+            raise ValueError("Scan not found")
+        attestations = self.list_latest_coverage(scan_id)
+        with self._connect() as connection:
+            unit_rows = connection.execute(
+                "SELECT work_unit_id, phase, role, paths_json FROM work_units "
+                "WHERE scan_id = ? AND role IN ('baseline', 'investigator') "
+                "ORDER BY created_at, work_unit_id",
+                (scan_id,),
+            ).fetchall()
+            snapshot_rows = connection.execute(
+                "SELECT relative_path FROM snapshot_files WHERE snapshot_id = ? "
+                "UNION SELECT relative_path FROM snapshot_omissions WHERE snapshot_id = ? "
+                "ORDER BY relative_path",
+                (scan["snapshot_id"], scan["snapshot_id"]),
+            ).fetchall()
+        units = {row["work_unit_id"]: dict(row) for row in unit_rows}
+        augmented = []
+        for attestation in attestations:
+            unit = units.get(attestation["work_unit_id"])
+            augmented.append(
+                {
+                    **attestation,
+                    "role": None if unit is None else unit["role"],
+                    "phase": None if unit is None else unit["phase"],
+                    "paths": [] if unit is None else json.loads(unit["paths_json"]),
+                }
+            )
+        merged = merge_analysis_coverage(augmented)
+        snapshot_paths = [row["relative_path"] for row in snapshot_rows]
+        records_by_path = {
+            item["relative_path"]: item for item in merged["records"]
+        }
+        covered_units = {item["work_unit_id"] for item in attestations}
+        missing_attestations = sorted(set(units) - covered_units)
+        active_gap_paths = [
+            path
+            for path in snapshot_paths
+            if records_by_path.get(path, {}).get("state")
+            not in {"read_complete", "not_applicable"}
+        ]
+        completeness = merged["completeness"]
+        if missing_attestations or active_gap_paths or any(
+            item.get("blocking") is True for item in merged["open_questions"]
+        ):
+            completeness = (
+                "blocked"
+                if scan["coverage_policy"] == "exhaustive"
+                else "partial"
+            )
+        elif units and covered_units == set(units):
+            completeness = "complete"
+        counts = {
+            "assigned": len(snapshot_paths),
+            "read_complete": sum(
+                item.get("state") == "read_complete" for item in records_by_path.values()
+            ),
+            "failed": sum(
+                item.get("state") == "failed" for item in records_by_path.values()
+            ),
+            "unexamined": sum(
+                item.get("state") in {"unexamined", "inventoried", "located", "read_partial"}
+                for item in records_by_path.values()
+            )
+            + sum(path not in records_by_path for path in snapshot_paths),
+            "active_gaps": len(active_gap_paths),
+        }
+        return {
+            **merged,
+            "policy": scan["coverage_policy"],
+            "completeness": completeness,
+            "counts": counts,
+            "active_gap_paths": active_gap_paths,
+            "missing_attestation_work_unit_ids": missing_attestations,
+        }
 
     def scan_status(self, scan_id: str) -> dict[str, Any]:
         scan = self.get_scan(scan_id)

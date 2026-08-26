@@ -29,6 +29,7 @@ from flocks_code_security.cli import (
     _resolve_model,
 )
 from flocks_code_security.artifact_integrity import find_output_directory
+from flocks_code_security.coverage import merge_analysis_coverage
 from flocks_code_security.paths import data_dir, outputs_root, runtime_dir
 from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
@@ -81,7 +82,9 @@ EVENT_TITLES = {
     "adjudication.started": "主智能体裁决已开始",
     "adjudication.failed": "主智能体裁决失败",
     "scan.adjudicated": "主智能体已提交裁决",
+    "investigation.skipped": "聚焦调查因范围约束已跳过",
     "scan.finalized": "最终产物已完成完整性校验",
+    "scan.coverage_blocked": "覆盖策略阻止生成最终产物",
     "scan.cancelled": "代码审计已取消",
 }
 
@@ -383,6 +386,12 @@ class _ProgressRecorder:
             if phase_run_id:
                 self.store.finish_phase_run(phase_run_id, "completed", summary=payload)
             event_type = "scan.completed"
+        elif event == "scan.coverage_blocked":
+            phase_run_id = self.phase_runs.get("finalization")
+            if phase_run_id:
+                self.store.finish_phase_run(phase_run_id, "failed", summary=payload)
+            event_type = "scan.coverage_blocked"
+            level = "warning"
         elif event == "scan.cancelled":
             # The service records cancellation only after it knows it was user initiated.
             return
@@ -460,6 +469,7 @@ class _ProgressRecorder:
             "pending_count",
             "deferred_count",
             "coverage_completeness",
+            "failure_code",
             "cancelled_workers",
             "candidate_count",
             "error_type",
@@ -1535,53 +1545,48 @@ class AuditService:
     @staticmethod
     def _coverage_attestation_summary(data: dict[str, Any]) -> dict[str, Any]:
         attestations = data["coverage"]
-        analysis_units = {
-            item["work_unit_id"]
+        analysis_unit_rows = {
+            item["work_unit_id"]: item
             for item in data["work_units"]
             if item.get("role") in {"baseline", "investigator"}
         }
+        analysis_units = set(analysis_unit_rows)
         covered_units = {
             item["work_unit_id"]
             for item in data["coverage"]
             if item.get("work_unit_id") in analysis_units
         }
-        completeness_values = {
-            str(item.get("completeness")) for item in attestations
-        }
+        merged = merge_analysis_coverage(
+            [
+                {
+                    **item,
+                    "role": analysis_unit_rows.get(item["work_unit_id"], {}).get("role"),
+                    "phase": analysis_unit_rows.get(item["work_unit_id"], {}).get("phase"),
+                    "paths": analysis_unit_rows.get(item["work_unit_id"], {}).get("paths", []),
+                }
+                for item in attestations
+            ]
+        )
         if not attestations:
             completeness = "pending"
-        elif "blocked" in completeness_values:
-            completeness = "blocked"
-        elif "partial" in completeness_values or covered_units != analysis_units:
-            completeness = "partial"
+        elif covered_units != analysis_units:
+            completeness = (
+                "blocked"
+                if data["scan"].get("coverage_policy") == "exhaustive"
+                else "partial"
+            )
         else:
-            completeness = "complete"
-        totals = {
-            "assigned_count": 0,
-            "read_complete_count": 0,
-            "failed_count": 0,
-            "unexamined_count": 0,
-        }
-        count_fields = {
-            "assigned_count": "assigned",
-            "read_complete_count": "read_complete",
-            "failed_count": "failed",
-            "unexamined_count": "unexamined",
-        }
-        for attestation in attestations:
-            counts = attestation.get("counts")
-            if not isinstance(counts, dict):
-                continue
-            for output_key, source_key in count_fields.items():
-                value = counts.get(source_key)
-                if isinstance(value, int) and not isinstance(value, bool):
-                    totals[output_key] += value
+            completeness = merged["completeness"]
+        counts = merged["counts"]
         return {
             "policy": data["scan"].get(
                 "coverage_policy", "evidence_backed_partial"
             ),
             "completeness": completeness,
-            **totals,
+            "assigned_count": counts["assigned"],
+            "read_complete_count": counts["read_complete"],
+            "failed_count": counts["failed"],
+            "unexamined_count": counts["unexamined"],
         }
 
     def _finding_summary(

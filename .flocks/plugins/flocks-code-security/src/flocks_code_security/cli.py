@@ -23,6 +23,10 @@ from flocks.utils.langfuse import (
 
 from flocks_code_security.paths import outputs_root
 from flocks_code_security.dynamic_validation import DockerDynamicRunner
+from flocks_code_security.orchestration import (
+    FollowUpPlanningError,
+    build_follow_up_unit,
+)
 from flocks_code_security.runtime import get_runtime
 from flocks_code_security.tools import (
     AUDIT_TOOL_NAMES,
@@ -270,6 +274,60 @@ class AuditOrchestrator:
             if remaining >= unverified:
                 raise RuntimeError("Verification phase made no progress")
             unverified = remaining
+        return status
+
+    async def _run_optional_investigation(
+        self,
+        scan_id: str,
+        status: dict[str, Any],
+        scan_observation: Any,
+    ) -> dict[str, Any]:
+        runtime = get_runtime()
+        if not all(
+            hasattr(runtime.store, name)
+            for name in ("get_scan", "list_latest_coverage", "get_work_unit")
+        ) or not hasattr(runtime, "manifests"):
+            return status
+        scan = await asyncio.to_thread(runtime.store.get_scan, scan_id)
+        if scan is None:
+            return status
+        baseline_attestation = None
+        for attestation in await asyncio.to_thread(
+            runtime.store.list_latest_coverage,
+            scan_id,
+        ):
+            unit = await asyncio.to_thread(
+                runtime.store.get_work_unit,
+                attestation["work_unit_id"],
+            )
+            if unit is not None and unit["phase"] == "baseline" and unit["role"] == "baseline":
+                baseline_attestation = attestation
+                break
+        if baseline_attestation is None:
+            return status
+        manifest = await asyncio.to_thread(
+            runtime.manifests.get_or_build,
+            scan["snapshot_id"],
+        )
+        try:
+            follow_up = build_follow_up_unit(baseline_attestation, manifest)
+        except FollowUpPlanningError as exc:
+            _emit(
+                self.progress,
+                "investigation.skipped",
+                {"scan_id": scan_id, "reason": exc.code},
+                observation_parent=scan_observation,
+            )
+            return status
+        if follow_up is None:
+            return status
+        _batch, status = await _run_phase(
+            self.ctx,
+            scan_id,
+            "investigation",
+            self.progress,
+            scan_observation,
+        )
         return status
 
     async def _run_dynamic_remaining(
@@ -581,6 +639,11 @@ class AuditOrchestrator:
                 self.progress,
                 scan_observation,
             )
+            status = await self._run_optional_investigation(
+                scan_id,
+                status,
+                scan_observation,
+            )
             status = await self._verify_remaining(
                 scan_id,
                 status,
@@ -621,9 +684,14 @@ class AuditOrchestrator:
                 raise RuntimeError("Parent adjudication did not finalize the audit")
 
             finalized = _require_success(await audit_finalize(self.ctx, scan_id))
+            final_event = (
+                "scan.coverage_blocked"
+                if finalized.get("failure_code") == "coverage_blocked"
+                else "scan.finalized"
+            )
             _emit(
                 self.progress,
-                "scan.finalized",
+                final_event,
                 finalized,
                 observation_parent=scan_observation,
             )

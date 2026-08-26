@@ -215,6 +215,13 @@ def _progress_line(event: str, payload: dict[str, Any]) -> None:
                 f"{finding.get('title', 'Untitled finding')}  {path}:{line}"
             )
         return
+    if event == "scan.coverage_blocked":
+        console.print(
+            f"[{timestamp}] [bold red]Coverage blocked[/bold red]  "
+            f"scan_id={payload.get('scan_id')}  "
+            f"failure_code={payload.get('failure_code', 'coverage_blocked')}"
+        )
+        return
     if event == "scan.cancelled":
         console.print(
             f"[{timestamp}] [yellow]Audit cancelled[/yellow]  "
@@ -349,6 +356,13 @@ def security_audit(
 
     if json_output:
         _json_line("scan.result", result)
+    if result.get("status") == "failed":
+        if not json_output and result.get("failure_code") != "coverage_blocked":
+            console.print(
+                f"[red]Audit failed:[/red] "
+                f"{result.get('failure_code', 'unknown failure')}"
+            )
+        raise typer.Exit(1)
 
 
 @security_app.command("status")

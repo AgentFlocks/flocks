@@ -518,6 +518,55 @@ def test_progress_recorder_preserves_adjudication_model_identity(
     assert phase["summary"]["execution"] == execution
 
 
+def test_progress_recorder_marks_coverage_blocked_finalization_as_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+        coverage_policy="exhaustive",
+    )
+    monkeypatch.setattr(
+        service_module,
+        "get_runtime",
+        lambda: SimpleNamespace(store=store),
+    )
+    recorder = _ProgressRecorder(scan_id, dynamic_enabled=False)
+    recorder("adjudication.started", {"adjudication_round": 1})
+    recorder(
+        "scan.adjudicated",
+        {
+            "adjudication_round": 1,
+            "action": "finalize",
+            "accepted_candidate_ids": [],
+            "rejected_candidates": [],
+        },
+    )
+
+    recorder(
+        "scan.coverage_blocked",
+        {
+            "scan_id": scan_id,
+            "status": "failed",
+            "failure_code": "coverage_blocked",
+            "coverage_completeness": "blocked",
+        },
+    )
+
+    finalization = next(
+        item for item in store.list_phase_runs(scan_id) if item["phase"] == "finalization"
+    )
+    assert finalization["status"] == "failed"
+    event = store.list_recent_scan_events(scan_id, limit=1)["items"][0]
+    assert event["type"] == "scan.coverage_blocked"
+    assert event["level"] == "warning"
+    assert event["summary"]["failure_code"] == "coverage_blocked"
+
+
 def test_recent_event_page_is_bounded_and_chronological(tmp_path: Path) -> None:
     store = _store(tmp_path)
     scan_id = store.create_scan(

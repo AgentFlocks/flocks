@@ -298,6 +298,86 @@ async def test_guided_scan_requires_bound_agents_to_read_knowledge_base(
     assert parent_guidance.output["sha256"] == hashlib.sha256(encoded).hexdigest()
 
 
+@pytest.mark.asyncio
+async def test_guided_baseline_and_investigator_record_separate_bound_accesses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(runtime, scan_id=scan_id, snapshot_id=snapshot_id)
+    content = b"Prioritize the request handler."
+    runtime.store.set_scan_request_metadata(
+        scan_id,
+        owner_subject="user-1",
+        request_source="cli",
+        workspace_ref="workspace-1",
+        idempotency_key=None,
+        request_digest="guided-analysis-request",
+        knowledge_base={
+            "display_name": "guide.txt",
+            "content": content.decode(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "byte_length": len(content),
+        },
+    )
+
+    for role, session_id, agent_name, phase in (
+        ("baseline", "baseline-guided", "code-security-baseline", "baseline"),
+        ("investigator", "investigator-guided", "code-security-investigator", "investigation"),
+    ):
+        unit_id = runtime.store.create_work_unit(
+            scan_id=scan_id,
+            phase=phase,
+            role=role,
+            paths=["."] if role == "baseline" else ["app.py"],
+        )
+        runtime.store.bind_session(
+            session_id=session_id,
+            scan_id=scan_id,
+            snapshot_id=snapshot_id,
+            role=role,
+            work_unit_id=unit_id,
+        )
+        worker = _agent_context(session_id, f"{session_id}-message", agent_name)
+        assert (await audit_threat_model_context(worker)).success
+        assert (await audit_inventory(worker)).success
+        assert (await audit_read(worker, "app.py", start_line=1, end_line=1)).success
+        blocked = await audit_submit_coverage(
+            worker,
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
+        )
+        assert blocked.success is False
+        assert "audit_knowledge_base" in str(blocked.error)
+        guidance = await audit_knowledge_base(worker)
+        assert guidance.success
+        submitted = await audit_submit_coverage(
+            worker,
+            dispositions=[{"path": "app.py", "claim": "analyzed"}],
+        )
+        assert submitted.success
+        runtime.store.update_work_unit_status(unit_id, "completed")
+
+    with runtime.store._connect() as connection:
+        accesses = connection.execute(
+            "SELECT session_id, role, content_sha256 FROM knowledge_base_access "
+            "WHERE scan_id = ? ORDER BY role",
+            (scan_id,),
+        ).fetchall()
+    assert [(item["session_id"], item["role"]) for item in accesses] == [
+        ("baseline-guided", "baseline"),
+        ("investigator-guided", "investigator"),
+    ]
+    assert {item["content_sha256"] for item in accesses} == {hashlib.sha256(content).hexdigest()}
+
+
 def test_adjudication_schema_migrates_to_latest_eight_columns(
     tmp_path: Path,
 ) -> None:
@@ -590,6 +670,97 @@ async def test_transient_worker_failure_resumes_same_session_and_attempt(
     )
     assert [attempt["status"] for attempt in attempts] == ["failed", "failed"]
     assert attempts[-1]["failure_class"] == "attempts_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_analysis_progress_without_coverage_gets_one_coverage_only_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(runtime, scan_id=scan_id, snapshot_id=snapshot_id)
+
+    parent = SimpleNamespace(
+        id="coordinator",
+        project_id="project",
+        directory=str(tmp_path),
+        provider="provider",
+        model="model",
+    )
+    children: list[SimpleNamespace] = []
+
+    async def create_child(**kwargs):
+        child = SimpleNamespace(id=f"worker-{len(children) + 1}", agent=kwargs["agent"])
+        children.append(child)
+        return child
+
+    callable_tools = {
+        "audit_knowledge_base",
+        "audit_threat_model_context",
+        "audit_inventory",
+        "audit_read",
+        "audit_search",
+        "audit_submit_candidate",
+        "audit_submit_coverage",
+    }
+    messages = AsyncMock()
+    monkeypatch.setattr(Session, "get_by_id", AsyncMock(return_value=parent))
+    monkeypatch.setattr(Session, "create", create_child)
+    monkeypatch.setattr(Message, "create", messages)
+    monkeypatch.setattr(
+        tools_module,
+        "get_session_callable_tools",
+        AsyncMock(return_value=callable_tools),
+    )
+    manager = _FakeBackgroundManager()
+    monkeypatch.setattr(tools_module, "_background_manager", lambda: manager)
+
+    launched = await audit_run_workers(coordinator, scan_id, "baseline")
+    assert launched.success
+    worker = launched.output["workers"][0]
+    baseline = _agent_context("worker-1", "baseline-message", "code-security-baseline")
+    baseline.extra.update(
+        model={"providerID": "provider", "modelID": "model"},
+        turn_callable_tool_names=sorted(callable_tools),
+    )
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    manager.tasks["task-1"].status = "completed"
+
+    resumed = await audit_wait_workers(
+        coordinator,
+        launched.output["batch_id"],
+        timeout_seconds=0,
+    )
+
+    assert resumed.output["status"] == "running"
+    assert resumed.output["workers"][0]["attempt_id"] == worker["attempt_id"]
+    assert resumed.output["workers"][0]["resume_count"] == 1
+    assert len(children) == 1
+    assert manager.calls[1]["session_id"] == "worker-1"
+    assert "Do not restart or broaden" in messages.await_args_list[-1].kwargs["content"]
+
+    manager.tasks["task-2"].status = "completed"
+    exhausted = await audit_wait_workers(
+        coordinator,
+        launched.output["batch_id"],
+        timeout_seconds=0,
+    )
+    assert exhausted.output["status"] == "failed"
+    assert exhausted.output["workers"][0]["failure_class"] == "coverage_attestation_missing"
+    assert len(children) == 1
+    assert runtime.store.list_source_accesses(worker["attempt_id"])
 
 
 @pytest.mark.asyncio
@@ -1438,7 +1609,7 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
         runtime.manifests.get_or_build(snapshot_id)
     )
     assert len(planned_units) == 1
-    assert planned_units[0]["paths"] == ["app.py", "empty.py"]
+    assert planned_units[0]["paths"] == ["."]
     unit_id = runtime.store.create_work_unit(
         scan_id=scan_id,
         phase="baseline",
@@ -1456,10 +1627,21 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
     assert (await audit_threat_model_context(baseline)).success
     assert (await audit_inventory(baseline)).success
     assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await audit_read(baseline, "assets/logo.svg", start_line=1, end_line=1)).success
+    assert (await audit_read(baseline, "docs/security.md", start_line=1, end_line=1)).success
+    assert (await audit_read(baseline, "tests/test_app.py", start_line=1, end_line=1)).success
 
     invalid = await audit_submit_coverage(
         baseline,
-        dispositions=[{"path": "app.py", "claim": "analyzed"}],
+        dispositions=[
+            {"path": path, "claim": "analyzed"}
+            for path in (
+                "app.py",
+                "assets/logo.svg",
+                "docs/security.md",
+                "tests/test_app.py",
+            )
+        ],
         open_questions=[
             {
                 "question": "Deployment controls are outside the source snapshot.",
@@ -1473,7 +1655,15 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
 
     submitted = await audit_submit_coverage(
         baseline,
-        dispositions=[{"path": "app.py", "claim": "analyzed"}],
+        dispositions=[
+            {"path": path, "claim": "analyzed"}
+            for path in (
+                "app.py",
+                "assets/logo.svg",
+                "docs/security.md",
+                "tests/test_app.py",
+            )
+        ],
         open_questions=[
             {
                 "question": "Deployment controls are outside the source snapshot.",
@@ -1493,23 +1683,11 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
     coverage = json.loads((output_path / "coverage.json").read_text(encoding="utf-8"))
     assert coverage["completeness"] == "complete"
     assert coverage["deferred"] == []
-    assert {"*.svg", "docs", "tests"} <= set(coverage["excludePaths"])
-    explicit_exclusions = {
-        item["pattern"]: item["reason"]
-        for item in coverage["explicitExclusions"]
-    }
-    assert {
-        pattern: explicit_exclusions[pattern]
-        for pattern in ("*.svg", "docs", "tests")
-    } == {
-        "*.svg": "Excluded from baseline by the default production-source focus",
-        "docs": "Excluded from baseline by the default production-source focus",
-        "tests": "Excluded from baseline by the default production-source focus",
-    }
+    assert not {"*.svg", "docs", "tests"} & set(coverage["excludePaths"])
     assert coverage["files"] == {
-        "total": 2,
-        "inventoried": 2,
-        "analyzed": 1,
+        "total": 5,
+        "inventoried": 5,
+        "analyzed": 4,
         "notApplicable": 1,
         "failed": 0,
         "effectiveCoveragePercent": 100,
@@ -1678,7 +1856,7 @@ async def test_exhaustive_attestation_blocks_until_all_files_have_terminal_state
     assert blocked.success is True
     assert blocked.output["completeness"] == "blocked"
     assert blocked.output["counts"]["unexamined"] == 1
-    assert runtime.store.work_unit_has_required_facts(unit_id, role="baseline") is False
+    assert runtime.store.work_unit_has_required_facts(unit_id, role="baseline") is True
 
     invalid_not_applicable = await audit_submit_coverage(
         baseline,
@@ -1861,7 +2039,7 @@ async def test_failed_coverage_is_sealed_as_deferred_work(
     manifest = json.loads((Path(finalized.output["output_dir"]) / "scan-manifest.json").read_text(encoding="utf-8"))
     coverage = json.loads((Path(finalized.output["output_dir"]) / "coverage.json").read_text(encoding="utf-8"))
     assert manifest["scan"]["status"] == "completed"
-    assert coverage["completeness"] == "complete"
+    assert coverage["completeness"] == "partial"
     assert any(item.get("paths") == ["app.py"] for item in coverage["deferred"])
     assert (
         await audit_submit_coverage(
@@ -1871,6 +2049,385 @@ async def test_failed_coverage_is_sealed_as_deferred_work(
     ).success is False
     assert (await audit_finalize(coordinator, scan_id)).success is False
     assert (await audit_cancel(coordinator, scan_id)).success is False
+
+
+@pytest.mark.asyncio
+async def test_investigator_success_removes_active_baseline_gap_from_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("first\nsecond\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    monkeypatch.setattr(
+        reporting_module,
+        "output_dir",
+        lambda scan_id: tmp_path / "outputs" / scan_id,
+    )
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(runtime, scan_id=scan_id, snapshot_id=snapshot_id)
+
+    unit_ids: dict[str, str] = {}
+    for role, phase, session_id, end_line, questions in (
+        (
+            "baseline",
+            "baseline",
+            "baseline",
+            1,
+            [
+                {
+                    "question": "Read the remaining handler flow.",
+                    "category": "coverage_blocking",
+                    "blocking": True,
+                    "related_paths": ["app.py"],
+                }
+            ],
+        ),
+        ("investigator", "investigation", "investigator", 2, []),
+    ):
+        unit_id = runtime.store.create_work_unit(
+            scan_id=scan_id,
+            phase=phase,
+            role=role,
+            paths=["."] if role == "baseline" else ["app.py"],
+        )
+        unit_ids[role] = unit_id
+        runtime.store.bind_session(
+            session_id=session_id,
+            scan_id=scan_id,
+            snapshot_id=snapshot_id,
+            role=role,
+            work_unit_id=unit_id,
+        )
+        worker = _agent_context(
+            session_id,
+            f"{session_id}-message",
+            "code-security-baseline" if role == "baseline" else "code-security-investigator",
+        )
+        assert (await audit_threat_model_context(worker)).success
+        assert (await audit_inventory(worker)).success
+        assert (await audit_read(worker, "app.py", start_line=1, end_line=end_line)).success
+        dispositions = (
+            [{"path": "app.py", "claim": "analyzed"}]
+            if role == "investigator"
+            else []
+        )
+        submitted = await audit_submit_coverage(
+            worker,
+            dispositions=dispositions,
+            open_questions=questions,
+        )
+        assert submitted.success
+        runtime.store.update_work_unit_status(unit_id, "completed")
+
+    _submit_final_adjudication(runtime, scan_id)
+    finalized = await audit_finalize(coordinator, scan_id)
+
+    assert finalized.success
+    coverage = json.loads(
+        (Path(finalized.output["output_dir"]) / "coverage.json").read_text(encoding="utf-8")
+    )
+    assert coverage["completeness"] == "complete"
+    assert coverage["files"]["analyzed"] == 1
+    assert coverage["deferred"] == []
+    assert "openQuestions" not in coverage
+    receipts = [
+        json.loads((Path(finalized.output["output_dir"]) / reference).read_text(encoding="utf-8"))
+        for surface in coverage["surfaces"]
+        for reference in surface["receiptRefs"]
+    ]
+    receipts_by_unit = {item["workUnitId"]: item for item in receipts}
+    assert receipts_by_unit[unit_ids["baseline"]]["completeness"] == "partial"
+    assert receipts_by_unit[unit_ids["baseline"]]["openQuestions"][0]["blocking"] is True
+    assert receipts_by_unit[unit_ids["investigator"]]["completeness"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_exhaustive_finalize_returns_coverage_blocked_and_preserves_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(
+        coordinator,
+        str(target),
+        coverage_policy="exhaustive",
+    )
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(runtime, scan_id=scan_id, snapshot_id=snapshot_id)
+    unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=unit_id,
+    )
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    submitted = await audit_submit_coverage(
+        baseline,
+        open_questions=[
+            {
+                "question": "The assigned source remains unread.",
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": ["app.py"],
+            }
+        ],
+    )
+    assert submitted.success
+    assert submitted.output["completeness"] == "blocked"
+    runtime.store.update_work_unit_status(unit_id, "completed")
+    _submit_final_adjudication(runtime, scan_id)
+
+    finalized = await audit_finalize(coordinator, scan_id)
+
+    assert finalized.success
+    assert finalized.output["status"] == "failed"
+    assert finalized.output["failure_code"] == "coverage_blocked"
+    assert finalized.output["coverage_completeness"] == "blocked"
+    assert runtime.store.get_scan(scan_id)["failure_code"] == "coverage_blocked"
+    assert runtime.store.report_data(scan_id)["coverage"][0]["attestation_id"] == submitted.output["attestation_id"]
+
+
+@pytest.mark.asyncio
+async def test_worker_tool_creates_at_most_one_exact_path_investigator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(runtime, scan_id=scan_id, snapshot_id=snapshot_id)
+    baseline_batch = runtime.store.create_worker_batch(
+        scan_id=scan_id,
+        phase="baseline",
+        units=[
+            {
+                "role": "baseline",
+                "paths": ["."],
+                "subject_id": None,
+                "assignment_digest": "a" * 64,
+            }
+        ],
+    )
+    baseline_unit = baseline_batch["units"][0]["work_unit_id"]
+    runtime.store.bind_session(
+        session_id="baseline",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=baseline_unit,
+    )
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    submitted = await audit_submit_coverage(
+        baseline,
+        open_questions=[
+            {
+                "question": "Trace the exact source path.",
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": ["app.py"],
+            }
+        ],
+    )
+    assert submitted.success
+    binding = runtime.store.require_binding("baseline", {"baseline"})
+    runtime.store.finish_work_attempt(binding.attempt_id, status="completed")
+    runtime.store.update_worker_batch_status(baseline_batch["batch_id"], "running")
+    runtime.store.update_worker_batch_status(baseline_batch["batch_id"], "completed")
+    launch = AsyncMock(return_value={})
+    monkeypatch.setattr(tools_module, "_launch_worker", launch)
+
+    investigation = await audit_run_workers(coordinator, scan_id, "investigation")
+
+    assert investigation.success
+    assert investigation.output["worker_count"] == 1
+    assert investigation.output["workers"][0]["role"] == "investigator"
+    assert investigation.output["workers"][0]["assigned_paths"] == ["app.py"]
+    assert launch.await_args.kwargs["open_questions"][0]["question"] == "Trace the exact source path."
+    second = await audit_run_workers(coordinator, scan_id, "investigation")
+    assert second.success is False
+    assert "already been created" in str(second.error)
+
+
+@pytest.mark.asyncio
+async def test_store_enforces_analysis_phase_ordering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    baseline_plan = [
+        {
+            "role": "baseline",
+            "paths": ["."],
+            "subject_id": None,
+            "assignment_digest": "a" * 64,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="threat model"):
+        runtime.store.create_worker_batch(
+            scan_id=scan_id,
+            phase="baseline",
+            units=baseline_plan,
+        )
+
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
+    baseline_batch = runtime.store.create_worker_batch(
+        scan_id=scan_id,
+        phase="baseline",
+        units=baseline_plan,
+    )
+    with pytest.raises(ValueError, match="baseline worker batch is already active"):
+        runtime.store.create_worker_batch(
+            scan_id=scan_id,
+            phase="baseline",
+            units=baseline_plan,
+        )
+    investigation_plan = [
+        {
+            "role": "investigator",
+            "paths": ["app.py"],
+            "subject_id": None,
+        }
+    ]
+    with pytest.raises(ValueError, match="terminated baseline"):
+        runtime.store.create_worker_batch(
+            scan_id=scan_id,
+            phase="investigation",
+            units=investigation_plan,
+        )
+    with pytest.raises(ValueError, match="all analysis workers"):
+        runtime.store.create_worker_batch(
+            scan_id=scan_id,
+            phase="verification",
+            units=[
+                {
+                    "role": "verifier",
+                    "paths": ["."],
+                    "subject_id": "cand_missing",
+                    "vote_index": 1,
+                }
+            ],
+        )
+
+    baseline_unit = baseline_batch["units"][0]["work_unit_id"]
+    runtime.store.bind_session(
+        session_id="baseline-ordering",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="baseline",
+        work_unit_id=baseline_unit,
+    )
+    baseline = _agent_context(
+        "baseline-ordering",
+        "baseline-ordering-message",
+        "code-security-baseline",
+    )
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await audit_inventory(baseline)).success
+    coverage = await audit_submit_coverage(
+        baseline,
+        open_questions=[
+            {
+                "question": "Trace the remaining source path.",
+                "category": "coverage_blocking",
+                "blocking": True,
+                "related_paths": ["app.py"],
+            }
+        ],
+    )
+    assert coverage.success
+    baseline_binding = runtime.store.require_binding(
+        "baseline-ordering",
+        {"baseline"},
+    )
+    runtime.store.finish_work_attempt(
+        baseline_binding.attempt_id,
+        status="completed",
+    )
+
+    investigation = runtime.store.create_worker_batch(
+        scan_id=scan_id,
+        phase="investigation",
+        units=investigation_plan,
+    )
+    with pytest.raises(ValueError, match="investigation worker batch is already active"):
+        runtime.store.create_worker_batch(
+            scan_id=scan_id,
+            phase="investigation",
+            units=investigation_plan,
+        )
+    with pytest.raises(ValueError, match="all analysis workers"):
+        runtime.store.create_worker_batch(
+            scan_id=scan_id,
+            phase="verification",
+            units=[
+                {
+                    "role": "verifier",
+                    "paths": ["."],
+                    "subject_id": "cand_missing",
+                    "vote_index": 1,
+                }
+            ],
+        )
+
+    runtime.store.update_work_unit_status(
+        investigation["units"][0]["work_unit_id"],
+        "failed",
+    )
+    with pytest.raises(ValueError, match="does not belong to the scan"):
+        runtime.store.create_worker_batch(
+            scan_id=scan_id,
+            phase="verification",
+            units=[
+                {
+                    "role": "verifier",
+                    "paths": ["."],
+                    "subject_id": "cand_missing",
+                    "vote_index": 1,
+                }
+            ],
+        )
 
 
 @pytest.mark.asyncio
