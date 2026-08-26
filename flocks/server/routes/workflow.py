@@ -61,8 +61,6 @@ from flocks.workflow.execution_store import (
     normalize_execution_status as _normalize_execution_status,
     record_execution_result as _record_execution_result,
     resolve_execution_outcome as _resolve_execution_outcome,
-    workflow_execution_key as _workflow_execution_key,
-    workflow_execution_step_prefix as _workflow_execution_step_prefix,
 )
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.workflow.store import WorkflowStore
