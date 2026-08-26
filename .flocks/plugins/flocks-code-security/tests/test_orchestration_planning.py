@@ -10,6 +10,7 @@ from flocks_code_security.models import (
 from flocks_code_security.orchestration import (
     MAX_SCOPES_PER_WORK_UNIT,
     MAX_WORK_UNITS_PER_BATCH,
+    baseline_focus_exclusions,
     plan_baseline_units,
     plan_verification_units,
 )
@@ -81,6 +82,82 @@ def test_small_repository_stays_in_one_deterministic_work_unit() -> None:
     assert first[0]["paths"] == ["."]
     assert len(first[0]["assignment_digest"]) == 64
     assert _assignment_counts(files, first) == Counter({"app.py": 1, "src/auth.py": 1})
+
+
+def test_large_files_do_not_create_extra_baseline_workers() -> None:
+    files = [
+        _file(f"large/module_{index:02d}.py", size_bytes=20 * 1024 * 1024)
+        for index in range(8)
+    ]
+
+    units = plan_baseline_units(_manifest(files))
+
+    assert len(units) == 1
+    assert units[0]["paths"] == ["."]
+    assert units[0]["assigned_bytes"] == 160 * 1024 * 1024
+
+
+def test_default_baseline_focus_excludes_noise_without_broadening_worker_scope() -> None:
+    files = [
+        _file("app.py"),
+        _file("src/auth.py"),
+        _file("src/tests/test_auth.py"),
+        _file("docs/security.md"),
+        _file("assets/logo.svg"),
+        _file("assets/logo.SVG"),
+    ]
+
+    units = plan_baseline_units(_manifest(files))
+
+    assert _assignment_counts(files, units) == Counter(
+        {"app.py": 1, "assets/logo.SVG": 1, "src/auth.py": 1}
+    )
+    assert all("." not in unit["paths"] for unit in units)
+    assert baseline_focus_exclusions(
+        [item.relative_path for item in files],
+        include_paths=(".",),
+    ) == {
+        "*.svg": "Excluded from baseline by the default production-source focus",
+        "docs": "Excluded from baseline by the default production-source focus",
+        "src/tests": "Excluded from baseline by the default production-source focus",
+    }
+
+
+def test_explicit_include_paths_disable_default_baseline_focus() -> None:
+    files = [_file("tests/security_regression.py")]
+
+    units = plan_baseline_units(
+        _manifest(files),
+        include_paths=("tests",),
+    )
+
+    assert units[0]["paths"] == ["."]
+    assert _assignment_counts(files, units) == Counter(
+        {"tests/security_regression.py": 1}
+    )
+    assert baseline_focus_exclusions(
+        [item.relative_path for item in files],
+        include_paths=("tests",),
+    ) == {}
+
+
+def test_file_count_split_still_balances_large_files_by_bytes() -> None:
+    files = [
+        *[
+            _file(f"flat/large_{index:03d}.py", size_bytes=1024 * 1024)
+            for index in range(400)
+        ],
+        *[_file(f"flat/small_{index:03d}.py") for index in range(400)],
+    ]
+
+    units = plan_baseline_units(_manifest(files))
+
+    assert len(units) == 2
+    assigned_bytes = [unit["assigned_bytes"] for unit in units]
+    assert max(assigned_bytes) - min(assigned_bytes) <= 1024 * 1024
+    assert _assignment_counts(files, units) == Counter(
+        {item.relative_path: 1 for item in files}
+    )
 
 
 def test_overweight_component_is_recursively_split_into_child_prefixes() -> None:

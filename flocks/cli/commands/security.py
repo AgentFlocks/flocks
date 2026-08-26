@@ -290,6 +290,11 @@ def security_audit(
         "--dynamic",
         help="Execute validated probes in a network-isolated local Docker runtime",
     ),
+    copy_source: bool = typer.Option(
+        True,
+        "--copy/--no-copy",
+        help="Copy source into a read-only snapshot (use --no-copy to audit the source directory directly)",
+    ),
     coverage_policy: str = typer.Option(
         "evidence_backed_partial",
         "--coverage-policy",
@@ -313,6 +318,8 @@ def security_audit(
         run_standard_audit, _scan_status = _load_plugin_cli()
         progress = _json_line if json_output else _progress_line
         audit_kwargs = {"model": model, "progress": progress}
+        if not copy_source:
+            audit_kwargs["copy_source"] = False
         if dynamic:
             audit_kwargs["dynamic_enabled"] = True
         if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:

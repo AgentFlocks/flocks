@@ -118,6 +118,7 @@ export async function createScan(
     includePaths: splitLines(values.includePaths, ["."]),
     excludePatterns: splitLines(values.excludePatterns),
     maxFileBytes: values.maxFileBytes,
+    copySource: values.copySource,
     dynamicEnabled: values.dynamicEnabled,
     dynamicConfirmed: values.dynamicConfirmed,
     coveragePolicy: values.coveragePolicy,

@@ -64,6 +64,11 @@ def test_create_scan_request_accepts_bounded_verification_votes() -> None:
     )
 
     assert payload.verification_votes == 3
+    assert payload.copy_source is True
+    assert code_security.CreateScanRequest(
+        workspaceId="workspace-1",
+        copySource=False,
+    ).copy_source is False
     with pytest.raises(ValueError):
         code_security.CreateScanRequest(
             workspaceId="workspace-1",

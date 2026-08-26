@@ -27,6 +27,7 @@ class CreateScanRequest(BaseModel):
     include_paths: list[str] = Field(default_factory=lambda: ["."], alias="includePaths")
     exclude_patterns: list[str] = Field(default_factory=list, alias="excludePatterns")
     max_file_bytes: int = Field(1_048_576, alias="maxFileBytes", ge=1, le=50 * 1024 * 1024)
+    copy_source: bool = Field(True, alias="copySource")
     dynamic_enabled: bool = Field(False, alias="dynamicEnabled")
     dynamic_confirmed: bool = Field(False, alias="dynamicConfirmed")
     coverage_policy: str = Field(
@@ -168,6 +169,7 @@ async def create_scan(request: Request, payload: CreateScanRequest):
                 include_paths=tuple(payload.include_paths),
                 exclude_patterns=tuple(payload.exclude_patterns),
                 max_file_bytes=payload.max_file_bytes,
+                copy_source=payload.copy_source,
                 dynamic_enabled=payload.dynamic_enabled,
                 coverage_policy=payload.coverage_policy,
                 verification_votes=payload.verification_votes,

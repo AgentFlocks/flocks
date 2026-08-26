@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,6 +46,102 @@ def _store(tmp_path: Path) -> ScanStore:
         [],
     )
     return store
+
+
+def _concurrent_store_worker(
+    database_path: str,
+    start_event,
+    result_queue,
+    index: int,
+) -> None:
+    try:
+        if not start_event.wait(30):
+            raise TimeoutError("concurrent store start signal timed out")
+        store = ScanStore(Path(database_path))
+        store.initialize()
+        snapshot_id = f"snapshot_concurrent_{index}"
+        store.save_snapshot(
+            SnapshotRef(
+                snapshot_id=snapshot_id,
+                repository_identity=f"repository-{index}",
+                source_revision=None,
+                tree_digest=f"{index:064x}",
+                scope_digest=f"{index + 1:064x}",
+                file_count=0,
+                total_bytes=0,
+                created_at="2026-08-26T00:00:00+00:00",
+                root_path=str(Path(database_path).parent),
+                copy_source=False,
+            ),
+            [],
+        )
+        scan_id = store.create_scan(
+            parent_session_id=f"session-{index}",
+            snapshot_id=snapshot_id,
+            mode="standard",
+            ruleset_digest="rules",
+        )
+        store.mark_scan_terminal(scan_id, "completed")
+    except Exception as exc:
+        result_queue.put(f"{type(exc).__name__}: {exc}")
+    else:
+        result_queue.put(None)
+
+
+def test_ten_processes_can_initialize_and_write_the_shared_store(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "shared" / "code-security.db"
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_concurrent_store_worker,
+            args=(str(database), start_event, result_queue, index),
+        )
+        for index in range(10)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=60)
+
+    timed_out = [process for process in processes if process.is_alive()]
+    for process in timed_out:
+        process.terminate()
+        process.join(timeout=5)
+    assert not timed_out
+    assert all(process.exitcode == 0 for process in processes)
+    assert [result_queue.get(timeout=5) for _ in processes] == [None] * 10
+    store = ScanStore(database)
+    store.initialize()
+    with store._connect() as connection:
+        assert (
+            connection.execute("PRAGMA user_version").fetchone()[0]
+            == store_module.STORE_SCHEMA_VERSION
+        )
+        assert (
+            connection.execute("PRAGMA busy_timeout").fetchone()[0]
+            == store_module.SQLITE_BUSY_TIMEOUT_MS
+        )
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 10
+
+
+def test_current_schema_initialization_does_not_request_a_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    monkeypatch.setattr(store_module, "SQLITE_BUSY_TIMEOUT_MS", 50)
+    blocker = store._connect()
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        ScanStore(store.database_path).initialize()
+    finally:
+        blocker.rollback()
+        blocker.close()
 
 
 def test_request_metadata_enforces_caller_scoped_idempotency(tmp_path: Path) -> None:
@@ -292,6 +389,9 @@ def test_knowledge_base_changes_the_request_digest_and_is_validated() -> None:
     assert first_digest != renamed_digest
     assert first_digest != AuditService._request_digest(
         StartScanRequest(target_path=Path("/tmp/target"), verification_votes=3)
+    )
+    assert first_digest != AuditService._request_digest(
+        StartScanRequest(target_path=Path("/tmp/target"), knowledge_base=first, copy_source=False)
     )
 
     with pytest.raises(AuditServiceError, match="32 KiB"):
@@ -828,6 +928,7 @@ def test_legacy_terminal_scan_uses_and_persists_its_last_update_time(tmp_path: P
             "UPDATE scans SET finished_at = NULL WHERE scan_id = ?",
             (scan_id,),
         )
+        connection.execute("PRAGMA user_version = 0")
 
     legacy = store.get_scan(scan_id)
     assert legacy is not None
@@ -888,6 +989,59 @@ async def test_scan_start_requires_admin_and_an_authorized_workspace(
         )
     assert escaped.value.code == "target_not_authorized"
     assert escaped.value.status_code == 403
+
+    with pytest.raises(AuditServiceError) as incompatible:
+        await service.start_scan(
+            StartScanRequest(
+                target_path=workspace,
+                copy_source=False,
+                dynamic_enabled=True,
+            ),
+            AuditCaller(
+                subject="admin-1",
+                source="tool",
+                is_admin=True,
+                authorized_root=workspace,
+            ),
+        )
+    assert incompatible.value.code == "incompatible_parameters"
+
+
+def test_terminal_direct_source_scan_deletion_never_returns_source_as_cleanup_root(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    store.save_snapshot(
+        SnapshotRef(
+            snapshot_id="snapshot_direct",
+            repository_identity="repository-direct",
+            source_revision=None,
+            tree_digest="c" * 64,
+            scope_digest="d" * 64,
+            file_count=0,
+            total_bytes=0,
+            created_at="2026-08-21T00:00:00+00:00",
+            root_path=str(source_root),
+            target_kind="directory_snapshot",
+            copy_source=False,
+        ),
+        [],
+    )
+    scan_id = store.create_scan(
+        parent_session_id="session-direct",
+        snapshot_id="snapshot_direct",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    store.mark_scan_terminal(scan_id, "completed")
+
+    deleted = store.delete_terminal_scan(scan_id)
+
+    assert deleted["snapshot_root"] is None
+    assert source_root.is_dir()
+    assert store.get_snapshot("snapshot_direct") is None
 
 
 def test_target_validation_allows_source_projects_in_the_flocks_workspace(
@@ -1552,6 +1706,7 @@ def test_initialize_backfills_legacy_worker_binding_and_receipts(
             "WHERE work_unit_id = ?",
             ("legacy-worker", "legacy-task", work_unit_id),
         )
+        connection.execute("PRAGMA user_version = 0")
 
     store.initialize()
 
@@ -1619,6 +1774,7 @@ def test_initialize_migrates_legacy_coverage_as_untrusted_partial_state(
                 "2026-08-25T00:00:00+00:00",
             ),
         )
+        connection.execute("PRAGMA user_version = 0")
 
     store.initialize()
     migrated = store.list_latest_coverage(scan_id)

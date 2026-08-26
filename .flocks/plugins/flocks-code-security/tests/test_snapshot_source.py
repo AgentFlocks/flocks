@@ -12,6 +12,7 @@ from flocks_code_security.coverage import (
     CoverageAttestationService,
     CoverageSubmissionError,
 )
+from flocks_code_security.models import SnapshotRef
 from flocks_code_security.runtime import build_runtime
 
 
@@ -65,6 +66,72 @@ def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
     assert runtime.store.report_data(scan_id)["source_access_counts"] == {
         work_unit_id: {"inventory": 2, "read": 2, "search": 1}
     }
+
+
+def test_snapshot_preserves_non_production_files_for_nonbaseline_phases(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    for directory in (
+        ".github/workflows",
+        "assets",
+        "ci",
+        "debian",
+        "docs",
+        "examples",
+        "fuzzers",
+        "packaging",
+        "po",
+        "project/tests",
+        "src",
+    ):
+        (target / directory).mkdir(parents=True, exist_ok=True)
+    files = {
+        ".github/workflows/ci.yml": "name: ci\n",
+        ".projection-complete": "done\n",
+        "assets/logo.svg": "<svg/>\n",
+        "assets/runtime.js": "export const enabled = true;\n",
+        "ci/check.sh": "exit 0\n",
+        "debian/rules": "build:\n",
+        "docs/guide.md": "guide\n",
+        "examples/demo.c": "int demo(void) { return 0; }\n",
+        "fuzzers/fuzz.c": "int fuzz(void) { return 0; }\n",
+        "packaging/build.sh": "exit 0\n",
+        "po/fr.po": "msgid \"hello\"\n",
+        "project/tests/test_app.c": "int test(void) { return 0; }\n",
+        "security.xml": "<security enabled=\"true\"/>\n",
+        "src/app.c": "int main(void) { return 0; }\n",
+    }
+    for relative_path, content in files.items():
+        (target / relative_path).write_text(content, encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+
+    snapshot = runtime.snapshots.create(str(target))
+
+    assert {
+        item.relative_path
+        for item in runtime.store.list_snapshot_files(snapshot.snapshot_id)
+    } == set(files) - {".projection-complete"}
+    assert snapshot.omitted_file_count == 0
+    assert runtime.store.list_snapshot_omissions(snapshot.snapshot_id) == []
+
+
+def test_explicit_snapshot_scope_can_select_a_test_tree(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    (target / "tests").mkdir(parents=True)
+    (target / "tests" / "security_regression.py").write_text(
+        "dangerous = True\n",
+        encoding="utf-8",
+    )
+    runtime = build_runtime(tmp_path / "plugin-data")
+
+    snapshot = runtime.snapshots.create(str(target), include_paths=["tests"])
+
+    assert snapshot.file_count == 1
+    assert {
+        item.relative_path
+        for item in runtime.store.list_snapshot_files(snapshot.snapshot_id)
+    } == {"tests/security_regression.py"}
 
 
 def test_search_records_only_unique_matching_files(tmp_path: Path) -> None:
@@ -123,6 +190,119 @@ def test_search_records_only_unique_matching_files(tmp_path: Path) -> None:
     limited = runtime.source.search("worker", "needle", max_results=1)
     assert len(limited["matches"]) == 1
     assert len(runtime.store.list_source_accesses(binding.attempt_id)) == len(accesses) + 1
+
+
+def test_direct_source_audit_reads_target_without_copy_and_never_deletes_it(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source_file = target / "app.py"
+    source_file.write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+
+    snapshot = runtime.snapshots.create(str(target), copy_source=False)
+    scan_id = runtime.store.create_scan(
+        parent_session_id="coordinator",
+        snapshot_id=snapshot.snapshot_id,
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="baseline",
+        role="baseline",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="worker",
+        scan_id=scan_id,
+        snapshot_id=snapshot.snapshot_id,
+        role="baseline",
+        work_unit_id=work_unit_id,
+    )
+
+    assert snapshot.copy_source is False
+    assert snapshot.target_kind == "directory_snapshot"
+    assert snapshot.root_path == str(target.resolve())
+    assert snapshot.public_dict()["copy_source"] is False
+    assert not (runtime.snapshots.snapshots_root / snapshot.snapshot_id).exists()
+    assert runtime.source.read("worker", "app.py")["text"] == "safe = True"
+
+    source_file.write_text("safe = None\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="digest mismatch"):
+        runtime.source.read("worker", "app.py")
+
+    runtime.store.delete_scan(scan_id)
+    runtime.snapshots.delete(snapshot.snapshot_id)
+    assert target.is_dir()
+    assert source_file.read_text(encoding="utf-8") == "safe = None\n"
+    assert runtime.store.get_snapshot(snapshot.snapshot_id) is None
+
+
+def test_snapshot_delete_refuses_to_remove_a_root_outside_owned_storage(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source_file = target / "app.py"
+    source_file.write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    runtime.store.save_snapshot(
+        SnapshotRef(
+            snapshot_id="snapshot_unsafe",
+            repository_identity="repository-unsafe",
+            source_revision=None,
+            tree_digest="a" * 64,
+            scope_digest="b" * 64,
+            file_count=1,
+            total_bytes=12,
+            created_at="2026-08-21T00:00:00+00:00",
+            root_path=str(target),
+            copy_source=True,
+        ),
+        [],
+    )
+
+    with pytest.raises(OSError, match="outside owned storage"):
+        runtime.snapshots.delete("snapshot_unsafe")
+
+    assert target.is_dir()
+    assert source_file.read_text(encoding="utf-8") == "safe = True\n"
+    assert runtime.store.get_snapshot("snapshot_unsafe") is not None
+
+
+def test_snapshot_delete_removes_an_owned_copy_only(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source_file = target / "app.py"
+    source_file.write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target))
+    snapshot_root = Path(snapshot.root_path)
+
+    runtime.snapshots.delete(snapshot.snapshot_id)
+
+    assert not snapshot_root.exists()
+    assert source_file.read_text(encoding="utf-8") == "safe = True\n"
+    assert runtime.store.get_snapshot(snapshot.snapshot_id) is None
+
+
+def test_legacy_snapshots_migrate_to_copied_source_mode(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target))
+    with sqlite3.connect(runtime.store.database_path) as connection:
+        connection.execute("ALTER TABLE snapshots DROP COLUMN copy_source")
+        connection.execute("PRAGMA user_version = 0")
+
+    runtime.store.initialize()
+
+    migrated = runtime.store.get_snapshot(snapshot.snapshot_id)
+    assert migrated is not None
+    assert migrated.copy_source is True
 
 
 def test_fresh_attempt_does_not_inherit_source_receipts(tmp_path: Path) -> None:
@@ -284,10 +464,15 @@ def test_snapshot_binds_clean_and_dirty_git_targets(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     _git(target, "init", "--quiet")
+    (target / "tests").mkdir()
     (target / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    (target / ".projection-complete").write_text("done\n", encoding="utf-8")
     (target / "app.py").write_text("safe = True\n", encoding="utf-8")
     (target / "ignored.py").write_text("ignored = True\n", encoding="utf-8")
-    _git(target, "add", ".gitignore", "app.py")
+    (target / "tests" / "test_app.py").write_text(
+        "def test_app(): pass\n", encoding="utf-8"
+    )
+    _git(target, "add", ".gitignore", ".projection-complete", "app.py", "tests")
     _git(
         target,
         "-c",
@@ -313,6 +498,7 @@ def test_snapshot_binds_clean_and_dirty_git_targets(tmp_path: Path) -> None:
     assert {item.relative_path for item in runtime.store.list_snapshot_files(clean.snapshot_id)} == {
         ".gitignore",
         "app.py",
+        "tests/test_app.py",
     }
 
     (target / "app.py").write_text("safe = False\n", encoding="utf-8")
@@ -325,6 +511,7 @@ def test_snapshot_binds_clean_and_dirty_git_targets(tmp_path: Path) -> None:
         ".gitignore",
         "app.py",
         "new.py",
+        "tests/test_app.py",
     }
 
     (target / "app.py").unlink()
@@ -632,6 +819,7 @@ def test_duplicate_verdict_migration_preserves_conflict_fact(tmp_path: Path) -> 
                     "2026-01-01",
                 ),
             )
+        connection.execute("PRAGMA user_version = 0")
 
     runtime.store.initialize()
 

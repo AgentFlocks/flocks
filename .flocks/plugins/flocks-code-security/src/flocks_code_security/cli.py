@@ -662,6 +662,7 @@ async def run_standard_audit(
     *,
     model: str | None = None,
     progress: ProgressCallback | None = None,
+    copy_source: bool = True,
     dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
@@ -686,6 +687,7 @@ async def run_standard_audit(
         StartScanRequest(
             target_path=target,
             model=model,
+            copy_source=copy_source,
             dynamic_enabled=dynamic_enabled,
             coverage_policy=coverage_policy,
             verification_votes=verification_votes,

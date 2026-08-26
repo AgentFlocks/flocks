@@ -1006,6 +1006,7 @@ function WorkerAttemptHistory({ attempts }: { attempts: WorkerAttempt[] }) {
 
 function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
   const { language, t } = useCodeSecurityI18n();
+  const copied = boundary.copy_source !== false;
   return (
     <section
       className="cs-phase-summary cs-snapshot-boundary"
@@ -1015,9 +1016,15 @@ function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
         <div>
           <h3 id="snapshot-boundary-title">
             <Icon name="shield" />
-            {t("快照可信边界")}
+            {t(copied ? "快照可信边界" : "直接源码校验边界")}
           </h3>
-          <span>{t("后续审计仅基于此不可变源码快照")}</span>
+          <span>
+            {t(
+              copied
+                ? "后续审计仅基于此不可变源码快照"
+                : "后续审计直接读取源目录并校验文件摘要",
+            )}
+          </span>
         </div>
       </div>
       <dl className="cs-phase-summary__grid">
@@ -1052,7 +1059,9 @@ function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
       </dl>
       <p className="cs-phase-summary__note">
         {t(
-          "工作区后续发生的文件变化不会影响本次审计结果，所有智能体共享同一份固定内容与版本标识。",
+          copied
+            ? "工作区后续发生的文件变化不会影响本次审计结果，所有智能体共享同一份固定内容与版本标识。"
+            : "审计工具直接读取源目录；如果已纳入文件的内容或大小发生变化，摘要校验将失败并停止使用变化后的内容。",
         )}
       </p>
     </section>

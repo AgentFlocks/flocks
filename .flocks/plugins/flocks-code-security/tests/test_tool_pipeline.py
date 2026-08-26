@@ -15,7 +15,10 @@ import flocks_code_security.runtime as runtime_module
 import flocks_code_security.tools as tools_module
 from flocks_code_security.contract import validate_document
 from flocks_code_security.coverage import normalize_open_questions
-from flocks_code_security.orchestration import plan_verification_units
+from flocks_code_security.orchestration import (
+    plan_baseline_units,
+    plan_verification_units,
+)
 from flocks_code_security.runtime import build_runtime
 from flocks_code_security.service import AuditService
 from flocks_code_security.tools import (
@@ -347,6 +350,7 @@ def test_manifest_does_not_claim_non_runnable_probes_executed() -> None:
             source_revision=None,
             tree_digest="a" * 64,
             file_count=44,
+            copy_source=True,
         ),
         threat_model={},
         coverage={
@@ -404,12 +408,13 @@ def test_manifest_and_markdown_record_guided_audit_without_raw_content() -> None
             "created_at": "2026-08-21T00:00:00+00:00",
         },
         snapshot=SimpleNamespace(
-            target_kind="directory_snapshot",
+            target_kind="git_revision",
             repository_identity="repo",
             display_name="snapshot",
-            source_revision=None,
+            source_revision="abc123",
             tree_digest="a" * 64,
             file_count=1,
+            copy_source=False,
         ),
         threat_model=threat_model,
         coverage=coverage,
@@ -431,6 +436,9 @@ def test_manifest_and_markdown_record_guided_audit_without_raw_content() -> None
     )
 
     validate_document("manifest", manifest)
+    assert manifest["scan"]["target"]["kind"] == "git_revision"
+    assert "snapshotDigest" in manifest["scan"]["target"]
+    assert "digest-bound source" in manifest["scan"]["scope"]["summary"]
     assert manifest["scan"]["knowledgeBase"] == {
         "displayName": "description.txt",
         "sha256": "b" * 64,
@@ -1398,8 +1406,17 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
+    (target / "assets").mkdir()
+    (target / "docs").mkdir()
+    (target / "tests").mkdir()
     (target / "app.py").write_text("safe = True\n", encoding="utf-8")
     (target / "empty.py").write_text("", encoding="utf-8")
+    (target / "assets" / "logo.svg").write_text("<svg/>\n", encoding="utf-8")
+    (target / "docs" / "security.md").write_text("guide\n", encoding="utf-8")
+    (target / "tests" / "test_app.py").write_text(
+        "def test_app(): pass\n",
+        encoding="utf-8",
+    )
     runtime = build_runtime(tmp_path / "plugin-data")
     monkeypatch.setattr(runtime_module, "_runtime", runtime)
     monkeypatch.setattr(
@@ -1417,11 +1434,16 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
         snapshot_id=snapshot_id,
     )
 
+    planned_units = plan_baseline_units(
+        runtime.manifests.get_or_build(snapshot_id)
+    )
+    assert len(planned_units) == 1
+    assert planned_units[0]["paths"] == ["app.py", "empty.py"]
     unit_id = runtime.store.create_work_unit(
         scan_id=scan_id,
         phase="baseline",
         role="baseline",
-        paths=["."],
+        paths=planned_units[0]["paths"],
     )
     runtime.store.bind_session(
         session_id="baseline",
@@ -1471,6 +1493,19 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
     coverage = json.loads((output_path / "coverage.json").read_text(encoding="utf-8"))
     assert coverage["completeness"] == "complete"
     assert coverage["deferred"] == []
+    assert {"*.svg", "docs", "tests"} <= set(coverage["excludePaths"])
+    explicit_exclusions = {
+        item["pattern"]: item["reason"]
+        for item in coverage["explicitExclusions"]
+    }
+    assert {
+        pattern: explicit_exclusions[pattern]
+        for pattern in ("*.svg", "docs", "tests")
+    } == {
+        "*.svg": "Excluded from baseline by the default production-source focus",
+        "docs": "Excluded from baseline by the default production-source focus",
+        "tests": "Excluded from baseline by the default production-source focus",
+    }
     assert coverage["files"] == {
         "total": 2,
         "inventoried": 2,

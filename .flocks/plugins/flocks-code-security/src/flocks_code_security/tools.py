@@ -267,6 +267,7 @@ async def audit_prepare(
     include_paths: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
     max_file_bytes: int = 1_048_576,
+    copy_source: bool = True,
     mode: str = "standard",
     dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
@@ -287,6 +288,7 @@ async def audit_prepare(
             include_paths=include_paths,
             exclude_patterns=exclude_patterns,
             max_file_bytes=max_file_bytes,
+            copy_source=copy_source,
         )
         scan_id = await asyncio.to_thread(
             runtime.store.create_scan,
@@ -1219,7 +1221,16 @@ async def audit_run_workers(
                 runtime.manifests.get_or_build,
                 binding.snapshot_id,
             )
-            units = plan_baseline_units(manifest)
+            snapshot = await asyncio.to_thread(
+                runtime.store.get_snapshot,
+                binding.snapshot_id,
+            )
+            if snapshot is None:
+                raise ValueError("Snapshot not found")
+            units = plan_baseline_units(
+                manifest,
+                include_paths=snapshot.include_paths,
+            )
             candidates_by_id: dict[str, dict[str, Any]] = {}
         elif phase == "verification":
             candidates = await asyncio.to_thread(
@@ -2352,13 +2363,20 @@ def register_tools() -> None:
     }
     _register(
         "audit_prepare",
-        "Create a reproducible read-only snapshot and initialize a standard static code audit. Never executes target code.",
+        "Prepare a digest-bound source view and initialize a standard static code audit. Copies source into a read-only snapshot by default and never executes target code.",
         audit_prepare,
         [
             _parameter("target_path", ParameterType.STRING, "Absolute local target directory to snapshot."),
             _parameter("include_paths", ParameterType.ARRAY, "Optional relative files or directories to include.", required=False, json_schema=string_array),
             _parameter("exclude_patterns", ParameterType.ARRAY, "Optional relative glob patterns to exclude.", required=False, json_schema=string_array),
-            _parameter("max_file_bytes", ParameterType.INTEGER, "Maximum bytes copied per file.", required=False, default=1_048_576),
+            _parameter("max_file_bytes", ParameterType.INTEGER, "Maximum bytes included per file.", required=False, default=1_048_576),
+            _parameter(
+                "copy_source",
+                ParameterType.BOOLEAN,
+                "Copy source into a read-only snapshot. Set false to audit the source directory directly.",
+                required=False,
+                default=True,
+            ),
             _parameter("mode", ParameterType.STRING, "Audit mode. Only standard is currently implemented.", required=False, default="standard", enum=["standard"]),
             _parameter(
                 "coverage_policy",

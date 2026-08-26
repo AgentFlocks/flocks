@@ -13,6 +13,7 @@ const EMPTY_VALUES: NewAuditValues = {
   includePaths: ".",
   excludePatterns: "",
   maxFileBytes: 1_048_576,
+  copySource: true,
   dynamicEnabled: false,
   dynamicConfirmed: false,
   coveragePolicy: "evidence_backed_partial",
@@ -166,6 +167,20 @@ export function NewAuditDrawer({
     }));
     setSubmitError("");
   };
+  const setCopySource = (enabled: boolean) => {
+    setValues((current) => ({
+      ...current,
+      copySource: enabled,
+      dynamicEnabled: enabled ? current.dynamicEnabled : false,
+      dynamicConfirmed: enabled ? current.dynamicConfirmed : false,
+    }));
+    setErrors((current) => ({
+      ...current,
+      dynamicEnabled: "",
+      dynamicConfirmed: "",
+    }));
+    setSubmitError("");
+  };
   const validatePath = () => {
     const path = values.targetPath.trim();
     const invalid =
@@ -259,7 +274,9 @@ export function NewAuditDrawer({
       >
         <header>
           <div>
-            <p className="cs-eyebrow">{t("不可变源码快照")}</p>
+            <p className="cs-eyebrow">
+              {t(values.copySource ? "不可变源码快照" : "直接源码审计")}
+            </p>
             <h2 id="new-audit-title" ref={titleRef} tabIndex={-1}>
               {t("新建代码审计")}
             </h2>
@@ -365,6 +382,24 @@ export function NewAuditDrawer({
             </label>
             <details className="cs-advanced">
               <summary>{t("高级设置")}</summary>
+              <label className="cs-toggle" htmlFor="audit-copySource">
+                <span>
+                  <strong>{t("复制源码到只读快照")}</strong>
+                  <small>
+                    {t(
+                      values.copySource
+                        ? "默认开启；审计使用固定的源码副本。"
+                        : "已关闭；直接读取源目录，文件变化会导致校验失败，且不能启用动态验证。",
+                    )}
+                  </small>
+                </span>
+                <input
+                  id="audit-copySource"
+                  type="checkbox"
+                  checked={values.copySource}
+                  onChange={(event) => setCopySource(event.target.checked)}
+                />
+              </label>
               <label className="cs-field" htmlFor="audit-maxFileBytes">
                 <span>{t("单文件上限（字节）")}</span>
                 <input
@@ -458,9 +493,15 @@ export function NewAuditDrawer({
                 id="audit-dynamicEnabled"
                 type="checkbox"
                 checked={values.dynamicEnabled}
+                disabled={!values.copySource}
                 onChange={(event) => setDynamicEnabled(event.target.checked)}
               />
             </label>
+            {!values.copySource && (
+              <small>
+                {t("直接源码审计不支持动态验证；重新开启源码复制后可用。")}
+              </small>
+            )}
             {values.dynamicEnabled && (
               <div className="cs-dynamic-confirm">
                 <Icon name="flask" />
@@ -513,7 +554,9 @@ export function NewAuditDrawer({
             >
               {t(
                 submitting
-                  ? "正在创建不可变快照…"
+                  ? values.copySource
+                    ? "正在创建不可变快照…"
+                    : "正在准备直接源码审计…"
                   : values.dynamicEnabled
                     ? "启动动态审计"
                     : "启动静态审计",

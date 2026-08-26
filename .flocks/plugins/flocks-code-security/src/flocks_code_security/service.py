@@ -117,6 +117,7 @@ class StartScanRequest:
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
     max_file_bytes: int = 1_048_576
+    copy_source: bool = True
     dynamic_enabled: bool = False
     coverage_policy: str = "evidence_backed_partial"
     verification_votes: int = 1
@@ -257,7 +258,11 @@ class _ProgressRecorder:
             snapshot_event = self.store.append_scan_event(
                 self.scan_id,
                 "scan.snapshot_ready",
-                EVENT_TITLES[event],
+                (
+                    EVENT_TITLES[event]
+                    if (payload.get("snapshot") or {}).get("copy_source", True)
+                    else "直接源码审计视图已准备"
+                ),
                 payload,
                 phase_run_id=phase_run_id,
             )
@@ -547,6 +552,7 @@ class AuditService:
             include_paths=self._validate_relative_paths(request.include_paths, "include_paths"),
             exclude_patterns=self._validate_exclude_patterns(request.exclude_patterns),
             max_file_bytes=request.max_file_bytes,
+            copy_source=bool(request.copy_source),
             dynamic_enabled=bool(request.dynamic_enabled),
             coverage_policy=str(request.coverage_policy or "").strip(),
             verification_votes=request.verification_votes,
@@ -560,6 +566,11 @@ class AuditService:
             )
         if normalized.model and len(normalized.model) > 256:
             raise AuditServiceError("invalid_parameter", "model may contain at most 256 characters")
+        if normalized.dynamic_enabled and not normalized.copy_source:
+            raise AuditServiceError(
+                "incompatible_parameters",
+                "Dynamic validation requires copy_source=true",
+            )
         if normalized.coverage_policy not in {
             "evidence_backed_partial",
             "exhaustive",
@@ -590,6 +601,7 @@ class AuditService:
                 include_paths=list(normalized.include_paths),
                 exclude_patterns=list(normalized.exclude_patterns) or None,
                 max_file_bytes=normalized.max_file_bytes,
+                copy_source=normalized.copy_source,
                 dynamic_enabled=normalized.dynamic_enabled,
                 coverage_policy=normalized.coverage_policy,
                 verification_votes=normalized.verification_votes,
@@ -1493,6 +1505,7 @@ class AuditService:
             "include_paths": list(request.include_paths),
             "exclude_patterns": list(request.exclude_patterns),
             "max_file_bytes": request.max_file_bytes,
+            "copy_source": request.copy_source,
             "dynamic_enabled": request.dynamic_enabled,
             "coverage_policy": request.coverage_policy,
             "verification_votes": request.verification_votes,

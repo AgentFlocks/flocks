@@ -69,6 +69,7 @@ const scanDetail = {
   target: {
     display_name: "flocks",
     source_revision: "abc123",
+    copy_source: true,
     tree_digest: "a".repeat(64),
     file_count: 842,
     total_bytes: 12800000,
@@ -1565,6 +1566,32 @@ describe("code security workspace contract page", () => {
     ).toBeInTheDocument();
   });
 
+  it("submits direct source mode and disables incompatible dynamic validation", async () => {
+    const user = userEvent.setup();
+    apiPost.mockResolvedValueOnce({ data: scanDetail });
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+
+    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    screen.getByText("高级设置").closest("details")!.open = true;
+    const copySource = screen.getByRole("checkbox", {
+      name: /^复制源码到只读快照/,
+    });
+    await user.click(copySource);
+
+    expect(copySource).not.toBeChecked();
+    expect(screen.getByText("直接源码审计")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /^动态验证/ })).toBeDisabled();
+    expect(
+      screen.getByText("直接源码审计不支持动态验证；重新开启源码复制后可用。"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "启动静态审计" }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1));
+    expect(apiPost.mock.calls[0][1].copySource).toBe(false);
+    expect(apiPost.mock.calls[0][1].dynamicEnabled).toBe(false);
+  });
+
   it("clears dynamic execution consent when the option is disabled and reopened", async () => {
     const user = userEvent.setup();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -1626,6 +1653,7 @@ describe("code security workspace contract page", () => {
       "evidence_backed_partial",
     );
     expect(apiPost.mock.calls[0][1].verificationVotes).toBe(3);
+    expect(apiPost.mock.calls[0][1].copySource).toBe(true);
     expect(apiPost.mock.calls[1][1].idempotencyKey).toBe(
       apiPost.mock.calls[0][1].idempotencyKey,
     );

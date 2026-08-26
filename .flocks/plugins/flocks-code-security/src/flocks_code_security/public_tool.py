@@ -85,6 +85,7 @@ async def code_security_audit(
     include_paths: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
     max_file_bytes: int = 1_048_576,
+    copy_source: bool = True,
     dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
@@ -127,6 +128,7 @@ async def code_security_audit(
                     include_paths=tuple(include_paths or ["."]),
                     exclude_patterns=tuple(exclude_patterns or []),
                     max_file_bytes=max_file_bytes,
+                    copy_source=copy_source,
                     dynamic_enabled=dynamic_enabled,
                     coverage_policy=coverage_policy,
                     verification_votes=verification_votes,
@@ -229,8 +231,8 @@ def register_public_tool() -> None:
         info=ToolInfo(
             name=PUBLIC_TOOL_NAME,
             description=(
-                "Start and manage a trusted immutable-snapshot code security audit. "
-                "Static analysis is the default and never executes target code. "
+                "Start and manage a trusted digest-bound code security audit. "
+                "Static analysis copies source into a read-only snapshot by default and never executes target code. "
                 "dynamic_enabled=true runs validated probes in restricted local Docker. "
                 "Start returns quickly; keep the scan_id for status, wait, result, or cancel."
             ),
@@ -255,7 +257,13 @@ def register_public_tool() -> None:
                     json_schema=string_array,
                 ),
                 _parameter(
-                    "max_file_bytes", ParameterType.INTEGER, "Maximum bytes copied per file.", default=1_048_576
+                    "max_file_bytes", ParameterType.INTEGER, "Maximum bytes included per file.", default=1_048_576
+                ),
+                _parameter(
+                    "copy_source",
+                    ParameterType.BOOLEAN,
+                    "Copy source into a read-only snapshot. Set false to audit the source directory directly.",
+                    default=True,
                 ),
                 _parameter(
                     "dynamic_enabled",

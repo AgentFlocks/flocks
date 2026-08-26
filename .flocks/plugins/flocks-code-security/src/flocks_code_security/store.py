@@ -13,9 +13,10 @@ import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as BinasciiError
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from flocks_code_security.coverage import normalize_open_questions
 from flocks_code_security.execution import (
@@ -63,6 +64,42 @@ DYNAMIC_EXECUTION_CATEGORIES = (
     "template-injection",
     "unsafe-deserialization",
 )
+# Bump this whenever initialize() adds or changes schema migrations.
+STORE_SCHEMA_VERSION = 1
+SQLITE_BUSY_TIMEOUT_MS = 120_000
+
+
+@contextmanager
+def _cross_process_lock(path: Path) -> Iterator[None]:
+    """Serialize schema initialization across independent audit processes."""
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
+    try:
+        if sys.platform == "win32":  # pragma: no cover - Windows only
+            import msvcrt
+
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        if locked:
+            if sys.platform == "win32":  # pragma: no cover - Windows only
+                import msvcrt
+
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _now() -> str:
@@ -172,9 +209,13 @@ class ScanStore:
         self._lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=30)
+        connection = sqlite3.connect(
+            self.database_path,
+            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+        )
         self.database_path.chmod(0o600)
         connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
@@ -363,8 +404,25 @@ class ScanStore:
     def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.database_path.parent.chmod(0o700)
-        with self._lock, self._connect() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
+        lock_path = self.database_path.with_name(
+            f"{self.database_path.name}.initialize.lock"
+        )
+        with (
+            self._lock,
+            _cross_process_lock(lock_path),
+            self._connect() as connection,
+        ):
+            schema_version = int(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if schema_version >= STORE_SCHEMA_VERSION:
+                self._restrict_database_files()
+                return
+            journal_mode = str(
+                connection.execute("PRAGMA journal_mode").fetchone()[0]
+            ).casefold()
+            if journal_mode != "wal":
+                connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 BEGIN IMMEDIATE;
@@ -382,7 +440,8 @@ class ScanStore:
                     total_bytes INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     root_path TEXT NOT NULL,
-                    omitted_file_count INTEGER NOT NULL DEFAULT 0
+                    omitted_file_count INTEGER NOT NULL DEFAULT 0,
+                    copy_source INTEGER NOT NULL DEFAULT 1
                 );
                 CREATE TABLE IF NOT EXISTS snapshot_omissions (
                     snapshot_id TEXT NOT NULL REFERENCES snapshots(snapshot_id) ON DELETE CASCADE,
@@ -938,6 +997,7 @@ class ScanStore:
                 ("display_name", "TEXT NOT NULL DEFAULT 'snapshot'"),
                 ("include_paths_json", "TEXT NOT NULL DEFAULT '[\".\"]'"),
                 ("exclude_patterns_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("copy_source", "INTEGER NOT NULL DEFAULT 1"),
             ):
                 if column not in snapshot_columns:
                     connection.execute(f"ALTER TABLE snapshots ADD COLUMN {column} {definition}")
@@ -971,6 +1031,7 @@ class ScanStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS verifications_one_per_candidate ON verifications(candidate_id)"
             )
             connection.execute("DROP INDEX IF EXISTS verification_subject_once")
+            connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
         self._restrict_database_files()
 
     def save_snapshot(
@@ -987,8 +1048,8 @@ class ScanStore:
                     target_kind, display_name, include_paths_json,
                     exclude_patterns_json,
                     tree_digest, scope_digest, file_count, total_bytes,
-                    created_at, root_path, omitted_file_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, root_path, omitted_file_count, copy_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.snapshot_id,
@@ -1005,6 +1066,7 @@ class ScanStore:
                     snapshot.created_at,
                     snapshot.root_path,
                     snapshot.omitted_file_count,
+                    int(snapshot.copy_source),
                 ),
             )
             connection.executemany(
@@ -1045,6 +1107,7 @@ class ScanStore:
         payload = dict(row)
         payload["include_paths"] = tuple(json.loads(payload.pop("include_paths_json")))
         payload["exclude_patterns"] = tuple(json.loads(payload.pop("exclude_patterns_json")))
+        payload["copy_source"] = bool(payload["copy_source"])
         return SnapshotRef(**payload)
 
     def save_repository_manifest(self, manifest: RepositoryManifest) -> None:
@@ -3238,7 +3301,7 @@ class ScanStore:
                 raise ValueError("Only terminal scans may be deleted")
 
             snapshot = connection.execute(
-                "SELECT root_path FROM snapshots WHERE snapshot_id = ?",
+                "SELECT root_path, copy_source FROM snapshots WHERE snapshot_id = ?",
                 (scan["snapshot_id"],),
             ).fetchone()
             connection.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
@@ -3252,7 +3315,11 @@ class ScanStore:
                     "DELETE FROM snapshots WHERE snapshot_id = ?",
                     (scan["snapshot_id"],),
                 )
-                snapshot_root = snapshot["root_path"] if snapshot is not None else None
+                snapshot_root = (
+                    snapshot["root_path"]
+                    if snapshot is not None and bool(snapshot["copy_source"])
+                    else None
+                )
 
             return {
                 "snapshot_id": scan["snapshot_id"],

@@ -185,6 +185,7 @@ const englishMessages: Record<string, string> = {
   "请求 ID：{{id}}": "Request ID: {{id}}",
   关闭新建审计: "Close new audit",
   不可变源码快照: "Immutable source snapshot",
+  直接源码审计: "Direct source audit",
   新建代码审计: "New code audit",
   请修正以下问题: "Fix the following issues",
   目标: "Target",
@@ -199,6 +200,11 @@ const englishMessages: Record<string, string> = {
   "每行一个 glob；留空使用插件默认排除规则。":
     "Enter one glob per line, or leave blank to use the plugin defaults.",
   高级设置: "Advanced settings",
+  复制源码到只读快照: "Copy source into a read-only snapshot",
+  "默认开启；审计使用固定的源码副本。":
+    "Enabled by default. The audit uses a fixed source copy.",
+  "已关闭；直接读取源目录，文件变化会导致校验失败，且不能启用动态验证。":
+    "Disabled. The audit reads the source directory directly; file changes fail integrity checks, and dynamic validation is unavailable.",
   "单文件上限（字节）": "Per-file limit (bytes)",
   覆盖策略: "Coverage policy",
   "可信部分覆盖（默认）": "Trusted partial coverage (default)",
@@ -215,6 +221,8 @@ const englishMessages: Record<string, string> = {
   验证方式: "Validation method",
   "默认关闭；开启后执行受限 Docker 探测。":
     "Disabled by default. When enabled, restricted Docker probes are executed.",
+  "直接源码审计不支持动态验证；重新开启源码复制后可用。":
+    "Dynamic validation is unavailable for direct source audits. Re-enable source copying to use it.",
   "动态验证将在本地 Docker 中构建并运行受限探测":
     "Dynamic validation builds and runs restricted probes in local Docker",
   "无网络 · 无主机挂载 · 只读根文件系统 · 无 capabilities · 资源受限 · 仅使用本地已有镜像":
@@ -226,6 +234,7 @@ const englishMessages: Record<string, string> = {
   "我理解动态验证会执行快照中的受限代码，并同意继续。":
     "I understand that dynamic validation executes restricted code from the snapshot and agree to continue.",
   "正在创建不可变快照…": "Creating immutable snapshot…",
+  "正在准备直接源码审计…": "Preparing direct source audit…",
   启动动态审计: "Start dynamic audit",
   启动静态审计: "Start static audit",
   阶段与实时事件: "Phases and live events",
@@ -319,10 +328,15 @@ const englishMessages: Record<string, string> = {
   快照可信边界: "Trusted snapshot boundary",
   后续审计仅基于此不可变源码快照:
     "All subsequent analysis uses only this immutable source snapshot",
+  直接源码校验边界: "Direct source validation boundary",
+  后续审计直接读取源目录并校验文件摘要:
+    "Subsequent analysis reads the source directory directly and verifies file digests",
   纳入文件: "Included files",
   遗漏文件: "Omitted files",
   "工作区后续发生的文件变化不会影响本次审计结果，所有智能体共享同一份固定内容与版本标识。":
     "Subsequent workspace file changes do not affect this audit. All agents share the same fixed content and revision identifier.",
+  "审计工具直接读取源目录；如果已纳入文件的内容或大小发生变化，摘要校验将失败并停止使用变化后的内容。":
+    "Audit tools read the source directory directly. If an included file's contents or size changes, digest validation fails and the changed content is not used.",
   等待校验: "Pending validation",
   封装结果: "Packaging results",
   最终产物已经固定并通过摘要校验:
@@ -408,6 +422,7 @@ const englishMessages: Record<string, string> = {
   "{{count}} 个工作单元已取消": "{{count}} work units cancelled",
   "{{count}} 个工作单元已启动": "{{count}} work units started",
   不可变源码快照已创建: "Immutable source snapshot created",
+  直接源码审计视图已准备: "Direct source audit view prepared",
   审计阶段已开始: "Audit phase started",
   审计阶段状态已更新: "Audit phase status updated",
   扫描状态已更新: "Scan status updated",

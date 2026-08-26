@@ -6,7 +6,8 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import PurePosixPath
+from typing import Any, Iterable
 
 from flocks_code_security.models import RepositoryManifest, SnapshotFile
 
@@ -16,6 +17,54 @@ MAX_SCOPES_PER_WORK_UNIT = 2_000
 TARGET_FILES_PER_WORK_UNIT = 500
 TARGET_BYTES_PER_WORK_UNIT = 16 * 1024 * 1024
 
+_BASELINE_NON_PRODUCTION_TREES = (
+    ".circleci",
+    ".github",
+    ".gitlab",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    "ci",
+    "debian",
+    "doc",
+    "docs",
+    "example",
+    "examples",
+    "fixtures",
+    "fuzz",
+    "fuzzer",
+    "fuzzers",
+    "htmlcov",
+    "packaging",
+    "po",
+    "sample",
+    "samples",
+    "test",
+    "test_data",
+    "testdata",
+    "testing",
+    "tests",
+)
+_BASELINE_NON_SOURCE_PATTERNS = (
+    "*.gif",
+    "*.ico",
+    "*.jpeg",
+    "*.jpg",
+    "*.mo",
+    "*.otf",
+    "*.pdf",
+    "*.png",
+    "*.po",
+    "*.pot",
+    "*.svg",
+    "*.ttf",
+    "*.webp",
+    "*.woff",
+    "*.woff2",
+)
+_BASELINE_FOCUS_REASON = "Excluded from baseline by the default production-source focus"
+
 
 @dataclass
 class _TreeNode:
@@ -23,6 +72,7 @@ class _TreeNode:
     files: list[SnapshotFile] = field(default_factory=list)
     direct_files: list[SnapshotFile] = field(default_factory=list)
     children: dict[str, "_TreeNode"] = field(default_factory=dict)
+    total_path_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -35,25 +85,79 @@ class _ScopeShard:
         return sum(item.size_bytes for item in self.files)
 
 
-def _scope_tree(files: list[SnapshotFile]) -> _TreeNode:
+def baseline_focus_exclusion(
+    relative_path: str,
+    *,
+    include_paths: tuple[str, ...],
+) -> tuple[str, str] | None:
+    """Return the concrete baseline exclusion scope and its public reason."""
+    if include_paths != (".",):
+        return None
+    path = PurePosixPath(relative_path)
+    for index, part in enumerate(path.parts[:-1]):
+        if part in _BASELINE_NON_PRODUCTION_TREES:
+            return "/".join(path.parts[: index + 1]), _BASELINE_FOCUS_REASON
+    for pattern in _BASELINE_NON_SOURCE_PATTERNS:
+        if path.match(pattern):
+            return pattern, _BASELINE_FOCUS_REASON
+    return None
+
+
+def baseline_focus_exclusions(
+    relative_paths: Iterable[str],
+    *,
+    include_paths: tuple[str, ...],
+) -> dict[str, str]:
+    exclusions: dict[str, str] = {}
+    for relative_path in relative_paths:
+        exclusion = baseline_focus_exclusion(
+            relative_path,
+            include_paths=include_paths,
+        )
+        if exclusion is not None:
+            scope, reason = exclusion
+            exclusions[scope] = reason
+    return dict(sorted(exclusions.items()))
+
+
+def _scope_tree(
+    inventory: list[SnapshotFile],
+    blocked_omission_paths: Iterable[str],
+    eligible_paths: set[str],
+) -> _TreeNode:
     root = _TreeNode(path=".")
-    for item in files:
-        root.files.append(item)
+    for item in inventory:
+        eligible = item.relative_path in eligible_paths
+        root.total_path_count += 1
+        if eligible:
+            root.files.append(item)
         node = root
         parts = item.relative_path.split("/")
         for depth, part in enumerate(parts[:-1], start=1):
             path = "/".join(parts[:depth])
             node = node.children.setdefault(part, _TreeNode(path=path))
-            node.files.append(item)
-        node.direct_files.append(item)
+            node.total_path_count += 1
+            if eligible:
+                node.files.append(item)
+        if eligible:
+            node.direct_files.append(item)
+    for relative_path in blocked_omission_paths:
+        root.total_path_count += 1
+        node = root
+        parts = relative_path.split("/")
+        for depth, part in enumerate(parts[:-1], start=1):
+            path = "/".join(parts[:depth])
+            node = node.children.setdefault(part, _TreeNode(path=path))
+            node.total_path_count += 1
     return root
 
 
 def _split_node(node: _TreeNode) -> list[_ScopeShard]:
-    total_bytes = sum(item.size_bytes for item in node.files)
+    if not node.files:
+        return []
     if (
         len(node.files) <= TARGET_FILES_PER_WORK_UNIT
-        and total_bytes <= TARGET_BYTES_PER_WORK_UNIT
+        and len(node.files) == node.total_path_count
     ):
         return [_ScopeShard(paths=(node.path,), files=tuple(node.files))]
     shards = [
@@ -139,23 +243,81 @@ def plan_threat_model_units() -> list[dict[str, Any]]:
     ]
 
 
-def plan_baseline_units(manifest: RepositoryManifest) -> list[dict[str, Any]]:
+def plan_baseline_units(
+    manifest: RepositoryManifest,
+    *,
+    include_paths: tuple[str, ...] = (".",),
+) -> list[dict[str, Any]]:
     """Create deterministic, disjoint manifest-bound baseline assignments."""
-    files = sorted(manifest.files, key=lambda item: item.relative_path)
+    inventory = sorted(manifest.files, key=lambda item: item.relative_path)
     if (
-        len(files) != manifest.file_count
-        or sum(item.size_bytes for item in files) != manifest.total_bytes
+        len(inventory) != manifest.file_count
+        or sum(item.size_bytes for item in inventory) != manifest.total_bytes
         or len(manifest.omissions) != manifest.omitted_file_count
     ):
         raise ValueError("Repository manifest inventory does not match its counts")
-    shards = _split_node(_scope_tree(files))
+    files = [
+        item
+        for item in inventory
+        if baseline_focus_exclusion(
+            item.relative_path,
+            include_paths=include_paths,
+        )
+        is None
+    ]
+    omissions = [
+        item
+        for item in sorted(
+            manifest.omissions,
+            key=lambda value: value.relative_path,
+        )
+        if baseline_focus_exclusion(
+            item.relative_path,
+            include_paths=include_paths,
+        )
+        is None
+    ]
+    if not files and not omissions:
+        raise ValueError(
+            "The selected scope contains no baseline-eligible source files"
+        )
+    if not files:
+        omission_paths = [item.relative_path for item in omissions]
+        return [
+            {
+                "role": "baseline",
+                "paths": omission_paths[index : index + MAX_SCOPES_PER_WORK_UNIT],
+                "subject_id": None,
+                "assignment_digest": _assignment_digest(
+                    manifest,
+                    omission_paths[index : index + MAX_SCOPES_PER_WORK_UNIT],
+                    [],
+                ),
+                "assigned_file_count": 0,
+                "assigned_bytes": 0,
+            }
+            for index in range(0, len(omission_paths), MAX_SCOPES_PER_WORK_UNIT)
+        ]
+    eligible_paths = {item.relative_path for item in files}
+    eligible_omission_paths = {item.relative_path for item in omissions}
+    excluded_omission_paths = [
+        item.relative_path
+        for item in manifest.omissions
+        if item.relative_path not in eligible_omission_paths
+    ]
+    shards = _split_node(
+        _scope_tree(
+            inventory,
+            excluded_omission_paths,
+            eligible_paths,
+        )
+    )
     scope_count = sum(len(shard.paths) for shard in shards)
     if scope_count > MAX_WORK_UNITS_PER_BATCH * MAX_SCOPES_PER_WORK_UNIT:
         raise ValueError("Repository manifest exceeds baseline assignment capacity")
     desired_units = max(
         1,
         math.ceil(len(files) / TARGET_FILES_PER_WORK_UNIT),
-        math.ceil(manifest.total_bytes / TARGET_BYTES_PER_WORK_UNIT),
         math.ceil(scope_count / MAX_SCOPES_PER_WORK_UNIT),
     )
     unit_count = min(MAX_WORK_UNITS_PER_BATCH, desired_units, len(shards))
@@ -205,8 +367,17 @@ def plan_baseline_units(manifest: RepositoryManifest) -> list[dict[str, Any]]:
     assignments: list[list[SnapshotFile]] = []
     assigned_counts: dict[str, int] = {item.relative_path: 0 for item in files}
     file_paths = set(assigned_counts)
+    inventory_paths = {item.relative_path for item in inventory}
     for paths in draft_units:
         assigned = _assigned_files(files, paths, file_paths)
+        if _assigned_files(
+            inventory,
+            paths,
+            inventory_paths,
+        ) != assigned:
+            raise ValueError(
+                "Baseline scope includes a path excluded by the production-source focus"
+            )
         assignments.append(assigned)
         for item in assigned:
             assigned_counts[item.relative_path] += 1
@@ -217,10 +388,7 @@ def plan_baseline_units(manifest: RepositoryManifest) -> list[dict[str, Any]]:
             + ", ".join(invalid[:20])
         )
 
-    for omission in sorted(
-        manifest.omissions,
-        key=lambda item: item.relative_path,
-    ):
+    for omission in omissions:
         matching_units = [
             index
             for index, paths in enumerate(draft_units)

@@ -141,6 +141,35 @@ def test_security_audit_forwards_dynamic_opt_in(monkeypatch, tmp_path) -> None:
     assert observed["dynamic_enabled"] is True
 
 
+def test_security_audit_forwards_direct_source_mode(monkeypatch, tmp_path) -> None:
+    observed: dict[str, object] = {}
+
+    async def run_audit(target, *, model, progress, copy_source):
+        observed.update(
+            target=target,
+            model=model,
+            progress=progress,
+            copy_source=copy_source,
+        )
+        return {"scan_id": "scan_direct"}
+
+    monkeypatch.setattr(
+        security_cmd,
+        "_load_plugin_cli",
+        lambda: (run_audit, lambda _scan_id: {}),
+    )
+    monkeypatch.setattr(security_cmd, "shutdown_langfuse", lambda: None)
+
+    result = runner.invoke(
+        security_cmd.security_app,
+        ["audit", str(tmp_path), "--no-copy", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert observed["target"] == tmp_path
+    assert observed["copy_source"] is False
+
+
 def test_security_audit_forwards_coverage_policy(monkeypatch, tmp_path) -> None:
     observed: dict[str, object] = {}
 

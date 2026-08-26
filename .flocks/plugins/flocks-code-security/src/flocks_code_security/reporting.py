@@ -31,6 +31,10 @@ from flocks_code_security.contract import (
     validate_bundle,
 )
 from flocks_code_security.coverage import public_open_question
+from flocks_code_security.orchestration import (
+    baseline_focus_exclusion,
+    baseline_focus_exclusions,
+)
 from flocks_code_security.paths import output_dir
 from flocks_code_security.snapshot import DEFAULT_EXCLUDES, TargetSnapshotService
 from flocks_code_security.store import ScanStore
@@ -614,7 +618,23 @@ class ReportWriter:
     ) -> tuple[dict[str, Any], dict[str, bytes]]:
         scan_id = data["scan"]["scan_id"]
         coverage_by_unit = {item["work_unit_id"]: item for item in data["coverage"]}
-        snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
+        all_snapshot_files = self.store.list_snapshot_files(snapshot.snapshot_id)
+        all_scope_paths = [
+            item.relative_path for item in all_snapshot_files
+        ] + [item["relative_path"] for item in data["omissions"]]
+        focus_exclusions = baseline_focus_exclusions(
+            all_scope_paths,
+            include_paths=snapshot.include_paths,
+        )
+        snapshot_files = [
+            item
+            for item in all_snapshot_files
+            if baseline_focus_exclusion(
+                item.relative_path,
+                include_paths=snapshot.include_paths,
+            )
+            is None
+        ]
         snapshot_paths = {item.relative_path for item in snapshot_files}
 
         def paths_in_states(
@@ -817,6 +837,11 @@ class ReportWriter:
             deferred.append(row)
 
         for omission in data["omissions"]:
+            if baseline_focus_exclusion(
+                omission["relative_path"],
+                include_paths=snapshot.include_paths,
+            ) is not None:
+                continue
             deferred.append(
                 {
                     "id": stable_id("deferred", "omission", omission["relative_path"]),
@@ -835,16 +860,19 @@ class ReportWriter:
             path
             for coverage in coverage_by_unit.values()
             for path in paths_in_states(coverage, {"read_complete"})
+            if path in snapshot_paths
         }
         failed_files = {
             path
             for coverage in coverage_by_unit.values()
             for path in paths_in_states(coverage, {"failed"})
+            if path in snapshot_paths
         }
         not_applicable_paths = {
             path
             for coverage in coverage_by_unit.values()
             for path in paths_in_states(coverage, {"not_applicable"})
+            if path in snapshot_paths
         }
         uncovered = sorted(
             path
@@ -886,17 +914,20 @@ class ReportWriter:
             {question_key(item): item for item in limitations}.values(),
             key=question_key,
         )
+
+        def exclusion_reason(pattern: str) -> str:
+            if pattern in DEFAULT_EXCLUDES:
+                return "Excluded by the deterministic snapshot safety policy"
+            return "Excluded by the requested audit scope"
+
         explicit_exclusions = [
-            {
-                "pattern": pattern,
-                "reason": (
-                    "Excluded by the deterministic snapshot safety policy"
-                    if pattern in DEFAULT_EXCLUDES
-                    else "Excluded by the requested audit scope"
-                ),
-            }
+            {"pattern": pattern, "reason": exclusion_reason(pattern)}
             for pattern in dict.fromkeys(snapshot.exclude_patterns)
         ]
+        explicit_exclusions.extend(
+            {"pattern": pattern, "reason": reason}
+            for pattern, reason in focus_exclusions.items()
+        )
         if snapshot.target_kind.startswith("git_"):
             explicit_exclusions.append(
                 {
@@ -905,7 +936,9 @@ class ReportWriter:
                 }
             )
         include_paths = list(snapshot.include_paths)
-        exclude_paths = list(snapshot.exclude_patterns)
+        exclude_paths = list(
+            dict.fromkeys((*snapshot.exclude_patterns, *focus_exclusions))
+        )
         scoped = include_paths != ["."]
         completeness = (
             "complete"
@@ -968,7 +1001,7 @@ class ReportWriter:
         }
         if snapshot.source_revision:
             target["revision"] = snapshot.source_revision
-        if snapshot.target_kind != "git_revision":
+        if snapshot.target_kind != "git_revision" or not snapshot.copy_source:
             target["snapshotDigest"] = snapshot_digest(snapshot.tree_digest)
         limitations = list(
             dict.fromkeys(
@@ -1001,7 +1034,10 @@ class ReportWriter:
         scope: dict[str, Any] = {
             "includePaths": coverage["includePaths"],
             "excludePaths": coverage["excludePaths"],
-            "summary": (f"Static review of {snapshot.file_count} immutable snapshot files."),
+            "summary": (
+                f"Static review of {snapshot.file_count} "
+                f"{'immutable snapshot' if snapshot.copy_source else 'digest-bound source'} files."
+            ),
             "runtimeStatus": runtime_status,
             "validationMode": validation_mode,
             "context": "Threat-model-guided standard source-code security audit.",

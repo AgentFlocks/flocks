@@ -41,6 +41,7 @@ class SnapshotRef:
     display_name: str = "snapshot"
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
+    copy_source: bool = True
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)

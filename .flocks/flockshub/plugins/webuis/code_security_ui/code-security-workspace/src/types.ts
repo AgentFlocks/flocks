@@ -161,6 +161,7 @@ export interface ScanDetail {
   target: {
     display_name: string;
     source_revision?: string | null;
+    copy_source?: boolean;
     tree_digest: string;
     file_count: number;
     total_bytes: number;
@@ -214,6 +215,7 @@ export interface NewAuditValues {
   includePaths: string;
   excludePatterns: string;
   maxFileBytes: number;
+  copySource: boolean;
   dynamicEnabled: boolean;
   dynamicConfirmed: boolean;
   coveragePolicy: "evidence_backed_partial" | "exhaustive";

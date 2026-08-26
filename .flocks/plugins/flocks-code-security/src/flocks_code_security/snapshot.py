@@ -41,6 +41,8 @@ DEFAULT_EXCLUDES = (
     "**/venv/**",
     "__pycache__",
     "**/__pycache__/**",
+    ".projection-complete",
+    "**/.projection-complete",
 )
 
 LANGUAGES = {
@@ -129,6 +131,7 @@ class TargetSnapshotService:
         include_paths: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
         max_file_bytes: int = 1_048_576,
+        copy_source: bool = True,
     ) -> SnapshotRef:
         raw_target = Path(target_path).expanduser()
         if not raw_target.is_absolute():
@@ -155,10 +158,11 @@ class TargetSnapshotService:
             normalize_relative_path(item, allow_root=True)
             for item in (include_paths or ["."])
         ]
-        patterns = tuple(DEFAULT_EXCLUDES) + tuple(
+        requested_patterns = tuple(
             normalize_relative_path(item, allow_root=True)
             for item in (exclude_patterns or [])
         )
+        patterns = DEFAULT_EXCLUDES + requested_patterns
         git_state = self._git_snapshot_state(target)
         root_descriptor: int | None = self._open_directory(target)
         root_identity = self._stat_signature(os.fstat(root_descriptor))
@@ -169,7 +173,12 @@ class TargetSnapshotService:
         omissions: list[SnapshotOmission] = []
         total_bytes = 0
         try:
-            files = self._enumerate_for_state(target, includes, patterns, git_state)
+            files = self._enumerate_for_state(
+                target,
+                includes,
+                patterns,
+                git_state,
+            )
             self._assert_root_identity(target, root_identity)
             if len(files) > MAX_SNAPSHOT_FILES:
                 raise ValueError(
@@ -183,11 +192,12 @@ class TargetSnapshotService:
                 for relative_path, _source_path in files
             }
 
-            self.snapshots_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            self.snapshots_root.chmod(0o700)
-            temporary = Path(
-                tempfile.mkdtemp(prefix=".snapshot-", dir=self.snapshots_root)
-            )
+            if copy_source:
+                self.snapshots_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                self.snapshots_root.chmod(0o700)
+                temporary = Path(
+                    tempfile.mkdtemp(prefix=".snapshot-", dir=self.snapshots_root)
+                )
             for relative_path, source_path in files:
                 data, observed_size = self._read_regular_file(
                     root_descriptor,
@@ -208,9 +218,10 @@ class TargetSnapshotService:
                     raise ValueError(
                         "Snapshot exceeds the 536870912-byte total size limit"
                     )
-                destination = temporary / relative_path
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(data)
+                if temporary is not None:
+                    destination = temporary / relative_path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
                 digest = hashlib.sha256(data).hexdigest()
                 is_binary = b"\x00" in data[:8192]
                 line_count = 0 if is_binary else len(data.decode("utf-8", errors="replace").splitlines())
@@ -270,6 +281,7 @@ class TargetSnapshotService:
                         "include_paths": includes,
                         "exclude_patterns": list(patterns),
                         "max_file_bytes": max_file_bytes,
+                        "copy_source": copy_source,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -285,11 +297,15 @@ class TargetSnapshotService:
                 target_kind = "git_revision" if git_state.clean else "git_worktree"
                 source_revision = git_state.revision
 
-            assert temporary is not None
-            os.replace(temporary, final_root)
-            for path in sorted(final_root.rglob("*"), reverse=True):
-                path.chmod(0o500 if path.is_dir() else 0o400)
-            final_root.chmod(0o500)
+            if copy_source:
+                assert temporary is not None
+                os.replace(temporary, final_root)
+                for path in sorted(final_root.rglob("*"), reverse=True):
+                    path.chmod(0o500 if path.is_dir() else 0o400)
+                final_root.chmod(0o500)
+                snapshot_root = final_root
+            else:
+                snapshot_root = target
 
             snapshot = SnapshotRef(
                 snapshot_id=snapshot_id,
@@ -300,12 +316,13 @@ class TargetSnapshotService:
                 file_count=len(records),
                 total_bytes=total_bytes,
                 created_at=datetime.now(timezone.utc).isoformat(),
-                root_path=str(final_root),
+                root_path=str(snapshot_root),
                 omitted_file_count=len(omissions),
                 target_kind=target_kind,
                 display_name=target.name,
                 include_paths=tuple(includes),
                 exclude_patterns=tuple(patterns),
+                copy_source=copy_source,
             )
             self.store.save_snapshot(snapshot, records, omissions)
             self.manifests.build(snapshot.snapshot_id)
@@ -333,13 +350,26 @@ class TargetSnapshotService:
         snapshot = self.store.get_snapshot(snapshot_id)
         if snapshot is None:
             return
+        owned_root: Path | None = None
+        if snapshot.copy_source:
+            root = Path(snapshot.root_path).expanduser()
+            expected_root = (
+                self.snapshots_root.expanduser().resolve() / snapshot.snapshot_id
+            )
+            if root.is_symlink() or root.resolve() != expected_root:
+                raise OSError(
+                    f"Refusing to delete snapshot outside owned storage: {root}"
+                )
+            owned_root = expected_root
         self.store.delete_snapshot(snapshot_id)
-        root = Path(snapshot.root_path)
-        if root.exists():
-            root.chmod(0o700)
-            for path in root.rglob("*"):
-                path.chmod(0o700 if path.is_dir() else 0o600)
-            shutil.rmtree(root)
+        if owned_root is None or not owned_root.exists():
+            return
+        owned_root.chmod(0o700)
+        for path in owned_root.rglob("*"):
+            if path.is_symlink():
+                continue
+            path.chmod(0o700 if path.is_dir() else 0o600)
+        shutil.rmtree(owned_root)
 
     def _enumerate(
         self,
@@ -378,7 +408,9 @@ class TargetSnapshotService:
                     relative = path.relative_to(target).as_posix()
                     if path.is_symlink():
                         raise ValueError(f"Symbolic links are not allowed: {relative}")
-                    if path.is_file() and not _matches_exclude(relative, exclude_patterns):
+                    if path.is_file() and not _matches_exclude(
+                        relative, exclude_patterns
+                    ):
                         selected[relative] = path
         return sorted(selected.items())
 

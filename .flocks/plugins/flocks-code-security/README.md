@@ -6,7 +6,7 @@ Current implementation provides:
 
 - five isolated code-security agents (primary adjudicator, threat modeler, baseline, verifier, prober);
 - a subset-only callable-tool projection;
-- reproducible read-only source snapshots;
+- digest-bound source views backed by reproducible read-only copies by default;
 - snapshot inventory, bounded reads, and literal search;
 - isolated background baseline and independent-verification workers;
 - a mandatory source-backed threat-modeling phase with canonical assets, trust boundaries, attacker capabilities, security objectives, and assumptions;
@@ -16,13 +16,21 @@ Current implementation provides:
 - deterministic Markdown and SARIF projections of independently verified findings.
 - final parent-Agent adjudication with at most one scope-bound targeted rescan.
 
-Target code is copied into the plugin snapshot store. Static scans never run target code, build scripts, tests, or Git hooks.
+Target code is copied into the plugin snapshot store by default. Static scans never run target code, build scripts, tests, or Git hooks. Repository-wide audits keep the complete safe snapshot available to threat modeling and verification, while baseline workers default to production source and security-relevant configuration. The baseline focus excludes test/documentation/example/fuzzing/packaging/localization trees and static binary assets; explicit `include_paths` remain authoritative. Baseline scope exclusions are recorded in coverage artifacts rather than reported as unread-file omissions.
 
 Run a complete audit with one command:
 
 ```bash
 flocks security audit /absolute/path/to/source
 ```
+
+To skip the source copy and audit the source directory directly:
+
+```bash
+flocks security audit /absolute/path/to/source --no-copy
+```
+
+Direct mode still records the initial inventory and file digests. Audit reads fail closed if an included source file changes, and deleting the scan never deletes the source directory. Direct mode cannot be combined with dynamic validation.
 
 Dynamic validation is explicit opt-in:
 
@@ -41,7 +49,7 @@ The description is captured before the scan starts, stored as immutable scan-bou
 
 Dynamic scans ask an isolated prober to describe a control/attack pair for each statically confirmed candidate. A trusted host runner validates the contract and builds only from an existing snapshot Dockerfile with no network, pulls, cache, or unrestricted build steps. BuildKit runs are pinned to the local default Docker builder and resource-limited; otherwise the runner forces the resource-limited legacy builder against the verified local daemon and fails preflight if neither backend can enforce CPU, memory, process, and shared-memory limits. Each script runs in a fresh local container with no network, no capabilities, a read-only root, bounded resources, and no mounts. The fail-closed Dockerfile policy accepts only an explicit instruction set and rejects parser directives, heredocs, `ADD`, `ONBUILD`, `FROM --platform`, and all `RUN` options; every external `FROM` or `COPY --from` image must already exist locally, while `scratch` needs no image inspection. The runner stores bounded facts only; the parent Agent decides whether those facts reproduce the candidate. Runnable probes require Docker CLI access and a local Docker daemon endpoint. Docker is a containment boundary for this opt-in workflow, not a general malicious-code sandbox.
 
-The command prints the `scan_id` as soon as the immutable snapshot is ready, then follows threat modeling, baseline scanning, independent verification, parent-Agent adjudication, and report generation. This one-command path is **host-orchestrated** by `AuditOrchestrator`; the `code-security` primary Agent makes the semantic accept/reject or targeted-rescan decision, but it does not schedule the CLI's macro phases. To inspect the same persisted progress from another terminal without changing the scan:
+The command prints the `scan_id` as soon as the digest-bound source view is ready, then follows threat modeling, baseline scanning, independent verification, parent-Agent adjudication, and report generation. This one-command path is **host-orchestrated** by `AuditOrchestrator`; the `code-security` primary Agent makes the semantic accept/reject or targeted-rescan decision, but it does not schedule the CLI's macro phases. To inspect the same persisted progress from another terminal without changing the scan:
 
 ```bash
 flocks security status <scan_id>
@@ -80,7 +88,7 @@ Normal completion, errors, and cancellation remove the named containers, final i
 
 Coverage completeness describes static source coverage, not the absence of environmental uncertainty. Inventoried zero-byte files are counted as `notApplicable`; unread or failed non-empty files, missing receipts, incomplete work units, snapshot omissions, unverified candidates, and explicitly blocking coverage questions still produce `partial`. External-service, deployment, runtime, and unresolved-hypothesis questions are retained as non-blocking validation limitations.
 
-The threat-model and completed-scan contract semantics are adapted from the Apache-2.0-licensed OpenAI Codex Security bundled plugin. See `THIRD_PARTY_NOTICES.md` for attribution. This implementation retains Flocks' immutable snapshot, dedicated-session, tool-projection, and persistence boundaries; it does not embed or launch the Codex Security MCP server. Change audits, shared threat-model caching, supplied-model overrides, remote Docker, external-network probes, and crash recovery remain outside the current version.
+The threat-model and completed-scan contract semantics are adapted from the Apache-2.0-licensed OpenAI Codex Security bundled plugin. See `THIRD_PARTY_NOTICES.md` for attribution. This implementation retains Flocks' digest-bound source view, dedicated-session, tool-projection, and persistence boundaries; it does not embed or launch the Codex Security MCP server. Change audits, shared threat-model caching, supplied-model overrides, remote Docker, external-network probes, and crash recovery remain outside the current version.
 
 Run the plugin regression suite from the Flocks checkout with:
 

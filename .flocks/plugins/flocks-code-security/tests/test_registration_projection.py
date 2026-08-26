@@ -210,7 +210,13 @@ def test_all_audit_tools_register() -> None:
         for parameter in prepare.parameters
         if parameter.name == "verification_votes"
     )
+    copy_source = next(
+        parameter
+        for parameter in prepare.parameters
+        if parameter.name == "copy_source"
+    )
     assert verification_votes.default == 1
+    assert copy_source.default is True
 
     threat_model_tool = ToolRegistry.get("audit_submit_threat_model").info
     threat_model_parameter = next(
@@ -362,8 +368,10 @@ def test_public_code_security_tool_registers_as_one_multi_action_entry() -> None
     assert tool.info.requires_confirmation is False
     action = next(parameter for parameter in tool.info.parameters if parameter.name == "action")
     dynamic = next(parameter for parameter in tool.info.parameters if parameter.name == "dynamic_enabled")
+    copy_source = next(parameter for parameter in tool.info.parameters if parameter.name == "copy_source")
     assert action.enum == PUBLIC_TOOL_ACTIONS
     assert dynamic.default is False
+    assert copy_source.default is True
 
 
 @pytest.mark.asyncio
