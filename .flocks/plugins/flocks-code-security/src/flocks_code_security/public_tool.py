@@ -290,6 +290,7 @@ def register_public_tool() -> None:
             source="plugin_py",
             native=False,
             always_load=False,
+            disable_on_repeated_failure=False,
             tags=["security", "code-security", "code-audit", "static-analysis", "dynamic-validation"],
         ),
         handler=code_security_audit,

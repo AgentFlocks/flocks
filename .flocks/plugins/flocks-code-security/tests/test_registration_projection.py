@@ -189,6 +189,7 @@ def test_all_audit_tools_register() -> None:
     for name in expected:
         info = ToolRegistry.get(name).info
         assert info.provider is None
+        assert info.disable_on_repeated_failure is False
         parameter_names = [parameter.name for parameter in info.parameters]
         assert len(parameter_names) == len(set(parameter_names))
     callable_infos, _enabled_count = resolve_callable_tool_infos(expected)
@@ -357,6 +358,7 @@ def test_public_code_security_tool_registers_as_one_multi_action_entry() -> None
 
     assert tool is not None
     assert tool.info.always_load is False
+    assert tool.info.disable_on_repeated_failure is False
     assert tool.info.requires_confirmation is False
     action = next(parameter for parameter in tool.info.parameters if parameter.name == "action")
     dynamic = next(parameter for parameter in tool.info.parameters if parameter.name == "dynamic_enabled")

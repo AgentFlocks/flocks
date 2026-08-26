@@ -1947,6 +1947,7 @@ def _register(
             source="plugin_py",
             native=False,
             always_load=False,
+            disable_on_repeated_failure=False,
             tags=["security", "code-security", "static-analysis"],
         ),
         handler=handler,

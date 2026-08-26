@@ -120,6 +120,10 @@ class ToolInfo(BaseModel):
         None,
         description="Whether the tool should always be exposed in each request",
     )
+    disable_on_repeated_failure: bool = Field(
+        True,
+        description="Whether identical repeated failures may automatically disable the tool",
+    )
     tags: List[str] = Field(
         default_factory=list,
         description="Lightweight retrieval tags used by tool catalog search",
@@ -2132,7 +2136,7 @@ class ToolRegistry:
 
     @classmethod
     def _should_track_failure(cls, tool: Tool) -> bool:
-        """Track failures only for standalone custom tools.
+        """Track failures only for standalone custom tools that allow auto-disable.
 
         Device-backed tools have per-device switches; repeated upstream/API
         failures should not mutate the shared in-memory switch for every
@@ -2142,6 +2146,7 @@ class ToolRegistry:
             tool.info.category == ToolCategory.CUSTOM
             and tool.info.name != "invalid"
             and tool.info.source != "device"
+            and tool.info.disable_on_repeated_failure
         )
 
     @classmethod

@@ -17,7 +17,11 @@ from flocks.tool.registry import (
 )
 
 
-def _failing_tool(name: str = "failing_custom_tool") -> Tool:
+def _failing_tool(
+    name: str = "failing_custom_tool",
+    *,
+    disable_on_repeated_failure: bool = True,
+) -> Tool:
     async def handler(_ctx: ToolContext, **_kwargs) -> ToolResult:
         return ToolResult(success=False, error="synthetic repeated failure")
 
@@ -27,6 +31,7 @@ def _failing_tool(name: str = "failing_custom_tool") -> Tool:
             description="Always fails for repeated-failure tests",
             category=ToolCategory.CUSTOM,
             source="plugin_py",
+            disable_on_repeated_failure=disable_on_repeated_failure,
         ),
         handler=handler,
     )
@@ -79,6 +84,27 @@ async def test_repeated_failures_disable_tool_by_default(
         "disabled_reason": "repeated_error",
     }
     assert ToolRegistry.revision() == 42
+
+
+@pytest.mark.asyncio
+async def test_tool_can_forbid_repeated_failure_auto_disable(
+    isolated_failure_tracking: Tool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protected_tool = _failing_tool(disable_on_repeated_failure=False)
+    monkeypatch.setattr(ToolRegistry, "_tools", {protected_tool.info.name: protected_tool})
+    persist_setting = Mock()
+    monkeypatch.setattr(ConfigWriter, "set_tool_setting", persist_setting)
+
+    for _ in range(ToolRegistry._failure_disable_threshold + 1):
+        result = await ToolRegistry.execute(protected_tool.info.name, query="same")
+
+    assert result.success is False
+    assert "disabled" not in result.metadata
+    assert protected_tool.info.enabled is True
+    assert ToolRegistry._failure_state == {}
+    assert ToolRegistry.revision() == 41
+    persist_setting.assert_not_called()
 
 
 def test_concurrent_failures_commit_one_disable_transition(
