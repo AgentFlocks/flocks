@@ -420,6 +420,8 @@ export interface ProviderCredentials {
   secret_masked?: string | null;
   base_url?: string | null;
   model_catalog_url?: string | null;
+  model_catalog_session_token_masked?: string | null;
+  has_model_catalog_session?: boolean;
   username?: string | null;
   /** Sensitive entries are masked on reads and must not be resubmitted unchanged. */
   fields?: Record<string, string | undefined>;
@@ -433,6 +435,7 @@ export interface ProviderCredentialInput {
   secret?: string;
   base_url?: string;
   model_catalog_url?: string;
+  model_catalog_session_token?: string;
   username?: string;
   fields?: Record<string, string | undefined>;
   provider_name?: string;

@@ -96,6 +96,11 @@ class TestThreatBookProviderModelBootstrap:
                 )
 
         monkeypatch.setattr(threatbook.httpx, "AsyncClient", FakeClient)
+        monkeypatch.setattr(
+            ThreatBookCnLLMProvider,
+            "get_model_catalog_session_token",
+            classmethod(lambda cls, _url: "test-console-session"),
+        )
         provider = ThreatBookCnLLMProvider()
         provider.configure(ProviderConfig(
             provider_id=provider.id,
@@ -103,7 +108,7 @@ class TestThreatBookProviderModelBootstrap:
             base_url="https://router.example/v1",
             custom_settings={
                 "trust_env": False,
-                "model_catalog_url": "https://catalog.example/api/console/common/models",
+                "model_catalog_url": "https://flocks-router-test.threatbook-inc.cn/api/console/common/models",
             },
         ))
 
@@ -139,11 +144,14 @@ class TestThreatBookProviderModelBootstrap:
         assert definitions["qwen3.8-max"].capabilities.supports_vision is True
         assert definitions["qwen3.8-max"].limits.context_window == 1000000
         assert definitions["Router-New"].pricing.input == 3.0
-        assert requests[0][0] == "https://catalog.example/api/console/common/models"
-        assert requests[0][1]["Authorization"] == "Bearer test-key"
+        assert requests[0][0] == (
+            "https://flocks-router-test.threatbook-inc.cn/api/console/common/models"
+        )
+        assert requests[0][1] == {"Accept": "application/json"}
+        assert requests[0][2] == {"session_token": "test-console-session"}
         assert requests[0][3] == {"page": 1, "pageSize": 100}
 
-    def test_model_catalog_fallback_stays_on_configured_router_origin(self):
+    def test_model_catalog_uses_only_explicitly_configured_url(self):
         provider = ThreatBookCnLLMProvider()
         provider.configure(ProviderConfig(
             provider_id=provider.id,
@@ -156,8 +164,27 @@ class TestThreatBookProviderModelBootstrap:
 
         assert provider._model_catalog_urls() == [
             "https://router-prod.example/api/console/common/models",
-            "https://router-prod.example/v1/models",
         ]
+
+    def test_model_catalog_session_is_bound_to_router_environment(self):
+        test_url = (
+            "https://flocks-router-test.threatbook-inc.cn"
+            "/api/console/common/models"
+        )
+        prod_url = (
+            "https://flocks-router.threatbook-inc.cn"
+            "/api/console/common/models"
+        )
+
+        assert ThreatBookCnLLMProvider.supports_model_catalog_session(test_url)
+        assert ThreatBookCnLLMProvider.supports_model_catalog_session(prod_url)
+        assert (
+            ThreatBookCnLLMProvider.model_catalog_session_secret_id(test_url)
+            != ThreatBookCnLLMProvider.model_catalog_session_secret_id(prod_url)
+        )
+        assert not ThreatBookCnLLMProvider.supports_model_catalog_session(
+            "https://example.com/api/console/common/models"
+        )
 
     @pytest.mark.asyncio
     async def test_router_refresh_failure_keeps_config_fallback(
@@ -324,6 +351,65 @@ class TestThreatBookProviderModelBootstrap:
 
         assert exc_info.value.status_code == 400
         fake_secrets.set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_model_catalog_session_is_stored_separately_and_masked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        catalog_url = (
+            "https://flocks-router-test.threatbook-inc.cn"
+            "/api/console/common/models"
+        )
+        ConfigWriter.add_provider(
+            "threatbook-cn-llm",
+            ConfigWriter.build_provider_config(
+                "threatbook-cn-llm",
+                base_url="https://flocks-router-test.threatbook-inc.cn/v1",
+                models={},
+                extra_options={"model_catalog_url": catalog_url},
+            ),
+        )
+        stored = {"threatbook-cn-llm_llm_key": "existing-api-key"}
+        fake_secrets = MagicMock()
+        fake_secrets.get.side_effect = stored.get
+        fake_secrets.set.side_effect = lambda secret_id, value: stored.__setitem__(
+            secret_id, value
+        )
+        runtime_provider = MagicMock()
+        runtime_provider._config = ProviderConfig(
+            provider_id="threatbook-cn-llm",
+            api_key="existing-api-key",
+            base_url="https://flocks-router-test.threatbook-inc.cn/v1",
+            custom_settings={"model_catalog_url": catalog_url},
+        )
+        monkeypatch.setattr("flocks.security.get_secret_manager", lambda: fake_secrets)
+        monkeypatch.setattr(provider_routes.Provider, "_ensure_initialized", MagicMock())
+        monkeypatch.setattr(
+            provider_routes.Provider,
+            "get",
+            lambda _provider_id: runtime_provider,
+        )
+
+        result = await provider_routes.set_provider_credentials(
+            "threatbook-cn-llm",
+            provider_routes.ProviderCredentialRequest(
+                model_catalog_session_token="test-session-token"
+            ),
+        )
+
+        session_secret_id = (
+            ThreatBookCnLLMProvider.model_catalog_session_secret_id(catalog_url)
+        )
+        assert result["success"] is True
+        assert stored[session_secret_id] == "test-session-token"
+        assert "model_catalog_session_token" not in str(
+            ConfigWriter.get_provider_raw("threatbook-cn-llm")
+        )
+        response = provider_routes._load_llm_provider_credentials(
+            "threatbook-cn-llm"
+        )
+        assert response.has_model_catalog_session is True
+        assert response.model_catalog_session_token_masked == "te***oken"
 
     @pytest.mark.asyncio
     async def test_existing_provider_model_catalog_url_is_updated_and_returned(

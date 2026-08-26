@@ -1236,6 +1236,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [showApiKey, setShowApiKey] = useState(false);
   const [baseUrl, setBaseUrl] = useState('');
   const [modelCatalogUrl, setModelCatalogUrl] = useState('');
+  const [modelCatalogSessionToken, setModelCatalogSessionToken] = useState('');
   const [description, setDescription] = useState('');
   const [providerName, setProviderName] = useState('');
   const [azureDeploymentName, setAzureDeploymentName] = useState('');
@@ -1321,6 +1322,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setDisplayName(provider.name);
       setBaseUrl(provider.default_base_url || '');
       setModelCatalogUrl(provider.default_model_catalog_url || '');
+      setModelCatalogSessionToken('');
       setApiKey('');
       setDescription(provider.description || '');
       setSelectedModelIds(new Set(provider.models.map(m => m.id)));
@@ -1367,6 +1369,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         base_url: baseUrl.trim() || undefined,
         model_catalog_url: selectedCatalogId === 'threatbook-cn-llm'
           ? modelCatalogUrl.trim()
+          : undefined,
+        model_catalog_session_token: selectedCatalogId === 'threatbook-cn-llm'
+          ? (modelCatalogSessionToken.trim() || undefined)
           : undefined,
         provider_name: selectedCatalogId === 'openai-compatible' && providerName.trim() ? providerName.trim() : undefined,
       });
@@ -1424,6 +1429,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         base_url: baseUrl.trim() || undefined,
         model_catalog_url: selectedCatalogId === 'threatbook-cn-llm'
           ? modelCatalogUrl.trim()
+          : undefined,
+        model_catalog_session_token: selectedCatalogId === 'threatbook-cn-llm'
+          ? (modelCatalogSessionToken.trim() || undefined)
           : undefined,
       });
       if (selectedCatalog) {
@@ -1749,20 +1757,37 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       </div>
 
                       {selectedCatalogId === 'threatbook-cn-llm' && (
-                        <div className="col-span-2">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            {t('form.modelCatalogUrl')}
-                            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
-                          </label>
-                          <input
-                            type="url"
-                            value={modelCatalogUrl}
-                            onChange={e => setModelCatalogUrl(e.target.value)}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-                            placeholder={selectedCatalog.default_model_catalog_url || 'https://router.example.com/api/console/common/models'}
-                          />
-                          <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogUrlHint')}</p>
-                        </div>
+                        <>
+                          <div className="col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('form.modelCatalogUrl')}
+                              <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                            </label>
+                            <input
+                              type="url"
+                              value={modelCatalogUrl}
+                              onChange={e => setModelCatalogUrl(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                              placeholder={selectedCatalog.default_model_catalog_url || 'https://router.example.com/api/console/common/models'}
+                            />
+                            <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogUrlHint')}</p>
+                          </div>
+                          <div className="col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('form.modelCatalogSession')}
+                              <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                            </label>
+                            <input
+                              type="password"
+                              value={modelCatalogSessionToken}
+                              onChange={e => setModelCatalogSessionToken(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                              placeholder={t('form.modelCatalogSessionPlaceholder')}
+                              autoComplete="off"
+                            />
+                            <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogSessionHint')}</p>
+                          </div>
+                        </>
                       )}
 
                       <div>
@@ -2387,9 +2412,11 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   const existingKey = existingCredentials?.api_key ?? '';
   const existingBaseUrl = existingCredentials?.base_url ?? '';
   const existingModelCatalogUrl = existingCredentials?.model_catalog_url ?? '';
+  const hasExistingModelCatalogSession = existingCredentials?.has_model_catalog_session ?? false;
 
   const [baseUrl, setBaseUrl] = useState(existingCredentials?.base_url ?? '');
   const [modelCatalogUrl, setModelCatalogUrl] = useState(existingModelCatalogUrl);
+  const [modelCatalogSessionToken, setModelCatalogSessionToken] = useState('');
   const [apiKey, setApiKey] = useState(existingKey);
   const [providerName, setProviderName] = useState(provider.name);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -2421,6 +2448,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
     setApiKey(existingKey);
     setBaseUrl(existingBaseUrl);
     setModelCatalogUrl(existingModelCatalogUrl);
+    setModelCatalogSessionToken('');
     setProviderName(provider.name);
   }, [existingBaseUrl, existingKey, existingModelCatalogUrl, provider.id, provider.name]);
 
@@ -2481,6 +2509,9 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
           ? (providerName.trim() || undefined)
           : undefined,
       };
+      if (provider.id === 'threatbook-cn-llm' && modelCatalogSessionToken.trim()) {
+        payload.model_catalog_session_token = modelCatalogSessionToken.trim();
+      }
       if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
       await providerAPI.setCredentials(provider.id, payload);
 
@@ -2517,8 +2548,8 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
       return;
     }
     const hasPendingChanges = hasPendingProviderCredentialChanges(
-      { apiKey: existingKey, baseUrl: existingBaseUrl, modelCatalogUrl: existingModelCatalogUrl },
-      { apiKey, baseUrl, modelCatalogUrl },
+      { apiKey: existingKey, baseUrl: existingBaseUrl, modelCatalogUrl: existingModelCatalogUrl, modelCatalogSessionToken: '' },
+      { apiKey, baseUrl, modelCatalogUrl, modelCatalogSessionToken },
     );
 
     const nextApiKey = apiKey.trim();
@@ -2541,6 +2572,9 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
             ? (providerName.trim() || undefined)
             : undefined,
         };
+        if (provider.id === 'threatbook-cn-llm' && modelCatalogSessionToken.trim()) {
+          payload.model_catalog_session_token = modelCatalogSessionToken.trim();
+        }
         if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
         await providerAPI.setCredentials(provider.id, payload);
       } catch (err: any) {
@@ -2657,20 +2691,39 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         </div>
 
         {provider.id === 'threatbook-cn-llm' && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              {t('form.modelCatalogUrl')}
-              <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
-            </label>
-            <input
-              type="url"
-              value={modelCatalogUrl}
-              onChange={(e) => setModelCatalogUrl(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              placeholder="https://router.example.com/api/console/common/models"
-            />
-            <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogUrlHint')}</p>
-          </div>
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                {t('form.modelCatalogUrl')}
+                <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+              </label>
+              <input
+                type="url"
+                value={modelCatalogUrl}
+                onChange={(e) => setModelCatalogUrl(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                placeholder="https://router.example.com/api/console/common/models"
+              />
+              <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogUrlHint')}</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                {t('form.modelCatalogSession')}
+                <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+              </label>
+              <input
+                type="password"
+                value={modelCatalogSessionToken}
+                onChange={(e) => setModelCatalogSessionToken(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                placeholder={hasExistingModelCatalogSession
+                  ? t('form.modelCatalogSessionKeepExisting')
+                  : t('form.modelCatalogSessionPlaceholder')}
+                autoComplete="off"
+              />
+              <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogSessionHint')}</p>
+            </div>
+          </>
         )}
 
         {/* API Key */}

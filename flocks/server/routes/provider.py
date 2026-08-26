@@ -1687,6 +1687,10 @@ class ProviderCredentialRequest(BaseModel):
         None,
         description="Model catalog URL, independent from the provider chat Base URL",
     )
+    model_catalog_session_token: Optional[str] = Field(
+        None,
+        description="Router Console session token used only for model catalog sync",
+    )
     username: Optional[str] = Field(None, description="Optional username for API services")
     fields: Optional[Dict[str, Optional[str]]] = Field(None, description="Dynamic service credential fields")
     provider_name: Optional[str] = Field(None, description="Display name for the provider")
@@ -1701,6 +1705,8 @@ class ProviderCredentialResponse(BaseModel):
     secret_masked: Optional[str] = None
     base_url: Optional[str] = None
     model_catalog_url: Optional[str] = None
+    model_catalog_session_token_masked: Optional[str] = None
+    has_model_catalog_session: bool = False
     username: Optional[str] = None
     fields: Optional[Dict[str, Optional[str]]] = None
     secret_ids: Optional[Dict[str, str]] = None
@@ -1747,6 +1753,19 @@ def _load_llm_provider_credentials(
         except Exception:
             pass
 
+    model_catalog_session_token = None
+    if provider_id == "threatbook-cn-llm" and model_catalog_url:
+        try:
+            from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
+
+            model_catalog_session_token = (
+                ThreatBookCnLLMProvider.get_model_catalog_session_token(
+                    model_catalog_url
+                )
+            )
+        except Exception:
+            pass
+
     is_placeholder = _is_placeholder_api_key(api_key)
     ui_api_key = None if is_placeholder else api_key
 
@@ -1756,6 +1775,12 @@ def _load_llm_provider_credentials(
         api_key_masked=SecretManager.mask(ui_api_key) if ui_api_key else None,
         base_url=base_url,
         model_catalog_url=model_catalog_url,
+        model_catalog_session_token_masked=(
+            SecretManager.mask(model_catalog_session_token)
+            if model_catalog_session_token
+            else None
+        ),
+        has_model_catalog_session=bool(model_catalog_session_token),
         has_credential=bool(api_key),
     )
 
@@ -1843,6 +1868,7 @@ async def set_provider_credentials(
     - api_key → .secret.json
     - base_url → flocks.json provider.{id}.options.baseURL
     - model_catalog_url → flocks.json provider.{id}.options.model_catalog_url
+    - model_catalog_session_token → environment-bound local secret storage
     - Ensures provider entry exists in flocks.json
     - Configures provider runtime immediately
     """
@@ -1905,6 +1931,42 @@ async def set_provider_credentials(
                         detail="Model catalog URL must be an absolute HTTP(S) URL",
                     )
 
+        model_catalog_session_was_set = (
+            "model_catalog_session_token" in request.model_fields_set
+        )
+        effective_model_catalog_session = (
+            (request.model_catalog_session_token or "").strip()
+            if model_catalog_session_was_set
+            else None
+        )
+        catalog_session_secret_id = None
+        if model_catalog_session_was_set:
+            if provider_id != "threatbook-cn-llm":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Model catalog session is only supported for ThreatBook-cn-llm",
+                )
+            session_catalog_url = effective_model_catalog_url
+            if not model_catalog_url_was_set:
+                current = _load_llm_provider_credentials(provider_id)
+                session_catalog_url = current.model_catalog_url
+            from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
+
+            if not session_catalog_url or not ThreatBookCnLLMProvider.supports_model_catalog_session(
+                session_catalog_url
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Model catalog session requires an HTTPS ThreatBook Console catalog URL"
+                    ),
+                )
+            catalog_session_secret_id = (
+                ThreatBookCnLLMProvider.model_catalog_session_secret_id(
+                    session_catalog_url
+                )
+            )
+
         # 1. Save API key to .secret.json using _llm_key convention for LLM providers
         if preserve_existing_secret:
             log.info("provider.credentials.preserved", {
@@ -1927,6 +1989,15 @@ async def set_provider_credentials(
                 "api_key_optional": api_key_optional,
                 "base_url": request.base_url,
             })
+
+        if model_catalog_session_was_set and catalog_session_secret_id:
+            if effective_model_catalog_session:
+                secrets.set(
+                    catalog_session_secret_id,
+                    effective_model_catalog_session,
+                )
+            else:
+                secrets.delete(catalog_session_secret_id)
 
         # 2. Ensure provider entry exists in flocks.json and update base_url / name
         raw_provider = ConfigWriter.get_provider_raw(provider_id)
@@ -2086,6 +2157,14 @@ async def delete_provider_credentials(
         deleted_secret = secrets.delete(f"{provider_id}_api_key") or deleted_secret
         # Also clean up legacy base_url entries
         secrets.delete(f"{provider_id}_base_url")
+        if provider_id == "threatbook-cn-llm":
+            from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
+
+            for stored_secret_id in secrets.list():
+                if stored_secret_id.startswith(
+                    ThreatBookCnLLMProvider.MODEL_CATALOG_SESSION_SECRET_PREFIX
+                ):
+                    deleted_secret = secrets.delete(stored_secret_id) or deleted_secret
 
         if not removed_config and not deleted_secret:
             raise HTTPException(status_code=404, detail="No credentials found for this provider")

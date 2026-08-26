@@ -7,10 +7,11 @@ capability/limit metadata that Router does not expose.
 """
 
 import asyncio
+import hashlib
 import os
 import time
 from typing import Any, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -35,6 +36,9 @@ class ThreatBookCnLLMProvider(OpenAIBaseProvider):
     CATALOG_ID = "threatbook-cn-llm"
     MODEL_CATALOG_CACHE_TTL_SECONDS = 60.0
     MODEL_CATALOG_TIMEOUT_SECONDS = 5.0
+    MODEL_CATALOG_SESSION_SECRET_PREFIX = (
+        "threatbook-cn-llm_model_catalog_session_"
+    )
 
     def __init__(self):
         super().__init__(provider_id="threatbook-cn-llm", name="ThreatBook-cn-llm")
@@ -81,26 +85,52 @@ class ThreatBookCnLLMProvider(OpenAIBaseProvider):
         return self.get_models()
 
     def _model_catalog_urls(self) -> list[str]:
-        """Return catalog sources in consistency-preferred order.
-
-        Console's common-model endpoint is the fee-details page's exact data
-        source. It currently requires a Passport ``session_token`` cookie, so
-        the API-key-protected ``/v1/models`` endpoint remains the runtime
-        fallback for ordinary Flocks installations. Both response shapes are
-        parsed identically below.
-        """
+        """Return only the explicitly configured Router catalog endpoint."""
         custom_settings = getattr(self._config, "custom_settings", None) or {}
         configured_url = (
             custom_settings.get("model_catalog_url") if isinstance(custom_settings, dict) else None
         ) or os.getenv("THREATBOOK_CN_LLM_MODEL_CATALOG_URL")
 
         catalog_url = configured_url or self.DEFAULT_MODEL_CATALOG_URL
-        urls = [catalog_url]
-        if "/api/console/" in urlsplit(catalog_url).path:
-            parsed = urlsplit(catalog_url)
-            origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
-            urls.append(f"{origin}/v1/models")
-        return list(dict.fromkeys(urls))
+        return [catalog_url]
+
+    @classmethod
+    def supports_model_catalog_session(cls, catalog_url: str) -> bool:
+        """Only attach a Console session to trusted HTTPS Router URLs."""
+        parsed = urlsplit(catalog_url)
+        hostname = (parsed.hostname or "").lower()
+        return (
+            parsed.scheme == "https"
+            and (
+                hostname == "threatbook-inc.cn"
+                or hostname.endswith(".threatbook-inc.cn")
+            )
+            and parsed.path.startswith("/api/console/")
+        )
+
+    @classmethod
+    def model_catalog_session_secret_id(cls, catalog_url: str) -> str:
+        """Build an environment-bound secret ID from the catalog origin."""
+        parsed = urlsplit(catalog_url)
+        origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        origin_hash = hashlib.sha256(origin.encode("utf-8")).hexdigest()[:16]
+        return f"{cls.MODEL_CATALOG_SESSION_SECRET_PREFIX}{origin_hash}"
+
+    @classmethod
+    def get_model_catalog_session_token(cls, catalog_url: str) -> Optional[str]:
+        """Resolve the session for this Router environment without exposing it."""
+        env_token = os.getenv("THREATBOOK_CN_LLM_CONSOLE_SESSION_TOKEN")
+        if env_token and env_token.strip():
+            return env_token.strip()
+        try:
+            from flocks.security import get_secret_manager
+
+            token = get_secret_manager().get(
+                cls.model_catalog_session_secret_id(catalog_url)
+            )
+        except Exception:
+            return None
+        return token.strip() if isinstance(token, str) and token.strip() else None
 
     @staticmethod
     def _positive_float_env(
@@ -299,7 +329,7 @@ class ThreatBookCnLLMProvider(OpenAIBaseProvider):
         headers: dict[str, str],
         cookies: Optional[dict[str, str]],
     ) -> list[Any]:
-        """Fetch either Console's paginated shape or ``/v1/models``."""
+        """Fetch Router Console's model catalog, including paginated results."""
         page = 1
         page_size = 100
         rows: list[Any] = []
@@ -384,12 +414,6 @@ class ThreatBookCnLLMProvider(OpenAIBaseProvider):
                 self.MODEL_CATALOG_TIMEOUT_SECONDS,
             )
             headers: dict[str, str] = {"Accept": "application/json"}
-            api_key = self._config.api_key if self._config else self._api_key
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-
-            session_token = os.getenv("THREATBOOK_CN_LLM_CONSOLE_SESSION_TOKEN")
-            cookies = {"session_token": session_token} if session_token else None
 
             models = None
             successful_url = None
@@ -401,6 +425,15 @@ class ThreatBookCnLLMProvider(OpenAIBaseProvider):
             ) as client:
                 for models_url in models_urls:
                     try:
+                        session_token = self.get_model_catalog_session_token(
+                            models_url
+                        )
+                        cookies = (
+                            {"session_token": session_token}
+                            if session_token
+                            and self.supports_model_catalog_session(models_url)
+                            else None
+                        )
                         rows = await self._fetch_catalog_rows(
                             client,
                             models_url,

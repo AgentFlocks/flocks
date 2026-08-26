@@ -38,6 +38,23 @@ describe('hasPendingProviderCredentialChanges', () => {
     ).toBe(true);
   });
 
+  it('returns true when a model catalog session is entered', () => {
+    expect(
+      hasPendingProviderCredentialChanges(
+        {
+          apiKey: 'same-key',
+          modelCatalogUrl: 'https://router.example/models',
+          modelCatalogSessionToken: '',
+        },
+        {
+          apiKey: 'same-key',
+          modelCatalogUrl: 'https://router.example/models',
+          modelCatalogSessionToken: 'new-session',
+        },
+      ),
+    ).toBe(true);
+  });
+
   it('ignores whitespace-only differences', () => {
     expect(
       hasPendingProviderCredentialChanges(
