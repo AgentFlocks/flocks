@@ -1081,8 +1081,8 @@ async def _set_n8n_workflow_active(record_id: str, *, active: bool) -> N8nWorkfl
     record = store.load_record(record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="n8n workflow record not found")
-    if record.source == "external" or record.ownership == "readonly":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="readonly n8n workflow records cannot be activated from Flocks")
+    if record.source == "external":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="external n8n workflow records cannot be activated from Flocks")
     connection = store.load_connection_by_id(record.connection_id)
     if not connection:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="n8n connection is missing")

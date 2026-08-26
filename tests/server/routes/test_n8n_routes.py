@@ -754,6 +754,43 @@ async def test_n8n_workflow_record_can_activate_and_deactivate_from_flocks(
 
 
 @pytest.mark.asyncio
+async def test_n8n_workflow_record_can_toggle_discovered_flocks_record(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    n8n_route_state,
+):
+    from flocks.server.routes import n8n as n8n_routes
+
+    n8n_route_state["secrets"].set("N8N_API_KEY", "n8n-secret-value")
+    fake_client = FakeN8nClient()
+    fake_client.active["readonly-toggle"] = False
+    monkeypatch.setattr(n8n_routes, "_client_for", lambda _base_url, _secret_ref: fake_client)
+
+    created = await client.post(
+        "/api/integrations/n8n/workflows",
+        json={
+            "name": "readonly toggle",
+            "source": "discovered",
+            "ownership": "readonly",
+            "n8nWorkflowId": "readonly-toggle",
+            "n8nBaseUrl": "http://localhost:5678",
+            "webhookPath": "readonly-toggle",
+            "webhookMethod": "POST",
+        },
+    )
+    assert created.status_code == 200, created.text
+    record_id = created.json()["id"]
+
+    activated = await client.post(f"/api/integrations/n8n/workflows/{record_id}/activate")
+    assert activated.status_code == 200, activated.text
+    assert activated.json()["remoteStatus"] == "active"
+
+    deactivated = await client.post(f"/api/integrations/n8n/workflows/{record_id}/deactivate")
+    assert deactivated.status_code == 200, deactivated.text
+    assert deactivated.json()["remoteStatus"] == "inactive"
+
+
+@pytest.mark.asyncio
 async def test_n8n_workflow_record_delete_removes_local_record_for_any_source(client):
     created = await client.post(
         "/api/integrations/n8n/workflows",

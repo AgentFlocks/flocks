@@ -62,6 +62,11 @@ function triggerSummary(record: N8nWorkflowRecord): string {
   return record.webhookUrl || '-';
 }
 
+function canToggleN8nRemote(record: N8nWorkflowRecord): boolean {
+  return record.source !== 'external'
+    && !['missing', 'missing_remote', 'cleaned', 'connection_missing'].includes(record.remoteStatus);
+}
+
 function DeleteWorkflowDialog({
   record,
   deleteRemote,
@@ -125,6 +130,7 @@ function N8nWorkflowList() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<N8nWorkflowRecord | null>(null);
   const [deleteRemote, setDeleteRemote] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -174,6 +180,21 @@ function N8nWorkflowList() {
   const openDeleteDialog = (record: N8nWorkflowRecord) => {
     setDeleteRemote(false);
     setDeleteTarget(record);
+  };
+
+  const handleToggleRemote = async (record: N8nWorkflowRecord, active: boolean) => {
+    setTogglingId(record.id);
+    try {
+      const response = active
+        ? await n8nAPI.activateWorkflowRecord(record.id)
+        : await n8nAPI.deactivateWorkflowRecord(record.id);
+      setRecords((current) => current.map((item) => (item.id === record.id ? response.data : item)));
+      toast.success(t(active ? 'n8n.activateSuccess' : 'n8n.deactivateSuccess'));
+    } catch (err) {
+      toast.error(t(active ? 'n8n.activateFailed' : 'n8n.deactivateFailed'), extractErrorMessage(err));
+    } finally {
+      setTogglingId(null);
+    }
   };
 
   const handleDelete = async () => {
@@ -279,10 +300,18 @@ function N8nWorkflowList() {
                         <button type="button" onClick={() => navigate(`/workflows/n8n/${record.id}`)} className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
                           {t('n8n.viewDetail')}
                         </button>
-                        <a href={record.workflowUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
-                          <ExternalLink className="h-3 w-3" />
-                          {t('n8n.openN8n')}
-                        </a>
+                        {canToggleN8nRemote(record) && record.remoteStatus !== 'active' && (
+                          <button type="button" disabled={togglingId === record.id} onClick={() => void handleToggleRemote(record, true)} className="inline-flex items-center gap-1 rounded border border-emerald-200 px-2 py-1 text-xs text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
+                            <Power className="h-3 w-3" />
+                            {t('n8n.activate')}
+                          </button>
+                        )}
+                        {canToggleN8nRemote(record) && record.remoteStatus === 'active' && (
+                          <button type="button" disabled={togglingId === record.id} onClick={() => void handleToggleRemote(record, false)} className="inline-flex items-center gap-1 rounded border border-amber-200 px-2 py-1 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-50">
+                            <PowerOff className="h-3 w-3" />
+                            {t('n8n.deactivate')}
+                          </button>
+                        )}
                         <button type="button" onClick={() => openDeleteDialog(record)} className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-white">
                           <Trash2 className="h-3 w-3" />
                           {t('n8n.delete')}
@@ -479,7 +508,7 @@ function N8nWorkflowDetail({ recordId }: { recordId: string }) {
   const canManageRemote = record.ownership === 'managed' && record.source !== 'external';
   const isWebhookRecord = triggerType(record) === 'webhook';
   const canRunRemote = record.source !== 'external' && record.remoteStatus === 'active' && isWebhookRecord && Boolean(record.webhookPath || record.webhookUrl);
-  const canToggleRemote = canManageRemote && !['missing', 'missing_remote', 'cleaned', 'connection_missing'].includes(record.remoteStatus);
+  const canToggleRemote = canToggleN8nRemote(record);
 
   return (
     <div className="flex h-full flex-col bg-gray-50">

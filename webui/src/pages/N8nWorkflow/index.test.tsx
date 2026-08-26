@@ -289,7 +289,7 @@ describe('N8nWorkflowPage', () => {
 
     expect(await screen.findByText('hello n8n')).toBeInTheDocument();
     expect(screen.getByText('wf-1')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /打开 n8n/ })).toHaveAttribute('href', record.workflowUrl);
+    expect(screen.queryByRole('link', { name: /打开 n8n/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '查看详情' }));
     expect(mocks.navigate).toHaveBeenCalledWith('/workflows/n8n/n8n-wf-1');
@@ -301,6 +301,21 @@ describe('N8nWorkflowPage', () => {
 
     await waitFor(() => expect(mocks.deleteWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1', { deleteRemote: false }));
     expect(mocks.toastSuccess).toHaveBeenCalledWith('删除完成');
+  });
+
+  it('can activate and deactivate a listed Flocks-managed workflow', async () => {
+    const user = userEvent.setup();
+    renderPage('/workflows/n8n');
+
+    expect(await screen.findByText('hello n8n')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '停用' }));
+    await waitFor(() => expect(mocks.deactivateWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('n8n workflow 已停用');
+
+    await user.click(screen.getByRole('button', { name: '启用' }));
+    await waitFor(() => expect(mocks.activateWorkflowRecord).toHaveBeenCalledWith('n8n-wf-1'));
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('n8n workflow 已启用');
   });
 
   it('can delete a listed workflow and request remote deletion', async () => {
