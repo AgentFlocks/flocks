@@ -19,6 +19,9 @@ SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.if",
     "n8n-nodes-base.httpRequest",
     "n8n-nodes-base.respondToWebhook",
+    "n8n-nodes-base.convertToFile",
+    "n8n-nodes-base.readWriteFile",
+    "n8n-nodes-base.writeBinaryFile",
     "n8n-nodes-base.noOp",
 }
 
@@ -171,6 +174,29 @@ def _contains_literal_secret_query_param(value: Any) -> bool:
         if normalized_key in SENSITIVE_QUERY_PARAM_NAMES and text and not text.startswith("{{") and len(text) >= 8:
             return True
     return False
+
+
+def _file_path_issues(file_name: str, path: str) -> List[N8nLintIssue]:
+    issues: List[N8nLintIssue] = []
+    if file_name.startswith("~"):
+        issues.append(
+            N8nLintIssue(
+                "FILE-WRITE-TILDE",
+                "warning",
+                "n8n file paths are evaluated by the n8n runtime and do not use shell tilde expansion; use an absolute container-visible path",
+                path,
+            )
+        )
+    elif file_name and not file_name.startswith("/") and not _is_expression(file_name):
+        issues.append(
+            N8nLintIssue(
+                "FILE-WRITE-RELATIVE",
+                "warning",
+                "n8n file writes should use an absolute path visible and writable by the n8n runtime/container",
+                path,
+            )
+        )
+    return issues
 
 
 def _runtime_policy_issues(workflow: Dict[str, Any]) -> List[N8nLintIssue]:
@@ -369,6 +395,85 @@ def lint_workflow(
                                 f"{path}.parameters.headerParameters.parameters[{header_index}].value",
                             )
                         )
+        if node_type == "n8n-nodes-base.convertToFile":
+            operation = str(params.get("operation") or "").strip()
+            mode = str(params.get("mode") or "").strip()
+            binary_property_name = str(params.get("binaryPropertyName") or "").strip()
+            if operation != "toJson":
+                issues.append(
+                    N8nLintIssue(
+                        "CONVERT-FILE-OP",
+                        "error",
+                        "Flocks currently supports Convert to File only with operation=toJson",
+                        path + ".parameters.operation",
+                    )
+                )
+            if mode not in {"once", "each"}:
+                issues.append(
+                    N8nLintIssue(
+                        "CONVERT-FILE-MODE",
+                        "error",
+                        "Convert to File mode must be once or each",
+                        path + ".parameters.mode",
+                    )
+                )
+            if not binary_property_name:
+                issues.append(
+                    N8nLintIssue(
+                        "CONVERT-FILE-BINARY",
+                        "error",
+                        "Convert to File requires binaryPropertyName for the output binary field",
+                        path + ".parameters.binaryPropertyName",
+                    )
+                )
+        if node_type == "n8n-nodes-base.readWriteFile":
+            operation = str(params.get("operation") or "").strip()
+            file_name = str(params.get("fileName") or "").strip()
+            data_property_name = str(params.get("dataPropertyName") or "").strip()
+            if operation != "write":
+                issues.append(
+                    N8nLintIssue(
+                        "FILE-WRITE-OP",
+                        "error",
+                        "Flocks currently supports Read/Write Files from Disk only with operation=write",
+                        path + ".parameters.operation",
+                    )
+                )
+            if not file_name:
+                issues.append(N8nLintIssue("FILE-WRITE-PATH", "error", "Read/Write Files from Disk requires fileName", path + ".parameters.fileName"))
+            if not data_property_name:
+                issues.append(
+                    N8nLintIssue(
+                        "FILE-WRITE-DATA",
+                        "error",
+                        "Read/Write Files from Disk requires dataPropertyName for the binary property to write",
+                        path + ".parameters.dataPropertyName",
+                    )
+                )
+            issues.extend(_file_path_issues(file_name, path + ".parameters.fileName"))
+        if node_type == "n8n-nodes-base.writeBinaryFile":
+            file_name = str(params.get("fileName") or "").strip()
+            data_property_name = str(params.get("dataPropertyName") or "").strip()
+            issues.append(
+                N8nLintIssue(
+                    "FILE-WRITE-LEGACY",
+                    "warning",
+                    "Use n8n Read/Write Files from Disk instead of the legacy Write Binary File node",
+                    path + ".type",
+                )
+            )
+            if not file_name:
+                issues.append(N8nLintIssue("FILE-WRITE-PATH", "error", "Write Binary File requires fileName", path + ".parameters.fileName"))
+            if not data_property_name:
+                issues.append(
+                    N8nLintIssue(
+                        "FILE-WRITE-DATA",
+                        "error",
+                        "Write Binary File requires dataPropertyName for the binary property to write",
+                        path + ".parameters.dataPropertyName",
+                    )
+                )
+            issues.extend(_file_path_issues(file_name, path + ".parameters.fileName"))
         if node_type == "n8n-nodes-base.code":
             code = str(params.get("jsCode") or "")
             if not code.strip():

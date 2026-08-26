@@ -287,6 +287,151 @@ def test_lint_blocks_unavailable_code_modules_for_n8n_2354() -> None:
     assert "CODE-MODULE-UNAVAILABLE" in codes
 
 
+def test_render_convert_to_file_and_write_file_nodes_and_lint_success() -> None:
+    ir = _sample_kafka_ir()
+    ir["steps"] = [
+        {
+            "id": "convert_triage_result",
+            "kind": "convert_to_file",
+            "name": "Convert Triage Result",
+            "outputFileName": "triage.json",
+            "dataPropertyName": "data",
+            "formatJson": True,
+            "next": "write_triage_result",
+        },
+        {
+            "id": "write_triage_result",
+            "kind": "write_file",
+            "name": "Write Triage Result",
+            "fileName": "/home/node/flocks_workspace/tdp_alerts/triage.jsonl",
+            "dataPropertyName": "data",
+            "append": True,
+        }
+    ]
+
+    workflow = render_ir_to_workflow(N8nIR.model_validate(ir))
+    convert_node = workflow["nodes"][1]
+    write_node = workflow["nodes"][2]
+
+    assert convert_node["type"] == "n8n-nodes-base.convertToFile"
+    assert convert_node["typeVersion"] == 1.1
+    assert convert_node["parameters"] == {
+        "operation": "toJson",
+        "mode": "once",
+        "binaryPropertyName": "data",
+        "options": {"encoding": "utf8", "format": True, "fileName": "triage.json"},
+    }
+    assert write_node["type"] == "n8n-nodes-base.readWriteFile"
+    assert write_node["typeVersion"] == 1.1
+    assert write_node["parameters"] == {
+        "operation": "write",
+        "fileName": "/home/node/flocks_workspace/tdp_alerts/triage.jsonl",
+        "dataPropertyName": "data",
+        "options": {"append": True},
+    }
+    assert workflow["connections"]["Convert Triage Result"]["main"][0][0]["node"] == "Write Triage Result"
+    assert [issue for issue in lint_workflow(workflow, kafka_group_prefixes=["flocks_kafka"]) if issue.severity == "error"] == []
+
+
+def test_legacy_write_binary_file_ir_renders_read_write_file_node() -> None:
+    ir = _sample_kafka_ir()
+    ir["steps"] = [
+        {
+            "id": "write_triage_result",
+            "kind": "write_binary_file",
+            "name": "Write Triage Result",
+            "fileName": "/home/node/flocks_workspace/tdp_alerts/triage.jsonl",
+            "dataPropertyName": "data",
+        }
+    ]
+
+    workflow = render_ir_to_workflow(N8nIR.model_validate(ir))
+    node = workflow["nodes"][1]
+
+    assert node["type"] == "n8n-nodes-base.readWriteFile"
+    assert node["parameters"]["operation"] == "write"
+    assert node["parameters"]["fileName"] == "/home/node/flocks_workspace/tdp_alerts/triage.jsonl"
+    assert node["parameters"]["dataPropertyName"] == "data"
+    assert [issue for issue in lint_workflow(workflow, kafka_group_prefixes=["flocks_kafka"]) if issue.severity == "error"] == []
+
+
+def test_lint_catches_invalid_file_write_node() -> None:
+    ir = _sample_kafka_ir()
+    ir["steps"] = [
+        {
+            "id": "write_triage_result",
+            "kind": "write_file",
+            "fileName": "/tmp/triage.jsonl",
+            "dataPropertyName": "data",
+        }
+    ]
+    workflow = render_ir_to_workflow(N8nIR.model_validate(ir))
+    node = workflow["nodes"][1]
+    node["parameters"]["fileName"] = ""
+    node["parameters"]["dataPropertyName"] = ""
+
+    codes = {issue.code for issue in lint_workflow(workflow, kafka_group_prefixes=["flocks_kafka"]) if issue.severity == "error"}
+
+    assert {"FILE-WRITE-PATH", "FILE-WRITE-DATA"} <= codes
+
+
+def test_lint_warns_about_tilde_write_file_path() -> None:
+    ir = _sample_kafka_ir()
+    ir["steps"] = [
+        {
+            "id": "write_triage_result",
+            "kind": "write_file",
+            "fileName": "~/.flocks/workspace/tdp_alerts/triage.jsonl",
+            "dataPropertyName": "data",
+        }
+    ]
+
+    workflow = render_ir_to_workflow(N8nIR.model_validate(ir))
+    issues = lint_workflow(workflow, kafka_group_prefixes=["flocks_kafka"])
+
+    assert "FILE-WRITE-TILDE" in {issue.code for issue in issues if issue.severity == "warning"}
+    assert [issue for issue in issues if issue.severity == "error"] == []
+
+
+def test_lint_warns_about_legacy_native_write_binary_file_node() -> None:
+    workflow = render_ir_to_workflow(_sample_kafka_ir())
+    node = workflow["nodes"][1]
+    node["type"] = "n8n-nodes-base.writeBinaryFile"
+    node["typeVersion"] = 1
+    node["parameters"] = {
+        "fileName": "/home/node/flocks_workspace/tdp_alerts/triage.jsonl",
+        "dataPropertyName": "data",
+    }
+
+    issues = lint_workflow(workflow, kafka_group_prefixes=["flocks_kafka"])
+
+    assert "FILE-WRITE-LEGACY" in {issue.code for issue in issues if issue.severity == "warning"}
+    assert [issue for issue in issues if issue.severity == "error"] == []
+
+
+def test_lint_catches_invalid_convert_to_file_node() -> None:
+    workflow = render_ir_to_workflow(
+        {
+            **_sample_kafka_ir(),
+            "steps": [
+                {
+                    "id": "convert",
+                    "kind": "convert_to_file",
+                    "dataPropertyName": "data",
+                }
+            ],
+        }
+    )
+    node = workflow["nodes"][1]
+    node["parameters"]["operation"] = "toText"
+    node["parameters"]["mode"] = "bad"
+    node["parameters"]["binaryPropertyName"] = ""
+
+    codes = {issue.code for issue in lint_workflow(workflow, kafka_group_prefixes=["flocks_kafka"]) if issue.severity == "error"}
+
+    assert {"CONVERT-FILE-OP", "CONVERT-FILE-MODE", "CONVERT-FILE-BINARY"} <= codes
+
+
 def test_lint_allows_mcp_text_in_non_runtime_metadata() -> None:
     workflow = render_ir_to_workflow(_sample_ir())
     workflow["name"] = "flocks-test-mcp-migration"

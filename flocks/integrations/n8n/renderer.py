@@ -136,6 +136,40 @@ def _node(step: N8nStep, *, index: int) -> Dict[str, Any]:
                 "options": {},
             },
         })
+    if step.kind == "convert_to_file":
+        options: Dict[str, Any] = {
+            "encoding": step.encoding or "utf8",
+            "format": step.format_json,
+        }
+        output_file_name = _convert_output_file_name(step)
+        if output_file_name:
+            options["fileName"] = output_file_name
+        return _with_step_credentials(step, {
+            **base,
+            "type": "n8n-nodes-base.convertToFile",
+            "typeVersion": 1.1,
+            "parameters": {
+                "operation": "toJson",
+                "mode": step.mode,
+                "binaryPropertyName": step.data_property_name or "data",
+                "options": options,
+            },
+        })
+    if step.kind in {"write_file", "write_binary_file"}:
+        if not step.file_name:
+            raise ValueError(f"{step.kind} step {step.id!r} requires fileName")
+        data_property_name = step.data_property_name or "data"
+        return _with_step_credentials(step, {
+            **base,
+            "type": "n8n-nodes-base.readWriteFile",
+            "typeVersion": 1.1,
+            "parameters": {
+                "operation": "write",
+                "fileName": step.file_name,
+                "dataPropertyName": data_property_name,
+                "options": {"append": step.append},
+            },
+        })
     if step.kind == "noop":
         return _with_step_credentials(step, {
             **base,
@@ -154,6 +188,16 @@ def _assignment_type(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return "object"
     return "string"
+
+
+def _convert_output_file_name(step: N8nStep) -> str | None:
+    if step.output_file_name:
+        return step.output_file_name
+    if not step.file_name:
+        return None
+    if step.file_name.strip().startswith("="):
+        return step.file_name
+    return step.file_name.rstrip("/").rsplit("/", 1)[-1] or None
 
 
 def _credential_payload(ref: N8nCredentialRef | None) -> Dict[str, Any] | None:

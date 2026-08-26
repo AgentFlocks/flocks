@@ -18,6 +18,9 @@ N8nStepKind = Literal[
     "if",
     "http_request",
     "respond_to_webhook",
+    "convert_to_file",
+    "write_file",
+    "write_binary_file",
     "noop",
 ]
 
@@ -98,6 +101,13 @@ class N8nStep(BaseModel):
     credentials: Dict[str, N8nCredentialRef] = Field(default_factory=dict)
     respond_with: Literal["json", "text", "firstIncomingItem"] = "json"
     response_body: Optional[Any] = None
+    file_name: Optional[str] = Field(None, alias="fileName")
+    output_file_name: Optional[str] = Field(None, alias="outputFileName")
+    data_property_name: str = Field("data", alias="dataPropertyName")
+    mode: Literal["once", "each"] = "once"
+    encoding: str = "utf8"
+    format_json: bool = Field(False, alias="formatJson")
+    append: bool = False
 
     @field_validator("id")
     @classmethod
