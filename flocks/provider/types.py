@@ -226,6 +226,17 @@ class ModelLimits(BaseModel):
     max_output_tokens: int = 4096
 
 
+class PriceTierConfig(BaseModel):
+    """Input-token price tier (prices are per ``PriceConfig.unit`` tokens)."""
+    max_input_tokens: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Inclusive input-token upper bound; null means no upper bound",
+    )
+    input_price: float = Field(0.0, ge=0)
+    output_price: float = Field(0.0, ge=0)
+
+
 class PriceConfig(BaseModel):
     """价格配置 (每百万 token)"""
     input: float = 0.0
@@ -234,6 +245,8 @@ class PriceConfig(BaseModel):
     currency: str = "USD"
     cache_read: Optional[float] = None
     cache_write: Optional[float] = None
+    price_tiers: Optional[List[PriceTierConfig]] = None
+    price_version: Optional[str] = None
 
 
 class ModelCapabilitiesV2(BaseModel):

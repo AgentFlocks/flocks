@@ -156,6 +156,8 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
             currency=getattr(pricing, "currency", "USD"),
             cache_read=getattr(pricing, "cache_read", None),
             cache_write=getattr(pricing, "cache_write", None),
+            price_tiers=getattr(pricing, "price_tiers", None),
+            price_version=getattr(pricing, "price_version", None),
         )
 
     if isinstance(pricing, dict):
@@ -166,6 +168,8 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
             currency=pricing.get("currency", "USD"),
             cache_read=pricing.get("cache_read"),
             cache_write=pricing.get("cache_write"),
+            price_tiers=pricing.get("price_tiers"),
+            price_version=pricing.get("price_version"),
         )
 
     return None

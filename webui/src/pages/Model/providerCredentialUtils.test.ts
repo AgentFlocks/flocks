@@ -21,6 +21,23 @@ describe('hasPendingProviderCredentialChanges', () => {
     ).toBe(true);
   });
 
+  it('returns true when only the model catalog url changes', () => {
+    expect(
+      hasPendingProviderCredentialChanges(
+        {
+          apiKey: 'same-key',
+          baseUrl: 'https://chat.example/v1',
+          modelCatalogUrl: 'https://router-test.example/models',
+        },
+        {
+          apiKey: 'same-key',
+          baseUrl: 'https://chat.example/v1',
+          modelCatalogUrl: 'https://router-prod.example/models',
+        },
+      ),
+    ).toBe(true);
+  });
+
   it('ignores whitespace-only differences', () => {
     expect(
       hasPendingProviderCredentialChanges(

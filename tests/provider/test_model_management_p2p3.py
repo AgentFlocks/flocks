@@ -23,6 +23,7 @@ from flocks.provider.types import (
     ModelSetting,
     ModelType,
     PriceConfig,
+    PriceTierConfig,
     UsageCost,
 )
 
@@ -431,6 +432,36 @@ class TestCostCalculator:
         cost = CostCalculator.calculate(1000, 1000, pricing, cached_tokens=500)
         # cache_read is None, so no cache cost
         assert cost.cache_cost == 0.0
+
+    def test_router_tiered_pricing_uses_prompt_token_bucket(self):
+        from flocks.provider.cost_calculator import CostCalculator
+
+        pricing = PriceConfig(
+            input=4.2,
+            output=16.8,
+            currency="CNY",
+            price_tiers=[
+                PriceTierConfig(
+                    max_input_tokens=512000,
+                    input_price=4.2,
+                    output_price=16.8,
+                ),
+                PriceTierConfig(
+                    max_input_tokens=None,
+                    input_price=8.4,
+                    output_price=33.6,
+                ),
+            ],
+        )
+
+        first_tier = CostCalculator.calculate(512000, 100000, pricing)
+        assert first_tier.input_cost == 2.1504
+        assert first_tier.output_cost == 1.68
+
+        second_tier = CostCalculator.calculate(600000, 100000, pricing)
+        assert second_tier.input_cost == 5.04
+        assert second_tier.output_cost == 3.36
+        assert second_tier.total_cost == 8.4
 
 
 # ==================== usage.py (recording & stats — SQLite dynamic data) ====================

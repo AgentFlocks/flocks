@@ -73,7 +73,8 @@
     "deprecated": "已弃用",
     "testingModel": "测试中",
     "available": "可用",
-    "free": "免费"
+    "free": "免费",
+    "tieredPricing": "阶梯 {{count}} 档"
   },
   "emptyDetail": {
     "addFirst": "开始添加模型供应商",
@@ -105,6 +106,8 @@
     "baseUrl": "Base URL",
     "baseUrlOptional": "（可选，留空用默认）",
     "baseUrlRequired": "请填写 Base URL",
+    "modelCatalogUrl": "模型目录 URL",
+    "modelCatalogUrlHint": "用于同步 Router 模型名称、价格和阶梯计费；与 Chat Base URL 相互独立，上线时可直接替换。",
     "apiKey": "API Key",
     "ollamaNoKey": "（Ollama 通常不需要）",
     "apiKeyOptional": "（可选，无鉴权网关可留空）",

@@ -1,6 +1,7 @@
 export interface ProviderCredentialSnapshot {
   apiKey: string;
   baseUrl?: string | null;
+  modelCatalogUrl?: string | null;
 }
 
 function normalizeValue(value?: string | null): string {
@@ -13,6 +14,7 @@ export function hasPendingProviderCredentialChanges(
 ): boolean {
   return (
     normalizeValue(existing.apiKey) !== normalizeValue(current.apiKey) ||
-    normalizeValue(existing.baseUrl) !== normalizeValue(current.baseUrl)
+    normalizeValue(existing.baseUrl) !== normalizeValue(current.baseUrl) ||
+    normalizeValue(existing.modelCatalogUrl) !== normalizeValue(current.modelCatalogUrl)
   );
 }

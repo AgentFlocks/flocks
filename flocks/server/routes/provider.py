@@ -8,11 +8,13 @@ temperature, tool_call, limit, etc.
 
 import asyncio
 import json
+import os
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -668,6 +670,7 @@ async def get_provider_catalog():
             "credential_schemas": [s.model_dump() for s in meta.credential_schemas],
             "env_vars": raw.get("env_vars", []),
             "default_base_url": raw.get("default_base_url"),
+            "default_model_catalog_url": raw.get("default_model_catalog_url"),
             "model_count": len(models),
             "models": [
                 {
@@ -693,6 +696,10 @@ async def get_provider_catalog():
                         "cache_read": m.pricing.cache_read,
                         "cache_write": m.pricing.cache_write,
                         "currency": m.pricing.currency,
+                        "price_tiers": [
+                            tier.model_dump() for tier in m.pricing.price_tiers
+                        ] if m.pricing.price_tiers else None,
+                        "price_version": m.pricing.price_version,
                     } if m.pricing else None,
                 }
                 for m in models
@@ -1624,7 +1631,6 @@ async def get_api_service_metadata(provider_id: str):
         if not base_url and data.get("apis") and len(data["apis"]) > 0:
             first_endpoint = data["apis"][0].get("endpoint", "")
             if first_endpoint:
-                from urllib.parse import urlparse
                 parsed = urlparse(first_endpoint)
                 base_url = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -1677,6 +1683,10 @@ class ProviderCredentialRequest(BaseModel):
     api_key: Optional[str] = Field(None, description="API key value")
     secret: Optional[str] = Field(None, description="Secondary secret value for custom API services")
     base_url: Optional[str] = Field(None, description="Base URL for the provider")
+    model_catalog_url: Optional[str] = Field(
+        None,
+        description="Model catalog URL, independent from the provider chat Base URL",
+    )
     username: Optional[str] = Field(None, description="Optional username for API services")
     fields: Optional[Dict[str, Optional[str]]] = Field(None, description="Dynamic service credential fields")
     provider_name: Optional[str] = Field(None, description="Display name for the provider")
@@ -1690,6 +1700,7 @@ class ProviderCredentialResponse(BaseModel):
     secret: Optional[str] = None
     secret_masked: Optional[str] = None
     base_url: Optional[str] = None
+    model_catalog_url: Optional[str] = None
     username: Optional[str] = None
     fields: Optional[Dict[str, Optional[str]]] = None
     secret_ids: Optional[Dict[str, str]] = None
@@ -1714,12 +1725,27 @@ def _load_llm_provider_credentials(
         api_key = _get_inline_provider_api_key(provider_id)
 
     base_url = None
+    model_catalog_url = None
     raw_provider = ConfigWriter.get_provider_raw(provider_id)
     if raw_provider:
         options = raw_provider.get("options", {})
         base_url = options.get("baseURL") or options.get("base_url")
+        model_catalog_url = options.get("model_catalog_url") or options.get(
+            "modelCatalogURL"
+        )
     if not base_url:
         base_url = secrets.get(f"{provider_id}_base_url")
+    if not model_catalog_url:
+        model_catalog_url = os.getenv("THREATBOOK_CN_LLM_MODEL_CATALOG_URL")
+    if not model_catalog_url:
+        try:
+            from flocks.provider.model_catalog import get_raw_catalog
+
+            model_catalog_url = get_raw_catalog().get(provider_id, {}).get(
+                "default_model_catalog_url"
+            )
+        except Exception:
+            pass
 
     is_placeholder = _is_placeholder_api_key(api_key)
     ui_api_key = None if is_placeholder else api_key
@@ -1729,6 +1755,7 @@ def _load_llm_provider_credentials(
         api_key=ui_api_key if reveal_api_key else None,
         api_key_masked=SecretManager.mask(ui_api_key) if ui_api_key else None,
         base_url=base_url,
+        model_catalog_url=model_catalog_url,
         has_credential=bool(api_key),
     )
 
@@ -1815,6 +1842,7 @@ async def set_provider_credentials(
 
     - api_key → .secret.json
     - base_url → flocks.json provider.{id}.options.baseURL
+    - model_catalog_url → flocks.json provider.{id}.options.model_catalog_url
     - Ensures provider entry exists in flocks.json
     - Configures provider runtime immediately
     """
@@ -1862,6 +1890,21 @@ async def set_provider_credentials(
                 # (which require a non-empty key argument) keep working.
                 effective_api_key = _NO_API_KEY_PLACEHOLDER
 
+        model_catalog_url_was_set = "model_catalog_url" in request.model_fields_set
+        effective_model_catalog_url = None
+        if model_catalog_url_was_set:
+            effective_model_catalog_url = (request.model_catalog_url or "").strip()
+            if effective_model_catalog_url:
+                parsed_catalog_url = urlparse(effective_model_catalog_url)
+                if (
+                    parsed_catalog_url.scheme not in {"http", "https"}
+                    or not parsed_catalog_url.netloc
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Model catalog URL must be an absolute HTTP(S) URL",
+                    )
+
         # 1. Save API key to .secret.json using _llm_key convention for LLM providers
         if preserve_existing_secret:
             log.info("provider.credentials.preserved", {
@@ -1903,6 +1946,12 @@ async def set_provider_credentials(
             if request.provider_name:
                 ConfigWriter.update_provider_field(
                     provider_id, "name", request.provider_name
+                )
+            if model_catalog_url_was_set:
+                ConfigWriter.update_provider_field(
+                    provider_id,
+                    "options.model_catalog_url",
+                    effective_model_catalog_url or None,
                 )
         else:
             # Provider not yet in flocks.json — create a minimal entry
@@ -1946,6 +1995,11 @@ async def set_provider_credentials(
                 npm=npm,
                 base_url=effective_base_url,
                 models=models,
+                extra_options=(
+                    {"model_catalog_url": effective_model_catalog_url}
+                    if effective_model_catalog_url
+                    else None
+                ),
             )
             if request.provider_name:
                 config_dict["name"] = request.provider_name
@@ -1968,6 +2022,11 @@ async def set_provider_credentials(
                     effective_base_url = raw.get("options", {}).get("baseURL")
 
             custom_settings = _get_provider_custom_settings(provider)
+            if model_catalog_url_was_set:
+                if effective_model_catalog_url:
+                    custom_settings["model_catalog_url"] = effective_model_catalog_url
+                else:
+                    custom_settings.pop("model_catalog_url", None)
             provider.configure(ProviderConfig(
                 provider_id=provider_id,
                 api_key=effective_api_key,

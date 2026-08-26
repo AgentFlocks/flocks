@@ -34,6 +34,7 @@
     "description": "ThreatBook China LLM Service (OpenAI-compatible)",
     "npm": "@ai-sdk/openai-compatible",
     "default_base_url": "https://llm.threatbook.cn/v1",
+    "default_model_catalog_url": "https://flocks-router-test.threatbook-inc.cn/api/console/common/models",
     "credential_schemas": [
       {
         "auth_method": "api_key",
@@ -49,11 +50,12 @@
       }
     ],
     "env_vars": [
-      "THREATBOOK_CN_LLM_API_KEY"
+      "THREATBOOK_CN_LLM_API_KEY",
+      "THREATBOOK_CN_LLM_MODEL_CATALOG_URL"
     ],
     "models": {
       "deepseek-v4-flash-0731": {
-        "name": "deepseek-v4-flash-0731",
+        "name": "DeepSeek-V4-Flash-0731",
         "family": "deepseek-v4",
         "capabilities": {
           "supports_tools": true,
@@ -75,11 +77,34 @@
         "pricing": {
           "input": 1.0,
           "output": 2.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026081405",
+          "price_tiers": [
+            {
+              "max_input_tokens": 100000,
+              "input_price": 1.0,
+              "output_price": 2.0
+            },
+            {
+              "max_input_tokens": 10000000,
+              "input_price": 2.0,
+              "output_price": 4.0
+            },
+            {
+              "max_input_tokens": 100000000,
+              "input_price": 1.0,
+              "output_price": 2.0
+            },
+            {
+              "max_input_tokens": null,
+              "input_price": 3.0,
+              "output_price": 6.0
+            }
+          ]
         }
       },
       "kimi-k2.7-code": {
-        "name": "kimi-k2.7-code",
+        "name": "Kimi-K2.7-Code",
         "family": "kimi-k2.7-code",
         "capabilities": {
           "supports_tools": true,
@@ -104,11 +129,12 @@
         "pricing": {
           "input": 6.5,
           "output": 27.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026072001"
         }
       },
       "minimax-m3": {
-        "name": "minimax-m3",
+        "name": "MiniMax-M3",
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
@@ -132,11 +158,23 @@
           "input": 4.2,
           "output": 16.8,
           "currency": "CNY",
-          "note": "≤512k input: ¥4.20/M tokens output: ¥16.80/M tokens; >512k input: ¥8.40/M tokens output: ¥33.60/M tokens"
+          "price_version": "2026061601",
+          "price_tiers": [
+            {
+              "max_input_tokens": 512000,
+              "input_price": 4.2,
+              "output_price": 16.8
+            },
+            {
+              "max_input_tokens": null,
+              "input_price": 8.4,
+              "output_price": 33.6
+            }
+          ]
         }
       },
       "minimax-m2.7": {
-        "name": "minimax-m2.7",
+        "name": "MiniMax-M2.7",
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
@@ -158,11 +196,12 @@
         "pricing": {
           "input": 2.1,
           "output": 8.4,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026061601"
         }
       },
       "minimax-m2.5": {
-        "name": "minimax-m2.5",
+        "name": "MiniMax-M2.5",
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
@@ -184,7 +223,8 @@
         "pricing": {
           "input": 2.1,
           "output": 8.42,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026081401"
         }
       },
       "GLM-5": {
@@ -210,11 +250,12 @@
         "pricing": {
           "input": 4.0,
           "output": 18.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026061601"
         }
       },
       "qwen3.6-plus": {
-        "name": "qwen3.6-plus",
+        "name": "Qwen3.6-Plus",
         "family": "qwen",
         "capabilities": {
           "supports_tools": true,
@@ -237,11 +278,12 @@
         "pricing": {
           "input": 2.0,
           "output": 12.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026061601"
         }
       },
       "qwen3-max": {
-        "name": "qwen3-max",
+        "name": "Qwen3-Max",
         "family": "qwen",
         "capabilities": {
           "supports_tools": true,
@@ -263,11 +305,12 @@
         "pricing": {
           "input": 2.5,
           "output": 10.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026061601"
         }
       },
       "qwen3.8-max": {
-        "name": "qwen3.8-max",
+        "name": "Qwen3.8-Max",
         "family": "qwen3.8",
         "capabilities": {
           "supports_tools": true,
@@ -290,11 +333,12 @@
         "pricing": {
           "input": 12.0,
           "output": 36.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026080301"
         }
       },
       "kimi-k2.6": {
-        "name": "kimi-k2.6",
+        "name": "Kimi-K2.6",
         "family": "kimi-k2.6",
         "capabilities": {
           "supports_tools": true,
@@ -319,11 +363,12 @@
         "pricing": {
           "input": 6.5,
           "output": 27.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026061601"
         }
       },
       "deepseek-v4-flash": {
-        "name": "deepseek-v4-flash",
+        "name": "DeepSeek-V4-Flash",
         "family": "deepseek-v4",
         "capabilities": {
           "supports_tools": true,
@@ -344,7 +389,53 @@
         "pricing": {
           "input": 1.0,
           "output": 2.0,
-          "currency": "CNY"
+          "currency": "CNY",
+          "price_version": "2026061601"
+        }
+      },
+      "testadd": {
+        "name": "testadd",
+        "family": "testadd",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 128000,
+          "max_output_tokens": 4096
+        },
+        "pricing": {
+          "input": 2.0,
+          "output": 3.0,
+          "currency": "CNY",
+          "price_version": "2026081401"
+        }
+      },
+      "gpt-4o": {
+        "name": "gpt-4o",
+        "family": "gpt-4o",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": null,
+            "max": null
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 128000,
+          "max_output_tokens": 16384
+        },
+        "pricing": {
+          "input": 50.0,
+          "output": 60.0,
+          "currency": "CNY",
+          "price_version": "2026082501"
         }
       }
     }

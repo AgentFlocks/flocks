@@ -57,6 +57,12 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
             pricing.get("cache_read") if isinstance(pricing, dict) else None,
             pricing.get("cache_write") if isinstance(pricing, dict) else None,
             pricing.get("currency") if isinstance(pricing, dict) else None,
+            json.dumps(
+                pricing.get("price_tiers") if isinstance(pricing, dict) else None,
+                default=str,
+                sort_keys=True,
+            ),
+            pricing.get("price_version") if isinstance(pricing, dict) else None,
         )
         if pricing is not None
         else None
@@ -1293,6 +1299,8 @@ class BaseProvider:
                 cache_read=model.pricing.get("cache_read"),
                 cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
+                price_tiers=model.pricing.get("price_tiers"),
+                price_version=model.pricing.get("price_version"),
             )
         max_output = model.capabilities.max_tokens or 4096
         return ModelDefinition(
@@ -1398,6 +1406,8 @@ class BaseProvider:
                 cache_read=model.pricing.get("cache_read"),
                 cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
+                price_tiers=model.pricing.get("price_tiers"),
+                price_version=model.pricing.get("price_version"),
             )
 
         return overridden

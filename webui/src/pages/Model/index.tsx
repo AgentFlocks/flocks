@@ -24,7 +24,7 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
-import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import { formatPriceTiers, formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import {
   convertCurrencyAmount,
   formatTokenMillions,
@@ -36,6 +36,7 @@ import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
   CustomModelCreate, ProviderCredentialInput, FallbackModelRef,
+  PriceConfigV2,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -1033,6 +1034,32 @@ function ProviderDetail({
 
 // ==================== Model Card (V2) ====================
 
+function PricingSummary({ pricing }: {
+  pricing: PriceConfigV2 | NonNullable<CatalogModel['pricing']>;
+}) {
+  const { t } = useTranslation('model');
+  const tierCount = pricing.price_tiers?.length ?? 0;
+  const tierDetails = tierCount > 0 ? formatPriceTiers(pricing) : '';
+  const title = [
+    pricing.price_version ? `v${pricing.price_version}` : '',
+    tierDetails,
+  ].filter(Boolean).join('\n');
+
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] text-gray-500 shrink-0">
+      <span>{formatPricingPerMillion(pricing)}</span>
+      {tierCount > 0 && (
+        <span
+          className="rounded bg-amber-50 px-1 py-0.5 font-medium text-amber-700"
+          title={title}
+        >
+          {t('status.tieredPricing', { count: tierCount })}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onToggle, onDelete }: {
   model: ModelDefinitionV2;
   enabled: boolean;
@@ -1099,7 +1126,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           </span>
           {contextK && <span className="text-[11px] text-gray-500 shrink-0">{contextK}</span>}
           {pricing && !isPricingFree(pricing) && (
-            <span className="text-[11px] text-gray-500 shrink-0">{formatPricingPerMillion(pricing)}</span>
+            <PricingSummary pricing={pricing} />
           )}
           {pricing && isPricingFree(pricing) && (
             <span className="text-[11px] text-green-600 font-medium shrink-0">{t('status.free')}</span>
@@ -1189,6 +1216,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [apiKey, setApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [baseUrl, setBaseUrl] = useState('');
+  const [modelCatalogUrl, setModelCatalogUrl] = useState('');
   const [description, setDescription] = useState('');
   const [providerName, setProviderName] = useState('');
   const [azureDeploymentName, setAzureDeploymentName] = useState('');
@@ -1273,6 +1301,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     if (provider) {
       setDisplayName(provider.name);
       setBaseUrl(provider.default_base_url || '');
+      setModelCatalogUrl(provider.default_model_catalog_url || '');
       setApiKey('');
       setDescription(provider.description || '');
       setSelectedModelIds(new Set(provider.models.map(m => m.id)));
@@ -1317,6 +1346,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       await providerAPI.setCredentials(selectedCatalogId, {
         api_key: apiKey.trim(),
         base_url: baseUrl.trim() || undefined,
+        model_catalog_url: selectedCatalogId === 'threatbook-cn-llm'
+          ? modelCatalogUrl.trim()
+          : undefined,
         provider_name: selectedCatalogId === 'openai-compatible' && providerName.trim() ? providerName.trim() : undefined,
       });
       const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
@@ -1371,6 +1403,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       await providerAPI.setCredentials(selectedCatalogId, {
         api_key: apiKey.trim() || 'not-needed',
         base_url: baseUrl.trim() || undefined,
+        model_catalog_url: selectedCatalogId === 'threatbook-cn-llm'
+          ? modelCatalogUrl.trim()
+          : undefined,
       });
       if (selectedCatalog) {
         const unselected = selectedCatalog.models.filter(m => !selectedModelIds.has(m.id)).map(m => m.id);
@@ -1694,6 +1729,23 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         />
                       </div>
 
+                      {selectedCatalogId === 'threatbook-cn-llm' && (
+                        <div className="col-span-2">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            {t('form.modelCatalogUrl')}
+                            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                          </label>
+                          <input
+                            type="url"
+                            value={modelCatalogUrl}
+                            onChange={e => setModelCatalogUrl(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                            placeholder={selectedCatalog.default_model_catalog_url || 'https://router.example.com/api/console/common/models'}
+                          />
+                          <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogUrlHint')}</p>
+                        </div>
+                      )}
+
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           API Key
@@ -1805,7 +1857,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                       </span>
                                     )}
                                     {model.pricing && !isPricingFree(model.pricing) && (
-                                      <span>{formatPricingPerMillion(model.pricing)}</span>
+                                      <PricingSummary pricing={model.pricing} />
                                     )}
                                     {model.pricing && isPricingFree(model.pricing) && (
                                       <span className="text-green-600">{t('status.free')}</span>
@@ -2315,8 +2367,10 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   const hasExisting = existingCredentials?.has_credential ?? false;
   const existingKey = existingCredentials?.api_key ?? '';
   const existingBaseUrl = existingCredentials?.base_url ?? '';
+  const existingModelCatalogUrl = existingCredentials?.model_catalog_url ?? '';
 
   const [baseUrl, setBaseUrl] = useState(existingCredentials?.base_url ?? '');
+  const [modelCatalogUrl, setModelCatalogUrl] = useState(existingModelCatalogUrl);
   const [apiKey, setApiKey] = useState(existingKey);
   const [providerName, setProviderName] = useState(provider.name);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -2347,8 +2401,9 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   useEffect(() => {
     setApiKey(existingKey);
     setBaseUrl(existingBaseUrl);
+    setModelCatalogUrl(existingModelCatalogUrl);
     setProviderName(provider.name);
-  }, [existingBaseUrl, existingKey, provider.id, provider.name]);
+  }, [existingBaseUrl, existingKey, existingModelCatalogUrl, provider.id, provider.name]);
 
   useEffect(() => {
     setSelectedModelIds(new Set(models.map(m => m.id)));
@@ -2400,6 +2455,9 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
       setLoading(true);
       const payload: ProviderCredentialInput = {
         base_url: baseUrl.trim() || undefined,
+        model_catalog_url: provider.id === 'threatbook-cn-llm'
+          ? modelCatalogUrl.trim()
+          : undefined,
         provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
           ? (providerName.trim() || undefined)
           : undefined,
@@ -2440,8 +2498,8 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
       return;
     }
     const hasPendingChanges = hasPendingProviderCredentialChanges(
-      { apiKey: existingKey, baseUrl: existingBaseUrl },
-      { apiKey, baseUrl },
+      { apiKey: existingKey, baseUrl: existingBaseUrl, modelCatalogUrl: existingModelCatalogUrl },
+      { apiKey, baseUrl, modelCatalogUrl },
     );
 
     const nextApiKey = apiKey.trim();
@@ -2457,6 +2515,9 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
       try {
         const payload: ProviderCredentialInput = {
           base_url: baseUrl.trim() || undefined,
+          model_catalog_url: provider.id === 'threatbook-cn-llm'
+            ? modelCatalogUrl.trim()
+            : undefined,
           provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
             ? (providerName.trim() || undefined)
             : undefined,
@@ -2575,6 +2636,23 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
             placeholder="https://api.example.com/v1"
           />
         </div>
+
+        {provider.id === 'threatbook-cn-llm' && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              {t('form.modelCatalogUrl')}
+              <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+            </label>
+            <input
+              type="url"
+              value={modelCatalogUrl}
+              onChange={(e) => setModelCatalogUrl(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              placeholder="https://router.example.com/api/console/common/models"
+            />
+            <p className="mt-1 text-xs text-gray-500">{t('form.modelCatalogUrlHint')}</p>
+          </div>
+        )}
 
         {/* API Key */}
         <div>
@@ -3078,7 +3156,9 @@ function formatModelPricing(
   const pricing = model.pricing;
   if (!pricing) return unavailableLabel;
   if (isPricingFree(pricing)) return freeLabel;
-  return formatPricingPerMillion(pricing);
+  const base = formatPricingPerMillion(pricing);
+  const tiers = formatPriceTiers(pricing);
+  return tiers ? `${base}\n${tiers}` : base;
 }
 
 function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {

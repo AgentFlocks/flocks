@@ -52,6 +52,8 @@ vi.mock('react-i18next', () => ({
         'form.selectProvider': 'Select Provider...',
         'form.baseUrlOptional': '(optional, leave empty for default)',
         'form.baseUrlRequired': 'Please enter Base URL',
+        'form.modelCatalogUrl': 'Model Catalog URL',
+        'form.modelCatalogUrlHint': 'Independent Router catalog endpoint',
         'form.apiKeyOptional': '(optional, leave empty for no-auth gateways)',
         'form.apiKeyOptionalHint': 'Leave empty for no-auth gateway',
         'form.apiKeyKeepExisting': 'Leave blank to keep the existing API key',
@@ -233,6 +235,55 @@ describe('ModelPage add provider dialog', () => {
         api_key: 'not-needed',
         description: 'Compatible endpoint',
       });
+    });
+  });
+
+  it('submits a configurable ThreatBook model catalog URL separately from Base URL', async () => {
+    const user = userEvent.setup();
+    mocks.catalogList.mockResolvedValue({
+      data: {
+        providers: [
+          {
+            id: 'threatbook-cn-llm',
+            name: 'ThreatBook-cn-llm',
+            description: 'ThreatBook Router',
+            credential_schemas: [{
+              auth_method: 'api_key',
+              fields: [{ name: 'api_key', label: 'API Key', type: 'secret', required: true, placeholder: 'tb-key' }],
+            }],
+            env_vars: [],
+            default_base_url: 'https://llm.threatbook.cn/v1',
+            default_model_catalog_url: 'https://flocks-router-test.threatbook-inc.cn/api/console/common/models',
+            model_count: 0,
+            models: [],
+          },
+        ],
+      },
+    });
+    mocks.setCredentials.mockResolvedValue({ data: { success: true } });
+
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
+    await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/i }));
+
+    const catalogUrlInput = screen.getByDisplayValue(
+      'https://flocks-router-test.threatbook-inc.cn/api/console/common/models',
+    );
+    await user.clear(catalogUrlInput);
+    await user.type(catalogUrlInput, 'https://router-prod.example/api/console/common/models');
+    await user.type(screen.getByPlaceholderText('tb-key'), 'tb-secret');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mocks.setCredentials).toHaveBeenCalledWith(
+        'threatbook-cn-llm',
+        expect.objectContaining({
+          api_key: 'tb-secret',
+          base_url: 'https://llm.threatbook.cn/v1',
+          model_catalog_url: 'https://router-prod.example/api/console/common/models',
+        }),
+      );
     });
   });
 });
@@ -455,7 +506,18 @@ describe('ModelPage default model selector', () => {
         modalities: { input: ['text', 'image'], output: ['text'] },
       },
       limits: { context_window: 200000, max_output_tokens: 8192 },
-      pricing: { input: 1.25, output: 5, cache_read: 0.25, unit: 1000000, currency: 'USD' },
+      pricing: {
+        input: 1.25,
+        output: 5,
+        cache_read: 0.25,
+        unit: 1000000,
+        currency: 'USD',
+        price_version: '2026082601',
+        price_tiers: [
+          { max_input_tokens: 512000, input_price: 1.25, output_price: 5 },
+          { max_input_tokens: null, input_price: 2.5, output_price: 10 },
+        ],
+      },
     },
   ];
 
@@ -513,6 +575,8 @@ describe('ModelPage default model selector', () => {
     expect(tooltip).toHaveTextContent(/1\.25/);
     expect(tooltip).toHaveTextContent(/\b5(?:\.0+)?\b/);
     expect(tooltip).toHaveTextContent('$1.25/$5/$0.25/M');
+    expect(tooltip).toHaveTextContent('≤ 512,000: $1.25/$5/M');
+    expect(tooltip).toHaveTextContent('> 512,000: $2.5/$10/M');
     expect(tooltip).toHaveTextContent(/USD|\$/);
   });
 
