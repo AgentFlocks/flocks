@@ -761,6 +761,7 @@ describe('SessionPage session actions menu', () => {
     refetchSessions.mockResolvedValue(undefined);
 
     renderSessionPage();
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-mention-agents', '');
     await user.click(screen.getByRole('button', { name: 'situationReport.newSession' }));
 
     await waitFor(() => {

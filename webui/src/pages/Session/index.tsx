@@ -843,7 +843,10 @@ export default function SessionPage() {
     () => agents.filter((a) => a.mode !== 'primary' && isAgentUsableInChat(a)),
     [agents],
   );
-  const chatAgents = useMemo(() => [...primaryAgents, ...subAgents], [primaryAgents, subAgents]);
+  const chatAgents = useMemo(
+    () => [...primaryAgents, ...subAgents].filter((agent) => agent.name !== SITUATION_REPORT_AGENT),
+    [primaryAgents, subAgents],
+  );
   const filteredChatAgents = useMemo(
     () => chatAgents.filter((agent) => {
       if (agent.name.toLowerCase() === 'rex') return false;
