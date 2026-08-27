@@ -223,6 +223,68 @@ async def test_conversation_rewrite_text_dispatches_as_modify(
 
 
 @pytest.mark.asyncio
+async def test_report_config_intent_is_published_and_restored_as_ui_action(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Configuration redirects use one Message Part contract on SSE and REST."""
+    created = await client.post(
+        "/api/session",
+        json={"title": "配置跳转边界", "category": "situation-report"},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["id"]
+    published: list[tuple[str, dict]] = []
+
+    async def capture_event(event_type: str, properties: dict) -> None:
+        published.append((event_type, properties))
+
+    monkeypatch.setattr(
+        "flocks.situation_report.product.orchestrator.publish_event",
+        capture_event,
+    )
+
+    response = await client.post(
+        f"/api/session/{session_id}/prompt_async",
+        json=_product_prompt(operation="modify", instruction="请打开报告配置页面"),
+    )
+    assert response.status_code == 202, response.text
+
+    from flocks.server.routes import session as session_routes
+
+    for _ in range(50):
+        if not session_routes._is_prompt_chain_active(session_id):
+            break
+        await asyncio.sleep(0.01)
+    assert session_routes._is_prompt_chain_active(session_id) is False
+
+    ui_action = {
+        "type": "open_report_config",
+        "reason": "configuration_change",
+        "buttonText": "前往配置",
+        "sessionID": session_id,
+    }
+    part_events = [
+        properties["part"]
+        for event_type, properties in published
+        if event_type == "message.part.updated"
+        and (properties.get("part") or {}).get("metadata", {}).get("uiAction")
+    ]
+    assert len(part_events) == 1
+    assert part_events[0]["metadata"]["uiAction"] == ui_action
+
+    messages = await client.get(f"/api/session/{session_id}/message")
+    assert messages.status_code == 200, messages.text
+    persisted_actions = [
+        part["metadata"]["uiAction"]
+        for message in messages.json()
+        for part in message["parts"]
+        if (part.get("metadata") or {}).get("uiAction")
+    ]
+    assert persisted_actions == [ui_action]
+
+
+@pytest.mark.asyncio
 async def test_hidden_product_agent_is_only_allowed_by_internal_runner(
     monkeypatch: pytest.MonkeyPatch,
 ):

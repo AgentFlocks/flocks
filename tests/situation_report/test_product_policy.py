@@ -29,7 +29,11 @@ def test_policy_redirects_new_report_and_configuration_changes_without_execution
         ("新生成一份报告", "new_report"),
         ("新建报告", "new_report"),
         ("再生成一份报告", "new_report"),
+        ("我要进行配置", "configuration_change"),
+        ("我要修改报告配置", "configuration_change"),
+        ("请打开报告配置页面", "configuration_change"),
         ("把素材换一批", "material_change"),
+        ("我想更换报告素材", "material_change"),
         ("修改一下模板", "template_change"),
         ("把语言切换成英文", "language_change"),
     ]
@@ -67,6 +71,7 @@ def test_policy_keeps_conversation_rewrite_requests_as_modify():
         "重新生成一份报告",
         "请重新生成当前报告",
         "请从头撰写整份报告",
+        "请按照当前配置修改报告摘要",
         "regenerate this report",
         "rewrite the report from scratch",
     ):

@@ -37,6 +37,15 @@ _CONFIG_PATTERNS = (
         ),
     ),
 )
+_GENERAL_CONFIG = re.compile(
+    r"(?:打开|进入|前往|跳转|访问|查看).{0,12}(?:报告)?(?:配置|设置)(?:页|页面)?|"
+    r"(?:修改|调整|更改|配置|设置).{0,6}(?:报告)?(?:配置|设置)(?:页|页面)?|"
+    r"^(?:请|我想|我要|帮我|麻烦)?(?:进行|做|改|修改|调整|更改|查看|打开|进入|前往)?"
+    r"(?:一下)?(?:报告)?(?:配置|设置)(?:页|页面)?[。.!！?？]*$|"
+    r"(?:open|go\s+to|show|change|edit)\s+(?:the\s+)?report\s+"
+    r"(?:config(?:uration)?|settings?)",
+    re.I,
+)
 _MODIFY_SIGNAL = re.compile(
     r"报告|章节|段落|标题|正文|内容|措辞|表格|建议|结论|摘要|事件|漏洞|IOC|ATT&CK|"
     r"修改|改写|润色|删除|删掉|增加|补充|调整|精简|扩写|纠正|"
@@ -93,6 +102,8 @@ def decide_report_prompt(parts: list[dict[str, Any]], *, session_id: str) -> Rep
     for reason, pattern in _CONFIG_PATTERNS:
         if pattern.search(text):
             return _ui_action(reason, session_id)
+    if _GENERAL_CONFIG.search(text):
+        return _ui_action("configuration_change", session_id)
 
     # The trusted business backend selects the operation from the product
     # entry point: first-generation button -> generate, dedicated regenerate
