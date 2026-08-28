@@ -49,6 +49,7 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(ws))
     monkeypatch.setenv("FLOCKS_DATA_DIR", str(data))
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
 
     # Reset both singletons so they re-read env vars
     from flocks.workspace.manager import WorkspaceManager
@@ -58,9 +59,21 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     # Build a minimal FastAPI app with only the workspace router
     from fastapi import FastAPI
+    from flocks.auth.context import AuthUser
     from flocks.server.routes.workspace import router
 
     app = FastAPI()
+
+    @app.middleware("http")
+    async def inject_auth_user(request, call_next):
+        request.state.auth_user = AuthUser(
+            id="usr_workspace",
+            username="workspace",
+            role="member",
+            status="active",
+        )
+        return await call_next(request)
+
     app.include_router(router, prefix="/api/workspace")
 
     client = TestClient(app, raise_server_exceptions=True)
@@ -697,10 +710,21 @@ class TestMemoryView:
         assert daily["type"] == "directory"
         assert daily["children"] == []
 
-    def test_list_memory_with_files(self, workspace_client):
+    def test_list_memory_with_files(self, workspace_client, monkeypatch):
+        from flocks.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_example"}),
+        )
         mem = _mem(workspace_client)
         (mem / "USER.md").write_text("# User")
         (mem / "MEMORY.md").write_text("# Memory")
+        (mem / "SHORT_MEMORY.md").write_text("# Short")
+        (mem / "bak.txt").write_text("backup")
+        (mem / "archive").mkdir()
+        (mem / "archive" / "2026-08-18.md").write_text("# Archived")
         (mem / "daily").mkdir()
         (mem / "daily" / "2026-03-14.md").write_text("## Daily")
         (mem / "projects" / "prj_example").mkdir(parents=True)
@@ -716,17 +740,29 @@ class TestMemoryView:
             "MEMORY.md",
             "projects",
             "daily",
+            "archive",
+            "bak.txt",
+            "SHORT_MEMORY.md",
         ]
         nodes = {node["name"]: node for node in r.json()}
-        assert set(nodes) == {"USER.md", "MEMORY.md", "daily", "projects"}
+        assert set(nodes) == {"USER.md", "MEMORY.md", "SHORT_MEMORY.md", "archive", "bak.txt", "daily", "projects"}
         assert nodes["USER.md"]["type"] == "file"
+        assert nodes["USER.md"]["editable"] is True
         assert nodes["MEMORY.md"]["type"] == "file"
+        assert nodes["MEMORY.md"]["editable"] is True
+        assert nodes["SHORT_MEMORY.md"]["editable"] is False
+        assert nodes["bak.txt"]["editable"] is False
+        assert nodes["archive"]["editable"] is False
+        assert nodes["archive"]["children"][0]["path"] == "archive/2026-08-18.md"
+        assert nodes["archive"]["children"][0]["editable"] is False
         assert nodes["daily"]["type"] == "directory"
         assert nodes["daily"]["children"][0]["path"] == "daily/2026-03-14.md"
+        assert nodes["daily"]["children"][0]["editable"] is True
         assert nodes["projects"]["type"] == "directory"
         project = nodes["projects"]["children"][0]
         assert project["path"] == "projects/prj_example"
         assert project["children"][0]["path"] == "projects/prj_example/MEMORY.md"
+        assert project["children"][0]["editable"] is True
 
     def test_read_memory_file(self, workspace_client):
         mem = _mem(workspace_client)
@@ -833,6 +869,40 @@ class TestMemoryView:
             "written": True,
         }
         assert target.read_text() == "new content"
+
+    def test_write_non_editable_memory_file_returns_403(self, workspace_client):
+        mem = _mem(workspace_client)
+        target = mem / "SHORT_MEMORY.md"
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "SHORT_MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
+
+    def test_write_unreadable_project_memory_returns_403(self, workspace_client, monkeypatch):
+        from flocks.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_allowed"}),
+        )
+        mem = _mem(workspace_client)
+        target = mem / "projects" / "prj_stale" / "MEMORY.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "projects/prj_stale/MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
 
     def test_write_memory_traversal_rejected(self, workspace_client):
         r = _client(workspace_client).put(
