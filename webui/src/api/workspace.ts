@@ -9,6 +9,7 @@ export interface WorkspaceNode {
   size?: number;
   modified_at?: number;
   is_text_file?: boolean;
+  editable?: boolean;
   children?: WorkspaceNode[];
   project_name?: string;
   project_worktree?: string;

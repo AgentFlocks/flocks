@@ -1585,20 +1585,6 @@ function memoryPathParts(path: string): string[] {
   return path.replace(/\\/g, '/').split('/');
 }
 
-function isEditableMemoryNode(node: WorkspaceNode): boolean {
-  const pathParts = memoryPathParts(node.path);
-  if (pathParts.length === 1) {
-    return node.path === 'USER.md' || node.path === 'MEMORY.md';
-  }
-  if (pathParts.length === 2) {
-    return pathParts[0] === 'daily' && node.name.endsWith('.md');
-  }
-  if (pathParts.length === 3) {
-    return pathParts[0] === 'projects' && pathParts[2] === 'MEMORY.md';
-  }
-  return false;
-}
-
 function buildMemoryView(
   nodes: WorkspaceNode[],
   visibleProjects: WorkspaceProject[],
@@ -1929,7 +1915,7 @@ function MemoryTab() {
               </div>
               <span className="text-xs text-gray-400">{formatBytes(selected.size ?? 0)}</span>
               <span className="text-xs text-gray-400">{formatDate(selected.modified_at)}</span>
-              {selected.is_text_file && isEditableMemoryNode(selected) && !editing && !truncated && contentState === 'ready' && (
+              {selected.is_text_file && selected.editable === true && !editing && !truncated && contentState === 'ready' && (
                 <button
                   onClick={() => {
                     setEditContent(content ?? '');

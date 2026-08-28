@@ -196,7 +196,7 @@ function directory(name: string, path: string) {
   };
 }
 
-function file(name: string, path: string, isTextFile = true) {
+function file(name: string, path: string, isTextFile = true, editable = isTextFile) {
   return {
     name,
     path,
@@ -204,6 +204,7 @@ function file(name: string, path: string, isTextFile = true) {
     size: 24,
     modified_at: 1710000000,
     is_text_file: isTextFile,
+    editable,
   };
 }
 
@@ -513,11 +514,11 @@ describe('WorkspacePage', () => {
   it('Memory 根目录的其他文件和目录会显示但默认只读', async () => {
     mocks.listMemory.mockResolvedValue({
       data: [
-        file('SHORT_MEMORY.md', 'SHORT_MEMORY.md'),
-        file('bak.txt', 'bak.txt'),
+        file('SHORT_MEMORY.md', 'SHORT_MEMORY.md', true, false),
+        file('bak.txt', 'bak.txt', true, false),
         {
           ...directory('archive', 'archive'),
-          children: [file('2026-08-18.md', 'archive/2026-08-18.md')],
+          children: [file('2026-08-18.md', 'archive/2026-08-18.md', true, false)],
         },
       ],
     });
