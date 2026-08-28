@@ -1771,18 +1771,62 @@ describe('getThinkingFirstSentence', () => {
 });
 
 describe('process group duration', () => {
-  it('uses the full wall-clock range and the current time for an active step', () => {
+  it('sums actual process intervals without counting gaps', () => {
     const parts = [
-      { id: 'reason', type: 'reasoning', time: { start: 1_000, end: 2_000 } },
-      { id: 'tool', type: 'tool', state: { status: 'running', time: { start: 2_500 } } },
+      { id: 'reason', type: 'reasoning', time: { start: 0, end: 5_000 } },
+      { id: 'summary', type: 'text', text: '继续检查', time: { start: 8_000, end: 9_000 } },
+      { id: 'tool', type: 'tool', state: { status: 'completed', time: { start: 20_000, end: 28_000 } } },
     ] as Message['parts'];
 
-    expect(getProcessGroupDurationMs(parts, 5_000)).toBe(4_000);
+    expect(getProcessGroupDurationMs(parts)).toBe(14_000);
     expect(formatProcessDuration(500)).toBe('1s');
     expect(formatProcessDuration(7_600)).toBe('7s');
     expect(formatProcessDuration(260_900)).toBe('4m20s');
     expect(getProcessGroupDurationMs([{ id: 'legacy', type: 'reasoning' }] as Message['parts']))
       .toBeNull();
+  });
+
+  it('uses current time only for unfinished active intervals', () => {
+    const parts = [
+      { id: 'done', type: 'tool', state: { status: 'completed', time: { start: 0, end: 5_000 } } },
+      { id: 'stale-text', type: 'text', text: 'missed final update', time: { start: 8_000 } },
+      { id: 'running', type: 'tool', state: { status: 'running', time: { start: 20_000 } } },
+      { id: 'future-text', type: 'text', text: '等待下一步', time: { start: 40_000 } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts, 22_000)).toBe(7_000);
+    expect(getProcessGroupDurationMs(parts, 23_000)).toBe(8_000);
+    expect(getProcessGroupDurationMs(parts, 23_000, 'running')).toBe(8_000);
+  });
+
+  it('merges overlapping intervals so parallel process steps are not double counted', () => {
+    const parts = [
+      { id: 'tool-a', type: 'tool', state: { status: 'completed', time: { start: 0, end: 10_000 } } },
+      { id: 'tool-b', type: 'tool', state: { status: 'completed', time: { start: 5_000, end: 15_000 } } },
+      { id: 'reason', type: 'reasoning', time: { start: 20_000, end: 22_000 } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(17_000);
+  });
+
+  it('ignores invalid or incomplete historical intervals', () => {
+    const parts = [
+      { id: 'missing-start', type: 'reasoning', time: { end: 5_000 } },
+      { id: 'missing-end', type: 'tool', state: { status: 'completed', time: { start: 10_000 } } },
+      { id: 'negative', type: 'text', text: 'bad clock', time: { start: 20_000, end: 19_000 } },
+      { id: 'zero', type: 'tool', state: { status: 'completed', time: { start: 25_000, end: 25_000 } } },
+      { id: 'valid', type: 'reasoning', time: { start: 30_000, end: 32_000 } },
+    ] as unknown as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(2_000);
+  });
+
+  it('keeps zero-duration completed intervals displayable', () => {
+    const parts = [
+      { id: 'instant', type: 'tool', state: { status: 'completed', time: { start: 1_000, end: 1_000 } } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(0);
   });
 
   it('updates the displayed duration while the last process step is active', () => {
@@ -5664,6 +5708,27 @@ describe('areChatMessagePartsRenderEqual', () => {
       [
         { id: 'text-1', type: 'text', text: '现在生成简化版 workflow.json' } as Message['parts'][number],
         sharedToolPart,
+      ],
+    )).toBe(false);
+  });
+
+  it('detects top-level part time updates used by reasoning and text parts', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'reason-1',
+          type: 'reasoning',
+          text: '检查上下文',
+          time: { start: 1_000 },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'reason-1',
+          type: 'reasoning',
+          text: '检查上下文',
+          time: { start: 1_000, end: 2_500 },
+        } as Message['parts'][number],
       ],
     )).toBe(false);
   });
