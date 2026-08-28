@@ -20,10 +20,35 @@ from flocks.utils.json_repair import (
 from flocks.tool.registry import ToolRegistry
 from flocks.session.streaming.stream_events import (
     ToolInputStartEvent,
+    ToolInputErrorEvent,
     ToolCallEvent,
 )
 
 log = Log.create(service="tool_accumulator")
+
+
+class StreamToolArgumentsTruncatedError(RuntimeError):
+    """Raised when the stream ends before tool arguments form valid JSON."""
+
+    def __init__(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        finish_reason: str,
+        arguments_len: int,
+        arguments_preview: str,
+    ) -> None:
+        self.tool_call_id = tool_call_id
+        self.tool_name = tool_name
+        self.finish_reason = finish_reason
+        self.arguments_len = arguments_len
+        self.arguments_preview = arguments_preview
+        super().__init__(
+            "Model output was truncated while generating tool arguments "
+            f"for '{tool_name}' (finish_reason='{finish_reason}', "
+            f"{arguments_len} chars). The tool was not executed."
+        )
 
 
 class ToolCallAccumulator:
@@ -143,6 +168,32 @@ class ToolCallAccumulator:
                 )
                 continue
 
+            if is_truncated:
+                error_msg = (
+                    f"Output was truncated (finish_reason='{stream_finish_reason}'). "
+                    f"Tool arguments for '{tool_name}' cut off at {len(accumulated_args)} chars. "
+                    "The tool was not executed."
+                )
+                await self._processor.process_event(
+                    ToolInputErrorEvent(
+                        id=tc_id,
+                        tool_name=tool_name,
+                        input={
+                            "tool": tool_name,
+                            "arguments_preview": accumulated_args[:500],
+                            "finish_reason": stream_finish_reason,
+                        },
+                        error=error_msg,
+                    )
+                )
+                raise StreamToolArgumentsTruncatedError(
+                    tool_call_id=tc_id,
+                    tool_name=tool_name,
+                    finish_reason=str(stream_finish_reason),
+                    arguments_len=len(accumulated_args),
+                    arguments_preview=accumulated_args[:500],
+                )
+
             # --- Repair strategies ---
             repaired = await self._try_repair(
                 tc_id, tool_name, accumulated_args, tc_data,
@@ -151,17 +202,10 @@ class ToolCallAccumulator:
                 continue
 
             # All strategies failed — redirect to invalid tool
-            if is_truncated:
-                error_msg = (
-                    f"Output was truncated (finish_reason='{stream_finish_reason}'). "
-                    f"Tool arguments for '{tool_name}' cut off at {len(accumulated_args)} chars. "
-                    f"Please reduce the content size or split the operation."
-                )
-            else:
-                error_msg = (
-                    f"Failed to parse tool arguments ({len(accumulated_args)} chars). "
-                    f"Please ensure valid JSON with balanced braces/brackets."
-                )
+            error_msg = (
+                f"Failed to parse tool arguments ({len(accumulated_args)} chars). "
+                f"Please ensure valid JSON with balanced braces/brackets."
+            )
 
             await self._processor.process_event(
                 ToolCallEvent(
