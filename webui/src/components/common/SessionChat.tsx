@@ -311,24 +311,81 @@ function getProcessPartTime(part: MessagePart): { start: number; end?: number } 
   return part.type === 'tool' ? part.state?.time : part.time;
 }
 
+type ProcessTimeInterval = {
+  start: number;
+  end: number;
+};
+
+function getProcessPartInterval(part: MessagePart, activeNowMs?: number): ProcessTimeInterval | null {
+  const time = getProcessPartTime(part);
+  if (!time || !Number.isFinite(time.start)) return null;
+
+  const end = Number.isFinite(time.end) ? time.end : activeNowMs;
+  if (end === undefined || !Number.isFinite(end) || end < time.start) return null;
+
+  return { start: time.start, end };
+}
+
+function sumMergedProcessIntervals(intervals: ProcessTimeInterval[]): number {
+  if (intervals.length === 0) return 0;
+
+  const sorted = [...intervals].sort((a, b) => a.start - b.start);
+  let total = 0;
+  let currentStart = sorted[0].start;
+  let currentEnd = sorted[0].end;
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const interval = sorted[index];
+    if (interval.start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, interval.end);
+      continue;
+    }
+
+    total += currentEnd - currentStart;
+    currentStart = interval.start;
+    currentEnd = interval.end;
+  }
+
+  return total + currentEnd - currentStart;
+}
+
 export function getProcessGroupDurationMs(
   parts: readonly MessagePart[],
   activeNowMs?: number,
+  activePartId?: string,
 ): number | null {
-  let firstStart = Number.POSITIVE_INFINITY;
-  let lastEnd = Number.NEGATIVE_INFINITY;
-
-  for (const part of parts) {
-    const time = getProcessPartTime(part);
-    if (!time || !Number.isFinite(time.start)) continue;
-    const end = Number.isFinite(time.end) ? time.end : activeNowMs;
-    if (end === undefined || !Number.isFinite(end)) continue;
-    firstStart = Math.min(firstStart, time.start);
-    lastEnd = Math.max(lastEnd, end);
+  let activeIntervalIndex = -1;
+  if (activeNowMs !== undefined) {
+    const startIndex = activePartId
+      ? parts.findIndex((part) => part.id === activePartId)
+      : parts.length - 1;
+    const endIndex = activePartId ? startIndex : 0;
+    for (let index = startIndex; index >= endIndex; index -= 1) {
+      const part = parts[index];
+      if (!part) continue;
+      const time = getProcessPartTime(part);
+      if (
+        !!time
+        && Number.isFinite(time.start)
+        && !Number.isFinite(time.end)
+        && time.start <= activeNowMs
+        && (part.type !== 'tool' || isActiveToolPart(part))
+      ) {
+        activeIntervalIndex = index;
+        break;
+      }
+    }
   }
 
-  if (!Number.isFinite(firstStart) || !Number.isFinite(lastEnd)) return null;
-  return Math.max(0, lastEnd - firstStart);
+  const intervals = parts
+    .map((part, index) => getProcessPartInterval(
+      part,
+      index === activeIntervalIndex ? activeNowMs : undefined,
+    ))
+    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+
+  if (intervals.length === 0) return null;
+  return sumMergedProcessIntervals(intervals);
 }
 
 export function formatProcessDuration(durationMs: number): string {
@@ -5343,6 +5400,7 @@ function ChatMessageBubbleInner({
             const processDurationMs = getProcessGroupDurationMs(
               group.map(({ part }) => part),
               processGroupActive ? processElapsedClock : undefined,
+              processGroupActive ? activeTailPart?.id : undefined,
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
