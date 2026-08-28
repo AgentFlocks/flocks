@@ -1859,6 +1859,54 @@ describe('process group duration', () => {
       vi.useRealTimers();
     }
   });
+
+  it('continues timing while the active assistant output streams after a process group', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+    try {
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({
+          id: 'assistant-active-output-duration',
+          role: 'assistant',
+          parts: [
+            {
+              id: 'reason-active-output',
+              type: 'reasoning',
+              text: '先读取上下文',
+              time: { start: 0, end: 1_000 },
+            },
+            {
+              id: 'tool-active-output',
+              type: 'tool',
+              tool: 'todo',
+              state: {
+                status: 'completed',
+                input: { todos: ['检查'] },
+                output: { ok: true },
+                time: { start: 1_000, end: 1_000 },
+              },
+            },
+            {
+              id: 'text-active-output',
+              type: 'text',
+              text: '继续输出中...',
+              time: { start: 1_000 },
+            },
+          ] as Message['parts'],
+        }),
+        isActive: true,
+        collapseIntermediateSteps: true,
+      }));
+
+      expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+      expect(screen.getAllByText('继续输出中...').length).toBeGreaterThan(0);
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 6s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('ChatMessageBubble reasoning streaming', () => {
