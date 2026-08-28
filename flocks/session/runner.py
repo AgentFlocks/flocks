@@ -1338,6 +1338,8 @@ class SessionRunner:
             "policy violation",
         )):
             return FailoverDecision(True, "content_policy")
+        if error_name == "StreamToolArgumentsTruncatedError":
+            return FailoverDecision(True, "stream_truncated")
         if error_name == "JSONDecodeError" or any(
             pattern in lowered for pattern in (
                 "malformed response", "invalid response", "empty choices",
@@ -1360,11 +1362,17 @@ class SessionRunner:
         assistant_message_id: Optional[str],
         decision: FailoverDecision,
         attempts: int,
+        allow_fallback_override: Optional[bool] = None,
     ) -> StepResult:
         state = LlmAttemptState(
             received_chunk=self._attempt_state.received_chunk,
             observable_output_started=self._attempt_state.observable_output_started,
             tool_execution_started=self._attempt_state.tool_execution_started,
+        )
+        allow_fallback = (
+            allow_fallback_override
+            if allow_fallback_override is not None
+            else decision.eligible and state.replay_safe
         )
         return StepResult(
             action="stop",
@@ -1374,11 +1382,15 @@ class SessionRunner:
                 error_data=error_data,
                 assistant_message_id=assistant_message_id,
                 reason=decision.reason,
-                allow_fallback=decision.eligible and state.replay_safe,
+                allow_fallback=allow_fallback,
                 attempt_state=state,
                 attempts=attempts,
             ),
         )
+
+    @staticmethod
+    def _is_stream_tool_arguments_truncated_error(error: Dict[str, Any]) -> bool:
+        return error.get("name") == "StreamToolArgumentsTruncatedError"
     
     async def _process_step(
         self,
@@ -1613,34 +1625,96 @@ class SessionRunner:
             # Disable tools when max steps reached
             tools = []
         
-        # Create assistant message (will be reused across retries)
-        assistant_msg = await Message.create(
-            session_id=self.session.id,
-            role=MessageRole.ASSISTANT,
-            content="",
-            agent=agent.name,
-            model_id=self.model_id,
-            provider_id=self.provider_id,
-            parent_id=last_user.id,
-        )
-        
-        # Publish assistant message SSE event so frontends can show the message card
-        if self.callbacks.event_publish_callback:
-            import time as _time
+        async def _publish_assistant_created(msg: MessageInfo) -> None:
+            if not self.callbacks.event_publish_callback:
+                return
             await self.callbacks.event_publish_callback("message.updated", {
                 "info": {
-                    "id": assistant_msg.id,
+                    "id": msg.id,
                     "sessionID": self.session.id,
                     "role": "assistant",
-                    "time": {"created": int(_time.time() * 1000)},
+                    "time": {"created": int(time.time() * 1000)},
                     "parentID": last_user.id,
                     "modelID": self.model_id,
                     "providerID": self.provider_id,
                     "agent": agent.name,
                     "mode": agent.name,
-                    "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                    "tokens": {
+                        "input": 0,
+                        "output": 0,
+                        "reasoning": 0,
+                        "cache": {"read": 0, "write": 0},
+                    },
                 }
             })
+
+        async def _create_attempt_assistant_message(*, publish: bool = True) -> MessageInfo:
+            msg = await Message.create(
+                session_id=self.session.id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=agent.name,
+                model_id=self.model_id,
+                provider_id=self.provider_id,
+                parent_id=last_user.id,
+            )
+            if publish:
+                await _publish_assistant_created(msg)
+            return msg
+
+        async def _replace_assistant_message_for_replay(reason: str) -> bool:
+            nonlocal assistant_msg
+            previous_msg = assistant_msg
+            try:
+                next_msg = await _create_attempt_assistant_message(publish=False)
+            except Exception as exc:
+                log.error("runner.step.replay_message_create_failed", {
+                    "session_id": self.session.id,
+                    "previous_message_id": previous_msg.id,
+                    "reason": reason,
+                    "error": str(exc),
+                })
+                return False
+
+            try:
+                deleted = await Message.delete(self.session.id, previous_msg.id)
+            except Exception as exc:
+                deleted = False
+                log.error("runner.step.replay_message_delete_failed", {
+                    "session_id": self.session.id,
+                    "previous_message_id": previous_msg.id,
+                    "next_message_id": next_msg.id,
+                    "reason": reason,
+                    "error": str(exc),
+                })
+            if not deleted:
+                try:
+                    await Message.delete(self.session.id, next_msg.id)
+                except Exception as exc:
+                    log.debug("runner.step.replay_message_cleanup_failed", {
+                        "session_id": self.session.id,
+                        "message_id": next_msg.id,
+                        "error": str(exc),
+                    })
+                return False
+
+            if self.callbacks.event_publish_callback:
+                await self.callbacks.event_publish_callback("message.removed", {
+                    "sessionID": self.session.id,
+                    "messageID": previous_msg.id,
+                })
+                await _publish_assistant_created(next_msg)
+            assistant_msg = next_msg
+            log.info("runner.step.replay_message_replaced", {
+                "session_id": self.session.id,
+                "previous_message_id": previous_msg.id,
+                "next_message_id": next_msg.id,
+                "reason": reason,
+            })
+            return True
+
+        # Create assistant message for the first attempt.
+        assistant_msg = await _create_attempt_assistant_message()
         
         # Retry loop matching Flocks' SessionProcessor.process()
         # MAX_ERROR_RETRIES caps exception-based retries so a permanently-failing
@@ -1824,6 +1898,9 @@ class SessionRunner:
                 # Check if retryable
                 retry_message = SessionRetry.retryable(error_dict)
                 failover_decision = self.classify_failover_error(error_dict)
+                is_stream_tool_args_truncated = (
+                    self._is_stream_tool_arguments_truncated_error(error_dict)
+                )
                 retry_limit = MAX_ERROR_RETRIES
                 will_retry = retry_message is not None and error_attempt <= retry_limit
                 retry_blocked_by_tool_execution = (
@@ -1837,7 +1914,18 @@ class SessionRunner:
                 elif self._defer_step_errors and not self._attempt_state.replay_safe:
                     # Retrying after text/reasoning/tool activity can duplicate
                     # visible output or execute a tool twice.
-                    will_retry = False
+                    will_retry = will_retry and is_stream_tool_args_truncated
+
+                if will_retry and is_stream_tool_args_truncated:
+                    # A truncated tool-argument stream already created a
+                    # partial assistant message (and usually a tool part). The
+                    # retry is only safe if that partial attempt can be removed
+                    # before the next provider call.
+                    replaced = await _replace_assistant_message_for_replay(
+                        reason="stream_tool_arguments_truncated"
+                    )
+                    if not replaced:
+                        will_retry = False
 
                 if will_retry:
                     # Error is retryable and we have budget left
@@ -1869,6 +1957,8 @@ class SessionRunner:
                     
                     # Wait before retry
                     await SessionRetry.sleep(delay_ms, self._abort)
+
+                    self._attempt_state = LlmAttemptState()
                     
                     # Continue to next retry attempt
                     continue
@@ -1898,12 +1988,18 @@ class SessionRunner:
                         error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
 
                     if self._defer_step_errors:
+                        allow_fallback_override = (
+                            failover_decision.eligible
+                            and is_stream_tool_args_truncated
+                            and not retry_blocked_by_tool_execution
+                        )
                         return self._deferred_failure_result(
                             message=final_error_message,
                             error_data=error_dict,
                             assistant_message_id=assistant_msg.id,
                             decision=failover_decision,
                             attempts=error_attempt,
+                            allow_fallback_override=allow_fallback_override,
                         )
 
                     if self.callbacks.on_error:
@@ -2508,6 +2604,17 @@ class SessionRunner:
                 "exceptionModule": type(exception).__module__,
             }
         }
+
+        if type(exception).__name__ == "StreamToolArgumentsTruncatedError":
+            error_dict["data"].update({
+                "isRetryable": True,
+                "streamToolArgumentsTruncated": True,
+                "toolCallID": getattr(exception, "tool_call_id", None),
+                "toolName": getattr(exception, "tool_name", None),
+                "finishReason": getattr(exception, "finish_reason", None),
+                "argumentsLength": getattr(exception, "arguments_len", None),
+                "argumentsPreview": getattr(exception, "arguments_preview", None),
+            })
 
         transport_exception = _find_retryable_transport_exception(exception)
         if transport_exception is not None:
@@ -3749,7 +3856,11 @@ class SessionRunner:
             "agent": agent.name,
         })
 
-        await tool_accumulator.flush_remaining(stream_finish_reason)
+        try:
+            await tool_accumulator.flush_remaining(stream_finish_reason)
+        except Exception:
+            await processor.drain_parallel_tool_calls()
+            raise
 
         if stream_text_rewriter is not None:
             trailing_text = stream_text_rewriter.flush()

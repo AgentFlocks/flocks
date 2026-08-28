@@ -33,6 +33,7 @@ from flocks.session.runner import (
     StepResult,
     ToolCall,
 )
+from flocks.session.streaming.tool_accumulator import StreamToolArgumentsTruncatedError
 from flocks.session.prompt import (
     SessionPrompt,
     SystemPromptBlock,
@@ -265,6 +266,24 @@ class TestExceptionToErrorDict:
         assert result["name"] == "APIError"
         assert result["data"]["isRetryable"] is True
         assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    def test_stream_tool_arguments_truncated_exception_is_retryable(self):
+        runner = _make_runner()
+        exc = StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+        result = runner._exception_to_error_dict(exc)
+
+        assert result["name"] == "StreamToolArgumentsTruncatedError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["streamToolArgumentsTruncated"] is True
+        assert result["data"]["toolCallID"] == "call_trunc"
+        assert result["data"]["toolName"] == "write"
 
     def test_incomplete_chunked_read_exception_is_retryable_connection_error(self):
         runner = _make_runner()
@@ -2375,6 +2394,212 @@ async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypat
 
     assert result.action == "stop"
     assert result.content == "done"
+
+
+@pytest.mark.asyncio
+async def test_process_step_retries_truncated_tool_arguments_with_fresh_message(monkeypatch):
+    runner = _make_runner("ses_runner_stream_tool_args_retry")
+    events = []
+
+    async def capture_event(event_type, data):
+        events.append((event_type, data))
+
+    runner.callbacks = RunnerCallbacks(
+        on_error=AsyncMock(),
+        event_publish_callback=capture_event,
+    )
+
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_1 = SimpleNamespace(id="msg_assistant_truncated_1")
+    assistant_2 = SimpleNamespace(id="msg_assistant_truncated_2")
+    create_mock = AsyncMock(side_effect=[assistant_1, assistant_2])
+    delete_mock = AsyncMock(return_value=True)
+    update_mock = AsyncMock(return_value=None)
+    call_ids = []
+
+    async def fake_call_llm(*_args, **kwargs):
+        call_ids.append(kwargs["assistant_msg"].id)
+        if len(call_ids) == 1:
+            runner._attempt_state.observable_output_started = True
+            raise StreamToolArgumentsTruncatedError(
+                tool_call_id="call_trunc",
+                tool_name="write",
+                finish_reason="length",
+                arguments_len=42,
+                arguments_preview='{"path":',
+            )
+        assert runner._attempt_state.observable_output_started is False
+        return StepResult(action="stop", content="done")
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", create_mock)
+    monkeypatch.setattr(runner_mod.Message, "delete", delete_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    assert result.content == "done"
+    assert call_ids == [assistant_1.id, assistant_2.id]
+    delete_mock.assert_awaited_once_with(runner.session.id, assistant_1.id)
+    runner.callbacks.on_error.assert_not_awaited()
+    assert ("message.removed", {"sessionID": runner.session.id, "messageID": assistant_1.id}) in events
+    assert events[-1][0] == "message.updated"
+    assert events[-1][1]["info"]["id"] == assistant_2.id
+    assert update_mock.await_args_list[-1].args[1] == assistant_2.id
+    assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_process_step_does_not_retry_truncated_tool_arguments_after_tool_started(monkeypatch):
+    runner = _make_runner("ses_runner_stream_tool_args_no_retry_after_tool")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_no_retry_after_tool",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant = SimpleNamespace(id="msg_assistant_no_retry_after_tool")
+    update_mock = AsyncMock(return_value=None)
+    delete_mock = AsyncMock(return_value=True)
+    call_count = 0
+
+    async def fake_call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        runner._attempt_state.observable_output_started = True
+        runner._attempt_state.tool_execution_started = True
+        raise StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant))
+    monkeypatch.setattr(runner_mod.Message, "delete", delete_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 1
+    assert result.action == "stop"
+    assert "truncated" in result.error.lower()
+    delete_mock.assert_not_awaited()
+    runner.callbacks.on_error.assert_awaited_once()
+    assert update_mock.await_args_list[-1].args[1] == assistant.id
+    assert update_mock.await_args_list[-1].kwargs["finish"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_process_step_allows_fallback_after_truncated_tool_argument_retries_exhausted(monkeypatch):
+    runner = SessionRunner(
+        session=_make_session("ses_runner_stream_tool_args_fallback"),
+        provider_id="primary",
+        model_id="primary-model",
+        defer_step_errors=True,
+        failover_available=True,
+    )
+
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_fallback",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    create_count = 0
+
+    async def create_message(**_kwargs):
+        nonlocal create_count
+        create_count += 1
+        return SimpleNamespace(id=f"msg_assistant_fallback_{create_count}")
+
+    async def fake_call_llm(*_args, **_kwargs):
+        runner._attempt_state.observable_output_started = True
+        raise StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", create_message)
+    monkeypatch.setattr(runner_mod.Message, "delete", AsyncMock(return_value=True))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.failure is not None
+    assert result.failure.reason == "stream_truncated"
+    assert result.failure.allow_fallback is True
+    assert result.failure.attempt_state.observable_output_started is True
+    assert result.failure.attempt_state.tool_execution_started is False
 
 
 @pytest.mark.asyncio
