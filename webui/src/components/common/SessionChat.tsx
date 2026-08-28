@@ -5393,14 +5393,24 @@ function ChatMessageBubbleInner({
               })()}
             </div>
           );
-          const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
+          const renderProcessGroup = (
+            group: Array<{ part: MessagePart; index: number }>,
+            groupIndex: number,
+            activeTimingPart?: MessagePart,
+          ) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
-            const processGroupActive = isActive && group.some(({ part }) => part === activeTailPart);
+            const groupParts = group.map(({ part }) => part);
+            const groupActivePart = groupParts.find((part) => part === activeTailPart);
+            const timedActivePart = groupActivePart || activeTimingPart;
+            const durationParts = timedActivePart && !groupParts.includes(timedActivePart)
+              ? [...groupParts, timedActivePart]
+              : groupParts;
+            const processGroupActive = isActive && !!timedActivePart;
             const processDurationMs = getProcessGroupDurationMs(
-              group.map(({ part }) => part),
+              durationParts,
               processGroupActive ? processElapsedClock : undefined,
-              processGroupActive ? activeTailPart?.id : undefined,
+              processGroupActive ? timedActivePart?.id : undefined,
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
@@ -5448,9 +5458,9 @@ function ChatMessageBubbleInner({
             const lastIntermediateProcessIndex = displayParts.reduce((lastIndex, part, index) => (
               isIntermediateProcessPart(part) ? index : lastIndex
             ), -1);
-            const flushProcessGroup = () => {
+            const flushProcessGroup = (activeTimingPart?: MessagePart) => {
               if (processGroup.length === 0) return;
-              nodes.push(renderProcessGroup(processGroup, processGroupIndex));
+              nodes.push(renderProcessGroup(processGroup, processGroupIndex, activeTimingPart));
               processGroup = [];
               processGroupIndex += 1;
             };
@@ -5461,7 +5471,7 @@ function ChatMessageBubbleInner({
               }
               if (!isRenderableDisplayPart(part)) return;
               if (isPendingQuestionToolPart(part) || isRenderableTextPart(part)) {
-                flushProcessGroup();
+                flushProcessGroup(isActive && part === activeTailPart && isRenderableTextPart(part) ? part : undefined);
               }
               nodes.push(renderPart(part, index));
             });
