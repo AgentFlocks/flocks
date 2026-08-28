@@ -452,7 +452,7 @@ describe('WorkspacePage', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith('Saved successfully');
   });
 
-  it('Memory 文件按 USER、Global、Project 和 Daily 层级展示', async () => {
+  it('Memory 文件按核心记忆、Project、Daily、其他根文件层级展示', async () => {
     mocks.listVisibleProjects.mockResolvedValue({
       data: [{
         id: 'prj_example',
@@ -496,27 +496,37 @@ describe('WorkspacePage', () => {
     expect(daily).toBeInTheDocument();
     expect(screen.queryByText('projects')).not.toBeInTheDocument();
     expect(screen.queryByText('prj_stale/MEMORY.md')).not.toBeInTheDocument();
-    expect(screen.queryByText('2026-04-07.md')).not.toBeInTheDocument();
-    expect(screen.queryByText('test.md')).not.toBeInTheDocument();
+    expect(screen.getByText('2026-04-07.md')).toBeInTheDocument();
+    expect(screen.getByText('test.md')).toBeInTheDocument();
     expect(
       projectMemory.compareDocumentPosition(daily) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      daily.compareDocumentPosition(screen.getByText('2026-04-07.md')) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(screen.queryByText('2026-08-03.md')).not.toBeInTheDocument();
 
     await user.click(projectMemory);
     expect(await screen.findByText('/Users/test/workspace/flocks-raven')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: /daily/ }));
-    expect(await screen.findByText('2026-08-03.md')).toBeInTheDocument();
   });
 
-  it('Memory 根目录的非规范文件不显示', async () => {
+  it('Memory 根目录的其他文件和目录会显示但默认只读', async () => {
     mocks.listMemory.mockResolvedValue({
       data: [
-        file('profile.pdf', 'profile.pdf', false),
-        file('logo.svg', 'logo.svg', false),
-        file('legacy.md', 'legacy.md'),
+        file('SHORT_MEMORY.md', 'SHORT_MEMORY.md'),
+        file('bak.txt', 'bak.txt'),
+        {
+          ...directory('archive', 'archive'),
+          children: [file('2026-08-18.md', 'archive/2026-08-18.md')],
+        },
       ],
+    });
+    mocks.readMemoryFile.mockResolvedValue({
+      data: {
+        path: 'bak.txt',
+        content: 'backup memory',
+        truncated: false,
+      },
     });
 
     const user = userEvent.setup();
@@ -526,11 +536,20 @@ describe('WorkspacePage', () => {
     await waitFor(() => {
       expect(mocks.listMemory).toHaveBeenCalled();
     });
-    expect(screen.queryByText('profile.pdf')).not.toBeInTheDocument();
-    expect(screen.queryByText('logo.svg')).not.toBeInTheDocument();
-    expect(screen.queryByText('legacy.md')).not.toBeInTheDocument();
+    expect(screen.getByText('SHORT_MEMORY.md')).toBeInTheDocument();
+    expect(screen.getByText('archive')).toBeInTheDocument();
+    expect(screen.getByText('bak.txt')).toBeInTheDocument();
+
+    const archiveButton = screen.getByText('archive').closest('button');
+    if (!archiveButton) throw new Error('Archive memory row button not found');
+    await user.click(archiveButton);
+    expect(await screen.findByText('2026-08-18.md')).toBeInTheDocument();
+
+    await user.click(screen.getByText('bak.txt'));
+    expect(await screen.findByText('backup memory')).toBeInTheDocument();
+    expect(mocks.readMemoryFile).toHaveBeenCalledWith('bak.txt');
+    expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
     expect(pdfMocks.getDocument).not.toHaveBeenCalled();
-    expect(mocks.readMemoryFile).not.toHaveBeenCalled();
   });
 
   it('Memory 文本文件快速切换时忽略过期读取结果', async () => {

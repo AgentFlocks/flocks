@@ -1585,6 +1585,20 @@ function memoryPathParts(path: string): string[] {
   return path.replace(/\\/g, '/').split('/');
 }
 
+function isEditableMemoryNode(node: WorkspaceNode): boolean {
+  const pathParts = memoryPathParts(node.path);
+  if (pathParts.length === 1) {
+    return node.path === 'USER.md' || node.path === 'MEMORY.md';
+  }
+  if (pathParts.length === 2) {
+    return pathParts[0] === 'daily' && node.name.endsWith('.md');
+  }
+  if (pathParts.length === 3) {
+    return pathParts[0] === 'projects' && pathParts[2] === 'MEMORY.md';
+  }
+  return false;
+}
+
 function buildMemoryView(
   nodes: WorkspaceNode[],
   visibleProjects: WorkspaceProject[],
@@ -1594,11 +1608,19 @@ function buildMemoryView(
   const projects = nodes.find((node) => node.path === 'projects');
   const daily = nodes.find((node) => node.path === 'daily');
   const projectById = new Map(visibleProjects.map((project) => [project.id, project]));
+  const consumedRootPaths = new Set<string>();
   const view: WorkspaceNode[] = [];
 
-  if (userMemory) view.push(userMemory);
-  if (globalMemory) view.push(globalMemory);
+  if (userMemory) {
+    view.push(userMemory);
+    consumedRootPaths.add(userMemory.path);
+  }
+  if (globalMemory) {
+    view.push(globalMemory);
+    consumedRootPaths.add(globalMemory.path);
+  }
   if (projects) {
+    consumedRootPaths.add(projects.path);
     const projectMemories = collectMemoryFiles(projects.children ?? []).flatMap((node) => {
       const pathParts = memoryPathParts(node.path);
       const project = pathParts.length === 3 ? projectById.get(pathParts[1]) : undefined;
@@ -1613,7 +1635,11 @@ function buildMemoryView(
     });
     view.push(...projectMemories);
   }
-  if (daily) view.push(daily);
+  if (daily) {
+    view.push(daily);
+    consumedRootPaths.add(daily.path);
+  }
+  view.push(...nodes.filter((node) => !consumedRootPaths.has(node.path)));
   return view;
 }
 
@@ -1903,7 +1929,7 @@ function MemoryTab() {
               </div>
               <span className="text-xs text-gray-400">{formatBytes(selected.size ?? 0)}</span>
               <span className="text-xs text-gray-400">{formatDate(selected.modified_at)}</span>
-              {selected.is_text_file && !editing && !truncated && contentState === 'ready' && (
+              {selected.is_text_file && isEditableMemoryNode(selected) && !editing && !truncated && contentState === 'ready' && (
                 <button
                   onClick={() => {
                     setEditContent(content ?? '');
