@@ -153,55 +153,20 @@ class ToolCallAccumulator:
                 continue
             accumulated_args = tc_data.get("arguments_str", "")
             tool_name = tc_data.get("name", "")
-            if is_truncated and tool_name and not accumulated_args:
-                error_msg = (
-                    f"Output was truncated (finish_reason='{stream_finish_reason}'). "
-                    f"Tool arguments for '{tool_name}' were not completed. "
-                    "The tool was not executed."
-                )
-                await self._processor.process_event(
-                    ToolInputErrorEvent(
-                        id=tc_id,
-                        tool_name=tool_name,
-                        input={
-                            "tool": tool_name,
-                            "arguments_preview": "",
-                            "finish_reason": stream_finish_reason,
-                        },
-                        error=error_msg,
-                    )
-                )
-                tc_data["failed"] = True
-                if truncation_error is None:
-                    truncation_error = StreamToolArgumentsTruncatedError(
-                        tool_call_id=tc_id,
-                        tool_name=tool_name,
-                        finish_reason=str(stream_finish_reason),
-                        arguments_len=0,
-                        arguments_preview="",
-                    )
-                continue
-            if not (accumulated_args and tool_name):
-                continue
-
-            arguments, ok = _parse_json_robust(accumulated_args)
-            if ok:
-                if not tc_data.get("input_started"):
-                    await self._processor.process_event(
-                        ToolInputStartEvent(id=tc_id, tool_name=tool_name)
-                    )
-                await self._processor.process_event(
-                    ToolCallEvent(
-                        tool_call_id=tc_id, tool_name=tool_name, input=arguments,
-                    )
-                )
+            if not tool_name:
                 continue
 
             if is_truncated:
+                if accumulated_args:
+                    detail = (
+                        f"Tool arguments for '{tool_name}' cut off at "
+                        f"{len(accumulated_args)} chars."
+                    )
+                else:
+                    detail = f"Tool arguments for '{tool_name}' were not completed."
                 error_msg = (
                     f"Output was truncated (finish_reason='{stream_finish_reason}'). "
-                    f"Tool arguments for '{tool_name}' cut off at {len(accumulated_args)} chars. "
-                    "The tool was not executed."
+                    f"{detail} The tool was not executed."
                 )
                 await self._processor.process_event(
                     ToolInputErrorEvent(
@@ -224,6 +189,22 @@ class ToolCallAccumulator:
                         arguments_len=len(accumulated_args),
                         arguments_preview=accumulated_args[:500],
                     )
+                continue
+
+            if not accumulated_args:
+                continue
+
+            arguments, ok = _parse_json_robust(accumulated_args)
+            if ok:
+                if not tc_data.get("input_started"):
+                    await self._processor.process_event(
+                        ToolInputStartEvent(id=tc_id, tool_name=tool_name)
+                    )
+                await self._processor.process_event(
+                    ToolCallEvent(
+                        tool_call_id=tc_id, tool_name=tool_name, input=arguments,
+                    )
+                )
                 continue
 
             # --- Repair strategies ---
