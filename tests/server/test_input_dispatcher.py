@@ -375,6 +375,33 @@ class TestDispatchUserInput:
 
 class TestSessionRoutesUseDispatcher:
     @pytest.mark.asyncio
+    async def test_internal_synthetic_input_is_forwarded_to_message_persistence(self, monkeypatch):
+        from flocks.input.events import UserInputEvent
+        from flocks.server.routes import session as session_routes
+
+        process = AsyncMock()
+        monkeypatch.setattr(session_routes, "_process_session_message", process)
+
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_internal_recovery",
+            text="internal recovery",
+            parts=[{"type": "text", "text": "internal recovery"}],
+            agent="situation-report-product",
+            synthetic=True,
+        )
+        await session_routes._dispatch_sse_input(
+            "ses_internal_recovery",
+            SimpleNamespace(id="ses_internal_recovery"),
+            event,
+            "/tmp/project",
+            internal_agent_name="situation-report-product",
+        )
+
+        process.assert_awaited_once()
+        assert process.await_args.kwargs["internal_synthetic"] is True
+
+    @pytest.mark.asyncio
     async def test_goal_mode_publishes_active_goal_before_llm(self, monkeypatch):
         from flocks.input.events import UserInputEvent
         from flocks.server.routes import session as session_routes

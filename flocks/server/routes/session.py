@@ -3544,6 +3544,7 @@ async def _process_session_message(
     *,
     lifecycle_generation: Optional[int] = None,
     internal_agent_name: Optional[str] = None,
+    internal_synthetic: bool = False,
 ):
     """
     Process session message within Instance context.
@@ -3677,6 +3678,7 @@ async def _process_session_message(
     display_metadata = {"displayText": display_text} if display_text else None
 
     _is_no_reply = bool(request.noReply)
+    _is_synthetic = _is_no_reply or bool(internal_synthetic)
     user_message = await _persist_active_session_write(
         sessionID,
         lambda: Message.create(
@@ -3690,7 +3692,7 @@ async def _process_session_message(
             executionMode=request.execution_mode,
             part_id=user_part_id,
             part_metadata=display_metadata,
-            synthetic=True if _is_no_reply else None,
+            synthetic=True if _is_synthetic else None,
         ),
         expected_generation=lifecycle_generation,
     )
@@ -3717,7 +3719,7 @@ async def _process_session_message(
     }
     if display_metadata:
         _part_event["metadata"] = display_metadata
-    if _is_no_reply:
+    if _is_synthetic:
         _part_event["synthetic"] = True
     await publish_event("message.part.updated", {"part": _part_event})
 
@@ -4596,6 +4598,9 @@ async def _dispatch_sse_input(
             working_directory,
             lifecycle_generation=lifecycle_generation,
             internal_agent_name=internal_agent_name,
+            internal_synthetic=bool(
+                internal_agent_name and getattr(output_event, "synthetic", False)
+            ),
         )
 
     async def _clear_history() -> None:

@@ -1389,8 +1389,17 @@ class TestSessionMessages:
         assert resp.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
 
     @pytest.mark.asyncio
-    async def test_send_message_noReply(self, client: AsyncClient, session_id: str):
+    async def test_send_message_noReply(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """POST /api/session/{id}/message with noReply=True stores without triggering LLM."""
+        from flocks.server.routes import event as event_routes
+
+        publish_event = AsyncMock()
+        monkeypatch.setattr(event_routes, "publish_event", publish_event)
         payload = {
             "parts": [{"type": "text", "text": "Hello!"}],
             "noReply": True,
@@ -1401,10 +1410,32 @@ class TestSessionMessages:
         # The message should appear in the list
         list_resp = await client.get(f"/api/session/{session_id}/message")
         messages = list_resp.json()
-        assert any(
-            any(p.get("text") == "Hello!" for p in m.get("parts", []))
-            for m in messages
+        stored_message = next(
+            message
+            for message in messages
+            if any(part.get("text") == "Hello!" for part in message.get("parts", []))
         )
+        stored_part = next(part for part in stored_message["parts"] if part.get("text") == "Hello!")
+        assert stored_message["info"]["role"] == "user"
+        assert stored_part["synthetic"] is True
+
+        published_parts = [
+            call.args[1]["part"]
+            for call in publish_event.await_args_list
+            if call.args[0] == "message.part.updated"
+            and call.args[1]["part"].get("text") == "Hello!"
+        ]
+        assert published_parts == [
+            {
+                "id": stored_part["id"],
+                "messageID": stored_message["info"]["id"],
+                "sessionID": session_id,
+                "type": "text",
+                "text": "Hello!",
+                "time": published_parts[0]["time"],
+                "synthetic": True,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_list_messages_preserves_reasoning_part_time(

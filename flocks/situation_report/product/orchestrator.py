@@ -104,6 +104,7 @@ def _build_agent_recovery_event(
             "text": recovery_text,
             "parts": [{"type": "text", "text": recovery_text}],
             "display_text": "正在根据校验结果继续完善报告。",
+            "synthetic": True,
             "message_id": None,
         }
     )

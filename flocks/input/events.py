@@ -26,6 +26,7 @@ class UserInputEvent(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     delivery_context: Dict[str, Any] = Field(default_factory=dict)
     display_text: Optional[str] = None
+    synthetic: bool = False
     message_id: Optional[str] = Field(None, alias="messageID")
     working_directory: Optional[str] = None
     no_reply: Optional[bool] = Field(None, alias="noReply")

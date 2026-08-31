@@ -60,6 +60,8 @@ def test_recovery_event_requires_immediate_sha_guarded_repair(tmp_path: Path) ->
     assert "material-1" in recovered.text
     assert "Do not answer with a plan or promise" in recovered.text
     assert recovered.message_id is None
+    assert recovered.synthetic is True
+    assert _event(generation_id).synthetic is False
 
 
 @pytest.mark.asyncio
@@ -105,4 +107,5 @@ async def test_agent_runner_continues_after_needs_revision(tmp_path: Path, monke
 
     assert len(calls) == 2
     assert calls[1].text.startswith("[SITUATION_REPORT_PRODUCT_RECOVERY_V1]")
+    assert calls[1].synthetic is True
     recovery_status.assert_awaited_once_with(1)
