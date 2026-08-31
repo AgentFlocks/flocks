@@ -297,6 +297,50 @@ class TestFlushRemaining:
         assert "tool-call" not in event_types
 
     @pytest.mark.asyncio
+    async def test_flush_with_multiple_truncated_tools_marks_all_errors(self):
+        acc, proc = _make_accumulator()
+        with patch("flocks.session.streaming.tool_accumulator.ToolRegistry") as mock_reg:
+            mock_reg.get_schema.return_value = None
+            mock_reg.get.return_value = MagicMock()
+
+            await acc.feed_chunk(_make_chunk(
+                index=0,
+                tc_id="call_done",
+                name="tool_a",
+                arguments='{"value": 1}',
+            ))
+            await acc.feed_chunk(_make_chunk(
+                index=1,
+                tc_id="call_trunc_b",
+                name="tool_b",
+                arguments='{"value": "unfinished',
+            ))
+            await acc.feed_chunk(_make_chunk(
+                index=2,
+                tc_id="call_trunc_c",
+                name="tool_c",
+                arguments='{"value": "also unfinished',
+            ))
+
+            with pytest.raises(StreamToolArgumentsTruncatedError) as exc_info:
+                await acc.flush_remaining(stream_finish_reason="length")
+
+        assert exc_info.value.tool_call_id == "call_trunc_b"
+
+        events = [c.args[0] for c in proc.process_event.call_args_list]
+        tool_call_events = [event for event in events if event.type == "tool-call"]
+        input_error_events = [
+            event for event in events if event.type == "tool-input-error"
+        ]
+
+        assert [event.tool_call_id for event in tool_call_events] == ["call_done"]
+        assert [event.id for event in input_error_events] == [
+            "call_trunc_b",
+            "call_trunc_c",
+        ]
+        assert all("truncated" in event.error.lower() for event in input_error_events)
+
+    @pytest.mark.asyncio
     async def test_flush_empty_accumulator_does_nothing(self):
         acc, proc = _make_accumulator()
         await acc.flush_remaining()

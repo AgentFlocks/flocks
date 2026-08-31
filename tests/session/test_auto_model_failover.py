@@ -192,6 +192,78 @@ async def test_auto_runner_uses_standard_retry_policy(
 
     assert result.failure is not None
     assert call_llm.await_count == expected_calls
+    assert result.failure.allow_fallback is True
+
+
+@pytest.mark.asyncio
+async def test_retry_exhausted_safe_api_error_switches_to_fallback(monkeypatch):
+    ctx = _ctx()
+    last_user = SimpleNamespace(id="msg_user", agent="rex", role="user")
+    events = []
+    calls = []
+    create_count = 0
+
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+
+    async def create_message(**_kwargs):
+        nonlocal create_count
+        create_count += 1
+        return SimpleNamespace(id=f"msg_assistant_{create_count}")
+
+    async def call_llm(runner, *_args, **_kwargs):
+        calls.append((runner.provider_id, runner.model_id))
+        if runner.provider_id == "primary":
+            failure = RuntimeError("Provider HTTP 500")
+            failure.status_code = 500
+            raise failure
+        return StepResult(action="stop", content="recovered")
+
+    async def publish(event, payload):
+        events.append((event, payload))
+
+    monkeypatch.setattr(
+        "flocks.session.runner.Agent.get",
+        AsyncMock(return_value=SimpleNamespace(
+            name="rex",
+            steps=None,
+            mode="primary",
+            prompt="",
+            tools=[],
+        )),
+    )
+    monkeypatch.setattr("flocks.session.runner.Provider.get", lambda _provider_id: provider)
+    monkeypatch.setattr("flocks.session.runner.Provider.apply_config", AsyncMock())
+    monkeypatch.setattr(
+        "flocks.session.runner.SessionPrompt.build_system_prompts",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        SessionRunner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hello")]),
+    )
+    monkeypatch.setattr(Message, "get_text_content", AsyncMock(return_value="hello"))
+    monkeypatch.setattr(Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(Message, "create", create_message)
+    monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
+    monkeypatch.setattr(Message, "update", AsyncMock())
+    monkeypatch.setattr(SessionRunner, "_call_llm", call_llm)
+    monkeypatch.setattr("flocks.session.runner.SessionRetry.sleep", AsyncMock())
+
+    result = await SessionLoop._process_step_with_failover(
+        ctx,
+        LoopCallbacks(event_publish_callback=publish),
+        [last_user],
+        last_user,
+    )
+
+    assert result.content == "recovered"
+    assert calls == [("primary", "primary-model")] * 6 + [("fallback", "fallback-model")]
+    assert (ctx.provider_id, ctx.model_id) == ("fallback", "fallback-model")
+    assert any(event == "message.removed" for event, _ in events)
+    assert any(event == "session.model.fallback" for event, _ in events)
 
 
 @pytest.mark.asyncio

@@ -146,12 +146,41 @@ class ToolCallAccumulator:
     ) -> None:
         """Process any tool calls still in the accumulator after the stream ends."""
         is_truncated = stream_finish_reason in ("length", "max_tokens")
+        truncation_error: StreamToolArgumentsTruncatedError | None = None
 
         for tc_id, tc_data in list(self._accumulator.items()):
-            if tc_data.get("completed"):
+            if tc_data.get("completed") or tc_data.get("failed"):
                 continue
             accumulated_args = tc_data.get("arguments_str", "")
             tool_name = tc_data.get("name", "")
+            if is_truncated and tool_name and not accumulated_args:
+                error_msg = (
+                    f"Output was truncated (finish_reason='{stream_finish_reason}'). "
+                    f"Tool arguments for '{tool_name}' were not completed. "
+                    "The tool was not executed."
+                )
+                await self._processor.process_event(
+                    ToolInputErrorEvent(
+                        id=tc_id,
+                        tool_name=tool_name,
+                        input={
+                            "tool": tool_name,
+                            "arguments_preview": "",
+                            "finish_reason": stream_finish_reason,
+                        },
+                        error=error_msg,
+                    )
+                )
+                tc_data["failed"] = True
+                if truncation_error is None:
+                    truncation_error = StreamToolArgumentsTruncatedError(
+                        tool_call_id=tc_id,
+                        tool_name=tool_name,
+                        finish_reason=str(stream_finish_reason),
+                        arguments_len=0,
+                        arguments_preview="",
+                    )
+                continue
             if not (accumulated_args and tool_name):
                 continue
 
@@ -186,13 +215,16 @@ class ToolCallAccumulator:
                         error=error_msg,
                     )
                 )
-                raise StreamToolArgumentsTruncatedError(
-                    tool_call_id=tc_id,
-                    tool_name=tool_name,
-                    finish_reason=str(stream_finish_reason),
-                    arguments_len=len(accumulated_args),
-                    arguments_preview=accumulated_args[:500],
-                )
+                tc_data["failed"] = True
+                if truncation_error is None:
+                    truncation_error = StreamToolArgumentsTruncatedError(
+                        tool_call_id=tc_id,
+                        tool_name=tool_name,
+                        finish_reason=str(stream_finish_reason),
+                        arguments_len=len(accumulated_args),
+                        arguments_preview=accumulated_args[:500],
+                    )
+                continue
 
             # --- Repair strategies ---
             repaired = await self._try_repair(
@@ -218,6 +250,9 @@ class ToolCallAccumulator:
                     },
                 )
             )
+
+        if truncation_error is not None:
+            raise truncation_error
 
     # ------------------------------------------------------------------
     # Internal helpers

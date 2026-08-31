@@ -1988,11 +1988,12 @@ class SessionRunner:
                         error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
 
                     if self._defer_step_errors:
-                        allow_fallback_override = (
-                            failover_decision.eligible
-                            and is_stream_tool_args_truncated
-                            and not retry_blocked_by_tool_execution
-                        )
+                        allow_fallback_override = None
+                        if is_stream_tool_args_truncated:
+                            allow_fallback_override = (
+                                failover_decision.eligible
+                                and not retry_blocked_by_tool_execution
+                            )
                         return self._deferred_failure_result(
                             message=final_error_message,
                             error_data=error_dict,
