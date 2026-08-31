@@ -422,6 +422,21 @@ async def question_tool(
             error="No valid questions provided"
         )
 
+    try:
+        await ctx.ask(
+            "question",
+            ["*"],
+            metadata={"reason": "question_tool"},
+        )
+    except (PermissionError, asyncio.TimeoutError) as e:
+        error = str(e) or "question"
+        if not error.lower().startswith("permission denied"):
+            error = f"Permission denied: {error}"
+        return ToolResult(
+            success=False,
+            error=error,
+        )
+
     channel_result = await _send_channel_question_if_applicable(ctx, normalized_questions)
     if channel_result is not None:
         return channel_result

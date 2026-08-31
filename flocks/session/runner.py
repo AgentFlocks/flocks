@@ -590,18 +590,35 @@ class SessionRunner:
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
         execution_mode = self._execution_mode_from_messages(messages)
+        from flocks.agent.tool_permissions import QUESTION_TOOL_NAME
+        from flocks.permission.next import PermissionNext
+
+        declared_tool_names = getattr(agent, "tools", None)
+        permission_ruleset = getattr(self, "_turn_permission_ruleset", None)
+        if permission_ruleset is None:
+            permission_ruleset = self._permission_ruleset_for_agent(agent)
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
-            declared_tool_names=getattr(agent, "tools", None),
+            declared_tool_names=declared_tool_names,
             agent=agent.name,
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
         )
-        tool_infos = [
-            tool_info
-            for tool_info in result.tool_infos
-            if is_tool_allowed(execution_mode, tool_info.name)
-        ]
+        permission_denied_tool_names: List[str] = []
+        tool_infos = []
+        for tool_info in result.tool_infos:
+            if not is_tool_allowed(execution_mode, tool_info.name):
+                continue
+            if tool_info.name == QUESTION_TOOL_NAME:
+                denied_by_permission = PermissionNext.evaluate_request(
+                    tool_info.name,
+                    ["*"],
+                    permission_ruleset,
+                ) == "deny"
+                if denied_by_permission:
+                    permission_denied_tool_names.append(tool_info.name)
+                    continue
+            tool_infos.append(tool_info)
         if (
             execution_mode == SessionExecutionMode.PLAN
             and all(tool_info.name != "plan_exit" for tool_info in tool_infos)
@@ -611,6 +628,7 @@ class SessionRunner:
                 tool_infos.append(plan_exit.info)
         metadata = dict(result.metadata)
         metadata["executionMode"] = execution_mode.value
+        metadata["permissionDeniedToolNames"] = sorted(permission_denied_tool_names)
         metadata["modeAllowedToolNames"] = sorted(
             tool_info.name for tool_info in tool_infos
         )
@@ -3999,6 +4017,8 @@ class SessionRunner:
             patterns,
             ruleset,
         )
+        metadata = dict(getattr(request, "metadata", None) or {})
+        deny_only_preflight = metadata.get("reason") == "question_tool"
 
         tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
         if self.callbacks.event_publish_callback:
@@ -4014,6 +4034,8 @@ class SessionRunner:
             raise PermissionError(f"Permission denied: {request.permission}")
         if configured_action == "allow":
             return
+        if deny_only_preflight:
+            return
 
         if self.callbacks.on_permission_request:
             allowed = await self.callbacks.on_permission_request(request)
@@ -4026,7 +4048,6 @@ class SessionRunner:
         if configured_action is None and not legacy_tool_permission_prompt_required():
             return
 
-        metadata = dict(getattr(request, "metadata", None) or {})
         metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
         metadata.setdefault("sessionID", self.session.id)
 

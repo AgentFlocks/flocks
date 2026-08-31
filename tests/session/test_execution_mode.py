@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -406,6 +407,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     agent = SimpleNamespace(
+        name="rex",
         tools=[
             "read",
             "bash",
@@ -479,3 +481,240 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         "task",
         "write",
     ]
+
+
+@pytest.mark.asyncio
+async def test_runner_hides_always_load_question_when_permission_denied(monkeypatch) -> None:
+    from flocks.permission.helpers import from_config
+    from flocks.session.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-question-deny")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(event_publish_callback=None)
+    runner._turn_permission_ruleset = from_config({"question": "deny"})
+    agent = SimpleNamespace(name="custom-agent", tools=["request_ledger"])
+
+    result = SimpleNamespace(
+        tool_infos=[
+            SimpleNamespace(name="question"),
+            SimpleNamespace(name="tool_search"),
+            SimpleNamespace(name="request_ledger"),
+        ],
+        metadata={},
+    )
+
+    async def list_tools(**_kwargs):
+        return result
+
+    monkeypatch.setattr(
+        "flocks.session.runner.list_session_callable_tool_infos",
+        list_tools,
+    )
+
+    messages = [
+        SimpleNamespace(
+            role="user",
+            executionMode=SessionExecutionMode.BUILD,
+        )
+    ]
+
+    tools, metadata = await runner._list_callable_tool_infos_for_turn(
+        agent,
+        messages,
+    )
+
+    assert [tool.name for tool in tools] == ["tool_search", "request_ledger"]
+    assert metadata["permissionDeniedToolNames"] == ["question"]
+    assert metadata["modeAllowedToolNames"] == ["request_ledger", "tool_search"]
+
+
+@pytest.mark.asyncio
+async def test_runner_keeps_always_load_question_without_permission_denial(monkeypatch) -> None:
+    from flocks.session.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-question-allowed")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(event_publish_callback=None)
+    runner._turn_permission_ruleset = []
+    agent = SimpleNamespace(name="custom-agent", tools=["question", "request_ledger"])
+
+    result = SimpleNamespace(
+        tool_infos=[
+            SimpleNamespace(name="question"),
+            SimpleNamespace(name="tool_search"),
+            SimpleNamespace(name="request_ledger"),
+        ],
+        metadata={},
+    )
+
+    async def list_tools(**_kwargs):
+        return result
+
+    monkeypatch.setattr(
+        "flocks.session.runner.list_session_callable_tool_infos",
+        list_tools,
+    )
+
+    messages = [
+        SimpleNamespace(
+            role="user",
+            executionMode=SessionExecutionMode.BUILD,
+        )
+    ]
+
+    tools, metadata = await runner._list_callable_tool_infos_for_turn(
+        agent,
+        messages,
+    )
+
+    assert [tool.name for tool in tools] == [
+        "question",
+        "tool_search",
+        "request_ledger",
+    ]
+    assert metadata["permissionDeniedToolNames"] == []
+
+
+@pytest.mark.asyncio
+async def test_runner_keeps_question_visible_when_only_tool_list_omits_it(monkeypatch) -> None:
+    from flocks.session.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-question-unchecked")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(event_publish_callback=None)
+    runner._turn_permission_ruleset = []
+    agent = SimpleNamespace(name="custom-agent", tools=["request_ledger"])
+
+    result = SimpleNamespace(
+        tool_infos=[
+            SimpleNamespace(name="question"),
+            SimpleNamespace(name="tool_search"),
+            SimpleNamespace(name="request_ledger"),
+        ],
+        metadata={},
+    )
+
+    async def list_tools(**_kwargs):
+        return result
+
+    monkeypatch.setattr(
+        "flocks.session.runner.list_session_callable_tool_infos",
+        list_tools,
+    )
+
+    messages = [
+        SimpleNamespace(
+            role="user",
+            executionMode=SessionExecutionMode.BUILD,
+        )
+    ]
+
+    tools, metadata = await runner._list_callable_tool_infos_for_turn(
+        agent,
+        messages,
+    )
+
+    assert [tool.name for tool in tools] == [
+        "question",
+        "tool_search",
+        "request_ledger",
+    ]
+    assert metadata["permissionDeniedToolNames"] == []
+
+
+@pytest.mark.asyncio
+async def test_runner_keeps_non_question_tools_visible_when_permission_denied(monkeypatch) -> None:
+    from flocks.permission.helpers import from_config
+    from flocks.session.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-bash-deny")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(event_publish_callback=None)
+    runner._turn_permission_ruleset = from_config({"bash": "deny"})
+    agent = SimpleNamespace(name="custom-agent", tools=["question", "bash"])
+
+    result = SimpleNamespace(
+        tool_infos=[
+            SimpleNamespace(name="question"),
+            SimpleNamespace(name="bash"),
+        ],
+        metadata={},
+    )
+
+    async def list_tools(**_kwargs):
+        return result
+
+    monkeypatch.setattr(
+        "flocks.session.runner.list_session_callable_tool_infos",
+        list_tools,
+    )
+
+    messages = [
+        SimpleNamespace(
+            role="user",
+            executionMode=SessionExecutionMode.BUILD,
+        )
+    ]
+
+    tools, metadata = await runner._list_callable_tool_infos_for_turn(
+        agent,
+        messages,
+    )
+
+    assert [tool.name for tool in tools] == ["question", "bash"]
+    assert metadata["permissionDeniedToolNames"] == []
+
+
+@pytest.mark.asyncio
+async def test_question_preflight_ask_permission_does_not_prompt() -> None:
+    from flocks.permission.helpers import from_config
+    from flocks.session.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-question-ask")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(
+        event_publish_callback=None,
+        on_permission_request=AsyncMock(return_value=False),
+    )
+    runner._turn_permission_ruleset = from_config({"question": "ask"})
+
+    await runner._handle_permission(SimpleNamespace(
+        permission="question",
+        patterns=["*"],
+        always=[],
+        metadata={"reason": "question_tool"},
+        message_id="msg_1",
+    ))
+
+    runner.callbacks.on_permission_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_question_preflight_deny_permission_still_blocks() -> None:
+    from flocks.permission.helpers import from_config
+    from flocks.session.runner import SessionRunner
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-question-deny")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(
+        event_publish_callback=None,
+        on_permission_request=AsyncMock(return_value=True),
+    )
+    runner._turn_permission_ruleset = from_config({"question": "deny"})
+
+    with pytest.raises(PermissionError, match="Permission denied: question"):
+        await runner._handle_permission(SimpleNamespace(
+            permission="question",
+            patterns=["*"],
+            always=[],
+            metadata={"reason": "question_tool"},
+            message_id="msg_1",
+        ))
+
+    runner.callbacks.on_permission_request.assert_not_awaited()
