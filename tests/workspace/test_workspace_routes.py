@@ -138,6 +138,33 @@ class TestDirList:
         r = _client(workspace_client).get("/api/workspace/list?path=file.txt")
         assert r.status_code == 400
 
+    def test_list_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "report.txt").write_text("ok")
+
+        root = _client(workspace_client).get("/api/workspace/list")
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert root.status_code == 200
+        assert any(item["name"] == "outputs" and item["path"] == "outputs" for item in root.json())
+        assert r.status_code == 200
+        assert any(
+            item["name"] == "report.txt"
+            and item["path"] == "outputs/report.txt"
+            and item["type"] == "file"
+            for item in r.json()
+        )
+
 
 class TestDirTree:
     def test_tree_root(self, workspace_client):
@@ -162,6 +189,30 @@ class TestDirTree:
     def test_tree_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/tree?path=nope")
         assert r.status_code == 404
+
+    def test_tree_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "nested").mkdir()
+
+        root = _client(workspace_client).get("/api/workspace/tree?depth=1")
+        r = _client(workspace_client).get("/api/workspace/tree?path=outputs&depth=1")
+
+        assert root.status_code == 200
+        assert root.json()["path"] == ""
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs"
+        assert any(child["path"] == "outputs/nested" for child in data["children"])
 
 
 class TestDirCreate:

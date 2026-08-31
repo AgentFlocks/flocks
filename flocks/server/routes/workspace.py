@@ -101,6 +101,11 @@ def _get_manager() -> WorkspaceManager:
     return mgr
 
 
+def _workspace_root(mgr: WorkspaceManager) -> Path:
+    """Return the canonical workspace root used for relative path rendering."""
+    return mgr.get_workspace_dir().resolve()
+
+
 def _is_allowed_upload_filename(filename: str) -> bool:
     return Path(filename).suffix.lower() in _ALLOWED_UPLOAD_EXTENSIONS
 
@@ -250,15 +255,16 @@ async def list_tree(
     depth: int = Query(2, ge=1, le=5, description="Tree depth"),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
-        base = mgr.resolve_workspace_path(path) if path else mgr.get_workspace_dir()
+        base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
-    return await asyncio.to_thread(_build_tree_sync, base, mgr.get_workspace_dir(), depth)
+    return await asyncio.to_thread(_build_tree_sync, base, workspace_root, depth)
 
 
 @router.get("/list", response_model=List[WorkspaceNode], summary="List directory")
@@ -266,15 +272,16 @@ async def list_dir(
     path: str = Query("", description="Relative path from workspace root"),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
-        base = mgr.resolve_workspace_path(path) if path else mgr.get_workspace_dir()
+        base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
-    return await asyncio.to_thread(_list_dir_sync, base, mgr.get_workspace_dir())
+    return await asyncio.to_thread(_list_dir_sync, base, workspace_root)
 
 
 class DirCreateRequest(BaseModel):
