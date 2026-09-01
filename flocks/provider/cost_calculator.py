@@ -39,25 +39,12 @@ class CostCalculator:
         """
         unit = pricing.unit if pricing.unit > 0 else 1_000_000
 
-        input_price = pricing.input
-        output_price = pricing.output
-        if pricing.price_tiers:
-            # Router selects a single tier from the request's complete prompt
-            # token count, then applies that tier to both input and output.
-            selected_tier = pricing.price_tiers[-1]
-            for tier in pricing.price_tiers:
-                if tier.max_input_tokens is None or input_tokens <= tier.max_input_tokens:
-                    selected_tier = tier
-                    break
-            input_price = selected_tier.input_price
-            output_price = selected_tier.output_price
-
         # Input cost: non-cached tokens at input price
         billable_input = max(0, input_tokens - cached_tokens)
-        input_cost = (billable_input / unit) * input_price
+        input_cost = (billable_input / unit) * pricing.input
 
         # Output cost
-        output_cost = (output_tokens / unit) * output_price
+        output_cost = (output_tokens / unit) * pricing.output
 
         # Cache cost
         cache_cost = 0.0

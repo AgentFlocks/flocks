@@ -419,9 +419,6 @@ export interface ProviderCredentials {
   secret?: string | null;
   secret_masked?: string | null;
   base_url?: string | null;
-  model_catalog_url?: string | null;
-  model_catalog_session_token_masked?: string | null;
-  has_model_catalog_session?: boolean;
   username?: string | null;
   /** Sensitive entries are masked on reads and must not be resubmitted unchanged. */
   fields?: Record<string, string | undefined>;
@@ -434,8 +431,6 @@ export interface ProviderCredentialInput {
   api_key?: string;
   secret?: string;
   base_url?: string;
-  model_catalog_url?: string;
-  model_catalog_session_token?: string;
   username?: string;
   fields?: Record<string, string | undefined>;
   provider_name?: string;
@@ -515,14 +510,6 @@ export interface PriceConfigV2 {
   cache_write?: number;
   unit: number;
   currency: string;
-  price_tiers?: PriceTierConfigV2[] | null;
-  price_version?: string | null;
-}
-
-export interface PriceTierConfigV2 {
-  max_input_tokens?: number | null;
-  input_price: number;
-  output_price: number;
 }
 
 export interface ParameterRuleV2 {
@@ -659,7 +646,6 @@ export interface CatalogProvider {
   credential_schemas: CatalogCredentialSchema[];
   env_vars: string[];
   default_base_url: string | null;
-  default_model_catalog_url?: string | null;
   model_count: number;
   models: CatalogModel[];
   allow_multiple?: boolean;
@@ -703,8 +689,6 @@ export interface CatalogModel {
     cache_read?: number;
     cache_write?: number;
     currency: string;
-    price_tiers?: PriceTierConfigV2[] | null;
-    price_version?: string | null;
   };
 }
 

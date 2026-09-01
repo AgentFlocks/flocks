@@ -57,12 +57,6 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
             pricing.get("cache_read") if isinstance(pricing, dict) else None,
             pricing.get("cache_write") if isinstance(pricing, dict) else None,
             pricing.get("currency") if isinstance(pricing, dict) else None,
-            json.dumps(
-                pricing.get("price_tiers") if isinstance(pricing, dict) else None,
-                default=str,
-                sort_keys=True,
-            ),
-            pricing.get("price_version") if isinstance(pricing, dict) else None,
         )
         if pricing is not None
         else None
@@ -738,49 +732,6 @@ class Provider:
         return all_models
 
     @classmethod
-    async def refresh_provider_models(
-        cls,
-        provider_ids: Optional[List[str]] = None,
-        *,
-        force: bool = False,
-    ) -> None:
-        """Refresh provider-owned dynamic model catalogs when supported.
-
-        Most providers keep their model list in ``flocks.json`` and therefore
-        do not implement ``refresh_models``. Providers backed by an
-        authoritative remote catalog (currently ThreatBook CN Router) can
-        expose that coroutine; failures stay isolated so model-list APIs keep
-        serving their bundled/configured fallback data.
-        """
-        cls._ensure_initialized()
-        target_ids = (
-            list(cls._providers.keys())
-            if provider_ids is None
-            else provider_ids
-        )
-        refreshes = []
-        refresh_ids = []
-        for pid in target_ids:
-            provider = cls._providers.get(pid)
-            refresh = getattr(provider, "refresh_models", None) if provider else None
-            if callable(refresh):
-                refresh_ids.append(pid)
-                refreshes.append(refresh(force=force))
-
-        if not refreshes:
-            return
-
-        import asyncio
-
-        results = await asyncio.gather(*refreshes, return_exceptions=True)
-        for pid, result in zip(refresh_ids, results):
-            if isinstance(result, Exception):
-                log.warning("provider.models.refresh_failed", {
-                    "provider_id": pid,
-                    "error": str(result),
-                })
-
-    @classmethod
     async def apply_config(cls, config: Optional[Any] = None, provider_id: Optional[str] = None) -> None:
         """
         Apply provider configuration from Config to registered providers.
@@ -1301,8 +1252,6 @@ class BaseProvider:
                 cache_read=model.pricing.get("cache_read"),
                 cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
-                price_tiers=model.pricing.get("price_tiers"),
-                price_version=model.pricing.get("price_version"),
             )
         max_output = model.capabilities.max_tokens or 4096
         return ModelDefinition(
@@ -1408,32 +1357,18 @@ class BaseProvider:
                 cache_read=model.pricing.get("cache_read"),
                 cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
-                price_tiers=model.pricing.get("price_tiers"),
-                price_version=model.pricing.get("price_version"),
             )
 
         return overridden
 
-    def _get_model_definition_source_models(self) -> List["ModelInfo"]:
-        """Return the model list used to build rich definitions.
-
-        Subclasses with an authoritative dynamic catalog can override this
-        hook without mutating ``_config_models``, which remains the user's
-        persisted configuration snapshot.
-        """
-        source_models = list(getattr(self, "_config_models", []))
-        return source_models if source_models else list(self.get_models())
-
     def get_model_definitions(self) -> List["ModelDefinition"]:
-        """Return rich model definitions for the provider's active model list.
+        """Return model definitions for models in flocks.json (_config_models).
 
         If CATALOG_ID is set, catalog.json is used as a metadata source: models
         whose ID appears in the catalog get the richer catalog entry (parameter_rules,
         release_date, etc.); all others fall back to the config data in flocks.json.
-        By default, flocks.json is the source of truth for *which* models are
-        listed. Dynamic providers may override
-        ``_get_model_definition_source_models``. User-edited values in
-        flocks.json still override catalog defaults where applicable.
+        flocks.json is the single source of truth for *which* models are listed.
+        User-edited values in flocks.json always override catalog defaults.
         """
         catalog_by_id: dict = {}
         if self.CATALOG_ID:
@@ -1445,7 +1380,9 @@ class BaseProvider:
             except Exception:
                 pass
 
-        source_models = self._get_model_definition_source_models()
+        source_models = list(getattr(self, "_config_models", []))
+        if not source_models:
+            source_models = list(self.get_models())
 
         result = []
         for model in source_models:

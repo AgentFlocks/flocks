@@ -8,13 +8,11 @@ temperature, tool_call, limit, etc.
 
 import asyncio
 import json
-import os
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -441,13 +439,6 @@ def _merge_config_models(
     provider_id: str,
     config: Any,
 ) -> Dict[str, Dict[str, Any]]:
-    provider = Provider.get(provider_id)
-    if getattr(provider, "model_catalog_is_authoritative", False) is True:
-        # The provider has already merged matching user overrides into its
-        # live Router snapshot (or bundled offline snapshot). Re-adding every
-        # persisted model here would resurrect removed models and stale prices.
-        return models_dict
-
     provider_cfg = (getattr(config, "provider", None) or {}).get(provider_id)
     if not provider_cfg or not getattr(provider_cfg, "models", None):
         return models_dict
@@ -545,7 +536,6 @@ async def list_providers() -> ProviderListResponse:
         try:
             config = await Config.get()
             await Provider.apply_config(config)
-            await Provider.refresh_provider_models(ConfigWriter.list_provider_ids())
             disabled = set(config.disabled_providers or [])
             enabled_set = set(config.enabled_providers) if config.enabled_providers else None
         except Exception:
@@ -670,7 +660,6 @@ async def get_provider_catalog():
             "credential_schemas": [s.model_dump() for s in meta.credential_schemas],
             "env_vars": raw.get("env_vars", []),
             "default_base_url": raw.get("default_base_url"),
-            "default_model_catalog_url": raw.get("default_model_catalog_url"),
             "model_count": len(models),
             "models": [
                 {
@@ -696,10 +685,6 @@ async def get_provider_catalog():
                         "cache_read": m.pricing.cache_read,
                         "cache_write": m.pricing.cache_write,
                         "currency": m.pricing.currency,
-                        "price_tiers": [
-                            tier.model_dump() for tier in m.pricing.price_tiers
-                        ] if m.pricing.price_tiers else None,
-                        "price_version": m.pricing.price_version,
                     } if m.pricing else None,
                 }
                 for m in models
@@ -841,7 +826,6 @@ async def get_provider(provider_id: str) -> ProviderInfo:
         
         config = await Config.get()
         await Provider.apply_config(config, provider_id=provider_id)
-        await Provider.refresh_provider_models([provider_id])
         
         # Credentials are resolved at config load time via {secret:xxx} in flocks.json.
         # Provider.apply_config() above already configures from resolved config.
@@ -893,7 +877,6 @@ async def list_models(provider_id: str) -> List[Dict[str, Any]]:
             return []
         config = await Config.get()
         await Provider.apply_config(config, provider_id=provider_id)
-        await Provider.refresh_provider_models([provider_id])
         provider_models = Provider.list_models(provider_id)
 
         models_dict: Dict[str, Dict[str, Any]] = {}
@@ -1631,6 +1614,7 @@ async def get_api_service_metadata(provider_id: str):
         if not base_url and data.get("apis") and len(data["apis"]) > 0:
             first_endpoint = data["apis"][0].get("endpoint", "")
             if first_endpoint:
+                from urllib.parse import urlparse
                 parsed = urlparse(first_endpoint)
                 base_url = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -1683,14 +1667,6 @@ class ProviderCredentialRequest(BaseModel):
     api_key: Optional[str] = Field(None, description="API key value")
     secret: Optional[str] = Field(None, description="Secondary secret value for custom API services")
     base_url: Optional[str] = Field(None, description="Base URL for the provider")
-    model_catalog_url: Optional[str] = Field(
-        None,
-        description="Model catalog URL, independent from the provider chat Base URL",
-    )
-    model_catalog_session_token: Optional[str] = Field(
-        None,
-        description="Router Console session token used only for model catalog sync",
-    )
     username: Optional[str] = Field(None, description="Optional username for API services")
     fields: Optional[Dict[str, Optional[str]]] = Field(None, description="Dynamic service credential fields")
     provider_name: Optional[str] = Field(None, description="Display name for the provider")
@@ -1704,9 +1680,6 @@ class ProviderCredentialResponse(BaseModel):
     secret: Optional[str] = None
     secret_masked: Optional[str] = None
     base_url: Optional[str] = None
-    model_catalog_url: Optional[str] = None
-    model_catalog_session_token_masked: Optional[str] = None
-    has_model_catalog_session: bool = False
     username: Optional[str] = None
     fields: Optional[Dict[str, Optional[str]]] = None
     secret_ids: Optional[Dict[str, str]] = None
@@ -1731,40 +1704,12 @@ def _load_llm_provider_credentials(
         api_key = _get_inline_provider_api_key(provider_id)
 
     base_url = None
-    model_catalog_url = None
     raw_provider = ConfigWriter.get_provider_raw(provider_id)
     if raw_provider:
         options = raw_provider.get("options", {})
         base_url = options.get("baseURL") or options.get("base_url")
-        model_catalog_url = options.get("model_catalog_url") or options.get(
-            "modelCatalogURL"
-        )
     if not base_url:
         base_url = secrets.get(f"{provider_id}_base_url")
-    if not model_catalog_url:
-        model_catalog_url = os.getenv("THREATBOOK_CN_LLM_MODEL_CATALOG_URL")
-    if not model_catalog_url:
-        try:
-            from flocks.provider.model_catalog import get_raw_catalog
-
-            model_catalog_url = get_raw_catalog().get(provider_id, {}).get(
-                "default_model_catalog_url"
-            )
-        except Exception:
-            pass
-
-    model_catalog_session_token = None
-    if provider_id == "threatbook-cn-llm" and model_catalog_url:
-        try:
-            from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
-
-            model_catalog_session_token = (
-                ThreatBookCnLLMProvider.get_model_catalog_session_token(
-                    model_catalog_url
-                )
-            )
-        except Exception:
-            pass
 
     is_placeholder = _is_placeholder_api_key(api_key)
     ui_api_key = None if is_placeholder else api_key
@@ -1774,13 +1719,6 @@ def _load_llm_provider_credentials(
         api_key=ui_api_key if reveal_api_key else None,
         api_key_masked=SecretManager.mask(ui_api_key) if ui_api_key else None,
         base_url=base_url,
-        model_catalog_url=model_catalog_url,
-        model_catalog_session_token_masked=(
-            SecretManager.mask(model_catalog_session_token)
-            if model_catalog_session_token
-            else None
-        ),
-        has_model_catalog_session=bool(model_catalog_session_token),
         has_credential=bool(api_key),
     )
 
@@ -1867,8 +1805,6 @@ async def set_provider_credentials(
 
     - api_key → .secret.json
     - base_url → flocks.json provider.{id}.options.baseURL
-    - model_catalog_url → flocks.json provider.{id}.options.model_catalog_url
-    - model_catalog_session_token → environment-bound local secret storage
     - Ensures provider entry exists in flocks.json
     - Configures provider runtime immediately
     """
@@ -1916,57 +1852,6 @@ async def set_provider_credentials(
                 # (which require a non-empty key argument) keep working.
                 effective_api_key = _NO_API_KEY_PLACEHOLDER
 
-        model_catalog_url_was_set = "model_catalog_url" in request.model_fields_set
-        effective_model_catalog_url = None
-        if model_catalog_url_was_set:
-            effective_model_catalog_url = (request.model_catalog_url or "").strip()
-            if effective_model_catalog_url:
-                parsed_catalog_url = urlparse(effective_model_catalog_url)
-                if (
-                    parsed_catalog_url.scheme not in {"http", "https"}
-                    or not parsed_catalog_url.netloc
-                ):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Model catalog URL must be an absolute HTTP(S) URL",
-                    )
-
-        model_catalog_session_was_set = (
-            "model_catalog_session_token" in request.model_fields_set
-        )
-        effective_model_catalog_session = (
-            (request.model_catalog_session_token or "").strip()
-            if model_catalog_session_was_set
-            else None
-        )
-        catalog_session_secret_id = None
-        if model_catalog_session_was_set:
-            if provider_id != "threatbook-cn-llm":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Model catalog session is only supported for ThreatBook-cn-llm",
-                )
-            session_catalog_url = effective_model_catalog_url
-            if not model_catalog_url_was_set:
-                current = _load_llm_provider_credentials(provider_id)
-                session_catalog_url = current.model_catalog_url
-            from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
-
-            if not session_catalog_url or not ThreatBookCnLLMProvider.supports_model_catalog_session(
-                session_catalog_url
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Model catalog session requires an HTTPS ThreatBook Console catalog URL"
-                    ),
-                )
-            catalog_session_secret_id = (
-                ThreatBookCnLLMProvider.model_catalog_session_secret_id(
-                    session_catalog_url
-                )
-            )
-
         # 1. Save API key to .secret.json using _llm_key convention for LLM providers
         if preserve_existing_secret:
             log.info("provider.credentials.preserved", {
@@ -1990,15 +1875,6 @@ async def set_provider_credentials(
                 "base_url": request.base_url,
             })
 
-        if model_catalog_session_was_set and catalog_session_secret_id:
-            if effective_model_catalog_session:
-                secrets.set(
-                    catalog_session_secret_id,
-                    effective_model_catalog_session,
-                )
-            else:
-                secrets.delete(catalog_session_secret_id)
-
         # 2. Ensure provider entry exists in flocks.json and update base_url / name
         raw_provider = ConfigWriter.get_provider_raw(provider_id)
         if raw_provider:
@@ -2017,12 +1893,6 @@ async def set_provider_credentials(
             if request.provider_name:
                 ConfigWriter.update_provider_field(
                     provider_id, "name", request.provider_name
-                )
-            if model_catalog_url_was_set:
-                ConfigWriter.update_provider_field(
-                    provider_id,
-                    "options.model_catalog_url",
-                    effective_model_catalog_url or None,
                 )
         else:
             # Provider not yet in flocks.json — create a minimal entry
@@ -2066,11 +1936,6 @@ async def set_provider_credentials(
                 npm=npm,
                 base_url=effective_base_url,
                 models=models,
-                extra_options=(
-                    {"model_catalog_url": effective_model_catalog_url}
-                    if effective_model_catalog_url
-                    else None
-                ),
             )
             if request.provider_name:
                 config_dict["name"] = request.provider_name
@@ -2093,11 +1958,6 @@ async def set_provider_credentials(
                     effective_base_url = raw.get("options", {}).get("baseURL")
 
             custom_settings = _get_provider_custom_settings(provider)
-            if model_catalog_url_was_set:
-                if effective_model_catalog_url:
-                    custom_settings["model_catalog_url"] = effective_model_catalog_url
-                else:
-                    custom_settings.pop("model_catalog_url", None)
             provider.configure(ProviderConfig(
                 provider_id=provider_id,
                 api_key=effective_api_key,
@@ -2157,14 +2017,6 @@ async def delete_provider_credentials(
         deleted_secret = secrets.delete(f"{provider_id}_api_key") or deleted_secret
         # Also clean up legacy base_url entries
         secrets.delete(f"{provider_id}_base_url")
-        if provider_id == "threatbook-cn-llm":
-            from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
-
-            for stored_secret_id in secrets.list():
-                if stored_secret_id.startswith(
-                    ThreatBookCnLLMProvider.MODEL_CATALOG_SESSION_SECRET_PREFIX
-                ):
-                    deleted_secret = secrets.delete(stored_secret_id) or deleted_secret
 
         if not removed_config and not deleted_secret:
             raise HTTPException(status_code=404, detail="No credentials found for this provider")

@@ -159,8 +159,6 @@ def _parse_model_definitions(
                 cache_read=pricing_raw.get("cache_read"),
                 cache_write=pricing_raw.get("cache_write"),
                 currency=pricing_raw.get("currency", "USD"),
-                price_tiers=pricing_raw.get("price_tiers"),
-                price_version=pricing_raw.get("price_version"),
             )
 
         model_type_str = m.get("model_type", "llm")

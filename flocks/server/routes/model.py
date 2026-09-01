@@ -32,17 +32,6 @@ def _connected_provider_ids() -> set[str]:
     return set(ConfigWriter.list_provider_ids())
 
 
-async def _refresh_connected_provider(provider_id: str) -> None:
-    """Apply config and refresh a connected provider's dynamic catalog."""
-    if provider_id not in _connected_provider_ids():
-        return
-    from flocks.config.config import Config
-
-    config = await Config.get()
-    await Provider.apply_config(config, provider_id=provider_id)
-    await Provider.refresh_provider_models([provider_id])
-
-
 # ==================== Response Models ====================
 
 class ModelCapabilities(BaseModel):
@@ -424,7 +413,6 @@ async def list_model_definitions(
     provider: Optional[str] = Query(None, description="Filter by provider ID"),
     model_type: Optional[ModelType] = Query(None, description="Filter by model type"),
     enabled_only: bool = Query(False, description="Only return enabled models"),
-    refresh: bool = Query(False, description="Force refresh dynamic provider catalogs"),
 ) -> ModelDefinitionListResponse:
     """List model definitions with full metadata."""
     try:
@@ -434,9 +422,6 @@ async def list_model_definitions(
         try:
             config = await Config.get()
             await Provider.apply_config(config, provider_id=provider)
-            connected = _connected_provider_ids()
-            refresh_ids = [provider] if provider and provider in connected else list(connected)
-            await Provider.refresh_provider_models(refresh_ids, force=refresh)
         except Exception:
             pass
 
@@ -468,7 +453,6 @@ async def list_model_definitions(
 )
 async def get_parameter_rules(provider_id: str, model_id: str):
     """Get parameter rules for a model."""
-    await _refresh_connected_provider(provider_id)
     manager = get_model_manager()
     definition = manager.get_model(provider_id, model_id)
     if not definition:
@@ -489,7 +473,6 @@ async def get_model_definition(
     provider_id: str, model_id: str
 ) -> ModelDefinition:
     """Get a single model definition."""
-    await _refresh_connected_provider(provider_id)
     manager = get_model_manager()
     definition = manager.get_model(provider_id, model_id)
     if not definition:
