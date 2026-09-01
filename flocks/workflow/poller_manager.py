@@ -448,15 +448,12 @@ class WorkflowPollerManager:
         cancel_events = self._run_cancel_events.setdefault(workflow_id, set())
         cancel_events.add(cancel_event)
         inputs = self._build_inputs(config)
-        exec_data = await create_execution_record(workflow_id, input_params=inputs)
-        exec_id = str(exec_data["id"])
-        loop = asyncio.get_running_loop()
-        step_recorder = ExecutionStepRecorder(
-            exec_id=exec_id,
-            loop=loop,
-            logger=log,
-            log_event="poller.execution_step.write_failed",
+        exec_data = await create_execution_record(
+            workflow_id,
+            input_params=inputs,
         )
+        exec_id = str(exec_data["id"])
+        step_recorder = ExecutionStepRecorder()
         current = self._status.get(workflow_id) or self._base_status(workflow_id)
         current["lastRunAt"] = started_at_ms
         current["activeRuns"] = self._cleanup_done_runs(workflow_id)
@@ -555,9 +552,15 @@ class WorkflowPollerManager:
             self._status[workflow_id] = current
             log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
+            steps = step_recorder.take_steps()
             await cleanup_workflow_tool_context(tool_context)
             try:
-                await record_execution_result(workflow_id, exec_id, exec_data)
+                await record_execution_result(
+                    workflow_id,
+                    exec_id,
+                    exec_data,
+                    steps=steps,
+                )
             except Exception as exc:
                 log.warning(
                     "poller.exec_record_failed",

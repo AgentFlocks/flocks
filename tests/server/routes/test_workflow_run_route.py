@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -38,6 +39,17 @@ def _two_node_workflow_json(edge):
         ],
         "edges": [edge],
     }
+
+
+def _progress_writer(exec_id: str, **updates):
+    summary = {
+        "id": exec_id,
+        "workflowId": "wf-1",
+        "status": "running",
+        "executionLog": [],
+    }
+    summary.update(updates)
+    return workflow_module.ExecutionProgressWriter(summary)
 
 
 @pytest.mark.asyncio
@@ -104,9 +116,7 @@ async def test_create_workflow_rejects_unmapped_edges_after_strict_default(
 
     req = workflow_module.WorkflowCreateRequest(
         name="new workflow",
-        workflowJson=_two_node_workflow_json(
-            {"from": "prepare_message", "to": "transform_message", "order": 0}
-        ),
+        workflowJson=_two_node_workflow_json({"from": "prepare_message", "to": "transform_message", "order": 0}),
     )
 
     with pytest.raises(workflow_module.HTTPException) as exc_info:
@@ -207,9 +217,7 @@ async def test_update_workflow_rejects_unmapped_edges_when_strict(
 
     req = workflow_module.WorkflowUpdateRequest(
         workflowJson={
-            **_two_node_workflow_json(
-                {"from": "prepare_message", "to": "transform_message", "order": 0}
-            ),
+            **_two_node_workflow_json({"from": "prepare_message", "to": "transform_message", "order": 0}),
             "metadata": {"runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}},
         }
     )
@@ -228,35 +236,44 @@ async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     init_mock = AsyncMock()
-    run_mock = Mock(
-        return_value=SimpleNamespace(
+    step_result = SimpleNamespace(
+        model_dump=lambda mode: {
+            "node_id": "node-1",
+            "node_type": "tool",
+            "inputs": {},
+            "outputs": {"ok": True},
+        }
+    )
+
+    def run_workflow_mock(**kwargs):
+        kwargs["on_step_start"](
+            "run-1",
+            1,
+            SimpleNamespace(id="node-1", type="tool"),
+            {},
+        )
+        kwargs["on_step_complete"](step_result)
+        return SimpleNamespace(
             outputs={"ok": True},
             history=[],
             last_node_id="node-1",
             steps=1,
         )
-    )
-    record_result = AsyncMock(return_value=None)
-    storage_read = AsyncMock(
-        return_value={
-            "id": "exec-1",
-            "workflowId": "wf-1",
-            "currentNodeType": "tool",
-            "executionLog": [],
-        }
-    )
 
+    run_mock = Mock(side_effect=run_workflow_mock)
+    record_result = AsyncMock(return_value=None)
+    upsert_execution = AsyncMock(return_value=None)
     monkeypatch.setattr(MCP, "init", init_mock)
     monkeypatch.setattr(workflow_module, "run_workflow", run_mock)
+    monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", upsert_execution)
     monkeypatch.setattr(workflow_module, "_resolve_execution_outcome", lambda _result: ("success", None))
     monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
-    monkeypatch.setattr(workflow_module.Storage, "read", storage_read)
-    monkeypatch.setattr(workflow_module.Storage, "write", AsyncMock(return_value=None))
     monkeypatch.setattr(workflow_module, "compact_outputs_for_storage", lambda value: value)
     monkeypatch.setattr(workflow_module, "compact_history_for_storage", lambda value: value)
 
     req = workflow_module.WorkflowRunRequest(inputs={"ip": "8.8.8.8"}, trace=False)
     tool_context = ToolContext(session_id="session-1", message_id="message-1", agent="rex")
+    progress_writer = _progress_writer("exec-1")
 
     await workflow_module._run_workflow_execution_task(
         workflow_id="wf-1",
@@ -264,13 +281,391 @@ async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
         req=req,
         exec_id="exec-1",
         cancel_event=workflow_module.threading.Event(),
+        progress_writer=progress_writer,
         tool_context=tool_context,
     )
 
     init_mock.assert_not_awaited()
     run_mock.assert_called_once()
     assert run_mock.call_args.kwargs["tool_context"] is tool_context
+    assert upsert_execution.await_count >= 1
+    assert all(call.args[0]["executionLog"] == [] for call in upsert_execution.await_args_list)
+    assert upsert_execution.await_args.args[0]["currentNodeId"] == "node-1"
     record_result.assert_awaited_once()
+    expected_step = {
+        "node_id": "node-1",
+        "node_type": "tool",
+        "inputs": {},
+        "outputs": {"ok": True},
+    }
+    assert record_result.await_args.args[2]["executionLog"] == [expected_step]
+    assert record_result.await_args.kwargs["steps"] == [(1, expected_step)]
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_execution_task_batches_cancelled_pending_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run_workflow_mock(**kwargs):
+        kwargs["on_step_start"](
+            "run-1",
+            1,
+            SimpleNamespace(id="node-1", type="tool"),
+            {"message": "hello"},
+        )
+        return SimpleNamespace(
+            run_id="run-1",
+            outputs={},
+            history=[],
+            last_node_id="node-1",
+            steps=0,
+        )
+
+    record_result = AsyncMock(return_value=None)
+    monkeypatch.setattr(workflow_module, "run_workflow", Mock(side_effect=run_workflow_mock))
+    monkeypatch.setattr(workflow_module, "_resolve_execution_outcome", lambda _result: ("success", None))
+    monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
+    monkeypatch.setattr(
+        workflow_module.WorkflowStore,
+        "upsert_execution",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(workflow_module, "compact_outputs_for_storage", lambda value: value)
+    monkeypatch.setattr(workflow_module, "compact_history_for_storage", lambda value: value)
+
+    cancel_event = workflow_module.threading.Event()
+    cancel_event.set()
+    progress_writer = _progress_writer("exec-cancelled")
+    await workflow_module._run_workflow_execution_task(
+        workflow_id="wf-1",
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        req=workflow_module.WorkflowRunRequest(inputs={"message": "hello"}, trace=False),
+        exec_id="exec-cancelled",
+        cancel_event=cancel_event,
+        progress_writer=progress_writer,
+    )
+
+    record_result.assert_awaited_once()
+    final_data = record_result.await_args.args[2]
+    assert final_data["status"] == "cancelled"
+    assert final_data["stepCount"] == 1
+    pending_step = {
+        "node_id": "node-1",
+        "node_type": "tool",
+        "inputs": {"message": "hello"},
+        "outputs": {},
+        "error": "Run cancelled before node completed",
+    }
+    assert final_data["executionLog"] == [pending_step]
+    assert record_result.await_args.kwargs["steps"] == [(1, pending_step)]
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_execution_task_keeps_completed_and_pending_step_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancel_event = workflow_module.threading.Event()
+    completed_step = SimpleNamespace(
+        model_dump=lambda mode: {
+            "node_id": "node-1",
+            "node_type": "python",
+            "inputs": {"value": 1},
+            "outputs": {"value": 2},
+        }
+    )
+
+    def run_workflow_mock(**kwargs):
+        kwargs["on_step_start"](
+            "run-1",
+            1,
+            SimpleNamespace(id="node-1", type="python"),
+            {"value": 1},
+        )
+        kwargs["on_step_complete"](completed_step)
+        cancel_event.set()
+        kwargs["on_step_start"](
+            "run-1",
+            2,
+            SimpleNamespace(id="node-2", type="tool"),
+            {"message": "hello"},
+        )
+        return SimpleNamespace(
+            run_id="run-1",
+            outputs={"value": 2},
+            history=[],
+            last_node_id="node-2",
+            steps=1,
+        )
+
+    record_result = AsyncMock(return_value=None)
+    upsert_execution = AsyncMock(return_value=None)
+    monkeypatch.setattr(workflow_module, "run_workflow", Mock(side_effect=run_workflow_mock))
+    monkeypatch.setattr(workflow_module, "_resolve_execution_outcome", lambda _result: ("success", None))
+    monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
+    monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", upsert_execution)
+
+    progress_writer = _progress_writer("exec-partial-cancel")
+    await workflow_module._run_workflow_execution_task(
+        workflow_id="wf-1",
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        req=workflow_module.WorkflowRunRequest(inputs={"value": 1}, trace=False),
+        exec_id="exec-partial-cancel",
+        cancel_event=cancel_event,
+        progress_writer=progress_writer,
+    )
+
+    steps = record_result.await_args.kwargs["steps"]
+    assert [step_index for step_index, _ in steps] == [1, 2]
+    assert [step["node_id"] for _, step in steps] == ["node-1", "node-2"]
+    assert steps[1][1]["error"] == "Run cancelled before node completed"
+    assert record_result.await_args.args[2]["status"] == "cancelled"
+    assert upsert_execution.await_args.args[0]["currentPhase"] == "cancelling"
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_execution_task_keeps_steps_when_runner_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed_step = SimpleNamespace(
+        model_dump=lambda mode: {
+            "node_id": "node-1",
+            "node_type": "python",
+            "inputs": {},
+            "outputs": {"ok": True},
+        }
+    )
+
+    def run_workflow_mock(**kwargs):
+        kwargs["on_step_start"](
+            "run-1",
+            1,
+            SimpleNamespace(id="node-1", type="python"),
+            {},
+        )
+        kwargs["on_step_complete"](completed_step)
+        kwargs["on_step_start"](
+            "run-1",
+            2,
+            SimpleNamespace(id="node-2", type="tool"),
+            {"message": "hello"},
+        )
+        raise RuntimeError("runner failed")
+
+    record_result = AsyncMock(return_value=None)
+    monkeypatch.setattr(workflow_module, "run_workflow", Mock(side_effect=run_workflow_mock))
+    monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
+    monkeypatch.setattr(
+        workflow_module.WorkflowStore,
+        "upsert_execution",
+        AsyncMock(return_value=None),
+    )
+
+    progress_writer = _progress_writer("exec-runner-error")
+    await workflow_module._run_workflow_execution_task(
+        workflow_id="wf-1",
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        req=workflow_module.WorkflowRunRequest(inputs={}, trace=False),
+        exec_id="exec-runner-error",
+        cancel_event=workflow_module.threading.Event(),
+        progress_writer=progress_writer,
+    )
+
+    final_data = record_result.await_args.args[2]
+    steps = record_result.await_args.kwargs["steps"]
+    assert final_data["status"] == "error"
+    assert final_data["errorMessage"] == "runner failed"
+    assert [step_index for step_index, _ in steps] == [1, 2]
+    assert [step["node_id"] for _, step in steps] == ["node-1", "node-2"]
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_execution_task_does_not_reclassify_persistence_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step_result = SimpleNamespace(
+        model_dump=lambda mode: {
+            "node_id": "node-1",
+            "node_type": "python",
+            "inputs": {},
+            "outputs": {"ok": True},
+        }
+    )
+
+    def run_workflow_mock(**kwargs):
+        kwargs["on_step_start"](
+            "run-1",
+            1,
+            SimpleNamespace(id="node-1", type="python"),
+            {},
+        )
+        kwargs["on_step_complete"](step_result)
+        return SimpleNamespace(
+            outputs={"ok": True},
+            history=[],
+            last_node_id="node-1",
+            steps=1,
+        )
+
+    record_result = AsyncMock(side_effect=RuntimeError("storage failed"))
+    monkeypatch.setattr(workflow_module, "run_workflow", Mock(side_effect=run_workflow_mock))
+    monkeypatch.setattr(workflow_module, "_resolve_execution_outcome", lambda _result: ("success", None))
+    monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
+    monkeypatch.setattr(
+        workflow_module.WorkflowStore,
+        "upsert_execution",
+        AsyncMock(return_value=None),
+    )
+
+    progress_writer = _progress_writer("exec-storage-error")
+
+    with pytest.raises(RuntimeError, match="storage failed"):
+        await workflow_module._run_workflow_execution_task(
+            workflow_id="wf-1",
+            workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+            req=workflow_module.WorkflowRunRequest(inputs={}, trace=False),
+            exec_id="exec-storage-error",
+            cancel_event=workflow_module.threading.Event(),
+            progress_writer=progress_writer,
+        )
+
+    record_result.assert_awaited_once()
+    final_data = record_result.await_args.args[2]
+    assert final_data["status"] == "success"
+    assert record_result.await_args.kwargs["steps"] == [
+        (
+            1,
+            {
+                "node_id": "node-1",
+                "node_type": "python",
+                "inputs": {},
+                "outputs": {"ok": True},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_callbacks_do_not_wait_for_blocked_progress_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    runner_finished = workflow_module.threading.Event()
+    write_order: list[str] = []
+    step_result = SimpleNamespace(
+        model_dump=lambda mode: {
+            "node_id": "node-1",
+            "node_type": "python",
+            "inputs": {},
+            "outputs": {"ok": True},
+        }
+    )
+
+    async def blocked_upsert(_summary):
+        write_order.append("progress-start")
+        write_started.set()
+        await release_write.wait()
+        write_order.append("progress-end")
+
+    async def record_result(*args, **kwargs):  # noqa: ANN002, ANN003
+        write_order.append("final")
+
+    def run_workflow_mock(**kwargs):
+        kwargs["on_step_start"](
+            "run-1",
+            1,
+            SimpleNamespace(id="node-1", type="python"),
+            {},
+        )
+        kwargs["on_step_complete"](step_result)
+        runner_finished.set()
+        return SimpleNamespace(
+            outputs={"ok": True},
+            history=[],
+            last_node_id="node-1",
+            steps=1,
+        )
+
+    record_result_mock = AsyncMock(side_effect=record_result)
+    monkeypatch.setattr(workflow_module, "run_workflow", Mock(side_effect=run_workflow_mock))
+    monkeypatch.setattr(workflow_module, "_resolve_execution_outcome", lambda _result: ("success", None))
+    monkeypatch.setattr(workflow_module, "_record_execution_result", record_result_mock)
+    monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", blocked_upsert)
+
+    progress_writer = _progress_writer("exec-blocked-progress")
+    task = asyncio.create_task(
+        workflow_module._run_workflow_execution_task(
+            workflow_id="wf-1",
+            workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+            req=workflow_module.WorkflowRunRequest(inputs={}, trace=False),
+            exec_id="exec-blocked-progress",
+            cancel_event=workflow_module.threading.Event(),
+            progress_writer=progress_writer,
+        )
+    )
+
+    await write_started.wait()
+    assert await asyncio.to_thread(runner_finished.wait, 0.1)
+    record_result_mock.assert_not_awaited()
+    release_write.set()
+    await task
+
+    record_result_mock.assert_awaited_once()
+    assert write_order[-2:] == ["progress-end", "final"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_workflow_execution_uses_active_progress_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted_summaries: list[dict] = []
+
+    async def capture_upsert(summary):
+        persisted_summaries.append(dict(summary))
+
+    monkeypatch.setattr(
+        workflow_module.WorkflowStore,
+        "get_execution",
+        AsyncMock(
+            return_value={
+                "id": "exec-cancel-route",
+                "workflowId": "wf-1",
+                "status": "running",
+                "currentPhase": "running",
+                "executionLog": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(workflow_module.WorkflowStore, "upsert_execution", capture_upsert)
+
+    progress_writer = _progress_writer("exec-cancel-route", currentPhase="queued")
+    progress_writer.submit({"currentPhase": "running", "currentNodeId": "node-1"})
+    cancel_event = workflow_module.threading.Event()
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    workflow_module._active_workflow_executions["exec-cancel-route"] = (
+        workflow_module.ActiveWorkflowExecution(
+            workflow_id="wf-1",
+            task=current_task,
+            cancel_event=cancel_event,
+            progress_writer=progress_writer,
+        )
+    )
+
+    try:
+        response = await workflow_module.cancel_workflow_execution(
+            "wf-1",
+            "exec-cancel-route",
+        )
+        await progress_writer.close_and_drain()
+    finally:
+        workflow_module._active_workflow_executions.pop("exec-cancel-route", None)
+
+    assert response["status"] == "accepted"
+    assert cancel_event.is_set()
+    assert persisted_summaries[-1]["currentPhase"] == "cancelling"
+    assert persisted_summaries[-1]["currentNodeId"] == "node-1"
+    assert persisted_summaries[-1]["errorMessage"] == "Cancellation requested"
 
 
 @pytest.mark.asyncio

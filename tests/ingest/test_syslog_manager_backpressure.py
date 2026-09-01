@@ -25,7 +25,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flocks.ingest.syslog import manager as syslog_manager
-from flocks.workflow import execution_store
 from flocks.workflow.triggers.models import TriggerDefinition
 
 
@@ -148,10 +147,7 @@ def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
             "concurrency": {"maxParallel": 999, "queueSize": 999_999},
         }
     )
-    assert (
-        syslog_manager._worker_count_for_trigger(oversized)
-        == syslog_manager._MAX_CONCURRENT_EXECUTIONS
-    )
+    assert syslog_manager._worker_count_for_trigger(oversized) == syslog_manager._MAX_CONCURRENT_EXECUTIONS
     assert syslog_manager._queue_size_for_trigger(oversized) == syslog_manager._MAX_QUEUE_SIZE
 
 
@@ -352,17 +348,18 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     manager = syslog_manager.SyslogManager()
     captured_run_kwargs: dict = {}
     recorded_exec_data: dict = {}
-    recorded_steps: list[tuple[str, int, dict]] = []
+    recorded_steps: list[tuple[int, dict]] = []
 
-    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
+    async def _fake_create_execution_record(  # noqa: ANN001
+        workflow_id, *, input_params=None, exec_id=None
+    ):
         return {"id": "exec-syslog", "workflowId": workflow_id, "inputParams": input_params}
 
-    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
+    async def _fake_record_execution_result(  # noqa: ANN001
+        workflow_id, exec_id, exec_data, *, steps=None
+    ):
         recorded_exec_data.update(exec_data)
-
-    async def _fake_record_execution_step(exec_id, step_index, step):  # noqa: ANN001
-        recorded_steps.append((exec_id, step_index, step))
-        return step
+        recorded_steps.extend(steps or [])
 
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
@@ -392,7 +389,6 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
-    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
 
     trigger = TriggerDefinition.model_validate(
         {
@@ -430,9 +426,17 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         action_name="trigger:syslog",
     )
     trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
-    assert recorded_steps[0][0] == "exec-syslog"
-    assert recorded_steps[0][1] == 1
-    assert recorded_steps[0][2]["node_id"] == "receive_alert"
+    assert recorded_steps == [
+        (
+            1,
+            {
+                "node_id": "receive_alert",
+                "node_type": "python",
+                "inputs": {"message": "demo"},
+                "outputs": {"ok": True},
+            },
+        )
+    ]
     assert recorded_exec_data["triggerId"] == "syslog-alerts"
     assert recorded_exec_data["triggerSource"] == "udp://0.0.0.0:5514"
     assert recorded_exec_data["executionLog"] == []

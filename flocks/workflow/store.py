@@ -8,7 +8,7 @@ import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import aiosqlite
 
@@ -37,6 +37,13 @@ _WORKFLOW_TABLE_PREFIXES = (
     "workflow_syslog_config/",
 )
 _WORKFLOW_PREFIXES = _WORKFLOW_KV_PREFIXES + _WORKFLOW_TABLE_PREFIXES
+_EXECUTION_UPSERT_SQL = """
+    INSERT OR REPLACE INTO workflow_executions
+    (id, workflow_id, status, current_phase, current_node_id, current_node_type,
+     current_step_index, step_count, input_params, output_results, error_message,
+     trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
 
 
 class WorkflowStore:
@@ -44,8 +51,10 @@ class WorkflowStore:
 
     _initialized = False
     _conn: Optional[aiosqlite.Connection] = None
+    _completion_conn: Optional[aiosqlite.Connection] = None
     _init_pid: Optional[int] = None
     _db_path: Optional[Path] = None
+    _completion_lock: Optional[asyncio.Lock] = None
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -57,10 +66,9 @@ class WorkflowStore:
         db_path = cls.get_db_path()
         if cls._initialized and cls._init_pid == current_pid and cls._db_path == db_path:
             return
-        if cls._initialized and (
-            (cls._init_pid is not None and cls._init_pid != current_pid)
-            or (cls._db_path is not None and cls._db_path != db_path)
-        ):
+        pid_changed = cls._initialized and cls._init_pid is not None and cls._init_pid != current_pid
+        db_path_changed = cls._initialized and cls._db_path is not None and cls._db_path != db_path
+        if pid_changed or db_path_changed:
             log.warn(
                 "workflow.store.fork_detected",
                 {
@@ -70,11 +78,16 @@ class WorkflowStore:
                     "new_db_path": str(db_path),
                 },
             )
-            if cls._conn:
-                await cls._conn.close()
+            if not pid_changed:
+                if cls._conn:
+                    await cls._conn.close()
+                if cls._completion_conn:
+                    await cls._completion_conn.close()
             cls._conn = None
+            cls._completion_conn = None
             cls._initialized = False
             cls._init_pid = None
+            cls._completion_lock = None
 
         await Storage._ensure_init()
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,9 +103,16 @@ class WorkflowStore:
             for stmt in _INDEX_STMTS:
                 await cls._conn.execute(stmt)
             await cls._conn.commit()
+            cls._completion_conn = await aiosqlite.connect(
+                db_path,
+                timeout=Storage._sqlite_timeout_s,
+            )
+            cls._completion_conn.row_factory = aiosqlite.Row
+            await Storage.configure_connection(cls._completion_conn)
             cls._initialized = True
             cls._init_pid = current_pid
             cls._db_path = db_path
+            cls._completion_lock = asyncio.Lock()
             await cls._migrate_legacy_kv()
 
         try:
@@ -101,7 +121,10 @@ class WorkflowStore:
         except Exception as exc:
             if cls._conn:
                 await cls._conn.close()
+            if cls._completion_conn:
+                await cls._completion_conn.close()
             cls._conn = None
+            cls._completion_conn = None
             cls._initialized = False
             cls._init_pid = None
             cls._db_path = None
@@ -120,10 +143,14 @@ class WorkflowStore:
     async def close(cls) -> None:
         if cls._conn:
             await cls._conn.close()
+        if cls._completion_conn:
+            await cls._completion_conn.close()
         cls._conn = None
+        cls._completion_conn = None
         cls._initialized = False
         cls._init_pid = None
         cls._db_path = None
+        cls._completion_lock = None
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
@@ -136,6 +163,19 @@ class WorkflowStore:
     @classmethod
     async def raw_db(cls) -> aiosqlite.Connection:
         return await cls._db()
+
+    @classmethod
+    async def _completion_db(cls) -> aiosqlite.Connection:
+        if cls._initialized and cls._init_pid is not None and cls._init_pid != os.getpid():
+            await cls.init()
+        if not cls._completion_conn or not cls._initialized:
+            await cls.init()
+        return cls._completion_conn  # type: ignore[return-value]
+
+    @classmethod
+    async def raw_completion_db(cls) -> aiosqlite.Connection:
+        """Return the completion connection for transaction-level tests."""
+        return await cls._completion_db()
 
     @staticmethod
     def _json_dumps(value: Any) -> str:
@@ -280,21 +320,18 @@ class WorkflowStore:
         log.info("workflow.store.legacy_kv_migrated", counts)
 
     @classmethod
-    async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
-        db = await cls._db()
+    def _execution_row(
+        cls,
+        exec_data: Dict[str, Any],
+    ) -> Tuple[str, str, Tuple[Any, ...]]:
         payload = dict(exec_data)
         exec_id = str(payload.get("id") or "")
         workflow_id = str(payload.get("workflowId") or payload.get("workflow_id") or "")
         if not exec_id or not workflow_id:
             raise ValueError("workflow execution requires id and workflowId")
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO workflow_executions
-            (id, workflow_id, status, current_phase, current_node_id, current_node_type,
-             current_step_index, step_count, input_params, output_results, error_message,
-             trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        return (
+            exec_id,
+            workflow_id,
             (
                 exec_id,
                 workflow_id,
@@ -316,6 +353,12 @@ class WorkflowStore:
                 cls._json_dumps(payload),
             ),
         )
+
+    @classmethod
+    async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
+        db = await cls._db()
+        _, _, row = cls._execution_row(exec_data)
+        await db.execute(_EXECUTION_UPSERT_SQL, row)
         await db.commit()
 
     @classmethod
@@ -354,7 +397,7 @@ class WorkflowStore:
             f"""
             SELECT payload FROM workflow_executions
             WHERE {" AND ".join(clauses)}
-            ORDER BY started_at DESC
+            ORDER BY started_at DESC, rowid DESC
             LIMIT ?
             """,
             tuple(params),
@@ -396,7 +439,7 @@ class WorkflowStore:
             """
             SELECT id FROM workflow_executions
             WHERE workflow_id = ?
-            ORDER BY started_at DESC
+            ORDER BY started_at DESC, rowid DESC
             LIMIT -1 OFFSET ?
             """,
             (workflow_id, max(int(keep), 0)),
@@ -409,19 +452,12 @@ class WorkflowStore:
         return exec_ids
 
     @classmethod
-    async def record_step(
+    def _step_rows(
         cls,
         exec_id: str,
-        step_index: int,
-        step_payload: Dict[str, Any],
-    ) -> None:
-        db = await cls._db()
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO workflow_execution_steps
-            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        steps: Iterable[Tuple[int, Dict[str, Any]]],
+    ) -> List[Tuple[Any, ...]]:
+        return [
             (
                 exec_id,
                 int(step_index),
@@ -431,9 +467,81 @@ class WorkflowStore:
                 cls._json_dumps(step_payload.get("outputs") or {}),
                 step_payload.get("error"),
                 cls._json_dumps(step_payload),
-            ),
+            )
+            for step_index, step_payload in steps
+        ]
+
+    @classmethod
+    async def record_step(
+        cls,
+        exec_id: str,
+        step_index: int,
+        step_payload: Dict[str, Any],
+    ) -> None:
+        await cls.record_steps(exec_id, [(step_index, step_payload)])
+
+    @classmethod
+    async def record_steps(
+        cls,
+        exec_id: str,
+        steps: Iterable[Tuple[int, Dict[str, Any]]],
+    ) -> None:
+        rows = cls._step_rows(exec_id, steps)
+        if not rows:
+            return
+        db = await cls._db()
+        await db.executemany(
+            """
+            INSERT OR REPLACE INTO workflow_execution_steps
+            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
         )
         await db.commit()
+
+    @classmethod
+    async def complete_execution(
+        cls,
+        exec_data: Dict[str, Any],
+        steps: Iterable[Tuple[int, Dict[str, Any]]],
+    ) -> None:
+        """Atomically persist one final execution summary and its step batch."""
+        db = await cls._completion_db()
+        exec_id, workflow_id, execution_row = cls._execution_row(exec_data)
+        step_rows = cls._step_rows(exec_id, steps)
+        lock = cls._completion_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._completion_lock = lock
+
+        async with lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                if step_rows:
+                    await db.executemany(
+                        """
+                        INSERT OR REPLACE INTO workflow_execution_steps
+                        (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        step_rows,
+                    )
+                await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
+                await db.commit()
+            except BaseException:
+                try:
+                    await db.rollback()
+                except BaseException as rollback_exc:
+                    log.error(
+                        "workflow.store.completion_rollback_failed",
+                        {
+                            "workflow_id": workflow_id,
+                            "exec_id": exec_id,
+                            "error": str(rollback_exc),
+                        },
+                    )
+                raise
 
     @classmethod
     async def list_steps(
