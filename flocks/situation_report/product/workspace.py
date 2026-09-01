@@ -100,18 +100,17 @@ async def read_generation_context(*, session_id: str, generation_id: str) -> dic
     context = _load_generation_context(workspace_dir, generation_id)
     template_info = context.get("template")
     template_path = _verified_context_file(workspace_dir, template_info, "Template snapshot")
-    session = await Session.get_by_id(session_id)
     result = {
         "generationID": generation_id,
         "operation": request.get("operation"),
-        "reportTitle": session.title if session is not None else None,
         "userInstruction": context.get("userInstruction"),
         "language": context.get("language"),
         "template": template_path.read_text(encoding="utf-8"),
         "materialCount": (context.get("materials") or {}).get("recordCount"),
         "baseReportAvailable": bool(context.get("baseReport")),
         "validationPolicy": {
-            "oneH1": True,
+            "reportTitleAllowed": False,
+            "h1Count": 0,
             "preserveTemplateH2": True,
             "citeEveryMaterialID": True,
             "maxValidationAttempts": 3,
@@ -282,8 +281,13 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
     )
     leaked_internal_markers = sorted(marker for marker in internal_markers if marker in report)
     issues: list[dict[str, Any]] = []
-    if len(h1_lines) != 1:
-        issues.append({"code": "h1_count", "detail": f"Expected one H1, found {len(h1_lines)}"})
+    if h1_lines:
+        issues.append(
+            {
+                "code": "report_title_forbidden",
+                "detail": "Report-level H1 headings are not allowed",
+            }
+        )
     if missing_headings:
         issues.append({"code": "template_headings", "missing": missing_headings})
     if missing_material_ids:

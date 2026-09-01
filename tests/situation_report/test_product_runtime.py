@@ -217,9 +217,9 @@ def _material_id(value: dict) -> str:
     return f"{value['source_type']}:{value['source_id']}"
 
 
-def _valid_report(template: bytes, materials: bytes, title: str = "流程测试报告") -> str:
+def _valid_report(template: bytes, materials: bytes) -> str:
     material_ids = [_material_id(json.loads(line)) for line in materials.decode("utf-8").splitlines() if line.strip()]
-    lines = [f"# {title}", "", "全部已校验素材：" + "、".join(material_ids)]
+    lines = ["全部已校验素材：" + "、".join(material_ids)]
     for heading in _template_h2(template.decode("utf-8")):
         lines.extend([f"## {heading}", "本节根据已校验素材生成。"])
     return "\n".join(lines)
@@ -325,6 +325,9 @@ async def test_generate_uses_original_session_id_and_backend_latest(
         limit=50,
     )
     assert context["language"] == "zh-CN"
+    assert "reportTitle" not in context
+    assert context["validationPolicy"]["reportTitleAllowed"] is False
+    assert context["validationPolicy"]["h1Count"] == 0
     assert first_page["total"] == 2
     expected_materials = [
         {**json.loads(line), "material_id": _material_id(json.loads(line))} for line in materials.splitlines()
@@ -341,10 +344,27 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     assert len(requests) == request_count
 
     report = _valid_report(template, materials)
+    titled_write = await write_candidate_report(
+        session_id=product_session.id,
+        generation_id="gen-001",
+        content="# 不应出现在报告正文中的标题\n\n" + report,
+    )
+    titled_validation = await validate_candidate_report(
+        session_id=product_session.id,
+        generation_id="gen-001",
+    )
+    assert titled_validation["status"] == "needs_revision"
+    assert titled_validation["issues"] == [
+        {
+            "code": "report_title_forbidden",
+            "detail": "Report-level H1 headings are not allowed",
+        }
+    ]
     await write_candidate_report(
         session_id=product_session.id,
         generation_id="gen-001",
         content=report,
+        expected_sha256=titled_write["sha256"],
     )
     assert (
         await validate_candidate_report(
@@ -358,7 +378,9 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     )
     output = root / published["output"]["path"]
     assert output.is_file()
-    assert output.read_text(encoding="utf-8").startswith("# 流程测试报告")
+    published_report = output.read_text(encoding="utf-8")
+    assert published_report.startswith("全部已校验素材：")
+    assert not any(line.startswith("# ") for line in published_report.splitlines())
 
 
 @pytest.mark.asyncio
@@ -611,7 +633,7 @@ async def test_a1_orchestrator_runs_preflight_publish_and_event_end_to_end(
         await write_candidate_report(
             session_id=session_id,
             generation_id="gen-e2e",
-            content=_valid_report(template, materials, title="A1 编排流程测试"),
+            content=_valid_report(template, materials),
         )
         validation = await validate_candidate_report(
             session_id=session_id,

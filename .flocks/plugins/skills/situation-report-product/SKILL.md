@@ -12,8 +12,8 @@ Treat tool results as the only authoritative business input. Never infer a works
 1. Call `situation_product_context_read` with the exact `generationID`.
 2. Confirm its operation matches the task: `generate`, `modify`, or `regenerate`.
 3. Page through `situation_product_material_read` until `hasMore=false`. Use every declared material.
-4. Follow the immutable template and requested language. Preserve exactly one H1 and all template report chapters.
-5. For `modify`, use the returned `baseReport` and change only what the user requests while keeping the result a complete report.
+4. Follow the immutable template and requested language. Omit the report-level title and preserve all template report chapters. If the template starts with an H1 or title placeholder, do not copy it into the report.
+5. For `modify`, use the returned `baseReport` and change only what the user requests while keeping the result a complete report. Remove any existing report-level H1 from the completed report.
 6. For `generate` and `regenerate`, draft from the template and materials without using an old report.
 7. Write the complete candidate once with `situation_product_report_write`.
 8. Call `situation_product_report_validate`. If it returns `needs_revision`, repair only listed issues, pass the prior candidate SHA-256 to the next write, and validate again. Stop after three validation attempts.
