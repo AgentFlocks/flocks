@@ -4,16 +4,20 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import Home from './index';
 
-const { createMock, navigateMock, toastErrorMock, useAuthMock, useStatsMock } = vi.hoisted(() => ({
-  createMock: vi.fn(),
-  navigateMock: vi.fn(),
-  toastErrorMock: vi.fn(),
-  useAuthMock: vi.fn(),
-  useStatsMock: vi.fn(),
-}));
+const { createMock, navigateMock, toastErrorMock, useAuthMock, useStatsMock } =
+  vi.hoisted(() => ({
+    createMock: vi.fn(),
+    navigateMock: vi.fn(),
+    toastErrorMock: vi.fn(),
+    useAuthMock: vi.fn(),
+    useStatsMock: vi.fn(),
+  }));
 
 vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  const actual =
+    await vi.importActual<typeof import('react-router-dom')>(
+      'react-router-dom',
+    );
   return {
     ...actual,
     useNavigate: () => navigateMock,
@@ -75,7 +79,9 @@ describe('Home create WebUI contract page entry', () => {
       </MemoryRouter>,
     );
 
-    await user.click(screen.getByRole('button', { name: 'createWebUIContractPage' }));
+    await user.click(
+      screen.getByRole('button', { name: 'createWebUIContractPage' }),
+    );
 
     await waitFor(() => {
       expect(createMock).toHaveBeenCalledWith({
@@ -105,7 +111,9 @@ describe('Home create WebUI contract page entry', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole('button', { name: 'createWebUIContractPage' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'createWebUIContractPage' }),
+    ).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
   });
 
@@ -122,7 +130,75 @@ describe('Home create WebUI contract page entry', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('stats.loadErrorHint.authExpired')).toBeInTheDocument();
+    expect(
+      screen.getByText('stats.loadErrorHint.authExpired'),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/backend is running/i)).not.toBeInTheDocument();
+  });
+
+  it('links dashboard stat cards to their matching pages', () => {
+    useStatsMock.mockReturnValue({
+      stats: {
+        agents: { total: 11 },
+        workflows: { total: 7 },
+        skills: { total: 14 },
+        tools: { total: 202 },
+        tasks: { week: 3, scheduledActive: 2 },
+        models: { total: 39 },
+        system: { status: 'healthy', message: 'healthy' },
+      },
+      loading: false,
+      error: null,
+    });
+
+    render(
+      <MemoryRouter>
+        <Home />
+      </MemoryRouter>,
+    );
+
+    expect(
+      screen.getByRole('link', { name: 'stats.agentCount' }),
+    ).toHaveAttribute('href', '/agents');
+    expect(screen.getByRole('link', { name: 'stats.agentCount' })).toHaveClass(
+      'hover:border-purple-200',
+    );
+    expect(
+      screen.getByRole('link', { name: 'stats.workflowCount' }),
+    ).toHaveAttribute('href', '/workflows');
+    expect(
+      screen.getByRole('link', { name: 'stats.workflowCount' }),
+    ).toHaveClass('hover:border-teal-200');
+    expect(
+      screen.getByRole('link', { name: 'stats.skillCount' }),
+    ).toHaveAttribute('href', '/skills');
+    expect(screen.getByRole('link', { name: 'stats.skillCount' })).toHaveClass(
+      'hover:border-green-200',
+    );
+    expect(
+      screen.getByRole('link', { name: 'stats.toolCount' }),
+    ).toHaveAttribute('href', '/tools');
+    expect(screen.getByRole('link', { name: 'stats.toolCount' })).toHaveClass(
+      'hover:border-orange-200',
+    );
+    expect(
+      screen.getByRole('link', { name: 'stats.weeklyTasks' }),
+    ).toHaveAttribute('href', '/tasks');
+    expect(screen.getByRole('link', { name: 'stats.weeklyTasks' })).toHaveClass(
+      'hover:border-amber-200',
+    );
+    expect(
+      screen.getByRole('link', { name: 'stats.activeScheduled' }),
+    ).toHaveAttribute('href', '/tasks');
+    expect(
+      screen.getByRole('link', { name: 'stats.activeScheduled' }),
+    ).toHaveClass('hover:border-violet-200');
+    expect(
+      screen.getByRole('link', { name: 'stats.modelCount' }),
+    ).toHaveAttribute('href', '/models');
+    expect(screen.getByRole('link', { name: 'stats.modelCount' })).toHaveClass(
+      'hover:border-pink-200',
+    );
+    expect(screen.getByText('stats.systemStatus').closest('a')).toBeNull();
   });
 });
