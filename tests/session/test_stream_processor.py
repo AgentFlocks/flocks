@@ -28,6 +28,7 @@ from flocks.session.streaming.stream_events import (
     TextEndEvent,
     TextStartEvent,
     ToolCallEvent,
+    ToolInputErrorEvent,
     ToolInputStartEvent,
 )
 from flocks.session.message import MessageRole, ToolStateError
@@ -494,6 +495,46 @@ class TestToolInputStart:
         # Tool call state should be tracked
         assert "tc_002" in proc.tool_calls
         assert proc.tool_calls["tc_002"].name == "read_file"
+
+    @pytest.mark.asyncio
+    async def test_tool_input_error_updates_pending_part_without_execution(self):
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        execute_mock = AsyncMock(return_value=ToolResult(success=True, output="should not run"))
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as mock_store,
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=execute_mock,
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_trunc", tool_name="write"))
+            await proc.process_event(
+                ToolInputErrorEvent(
+                    id="tc_trunc",
+                    tool_name="write",
+                    input={"arguments_preview": '{"path": "/tmp/f"', "finish_reason": "length"},
+                    error="Output was truncated while generating tool arguments.",
+                )
+            )
+
+        execute_mock.assert_not_awaited()
+        state = proc.tool_calls["tc_trunc"]
+        assert state.status == "error"
+        assert state.name == "write"
+        assert "truncated" in state.error
+
+        completed_part = mock_store.await_args_list[-1].args[2]
+        assert completed_part.tool == "write"
+        assert completed_part.state.status == "error"
+        assert completed_part.state.input["finish_reason"] == "length"
+        assert "truncated" in completed_part.state.error
+
+        published_part = event_callback.await_args_list[-1].args[1]["part"]
+        assert published_part["tool"] == "write"
+        assert published_part["state"]["status"] == "error"
+        assert published_part["state"]["input"]["finish_reason"] == "length"
 
 
 # ---------------------------------------------------------------------------

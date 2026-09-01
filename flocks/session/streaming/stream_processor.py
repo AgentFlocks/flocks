@@ -38,6 +38,7 @@ from flocks.session.streaming.stream_events import (
     TextDeltaEvent,
     TextEndEvent,
     ToolInputStartEvent,
+    ToolInputErrorEvent,
 )
 from flocks.tool.registry import ToolRegistry, ToolContext, ToolResult
 from flocks.permission import PermissionNext
@@ -218,6 +219,9 @@ class StreamProcessor:
         
         elif event_type == "tool-input-end":
             pass  # Input is complete
+
+        elif event_type == "tool-input-error":
+            await self._handle_tool_input_error(event)
         
         elif event_type == "tool-call":
             if self._should_run_tool_call_parallel(event):
@@ -471,6 +475,69 @@ class StreamProcessor:
             })
         except Exception as e:
             log.error("stream.tool_input_start.store_part_failed", {"error": str(e)})
+
+    async def _handle_tool_input_error(self, event: ToolInputErrorEvent) -> None:
+        """Mark an input-generation failure without executing a tool."""
+        if event.id in self.tool_calls:
+            tool_state = self.tool_calls[event.id]
+            part_id = tool_state.part_id
+        else:
+            part_id = Identifier.create("part")
+            tool_state = ToolCallState(
+                id=event.id,
+                name=event.tool_name,
+                input=event.input,
+                part_id=part_id,
+                status="pending",
+            )
+            self.tool_calls[event.id] = tool_state
+
+        tool_state.name = event.tool_name
+        tool_state.input = event.input
+        tool_state.status = "error"
+        tool_state.error = event.error
+
+        tool_error_time = int(datetime.now().timestamp() * 1000)
+        error_state = ToolStateError(
+            status="error",
+            input=event.input,
+            error=event.error,
+            time={"start": tool_error_time, "end": tool_error_time},
+        )
+        error_part = ToolPart(
+            id=part_id,
+            sessionID=self.session_id,
+            messageID=self.assistant_message.id,
+            type="tool",
+            callID=event.id,
+            tool=event.tool_name,
+            state=error_state,
+        )
+        await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+        if self.event_publish_callback:
+            await self.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": part_id,
+                    "messageID": self.assistant_message.id,
+                    "sessionID": self.session_id,
+                    "type": "tool",
+                    "callID": event.id,
+                    "tool": event.tool_name,
+                    "state": {
+                        "status": "error",
+                        "input": event.input,
+                        "error": event.error,
+                        "time": {"start": tool_error_time, "end": tool_error_time},
+                    },
+                },
+            })
+
+        log.warn("stream.tool_input.error", {
+            "tool_call_id": event.id,
+            "tool_name": event.tool_name,
+            "error": event.error,
+        })
     
     async def _handle_tool_call(self, event: ToolCallEvent) -> None:
         """
@@ -1778,7 +1845,7 @@ class StreamProcessor:
             re.DOTALL | re.IGNORECASE,
         ):
             body = match.group(1).strip()
-            if not body or not body[:1] in "{[":
+            if not body or body[:1] not in "{[":
                 continue
 
             try:
