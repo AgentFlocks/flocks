@@ -29,6 +29,7 @@ from flocks_code_security.cli import (
     _resolve_model,
 )
 from flocks_code_security.artifact_integrity import find_output_directory
+from flocks_code_security.cybergym_runtime import CyberGymManifestError, CyberGymTargetManifest
 from flocks_code_security.paths import data_dir, outputs_root, runtime_dir
 from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
@@ -115,6 +116,8 @@ class KnowledgeBaseInput:
 @dataclass(frozen=True)
 class StartScanRequest:
     target_path: Path
+    scan_mode: str = "standard"
+    cybergym_manifest: dict[str, Any] | None = None
     model: str | None = None
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
@@ -557,6 +560,8 @@ class AuditService:
         self._require_authorized_target(target, caller.authorized_root)
         normalized = StartScanRequest(
             target_path=target,
+            scan_mode=str(request.scan_mode or "").strip(),
+            cybergym_manifest=request.cybergym_manifest,
             model=(request.model or "").strip() or None,
             include_paths=self._validate_relative_paths(request.include_paths, "include_paths"),
             exclude_patterns=self._validate_exclude_patterns(request.exclude_patterns),
@@ -568,6 +573,33 @@ class AuditService:
             idempotency_key=(request.idempotency_key or "").strip() or None,
             knowledge_base=self._validate_knowledge_base(request.knowledge_base),
         )
+        if normalized.scan_mode not in {"standard", "cybergym_level1"}:
+            raise AuditServiceError("invalid_parameter", "Unsupported scan_mode")
+        if normalized.scan_mode == "cybergym_level1":
+            if normalized.cybergym_manifest is None:
+                raise AuditServiceError(
+                    "cybergym_manifest_required",
+                    "cybergym_level1 requires a trusted cybergym_manifest",
+                )
+            try:
+                cybergym_manifest = CyberGymTargetManifest.from_dict(
+                    normalized.cybergym_manifest
+                ).public_dict()
+            except CyberGymManifestError as exc:
+                raise AuditServiceError("invalid_cybergym_manifest", str(exc)) from exc
+            normalized = StartScanRequest(
+                **{**normalized.__dict__, "cybergym_manifest": cybergym_manifest}
+            )
+            if normalized.dynamic_enabled:
+                raise AuditServiceError(
+                    "incompatible_parameters",
+                    "cybergym_level1 does not use generic dynamic validation",
+                )
+        elif normalized.cybergym_manifest is not None:
+            raise AuditServiceError(
+                "incompatible_parameters",
+                "cybergym_manifest requires scan_mode=cybergym_level1",
+            )
         if normalized.max_file_bytes < 1 or normalized.max_file_bytes > 50 * 1024 * 1024:
             raise AuditServiceError(
                 "invalid_parameter",
@@ -611,9 +643,11 @@ class AuditService:
                 exclude_patterns=list(normalized.exclude_patterns) or None,
                 max_file_bytes=normalized.max_file_bytes,
                 copy_source=normalized.copy_source,
+                mode=normalized.scan_mode,
                 dynamic_enabled=normalized.dynamic_enabled,
                 coverage_policy=normalized.coverage_policy,
                 verification_votes=normalized.verification_votes,
+                cybergym_manifest=normalized.cybergym_manifest,
             )
             try:
                 prepared = _require_success(prepare_result)
@@ -704,6 +738,7 @@ class AuditService:
                 request.target_path,
                 recorder,
                 dynamic_enabled=request.dynamic_enabled,
+                scan_mode=request.scan_mode,
                 prepared=prepared,
             ).run()
             return result
@@ -788,6 +823,7 @@ class AuditService:
             "integrity_status": status.get("integrity_status", "pending"),
             "integrity_errors": status.get("integrity_errors", []),
             "coverage_status": coverage_summary["completeness"],
+            "scan_mode": scan["mode"],
             "dynamic_enabled": bool(scan["dynamic_enabled"]),
             "coverage_policy": scan["coverage_policy"],
             "verification_votes": scan["verification_vote_count"],
@@ -801,8 +837,13 @@ class AuditService:
             "failure_summary": scan.get("failure_summary"),
             "request_source": scan.get("request_source"),
             "workspace_ref": scan.get("workspace_ref"),
-            "audit_mode": "knowledge_guided" if knowledge_base else "standard",
+            "audit_mode": (
+                "cybergym_level1"
+                if scan["mode"] == "cybergym_level1"
+                else "knowledge_guided" if knowledge_base else "standard"
+            ),
             "knowledge_base": knowledge_base,
+            "cybergym": status.get("cybergym"),
         }
         return {
             "schema_version": PUBLIC_SCHEMA_VERSION,
@@ -819,6 +860,7 @@ class AuditService:
                 enabled=bool(scan["dynamic_enabled"]),
                 report_data=report_data,
             ),
+            "cybergym": status.get("cybergym"),
             "phase_runs": phases,
             "workers": workers,
             "artifacts": self._artifact_index(
@@ -1303,6 +1345,7 @@ class AuditService:
             _require_enabled_audit_tools(
                 dynamic_enabled=request.dynamic_enabled,
                 knowledge_base_enabled=request.knowledge_base is not None,
+                cybergym_enabled=request.scan_mode == "cybergym_level1",
             )
             await Storage.init()
             provider_id, model_id = await _resolve_model(request.model)
@@ -1331,6 +1374,7 @@ class AuditService:
                 "model": {"providerID": provider_id, "modelID": model_id},
                 "suppress_parent_completion": True,
                 "audit_owner_subject": caller.subject,
+                "trusted_cybergym_manifest": request.cybergym_manifest,
             },
         )
 
@@ -1507,6 +1551,8 @@ class AuditService:
         knowledge_base = AuditService._knowledge_base_record(request.knowledge_base)
         payload = {
             "target_path": str(request.target_path),
+            "scan_mode": request.scan_mode,
+            "cybergym_manifest": request.cybergym_manifest,
             "model": request.model,
             "include_paths": list(request.include_paths),
             "exclude_patterns": list(request.exclude_patterns),

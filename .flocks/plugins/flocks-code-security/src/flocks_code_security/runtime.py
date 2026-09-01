@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import RLock
 
 from flocks_code_security.manifest import RepositoryManifestService
+from flocks_code_security.cybergym_runtime import CyberGymRuntime
 from flocks_code_security.paths import (
     data_dir,
     ensure_private_directory,
@@ -25,6 +26,7 @@ class PluginRuntime:
     snapshots: TargetSnapshotService
     manifests: RepositoryManifestService
     source: AuditSourceRepository
+    cybergym: CyberGymRuntime
 
 
 _runtime: PluginRuntime | None = None
@@ -44,6 +46,7 @@ def build_runtime(root: Path) -> PluginRuntime:
         snapshots=snapshot_service,
         manifests=snapshot_service.manifests,
         source=AuditSourceRepository(store),
+        cybergym=CyberGymRuntime(store),
     )
 
 

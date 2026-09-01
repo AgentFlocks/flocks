@@ -80,6 +80,8 @@ async def code_security_audit(
     ctx: ToolContext,
     action: str,
     target_path: str | None = None,
+    scan_mode: str = "standard",
+    cybergym_manifest: dict[str, Any] | None = None,
     scan_id: str | None = None,
     model: str | None = None,
     include_paths: list[str] | None = None,
@@ -109,7 +111,7 @@ async def code_security_audit(
             await ctx.ask(
                 "code_security.audit.start",
                 [str(target)],
-                metadata={"action": "start", "dynamic_enabled": bool(dynamic_enabled)},
+                metadata={"action": "start", "dynamic_enabled": bool(dynamic_enabled), "scan_mode": scan_mode},
             )
             if dynamic_enabled:
                 await ctx.ask(
@@ -124,6 +126,8 @@ async def code_security_audit(
             detail = await service.start_scan(
                 StartScanRequest(
                     target_path=target,
+                    scan_mode=scan_mode,
+                    cybergym_manifest=cybergym_manifest,
                     model=model,
                     include_paths=tuple(include_paths or ["."]),
                     exclude_patterns=tuple(exclude_patterns or []),
@@ -242,6 +246,19 @@ def register_public_tool() -> None:
                     "action", ParameterType.STRING, "Lifecycle action.", required=True, enum=PUBLIC_TOOL_ACTIONS
                 ),
                 _parameter("target_path", ParameterType.STRING, "Absolute target directory for start."),
+                _parameter(
+                    "scan_mode",
+                    ParameterType.STRING,
+                    "Audit mode; cybergym_level1 requires cybergym_manifest.",
+                    default="standard",
+                    enum=["standard", "cybergym_level1"],
+                ),
+                _parameter(
+                    "cybergym_manifest",
+                    ParameterType.OBJECT,
+                    "Trusted CyberGym Level 1 execution manifest for start.",
+                    required=False,
+                ),
                 _parameter("scan_id", ParameterType.STRING, "Scan identifier for status, wait, result, or cancel."),
                 _parameter("model", ParameterType.STRING, "Optional pinned provider/model."),
                 _parameter(

@@ -1,0 +1,26 @@
+name: code-security-cybergym-solver
+description: Hidden CyberGym Level 1 raw-input PoC solver.
+mode: subagent
+hidden: true
+delegatable: false
+tags:
+  - security
+  - code-security
+  - cybergym
+  - internal
+temperature: 0.0
+steps: 96
+skills: []
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - audit_cybergym_context
+  - audit_cybergym_artifact_create
+  - audit_cybergym_replay
+  - audit_cybergym_gdb
+  - audit_cybergym_fuzz_start
+  - audit_cybergym_fuzz_status
+  - audit_cybergym_minimize
+  - audit_cybergym_submit

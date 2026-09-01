@@ -233,6 +233,37 @@ class ReportWriter:
                             "networkMode": "none",
                         }
                     )
+            cybergym_document: dict[str, Any] | None = None
+            if scan["mode"] == "cybergym_level1":
+                task = self.store.get_cybergym_task(scan_id)
+                if task is None:
+                    raise ValueError("CyberGym task is missing from a CyberGym scan")
+                submission = self.store.get_cybergym_submission(scan_id)
+                cybergym_document = {
+                    "documentType": "flocks-code-security.cybergym-level1",
+                    "schemaVersion": "1.0",
+                    "scanId": scan_id,
+                    "taskId": task["task_id"],
+                    "status": task["status"],
+                    "finalArtifactId": task.get("final_artifact_id"),
+                    "localValidation": task.get("local_validation"),
+                    "selectionReason": task.get("selection_reason"),
+                    "submission": submission,
+                }
+                final_artifact_id = task.get("final_artifact_id")
+                if isinstance(final_artifact_id, str):
+                    artifact = self.store.get_cybergym_artifact(
+                        scan_id, final_artifact_id, include_data=True
+                    )
+                    if artifact is None:
+                        raise ValueError("CyberGym final artifact is missing")
+                    artifact_path = f"poc/cybergym/{final_artifact_id}.bin"
+                    supplemental_contents[artifact_path] = artifact["data"]
+                    cybergym_document["finalArtifactRef"] = artifact_path
+                    cybergym_document["finalArtifact"] = {
+                        key: value for key, value in artifact.items() if key != "data"
+                    }
+                supplemental_contents["cybergym-level1.json"] = canonical_json_bytes(cybergym_document)
             artifact_contents = {
                 "findings.json": findings_bytes,
                 "coverage.json": coverage_bytes,
@@ -251,6 +282,7 @@ class ReportWriter:
                 completed_at,
                 artifacts,
                 knowledge_base=data["knowledge_base"],
+                cybergym=cybergym_document,
             )
             artifact_contents.update(
                 {
@@ -941,6 +973,7 @@ class ReportWriter:
         completed_at: str,
         artifacts: list[dict[str, str]],
         knowledge_base: dict[str, Any] | None = None,
+        cybergym: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         target: dict[str, Any] = {
             "kind": snapshot.target_kind,
@@ -979,6 +1012,15 @@ class ReportWriter:
         else:
             runtime_status = "Target code was not executed."
             validation_mode = "Independent static source verification"
+        if cybergym is not None:
+            runtime_status = (
+                "CyberGym Level 1 used only the manifest-locked vulnerable-side runner; "
+                "fixed-side behavior was not exposed to the solver."
+            )
+            validation_mode = (
+                "Static source verification plus constrained vulnerable replay, batch GDB, "
+                "and libFuzzer evidence"
+            )
         scope: dict[str, Any] = {
             "includePaths": coverage["includePaths"],
             "excludePaths": coverage["excludePaths"],
@@ -988,7 +1030,11 @@ class ReportWriter:
             ),
             "runtimeStatus": runtime_status,
             "validationMode": validation_mode,
-            "context": "Threat-model-guided standard source-code security audit.",
+            "context": (
+                "CyberGym Level 1 static audit and constrained raw-input PoC solving."
+                if cybergym is not None
+                else "Threat-model-guided standard source-code security audit."
+            ),
         }
         if limitations:
             scope["limitations"] = limitations
@@ -1016,6 +1062,15 @@ class ReportWriter:
                 "sha256": knowledge_base["sha256"],
                 "byteLength": knowledge_base["byte_length"],
                 "trust": knowledge_base["trust"],
+            }
+        if cybergym is not None:
+            manifest_scan["cyberGym"] = {
+                "taskId": cybergym["taskId"],
+                "status": cybergym["status"],
+                "finalArtifactId": cybergym["finalArtifactId"],
+                "localValidation": cybergym["localValidation"],
+                "selectionReason": cybergym["selectionReason"],
+                "resultRef": "cybergym-level1.json",
             }
         return {
             "documentType": "codex-security.scan-manifest",
@@ -1084,6 +1139,8 @@ class ReportWriter:
                 media_type = "text/markdown"
             elif path.endswith(".sarif"):
                 media_type = "application/sarif+json"
+            elif path.endswith(".bin"):
+                media_type = "application/octet-stream"
             records.append(artifact_record(path, value, media_type))
         return records
 
@@ -1159,6 +1216,17 @@ class ReportWriter:
                     f"- Knowledge base: `{ReportWriter._markdown_text(knowledge_base['displayName'])}`",
                     f"- Knowledge base SHA-256: `{knowledge_base['sha256']}`",
                     "- Knowledge base trust: `untrusted external hypothesis; not evidence`",
+                ]
+            )
+        cybergym = scan.get("cyberGym")
+        if cybergym is not None:
+            lines.extend(
+                [
+                    "- Audit mode: `cybergym_level1`",
+                    f"- CyberGym task: `{ReportWriter._markdown_text(cybergym['taskId'])}`",
+                    f"- Final artifact: `{ReportWriter._markdown_text(cybergym.get('finalArtifactId') or 'none')}`",
+                    f"- Local validation: `{ReportWriter._markdown_text(cybergym.get('localValidation') or 'failed_no_artifact')}`",
+                    f"- Artifact selection: {ReportWriter._markdown_text(cybergym.get('selectionReason') or 'no artifact was generated')}",
                 ]
             )
         lines.extend(

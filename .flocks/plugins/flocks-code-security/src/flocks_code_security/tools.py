@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import sqlite3
@@ -45,6 +46,7 @@ from flocks_code_security.orchestration import (
     baseline_prompt,
     build_follow_up_unit,
     investigator_prompt,
+    cybergym_solver_prompt,
     plan_baseline_units,
     plan_probe_units,
     plan_threat_model_units,
@@ -65,6 +67,7 @@ ROLE_AGENTS = {
     "investigator": "code-security-investigator",
     "verifier": "code-security-verifier",
     "prober": "code-security-prober",
+    "cybergym_solver": "code-security-cybergym-solver",
 }
 _AGENT_DEFINITIONS_ROOT = Path(__file__).resolve().parent / "agents"
 
@@ -84,6 +87,7 @@ def _ruleset_digest() -> str:
         "coverage.py",
         "dockerfile_policy.py",
         "dynamic_validation.py",
+        "cybergym_runtime.py",
         "orchestration.py",
         "reporting.py",
         "schemas/coverage.schema.json",
@@ -103,6 +107,7 @@ SOURCE_SUBMIT_ROLES = {"baseline", "investigator"}
 THREAT_MODEL_CONSUMER_ROLES = {"baseline", "investigator"}
 VERIFIER_ROLE = {"verifier"}
 PROBER_ROLE = {"prober"}
+CYBERGYM_SOLVER_ROLE = {"cybergym_solver"}
 KNOWLEDGE_BASE_ROLES = COORDINATOR_ROLE | THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES
 SOURCE_READ_ROLES = THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | VERIFIER_ROLE | PROBER_ROLE
 EVIDENCE_ROLES = {
@@ -143,6 +148,14 @@ AUDIT_TOOL_NAMES = (
     "audit_cancel",
     "audit_run_workers",
     "audit_wait_workers",
+    "audit_cybergym_context",
+    "audit_cybergym_artifact_create",
+    "audit_cybergym_replay",
+    "audit_cybergym_gdb",
+    "audit_cybergym_fuzz_start",
+    "audit_cybergym_fuzz_status",
+    "audit_cybergym_minimize",
+    "audit_cybergym_submit",
 )
 
 
@@ -278,6 +291,16 @@ def _coordinator_binding(ctx: ToolContext, scan_id: str):
     return binding
 
 
+def _cybergym_binding(ctx: ToolContext):
+    runtime = get_runtime()
+    _require_agent_execution(ctx, CYBERGYM_SOLVER_ROLE)
+    binding = runtime.store.require_binding(ctx.session_id, CYBERGYM_SOLVER_ROLE)
+    scan = runtime.store.get_scan(binding.scan_id)
+    if scan is None or scan["mode"] != "cybergym_level1":
+        raise ValueError("CyberGym tools require a cybergym_level1 scan")
+    return binding
+
+
 async def audit_prepare(
     ctx: ToolContext,
     target_path: str,
@@ -289,9 +312,18 @@ async def audit_prepare(
     dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
+    cybergym_manifest: dict[str, Any] | None = None,
 ) -> ToolResult:
-    if mode != "standard":
-        return _error("Only standard audits are implemented in this version", title="Audit preparation")
+    if mode not in {"standard", "cybergym_level1"}:
+        return _error("Unsupported audit mode", title="Audit preparation")
+    trusted_cybergym_manifest = ctx.extra.get("trusted_cybergym_manifest")
+    if mode == "cybergym_level1" and (
+        not isinstance(trusted_cybergym_manifest, dict)
+        or cybergym_manifest != trusted_cybergym_manifest
+    ):
+        return _error("cybergym_level1 requires a service-bound trusted manifest", title="Audit preparation")
+    if mode == "standard" and cybergym_manifest is not None:
+        return _error("cybergym_manifest requires cybergym_level1 mode", title="Audit preparation")
     runtime = get_runtime()
     snapshot = None
     scan_id = None
@@ -317,6 +349,13 @@ async def audit_prepare(
             coverage_policy=coverage_policy,
             verification_vote_count=verification_votes,
         )
+        cybergym_task = None
+        if mode == "cybergym_level1":
+            cybergym_task = await asyncio.to_thread(
+                runtime.store.create_cybergym_task,
+                scan_id,
+                cybergym_manifest,
+            )
         await asyncio.to_thread(
             runtime.store.bind_session,
             session_id=ctx.session_id,
@@ -328,11 +367,13 @@ async def audit_prepare(
             success=True,
             output={
                 "scan_id": scan_id,
+                "scan_mode": mode,
                 "status": "running",
                 "dynamic_enabled": bool(dynamic_enabled),
                 "coverage_policy": coverage_policy,
                 "verification_votes": verification_votes,
                 "snapshot": snapshot.public_dict(),
+                "cybergym_task": cybergym_task,
             },
             title=f"Prepared code audit {scan_id}",
             metadata={"scan_id": scan_id, "snapshot_id": snapshot.snapshot_id},
@@ -343,6 +384,146 @@ async def audit_prepare(
         if snapshot is not None:
             await asyncio.to_thread(runtime.snapshots.delete, snapshot.snapshot_id)
         return _error(exc, title="Audit preparation failed")
+
+
+def _decode_cybergym_artifact_input(data: str, encoding: str) -> bytes:
+    if not isinstance(data, str) or len(data) > 8 * 1024 * 1024:
+        raise ValueError("CyberGym artifact data must be a bounded string")
+    if encoding == "utf8":
+        return data.encode("utf-8")
+    if encoding == "hex":
+        try:
+            return bytes.fromhex(data)
+        except ValueError as exc:
+            raise ValueError("CyberGym hex artifact data is invalid") from exc
+    if encoding == "base64":
+        try:
+            return base64.b64decode(data.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError) as exc:
+            raise ValueError("CyberGym base64 artifact data is invalid") from exc
+    raise ValueError("CyberGym artifact encoding must be utf8, hex, or base64")
+
+
+async def audit_cybergym_context(ctx: ToolContext) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        return ToolResult(
+            success=True,
+            output=get_runtime().cybergym.context(binding.scan_id),
+            title="CyberGym Level 1 task context",
+            metadata={"scan_id": binding.scan_id},
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym context failed")
+
+
+async def audit_cybergym_artifact_create(
+    ctx: ToolContext,
+    data: str,
+    encoding: str,
+) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        raw = _decode_cybergym_artifact_input(data, encoding)
+        artifact = get_runtime().cybergym.artifact_create(
+            binding.scan_id,
+            kind="seed",
+            raw=raw,
+            provenance={"operation": "solver_artifact_create", "encoding": encoding},
+        )
+        return ToolResult(
+            success=True,
+            output={key: value for key, value in artifact.items() if key != "data"},
+            title="Created CyberGym raw seed artifact",
+            metadata={"scan_id": binding.scan_id, "artifact_id": artifact["artifact_id"]},
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym artifact creation failed")
+
+
+async def audit_cybergym_replay(ctx: ToolContext, artifact_id: str) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        output = await get_runtime().cybergym.replay(binding.scan_id, artifact_id)
+        return ToolResult(success=True, output=output, title="CyberGym vulnerable-side replay")
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym replay failed")
+
+
+async def audit_cybergym_gdb(
+    ctx: ToolContext,
+    artifact_id: str,
+    intent: dict[str, Any],
+) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        output = await get_runtime().cybergym.gdb(binding.scan_id, artifact_id, intent)
+        return ToolResult(success=True, output=output, title="CyberGym batch GDB check")
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym GDB check failed")
+
+
+async def audit_cybergym_fuzz_start(
+    ctx: ToolContext,
+    seed_artifact_ids: list[str],
+    dictionary: list[str] | None = None,
+    budget_seconds: int | None = None,
+    max_length: int | None = None,
+) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        output = await get_runtime().cybergym.fuzz_start(
+            binding.scan_id,
+            seed_artifact_ids,
+            dictionary=dictionary,
+            budget_seconds=budget_seconds,
+            max_length=max_length,
+        )
+        return ToolResult(success=True, output=output, title="Started CyberGym libFuzzer search")
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym fuzz start failed")
+
+
+async def audit_cybergym_fuzz_status(ctx: ToolContext, run_id: str) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        output = get_runtime().cybergym.fuzz_status(binding.scan_id, run_id)
+        return ToolResult(success=True, output=output, title="CyberGym libFuzzer status")
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym fuzz status failed")
+
+
+async def audit_cybergym_minimize(ctx: ToolContext, artifact_id: str) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        output = await get_runtime().cybergym.minimize(binding.scan_id, artifact_id)
+        return ToolResult(success=True, output=output, title="CyberGym crash minimization")
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym minimization failed")
+
+
+async def audit_cybergym_submit(
+    ctx: ToolContext,
+    artifact_id: str,
+    local_validation: str,
+    selection_reason: str,
+) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        output = await get_runtime().cybergym.submit(
+            binding.scan_id,
+            artifact_id,
+            local_validation=local_validation,
+            selection_reason=selection_reason,
+        )
+        return ToolResult(
+            success=True,
+            output=output,
+            title="Submitted CyberGym final artifact",
+            metadata={"scan_id": binding.scan_id, "artifact_id": artifact_id},
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym submit failed")
 
 
 async def audit_knowledge_base(ctx: ToolContext) -> ToolResult:
@@ -1328,6 +1509,9 @@ async def audit_run_workers(
                 }
             ]
             candidates_by_id = {}
+        elif phase == "cybergym_solving":
+            units = [{"role": "cybergym_solver", "paths": ["."], "subject_id": None}]
+            candidates_by_id = {}
         else:
             raise ValueError("Unsupported standard-audit worker phase")
         batch = await asyncio.to_thread(
@@ -1570,6 +1754,8 @@ async def _launch_worker(
             snapshot_id=snapshot_id,
             candidate_id=candidate["candidate_id"],
         )
+    elif phase == "cybergym_solving":
+        prompt = cybergym_solver_prompt()
     else:
         raise ValueError("Worker prompt data is incomplete")
     manager = _background_manager()
@@ -1752,7 +1938,7 @@ async def _start_fresh_worker_attempt(
             "failed",
         )
         return False
-    if unit["role"] == "threat_modeler":
+    if unit["role"] in {"threat_modeler", "cybergym_solver"}:
         candidate = None
     else:
         subject_id = unit.get("subject_id")
@@ -2614,7 +2800,14 @@ def register_tools() -> None:
                 required=False,
                 default=True,
             ),
-            _parameter("mode", ParameterType.STRING, "Audit mode. Only standard is currently implemented.", required=False, default="standard", enum=["standard"]),
+            _parameter(
+                "mode",
+                ParameterType.STRING,
+                "Audit mode. Agent-callable preparation is limited to standard mode.",
+                required=False,
+                default="standard",
+                enum=["standard"],
+            ),
             _parameter(
                 "coverage_policy",
                 ParameterType.STRING,
@@ -2630,6 +2823,94 @@ def register_tools() -> None:
                 required=False,
                 default=1,
             ),
+        ],
+    )
+    gdb_intent_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "breakpoints": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["kind", "location"],
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["target", "vulnerable_branch", "observation"]},
+                        "location": {"type": "string", "minLength": 1, "maxLength": 1024},
+                    },
+                },
+            },
+            "variables": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {"type": "string", "minLength": 1, "maxLength": 128},
+            },
+        },
+    }
+    _register(
+        "audit_cybergym_context",
+        "Read the bound CyberGym Level 1 manifest, accepted candidates, artifact inventory, and budgets without fixed-side data.",
+        audit_cybergym_context,
+        [],
+    )
+    _register(
+        "audit_cybergym_artifact_create",
+        "Persist one raw input seed before any CyberGym execution. Accepts only utf8, hex, or base64 bytes.",
+        audit_cybergym_artifact_create,
+        [
+            _parameter("data", ParameterType.STRING, "Raw input encoded using encoding."),
+            _parameter("encoding", ParameterType.STRING, "Input encoding.", enum=["utf8", "hex", "base64"]),
+        ],
+    )
+    _register(
+        "audit_cybergym_replay",
+        "Replay one persisted raw input against the manifest-locked vulnerable runner. A crash is positive local evidence.",
+        audit_cybergym_replay,
+        [_parameter("artifact_id", ParameterType.STRING, "Persisted CyberGym artifact identifier.")],
+    )
+    _register(
+        "audit_cybergym_gdb",
+        "Run a manifest-locked batch GDB reachability check using only structured breakpoint and variable intent.",
+        audit_cybergym_gdb,
+        [
+            _parameter("artifact_id", ParameterType.STRING, "Persisted CyberGym artifact identifier."),
+            _parameter("intent", ParameterType.OBJECT, "Structured GDB intent.", json_schema=gdb_intent_schema),
+        ],
+    )
+    _register(
+        "audit_cybergym_fuzz_start",
+        "Start a manifest-locked libFuzzer job from persisted seed artifacts.",
+        audit_cybergym_fuzz_start,
+        [
+            _parameter("seed_artifact_ids", ParameterType.ARRAY, "One to 32 persisted seed artifact IDs.", json_schema={"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": {"type": "string", "minLength": 1}}),
+            _parameter("dictionary", ParameterType.ARRAY, "Optional bounded libFuzzer dictionary tokens.", required=False, json_schema={"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}}),
+            _parameter("budget_seconds", ParameterType.INTEGER, "Optional fuzz budget bounded by the manifest.", required=False),
+            _parameter("max_length", ParameterType.INTEGER, "Optional maximum generated input length.", required=False),
+        ],
+    )
+    _register(
+        "audit_cybergym_fuzz_status",
+        "Read one CyberGym libFuzzer job and its persisted corpus or crash artifacts.",
+        audit_cybergym_fuzz_status,
+        [_parameter("run_id", ParameterType.STRING, "CyberGym fuzz run identifier.")],
+    )
+    _register(
+        "audit_cybergym_minimize",
+        "Minimize a persisted crash via the manifest-locked libFuzzer target, then replay it.",
+        audit_cybergym_minimize,
+        [_parameter("artifact_id", ParameterType.STRING, "Persisted crash artifact identifier.")],
+    )
+    _register(
+        "audit_cybergym_submit",
+        "Perform the single official CyberGym submission using an existing persisted artifact ID; inline or empty defaults are forbidden.",
+        audit_cybergym_submit,
+        [
+            _parameter("artifact_id", ParameterType.STRING, "Existing persisted CyberGym artifact identifier."),
+            _parameter("local_validation", ParameterType.STRING, "Local validation state.", enum=["verified", "unverified"]),
+            _parameter("selection_reason", ParameterType.STRING, "Truthful reason for selecting this artifact."),
         ],
     )
     _register(
@@ -2841,6 +3122,7 @@ def register_tools() -> None:
                     "verification",
                     "probing",
                     "targeted_rescan",
+                    "cybergym_solving",
                 ],
             ),
         ],

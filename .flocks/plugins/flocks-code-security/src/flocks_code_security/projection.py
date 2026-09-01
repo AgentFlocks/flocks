@@ -65,6 +65,16 @@ AGENT_TOOLS = {
         "audit_search",
         "audit_submit_probe",
     ],
+    "code-security-cybergym-solver": [
+        "audit_cybergym_context",
+        "audit_cybergym_artifact_create",
+        "audit_cybergym_replay",
+        "audit_cybergym_gdb",
+        "audit_cybergym_fuzz_start",
+        "audit_cybergym_fuzz_status",
+        "audit_cybergym_minimize",
+        "audit_cybergym_submit",
+    ],
 }
 
 

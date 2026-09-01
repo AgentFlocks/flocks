@@ -218,6 +218,7 @@ def test_all_audit_tools_register() -> None:
             "verification",
         "probing",
         "targeted_rescan",
+        "cybergym_solving",
     ]
     prepare = ToolRegistry.get("audit_prepare").info
     verification_votes = next(

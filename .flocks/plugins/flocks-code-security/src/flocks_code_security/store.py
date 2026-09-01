@@ -58,6 +58,7 @@ WORKER_ROLE_AGENTS = {
     "investigator": "code-security-investigator",
     "verifier": "code-security-verifier",
     "prober": "code-security-prober",
+    "cybergym_solver": "code-security-cybergym-solver",
 }
 DYNAMIC_EXECUTION_CATEGORIES = (
     "code-execution",
@@ -69,7 +70,7 @@ DYNAMIC_EXECUTION_CATEGORIES = (
     "unsafe-deserialization",
 )
 # Bump this whenever initialize() adds or changes schema migrations.
-STORE_SCHEMA_VERSION = 1
+STORE_SCHEMA_VERSION = 2
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -717,6 +718,63 @@ class ScanStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS cybergym_tasks (
+                    scan_id TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    task_id TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('active', 'submitting', 'submitted', 'failed_no_artifact')
+                    ),
+                    final_artifact_id TEXT,
+                    local_validation TEXT CHECK (
+                        local_validation IN ('verified', 'unverified', 'failed_no_artifact')
+                    ),
+                    selection_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cybergym_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL REFERENCES cybergym_tasks(scan_id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK (
+                        kind IN ('seed', 'corpus', 'crash', 'minimized', 'dictionary')
+                    ),
+                    sha256 TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                    raw_bytes BLOB NOT NULL,
+                    parent_id TEXT REFERENCES cybergym_artifacts(artifact_id),
+                    provenance_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(scan_id, sha256, kind, parent_id)
+                );
+                CREATE TABLE IF NOT EXISTS cybergym_runs (
+                    run_id TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL REFERENCES cybergym_tasks(scan_id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK (kind IN ('replay', 'gdb', 'fuzz', 'minimize')),
+                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+                    input_json TEXT NOT NULL,
+                    result_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cybergym_budget (
+                    scan_id TEXT NOT NULL REFERENCES cybergym_tasks(scan_id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK (kind IN ('replay', 'gdb', 'fuzz', 'minimize')),
+                    used INTEGER NOT NULL DEFAULT 0 CHECK (used >= 0),
+                    PRIMARY KEY (scan_id, kind)
+                );
+                CREATE TABLE IF NOT EXISTS cybergym_submissions (
+                    scan_id TEXT PRIMARY KEY REFERENCES cybergym_tasks(scan_id) ON DELETE CASCADE,
+                    submission_id TEXT NOT NULL UNIQUE,
+                    artifact_id TEXT NOT NULL REFERENCES cybergym_artifacts(artifact_id),
+                    local_validation TEXT NOT NULL CHECK (local_validation IN ('verified', 'unverified')),
+                    selection_reason TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    official_result_json TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('submitting', 'completed')),
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
                 CREATE TABLE IF NOT EXISTS scan_phase_runs (
                     phase_run_id TEXT PRIMARY KEY,
                     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
@@ -969,6 +1027,14 @@ class ScanStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS verification_votes_scan_candidate "
                 "ON verification_votes(scan_id, candidate_id, vote_index)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS cybergym_artifacts_scan_created "
+                "ON cybergym_artifacts(scan_id, created_at, artifact_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS cybergym_runs_scan_created "
+                "ON cybergym_runs(scan_id, created_at, run_id)"
             )
             connection.execute(
                 "UPDATE work_units SET started_at = created_at WHERE started_at IS NULL AND status != 'pending'"
@@ -1308,7 +1374,7 @@ class ScanStore:
         status: str = "pending",
         assignment_digest: str | None = None,
     ) -> str:
-        if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober"}:
+        if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober", "cybergym_solver"}:
             raise ValueError("Unsupported work-unit role")
         if not paths or not all(isinstance(path, str) and path for path in paths):
             raise ValueError("Work units require at least one path")
@@ -1365,6 +1431,7 @@ class ScanStore:
             "verification",
             "probing",
             "targeted_rescan",
+            "cybergym_solving",
         }:
             raise ValueError("Unsupported worker phase")
         if not units or len(units) > 32:
@@ -1376,6 +1443,8 @@ class ScanStore:
             scan = self._require_scan_status(connection, scan_id, {"running"})
             if phase == "probing" and not bool(scan["dynamic_enabled"]):
                 raise ValueError("Dynamic validation is not enabled for this scan")
+            if phase == "cybergym_solving" and scan["mode"] != "cybergym_level1":
+                raise ValueError("CyberGym solver requires cybergym_level1 scan mode")
             active = connection.execute(
                 "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = ? AND status IN ('pending', 'running')",
                 (scan_id, phase),
@@ -1439,6 +1508,22 @@ class ScanStore:
                     raise ValueError("A targeted rescan has already been created")
                 if len(units) != 1 or units[0].get("paths") != directive["paths"]:
                     raise ValueError("Targeted-rescan scope must exactly match the adjudication")
+            if phase == "cybergym_solving":
+                task = connection.execute(
+                    "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+                ).fetchone()
+                finalized = connection.execute(
+                    "SELECT 1 FROM adjudications WHERE scan_id = ? AND action = 'finalize'",
+                    (scan_id,),
+                ).fetchone()
+                prior = connection.execute(
+                    "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = 'cybergym_solving'",
+                    (scan_id,),
+                ).fetchone()
+                if task is None or task["status"] != "active" or finalized is None or prior is not None:
+                    raise ValueError("CyberGym solving requires one active task after final adjudication")
+                if len(units) != 1 or units[0].get("paths") != ["."]:
+                    raise ValueError("CyberGym solving requires exactly one task-level work unit")
             connection.execute(
                 "INSERT INTO worker_batches VALUES (?, ?, ?, ?, ?, ?)",
                 (batch_id, scan_id, phase, "pending", now, now),
@@ -1449,7 +1534,7 @@ class ScanStore:
                 subject_id = unit.get("subject_id")
                 vote_index = unit.get("vote_index")
                 assignment_digest = unit.get("assignment_digest")
-                if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober"}:
+                if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober", "cybergym_solver"}:
                     raise ValueError("Unsupported work-unit role")
                 expected_role = {
                     "threat_modeling": "threat_modeler",
@@ -1458,6 +1543,7 @@ class ScanStore:
                     "verification": "verifier",
                     "probing": "prober",
                     "targeted_rescan": "baseline",
+                    "cybergym_solving": "cybergym_solver",
                 }[phase]
                 if role != expected_role:
                     raise ValueError("Work-unit role does not match its phase")
@@ -2018,6 +2104,13 @@ class ScanStore:
                     "SELECT 1 FROM dynamic_runs WHERE probe_work_unit_id = ? AND candidate_id = ?",
                     (work_unit_id, assignment["subject_id"]),
                 ).fetchone()
+            elif role == "cybergym_solver":
+                row = connection.execute(
+                    "SELECT 1 FROM cybergym_tasks WHERE scan_id = ("
+                    "SELECT scan_id FROM work_units WHERE work_unit_id = ?"
+                    ") AND status IN ('submitted', 'failed_no_artifact')",
+                    (work_unit_id,),
+                ).fetchone()
             else:
                 raise ValueError("Unsupported work-unit role")
         if row is None:
@@ -2298,6 +2391,437 @@ class ScanStore:
         with self._connect() as connection:
             scan = self._require_scan_status(connection, scan_id, {"running"})
             self._require_dynamic_ready(connection, scan_id, scan=scan)
+
+    def create_cybergym_task(self, scan_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        """Persist a host-validated Level 1 task before a solver can access it."""
+        from flocks_code_security.cybergym_runtime import CyberGymTargetManifest
+
+        normalized = CyberGymTargetManifest.from_dict(manifest).public_dict()
+        now = _now()
+        with self._lock, self._connect() as connection:
+            scan = self._require_scan_status(connection, scan_id, {"running"})
+            if scan["mode"] != "cybergym_level1":
+                raise ValueError("CyberGym task requires cybergym_level1 scan mode")
+            try:
+                connection.execute(
+                    "INSERT INTO cybergym_tasks (scan_id, task_id, manifest_json, status, "
+                    "final_artifact_id, local_validation, selection_reason, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)",
+                    (
+                        scan_id,
+                        normalized["task_id"],
+                        json.dumps(normalized, ensure_ascii=False, sort_keys=True),
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("CyberGym task already exists for this scan") from exc
+        task = self.get_cybergym_task(scan_id)
+        if task is None:  # pragma: no cover - defensive persistence boundary
+            raise ValueError("CyberGym task was not persisted")
+        return task
+
+    @staticmethod
+    def _decode_cybergym_task(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["manifest"] = json.loads(item.pop("manifest_json"))
+        return item
+
+    @staticmethod
+    def _decode_cybergym_artifact(row: sqlite3.Row, *, include_data: bool = False) -> dict[str, Any]:
+        item = dict(row)
+        item["size"] = item.pop("size_bytes")
+        item["provenance"] = json.loads(item.pop("provenance_json"))
+        raw = item.pop("raw_bytes")
+        if include_data:
+            item["data"] = bytes(raw)
+        return item
+
+    @staticmethod
+    def _decode_cybergym_run(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["input"] = json.loads(item.pop("input_json"))
+        raw_result = item.pop("result_json")
+        item["result"] = json.loads(raw_result) if raw_result else None
+        return item
+
+    def get_cybergym_task(self, scan_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+        return self._decode_cybergym_task(row) if row is not None else None
+
+    def cybergym_context(self, scan_id: str) -> dict[str, Any]:
+        task = self.get_cybergym_task(scan_id)
+        if task is None:
+            raise ValueError("CyberGym task is not available for this scan")
+        with self._connect() as connection:
+            adjudication = connection.execute(
+                "SELECT accepted_candidate_ids_json FROM adjudications "
+                "WHERE scan_id = ? AND action = 'finalize' "
+                "ORDER BY adjudication_round DESC LIMIT 1",
+                (scan_id,),
+            ).fetchone()
+            candidate_ids = json.loads(adjudication["accepted_candidate_ids_json"]) if adjudication else []
+            candidates: list[dict[str, Any]] = []
+            for candidate_id in candidate_ids:
+                row = connection.execute(
+                    "SELECT candidate_id, payload_json, created_at FROM candidates "
+                    "WHERE scan_id = ? AND candidate_id = ?",
+                    (scan_id, candidate_id),
+                ).fetchone()
+                if row is None:
+                    continue
+                evidence_rows = connection.execute(
+                    "SELECT relative_path, blob_digest, start_line, end_line FROM evidence "
+                    "WHERE candidate_id = ? ORDER BY ordinal, rowid",
+                    (candidate_id,),
+                ).fetchall()
+                candidates.append(
+                    {
+                        "candidate_id": row["candidate_id"],
+                        "candidate": json.loads(row["payload_json"]),
+                        "evidence": [dict(item) for item in evidence_rows],
+                    }
+                )
+        return {
+            "task": {
+                key: value
+                for key, value in task.items()
+                if key not in {"final_artifact_id", "selection_reason"}
+            },
+            "candidates": candidates,
+            "artifacts": self.list_cybergym_artifacts(scan_id),
+            "submission": self.get_cybergym_submission(scan_id),
+            "budget": self.cybergym_budget(scan_id),
+        }
+
+    def create_cybergym_artifact(
+        self,
+        scan_id: str,
+        *,
+        kind: str,
+        raw: bytes,
+        parent_id: str | None,
+        provenance: dict[str, Any],
+    ) -> dict[str, Any]:
+        if kind not in {"seed", "corpus", "crash", "minimized", "dictionary"}:
+            raise ValueError("Unsupported CyberGym artifact kind")
+        if not isinstance(raw, bytes):
+            raise ValueError("CyberGym artifact bytes are required")
+        if not isinstance(provenance, dict):
+            raise ValueError("CyberGym artifact provenance must be an object")
+        encoded_provenance = json.dumps(provenance, ensure_ascii=False, sort_keys=True)
+        if len(encoded_provenance.encode("utf-8")) > 16 * 1024:
+            raise ValueError("CyberGym artifact provenance is too large")
+        artifact_id = f"cybergym_artifact_{uuid.uuid4().hex}"
+        digest = hashlib.sha256(raw).hexdigest()
+        now = _now()
+        with self._lock, self._connect() as connection:
+            task = connection.execute(
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None or task["status"] != "active":
+                raise ValueError("CyberGym task is not accepting new artifacts")
+            if parent_id is not None:
+                parent = connection.execute(
+                    "SELECT 1 FROM cybergym_artifacts WHERE artifact_id = ? AND scan_id = ?",
+                    (parent_id, scan_id),
+                ).fetchone()
+                if parent is None:
+                    raise ValueError("CyberGym artifact parent is not in this task")
+            existing = connection.execute(
+                "SELECT * FROM cybergym_artifacts WHERE scan_id = ? AND sha256 = ? "
+                "AND kind = ? AND parent_id IS ?",
+                (scan_id, digest, kind, parent_id),
+            ).fetchone()
+            if existing is not None:
+                return self._decode_cybergym_artifact(existing)
+            connection.execute(
+                "INSERT INTO cybergym_artifacts (artifact_id, scan_id, kind, sha256, "
+                "size_bytes, raw_bytes, parent_id, provenance_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (artifact_id, scan_id, kind, digest, len(raw), raw, parent_id, encoded_provenance, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM cybergym_artifacts WHERE artifact_id = ?", (artifact_id,)
+            ).fetchone()
+        if row is None:  # pragma: no cover - defensive persistence boundary
+            raise ValueError("CyberGym artifact was not persisted")
+        return self._decode_cybergym_artifact(row)
+
+    def get_cybergym_artifact(
+        self,
+        scan_id: str,
+        artifact_id: str,
+        *,
+        include_data: bool = False,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM cybergym_artifacts WHERE scan_id = ? AND artifact_id = ?",
+                (scan_id, artifact_id),
+            ).fetchone()
+        return self._decode_cybergym_artifact(row, include_data=include_data) if row is not None else None
+
+    def list_cybergym_artifacts(self, scan_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM cybergym_artifacts WHERE scan_id = ? ORDER BY created_at, artifact_id",
+                (scan_id,),
+            ).fetchall()
+        return [self._decode_cybergym_artifact(row) for row in rows]
+
+    def consume_cybergym_budget(self, scan_id: str, kind: str, limit: int) -> int:
+        if kind not in {"replay", "gdb", "fuzz", "minimize"}:
+            raise ValueError("Unsupported CyberGym budget kind")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("CyberGym budget limit is invalid")
+        with self._lock, self._connect() as connection:
+            task = connection.execute(
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None or task["status"] != "active":
+                raise ValueError("CyberGym task is not active")
+            connection.execute(
+                "INSERT INTO cybergym_budget (scan_id, kind, used) VALUES (?, ?, 0) "
+                "ON CONFLICT(scan_id, kind) DO NOTHING",
+                (scan_id, kind),
+            )
+            cursor = connection.execute(
+                "UPDATE cybergym_budget SET used = used + 1 WHERE scan_id = ? "
+                "AND kind = ? AND used < ?",
+                (scan_id, kind, limit),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"CyberGym {kind} budget is exhausted")
+            return int(
+                connection.execute(
+                    "SELECT used FROM cybergym_budget WHERE scan_id = ? AND kind = ?",
+                    (scan_id, kind),
+                ).fetchone()[0]
+            )
+
+    def cybergym_budget(self, scan_id: str) -> dict[str, int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT kind, used FROM cybergym_budget WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
+        values = {"replay": 0, "gdb": 0, "fuzz": 0, "minimize": 0}
+        values.update({row["kind"]: int(row["used"]) for row in rows})
+        return values
+
+    def start_cybergym_run(self, scan_id: str, kind: str, input_payload: dict[str, Any]) -> dict[str, Any]:
+        if kind not in {"replay", "gdb", "fuzz", "minimize"} or not isinstance(input_payload, dict):
+            raise ValueError("CyberGym run is invalid")
+        run_id = f"cybergym_run_{uuid.uuid4().hex}"
+        now = _now()
+        with self._lock, self._connect() as connection:
+            task = connection.execute(
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None or task["status"] != "active":
+                raise ValueError("CyberGym task is not active")
+            connection.execute(
+                "INSERT INTO cybergym_runs (run_id, scan_id, kind, status, input_json, result_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'running', ?, NULL, ?, ?)",
+                (run_id, scan_id, kind, json.dumps(input_payload, ensure_ascii=False, sort_keys=True), now, now),
+            )
+        return {"run_id": run_id, "scan_id": scan_id, "kind": kind, "status": "running"}
+
+    def finish_cybergym_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
+        if status not in {"completed", "failed"} or not isinstance(result, dict):
+            raise ValueError("CyberGym run terminal result is invalid")
+        encoded = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        if len(encoded.encode("utf-8")) > 128 * 1024:
+            raise ValueError("CyberGym run result is too large")
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE cybergym_runs SET status = ?, result_json = ?, updated_at = ? "
+                "WHERE run_id = ? AND status = 'running'",
+                (status, encoded, _now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("CyberGym run is not active")
+
+    def get_cybergym_run(self, scan_id: str, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM cybergym_runs WHERE scan_id = ? AND run_id = ?", (scan_id, run_id)
+            ).fetchone()
+        return self._decode_cybergym_run(row) if row is not None else None
+
+    def assert_cybergym_runs_terminal(self, scan_id: str) -> None:
+        with self._connect() as connection:
+            active = connection.execute(
+                "SELECT 1 FROM cybergym_runs WHERE scan_id = ? AND status = 'running' LIMIT 1",
+                (scan_id,),
+            ).fetchone()
+        if active is not None:
+            raise ValueError("CyberGym execution is still running; wait for persisted artifacts before submission")
+
+    def list_cybergym_runs(self, scan_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM cybergym_runs WHERE scan_id = ? ORDER BY created_at, run_id", (scan_id,)
+            ).fetchall()
+        return [self._decode_cybergym_run(row) for row in rows]
+
+    def cybergym_artifact_has_stable_crash(self, scan_id: str, artifact_id: str) -> bool:
+        for run in self.list_cybergym_runs(scan_id):
+            if run["kind"] != "replay" or run["status"] != "completed":
+                continue
+            if run["input"].get("artifact_id") == artifact_id and (run["result"] or {}).get("crash") is True:
+                return True
+        return False
+
+    def cybergym_artifact_evidence(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
+        replay: list[dict[str, Any]] = []
+        gdb: list[dict[str, Any]] = []
+        for run in self.list_cybergym_runs(scan_id):
+            if run["input"].get("artifact_id") != artifact_id:
+                continue
+            if run["kind"] == "replay":
+                replay.append(run["result"] or {})
+            elif run["kind"] == "gdb":
+                gdb.append(run["result"] or {})
+        return {
+            "replay": replay,
+            "gdb": gdb,
+            "stable_crash": any(item.get("crash") is True for item in replay),
+            "vulnerable_branch_reached": any(item.get("vulnerable_branch_reached") is True for item in gdb),
+            "target_reached": any(item.get("target_reached") is True for item in gdb),
+        }
+
+    def select_cybergym_final_artifact(self, scan_id: str) -> dict[str, Any] | None:
+        artifacts = self.list_cybergym_artifacts(scan_id)
+        if not artifacts:
+            return None
+        ranked: list[tuple[tuple[int, str, str], dict[str, Any], dict[str, Any]]] = []
+        for artifact in artifacts:
+            evidence = self.cybergym_artifact_evidence(scan_id, artifact["artifact_id"])
+            score = 0
+            if evidence["stable_crash"]:
+                score += 100
+            if evidence["vulnerable_branch_reached"]:
+                score += 50
+            if evidence["target_reached"]:
+                score += 25
+            if artifact["kind"] in {"crash", "minimized"}:
+                score += 10
+            ranked.append(((score, artifact["created_at"], artifact["artifact_id"]), artifact, evidence))
+        _score, artifact, evidence = max(ranked, key=lambda item: item[0])
+        if evidence["stable_crash"]:
+            validation, reason = "verified", "stable vulnerable-side crash replay"
+        elif evidence["vulnerable_branch_reached"]:
+            validation, reason = "unverified", "strongest retained artifact reached vulnerable branch"
+        elif evidence["target_reached"]:
+            validation, reason = "unverified", "strongest retained artifact reached target function"
+        else:
+            validation, reason = "unverified", "most recent retained raw input artifact"
+        return {"artifact": artifact, "local_validation": validation, "selection_reason": reason, "evidence": evidence}
+
+    def reserve_cybergym_submission(
+        self,
+        scan_id: str,
+        *,
+        artifact_id: str,
+        local_validation: str,
+        selection_reason: str,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _now()
+        submission_id = f"cybergym_submission_{uuid.uuid4().hex}"
+        with self._lock, self._connect() as connection:
+            task = connection.execute(
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None or task["status"] != "active":
+                raise ValueError("CyberGym task has already been finalized")
+            artifact = connection.execute(
+                "SELECT 1 FROM cybergym_artifacts WHERE scan_id = ? AND artifact_id = ?",
+                (scan_id, artifact_id),
+            ).fetchone()
+            if artifact is None:
+                raise ValueError("CyberGym submission artifact is not in this task")
+            connection.execute(
+                "INSERT INTO cybergym_submissions (scan_id, submission_id, artifact_id, local_validation, "
+                "selection_reason, evidence_json, official_result_json, status, created_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL, 'submitting', ?, NULL)",
+                (
+                    scan_id, submission_id, artifact_id, local_validation, selection_reason,
+                    json.dumps(evidence, ensure_ascii=False, sort_keys=True), now,
+                ),
+            )
+            connection.execute(
+                "UPDATE cybergym_tasks SET status = 'submitting', final_artifact_id = ?, "
+                "local_validation = ?, selection_reason = ?, updated_at = ? WHERE scan_id = ?",
+                (artifact_id, local_validation, selection_reason, now, scan_id),
+            )
+        submission = self.get_cybergym_submission(scan_id)
+        if submission is None:  # pragma: no cover - defensive persistence boundary
+            raise ValueError("CyberGym submission was not persisted")
+        return submission
+
+    def complete_cybergym_submission(self, scan_id: str, official_result: dict[str, Any]) -> None:
+        if not isinstance(official_result, dict):
+            raise ValueError("CyberGym official result must be an object")
+        encoded = json.dumps(official_result, ensure_ascii=False, sort_keys=True)
+        if len(encoded.encode("utf-8")) > 64 * 1024:
+            raise ValueError("CyberGym official result is too large")
+        now = _now()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE cybergym_submissions SET official_result_json = ?, status = 'completed', completed_at = ? "
+                "WHERE scan_id = ? AND status = 'submitting'",
+                (encoded, now, scan_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("CyberGym submission is not awaiting an official result")
+            connection.execute(
+                "UPDATE cybergym_tasks SET status = 'submitted', updated_at = ? WHERE scan_id = ?",
+                (now, scan_id),
+            )
+
+    def get_cybergym_submission(self, scan_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM cybergym_submissions WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["evidence"] = json.loads(item.pop("evidence_json"))
+        raw = item.pop("official_result_json")
+        item["official_result"] = json.loads(raw) if raw else None
+        return item
+
+    def mark_cybergym_failed_no_artifact(self, scan_id: str) -> dict[str, Any]:
+        now = _now()
+        with self._lock, self._connect() as connection:
+            task = connection.execute(
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None:
+                raise ValueError("CyberGym task is not available")
+            count = connection.execute(
+                "SELECT COUNT(*) FROM cybergym_artifacts WHERE scan_id = ?", (scan_id,)
+            ).fetchone()[0]
+            if count:
+                raise ValueError("CyberGym task has artifacts and must select one for finalization")
+            cursor = connection.execute(
+                "UPDATE cybergym_tasks SET status = 'failed_no_artifact', local_validation = 'failed_no_artifact', "
+                "selection_reason = 'no generated artifact', updated_at = ? WHERE scan_id = ? AND status = 'active'",
+                (now, scan_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("CyberGym task has already been finalized")
+        task = self.get_cybergym_task(scan_id)
+        if task is None:  # pragma: no cover - defensive persistence boundary
+            raise ValueError("CyberGym task disappeared")
+        return task
 
     def cancel_scan_work(self, scan_id: str) -> list[str]:
         with self._lock, self._connect() as connection:
@@ -2765,6 +3289,12 @@ class ScanStore:
             self._require_threat_model_ready(connection, scan_id)
             self._require_analysis_ready(connection, scan_id)
             self._require_dynamic_ready(connection, scan_id)
+            if scan["mode"] == "cybergym_level1":
+                task = connection.execute(
+                    "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+                ).fetchone()
+                if task is None or task["status"] not in {"submitted", "failed_no_artifact"}:
+                    raise ValueError("CyberGym task must select a final artifact before report finalization")
             latest = connection.execute(
                 "SELECT action FROM adjudications WHERE scan_id = ? ORDER BY adjudication_round DESC LIMIT 1",
                 (scan_id,),
@@ -3412,6 +3942,7 @@ class ScanStore:
             "investigator",
             "verifier",
             "prober",
+            "cybergym_solver",
         }
         if role not in allowed_roles:
             raise ValueError("Unsupported session binding role")
@@ -4723,9 +5254,15 @@ class ScanStore:
                 integrity_status = "invalid"
                 integrity_errors.append("Completed scan does not have a valid completed threat model")
         knowledge_base = self.get_knowledge_base_metadata(scan_id)
+        cybergym_task = self.get_cybergym_task(scan_id)
+        cybergym_submission = self.get_cybergym_submission(scan_id) if cybergym_task is not None else None
         return {
             **scan,
-            "audit_mode": "knowledge_guided" if knowledge_base else "standard",
+            "audit_mode": (
+                "cybergym_level1"
+                if scan["mode"] == "cybergym_level1"
+                else "knowledge_guided" if knowledge_base else "standard"
+            ),
             "knowledge_base": knowledge_base,
             "counts": counts,
             "threat_model_status": threat_model_status,
@@ -4734,6 +5271,19 @@ class ScanStore:
             "integrity_artifacts": integrity_artifacts,
             "adjudication": (dict(adjudication_row) if adjudication_row is not None else None),
             "worker_batches": [dict(row) for row in batch_rows],
+            "cybergym": (
+                {
+                    "task_id": cybergym_task["task_id"],
+                    "status": cybergym_task["status"],
+                    "final_artifact_id": cybergym_task.get("final_artifact_id"),
+                    "local_validation": cybergym_task.get("local_validation"),
+                    "selection_reason": cybergym_task.get("selection_reason"),
+                    "submission": cybergym_submission,
+                    "artifact_count": len(self.list_cybergym_artifacts(scan_id)),
+                }
+                if cybergym_task is not None
+                else None
+            ),
         }
 
     def report_data(self, scan_id: str) -> dict[str, Any]:

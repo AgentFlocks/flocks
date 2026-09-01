@@ -43,12 +43,23 @@ ProgressCallback = Callable[[str, dict[str, Any]], None]
 TERMINAL_BATCH_STATUSES = {"completed", "partial", "failed", "cancelled"}
 DYNAMIC_AGENT_TOOL_NAMES = {"audit_probe_subject", "audit_submit_probe"}
 GUIDED_AUDIT_TOOL_NAMES = {"audit_knowledge_base"}
+CYBERGYM_AGENT_TOOL_NAMES = {
+    "audit_cybergym_context",
+    "audit_cybergym_artifact_create",
+    "audit_cybergym_replay",
+    "audit_cybergym_gdb",
+    "audit_cybergym_fuzz_start",
+    "audit_cybergym_fuzz_status",
+    "audit_cybergym_minimize",
+    "audit_cybergym_submit",
+}
 
 
 def _require_enabled_audit_tools(
     *,
     dynamic_enabled: bool = False,
     knowledge_base_enabled: bool = False,
+    cybergym_enabled: bool = False,
 ) -> None:
     ToolRegistry.init()
     excluded = set()
@@ -56,6 +67,8 @@ def _require_enabled_audit_tools(
         excluded.update(DYNAMIC_AGENT_TOOL_NAMES)
     if not knowledge_base_enabled:
         excluded.update(GUIDED_AUDIT_TOOL_NAMES)
+    if not cybergym_enabled:
+        excluded.update(CYBERGYM_AGENT_TOOL_NAMES)
     required = tuple(name for name in AUDIT_TOOL_NAMES if name not in excluded)
     unavailable = [name for name in required if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled]
     if unavailable:
@@ -245,6 +258,7 @@ class AuditOrchestrator:
         target: Path,
         progress: ProgressCallback | None,
         dynamic_enabled: bool = False,
+        scan_mode: str = "standard",
         dynamic_runner: DockerDynamicRunner | None = None,
         prepared: dict[str, Any] | None = None,
     ) -> None:
@@ -252,6 +266,7 @@ class AuditOrchestrator:
         self.target = target
         self.progress = progress
         self.dynamic_enabled = bool(dynamic_enabled)
+        self.scan_mode = scan_mode
         self.dynamic_runner = dynamic_runner
         self.prepared = prepared
 
@@ -566,6 +581,50 @@ class AuditOrchestrator:
         )
         return decision
 
+    async def _run_cybergym_solver(
+        self,
+        scan_id: str,
+        status: dict[str, Any],
+        scan_observation: Any,
+    ) -> dict[str, Any]:
+        """Run the isolated solver after static adjudication, with a deterministic fallback gate."""
+        if self.scan_mode != "cybergym_level1":
+            return status
+        scope = _start_phase_observation(scan_observation, "cybergym_solving")
+        parent = scan_observation if scope is None else scope.observation
+        try:
+            batch, status = await _run_phase(
+                self.ctx,
+                scan_id,
+                "cybergym_solving",
+                self.progress,
+                parent,
+            )
+            if batch.get("status") != "completed":
+                runtime = get_runtime().cybergym
+                selected = runtime.select_final_artifact(scan_id)
+                if selected is None:
+                    runtime.mark_failed_no_artifact(scan_id)
+                else:
+                    await runtime.submit(
+                        scan_id,
+                        selected["artifact"]["artifact_id"],
+                        local_validation=selected["local_validation"],
+                        selection_reason=selected["selection_reason"],
+                    )
+                status = _require_success(await audit_status(self.ctx, scan_id))
+                _emit(self.progress, "scan.status", status, observation_parent=parent)
+            _end_observation(scope, output={"status": "completed", "counts": status.get("counts", {})})
+            return status
+        except BaseException as exc:
+            _end_observation(
+                scope,
+                output={"status": "failed", "error_type": type(exc).__name__},
+                level="ERROR",
+                status_message=type(exc).__name__,
+            )
+            raise
+
     async def run(self) -> dict[str, Any]:
         scan_id: str | None = None
         scan_scope = None
@@ -592,20 +651,20 @@ class AuditOrchestrator:
                         tags=[
                             "feature:code-security",
                             f"scan:{scan_id}",
-                            "mode:standard",
+                            f"mode:{self.scan_mode}",
                             f"dynamic:{str(self.dynamic_enabled).lower()}",
                         ],
                         input={
                             "scan_id": scan_id,
                             "target": str(self.target),
-                            "mode": "standard",
+                            "mode": self.scan_mode,
                             "dynamic_enabled": self.dynamic_enabled,
                             "snapshot": prepared.get("snapshot", {}),
                         },
                         metadata={
                             "scan_id": scan_id,
                             "target_name": self.target.name,
-                            "mode": "standard",
+                            "mode": self.scan_mode,
                         },
                     )
                 except Exception:
@@ -683,6 +742,12 @@ class AuditOrchestrator:
             if decision["action"] != "finalize":
                 raise RuntimeError("Parent adjudication did not finalize the audit")
 
+            status = await self._run_cybergym_solver(
+                scan_id,
+                status,
+                scan_observation,
+            )
+
             finalized = _require_success(await audit_finalize(self.ctx, scan_id))
             final_event = (
                 "scan.coverage_blocked"
@@ -735,6 +800,8 @@ async def run_standard_audit(
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
     knowledge_base: dict[str, str] | None = None,
+    scan_mode: str = "standard",
+    cybergym_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the trusted standard audit through the shared service layer."""
     from flocks_code_security.service import (
@@ -754,6 +821,8 @@ async def run_standard_audit(
     return await get_audit_service().run_scan(
         StartScanRequest(
             target_path=target,
+            scan_mode=scan_mode,
+            cybergym_manifest=cybergym_manifest,
             model=model,
             copy_source=copy_source,
             dynamic_enabled=dynamic_enabled,

@@ -23,6 +23,8 @@ class CreateScanRequest(BaseModel):
 
     workspace_id: str = Field(alias="workspaceId")
     target_path: str = Field(".", alias="targetPath")
+    scan_mode: str = Field("standard", alias="scanMode", pattern="^(standard|cybergym_level1)$")
+    cybergym_manifest: dict[str, Any] | None = Field(None, alias="cybergymManifest")
     model: str | None = None
     include_paths: list[str] = Field(default_factory=lambda: ["."], alias="includePaths")
     exclude_patterns: list[str] = Field(default_factory=list, alias="excludePatterns")
@@ -109,6 +111,7 @@ def _web_detail(detail: dict[str, Any]) -> dict[str, Any]:
         "findingSummary": detail["finding_summary"],
         "coverageSummary": detail["coverage_summary"],
         "dynamicValidation": detail["dynamic_validation"],
+        "cybergym": detail.get("cybergym"),
         "phaseRuns": detail["phase_runs"],
         "workers": detail["workers"],
         "artifacts": detail["artifacts"],
@@ -165,6 +168,8 @@ async def create_scan(request: Request, payload: CreateScanRequest):
         detail = await service.start_scan(
             StartScanRequest(
                 target_path=target,
+                scan_mode=payload.scan_mode,
+                cybergym_manifest=payload.cybergym_manifest,
                 model=payload.model,
                 include_paths=tuple(payload.include_paths),
                 exclude_patterns=tuple(payload.exclude_patterns),

@@ -100,6 +100,22 @@ def _read_knowledge_base(
     return {"display_name": source.name, "content": content}
 
 
+def _read_cybergym_manifest(path: Path) -> dict[str, Any]:
+    """Read one host-approved Level 1 manifest without treating it as executable input."""
+    source = path.expanduser()
+    if not source.is_file() or source.is_symlink():
+        raise ValueError("CyberGym manifest must be a regular file")
+    if source.stat().st_size > 64 * 1024:
+        raise ValueError("CyberGym manifest may contain at most 64 KiB")
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("CyberGym manifest must be a valid UTF-8 JSON object") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("CyberGym manifest must be a JSON object")
+    return payload
+
+
 def _load_plugin_cli() -> tuple[AuditRunner, StatusReader]:
     """Load the source plugin even when the audit target is the current directory."""
     from flocks.tool.registry import ToolRegistry
@@ -319,6 +335,11 @@ def security_audit(
         "--knowledge-base",
         help="Optional untrusted UTF-8 vulnerability target specification",
     ),
+    cybergym_manifest: Optional[Path] = typer.Option(
+        None,
+        "--cybergym-manifest",
+        help="Trusted Level 1 JSON execution manifest; enables cybergym_level1 mode",
+    ),
 ) -> None:
     """Run the host-orchestrated audit with parent-Agent adjudication."""
     try:
@@ -340,6 +361,9 @@ def security_audit(
                 knowledge_base,
                 audited_target=target,
             )
+        if cybergym_manifest is not None:
+            audit_kwargs["scan_mode"] = "cybergym_level1"
+            audit_kwargs["cybergym_manifest"] = _read_cybergym_manifest(cybergym_manifest)
         result = asyncio.run(run_standard_audit(target, **audit_kwargs))
     except KeyboardInterrupt:
         if not json_output:
