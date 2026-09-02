@@ -28,27 +28,51 @@ from flocks.utils.log import Log
 
 log = Log.create(service="workshop_auth")
 
-_REQUIRED_ENV = "WORKSHOP_JWT_SECRET"
+# ---------------------------------------------------------------------------
+# Algorithm selection — PoC defaults to HS256 for the lightweight standalone
+# reproducer; production should set WORKSHOP_JWT_ALG=RS256 + WORKSHOP_JWKS_URL.
+# ---------------------------------------------------------------------------
+_ALG_ENV = "WORKSHOP_JWT_ALG"
+_JWKS_URL_ENV = "WORKSHOP_JWKS_URL"
+_HS_SECRET_ENV = "WORKSHOP_JWT_SECRET"
 
 
-def _secret() -> str:
-    secret = os.getenv(_REQUIRED_ENV, "")
-    if not secret:
-        raise RuntimeError(f"env {_REQUIRED_ENV} is required for workshop auth")
-    return secret
+def _algorithm() -> str:
+    return os.getenv(_ALG_ENV, "HS256").upper()
 
 
-def _decode(token: str) -> dict:
-    payload = pyjwt.decode(
-        token,
-        _secret(),
-        algorithms=["HS256"],
-        audience="flocks",
-        options={"verify_aud": True, "verify_exp": True},
-    )
+async def _decode(token: str) -> dict:
+    alg = _algorithm()
+    audience = "flocks"
+    options = {"verify_aud": True, "verify_exp": True}
+    if alg == "HS256":
+        secret = os.getenv(_HS_SECRET_ENV, "")
+        if not secret:
+            raise RuntimeError(f"env {_HS_SECRET_ENV} is required for HS256")
+        payload = pyjwt.decode(token, secret, algorithms=["HS256"], audience=audience, options=options)
+    elif alg in ("RS256", "RS384", "RS512", "ES256", "ES384"):
+        from flocks.workshop_auth.client import public_key_for
+
+        jwks_url = os.getenv(_JWKS_URL_ENV, "")
+        if not jwks_url:
+            raise RuntimeError(f"env {_JWKS_URL_ENV} is required for {alg}")
+        try:
+            unverified_header = pyjwt.get_unverified_header(token)
+        except pyjwt.DecodeError as e:
+            raise pyjwt.InvalidTokenError(f"malformed JWT header: {e}") from e
+        kid = unverified_header.get("kid")
+        key = await public_key_for(kid, jwks_url)
+        if key is None:
+            raise pyjwt.InvalidTokenError("unable to resolve JWKS key for token")
+        payload = pyjwt.decode(token, key, algorithms=[alg], audience=audience, options=options)
+    else:
+        raise RuntimeError(f"unsupported WORKSHOP_JWT_ALG={alg!r}")
     if payload.get("iss") != "ai-agent-workshop":
         raise pyjwt.InvalidIssuerError("unexpected issuer")
     return payload
+
+
+
 
 
 class TeamJWTAuthBackend:
@@ -83,7 +107,7 @@ class TeamJWTAuthBackend:
         # Lazy import to avoid a cycle: LocalUser is defined in service.py.
         from flocks.auth.service import LocalUser
 
-        payload = _decode(session_id)
+        payload = await _decode(session_id)
         return LocalUser(
             id=payload["sub"],
             username=payload.get("username", payload["sub"]),
