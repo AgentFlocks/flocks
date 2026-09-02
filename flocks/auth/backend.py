@@ -98,3 +98,37 @@ class AuthBackend(Protocol):
     @classmethod
     async def migrate_legacy_sessions_to_admin(cls, admin_user_id: str) -> None: ...
 
+    # ----- Optional: bearer / machine-to-machine auth (proposed) -----
+    #
+    # These two methods are OPTIONAL on the protocol. Backends that do not
+    # implement them simply return ``False`` / ``None`` respectively, and the
+    # server-side auth middleware falls back to the existing API-token path.
+    #
+    # Backends that DO implement them (e.g. a JWT / OIDC backend) take over
+    # Bearer token authentication for non-browser, non-cookie requests.
+    # This unlocks service-to-service use cases without leaking the shared
+    # API token across deployments.
+
+    @classmethod
+    async def supports_bearer_token(cls) -> bool:
+        """Whether this backend can authenticate non-cookie Bearer tokens.
+
+        Default: ``False``. Backends should override to opt in.
+        """
+        return False
+
+    @classmethod
+    async def authenticate_bearer_token(
+        cls,
+        token: str,
+        *,
+        audience: Optional[str] = None,
+    ) -> Optional["LocalUser"]:
+        """Resolve a Bearer token to a LocalUser.
+
+        Default: ``None``. Backends that override ``supports_bearer_token``
+        to ``True`` must also override this to return the LocalUser whose
+        claims match the token, or ``None`` to indicate invalid/untrusted.
+        """
+        return None
+
