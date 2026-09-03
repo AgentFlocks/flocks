@@ -75,7 +75,7 @@ jobs:
             > "${release_metadata}"
 
           resolved_tag="$(jq -er '.tag_name' "${release_metadata}")"
-          is_draft="$(jq -er '.draft' "${release_metadata}")"
+          is_draft="$(jq -r '.draft' "${release_metadata}")"
           published_at="$(jq -r '.published_at // empty' "${release_metadata}")"
 
           if [[ "${resolved_tag}" != "${TAG_NAME}" ]]; then
@@ -218,14 +218,18 @@ jobs:
           encoded_tag="$(jq -rn --arg value "${TAG_NAME}" '$value | @uri')"
           release_lookup="${RUNNER_TEMP}/gitee-release-lookup.json"
           release_response="${RUNNER_TEMP}/gitee-release-response.json"
-          lookup_status="$(
+          if ! lookup_status="$(
             curl --silent --show-error --retry 3 \
               --output "${release_lookup}" \
               --write-out '%{http_code}' \
               --get \
               --data-urlencode "access_token=${GITEE_TOKEN}" \
               "${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${encoded_tag}"
-          )"
+          )"; then
+            echo "::error title=Gitee Release lookup request failed::Could not query ${TAG_NAME} after retries."
+            exit 1
+          fi
+          echo "Gitee Release lookup returned HTTP ${lookup_status}."
 
           common_fields=(
             --data-urlencode "access_token=${GITEE_TOKEN}"
@@ -235,34 +239,70 @@ jobs:
             --data-urlencode "prerelease=${prerelease}"
           )
 
+          release_missing="false"
           if [[ "${lookup_status}" == "200" ]]; then
-            release_id="$(jq -er '.id' "${release_lookup}")"
-            sync_method="PATCH"
-            sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${release_id}"
-            echo "Gitee Release ${TAG_NAME} already exists; updating its metadata only."
+            release_id="$(jq -r '.id // empty' "${release_lookup}")"
+            if [[ -n "${release_id}" ]]; then
+              sync_method="PATCH"
+              sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${release_id}"
+              echo "Gitee Release ${TAG_NAME} already exists; updating its metadata only."
+            elif jq -e 'type == "null"' "${release_lookup}" > /dev/null; then
+              release_missing="true"
+              echo "Gitee returned HTTP 200 with null for missing Release ${TAG_NAME}."
+            else
+              echo "::error title=Unexpected Gitee Release lookup response::HTTP 200 response does not contain a Release ID."
+              exit 1
+            fi
           elif [[ "${lookup_status}" == "404" ]]; then
-            sync_method="POST"
-            sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases"
-            common_fields+=(--data-urlencode "target_commitish=${VERIFIED_SHA}")
-            echo "Creating Gitee Release ${TAG_NAME} at verified commit ${VERIFIED_SHA}."
+            release_missing="true"
           else
             message="$(jq -r '.message // "unknown Gitee API error"' "${release_lookup}" 2>/dev/null || true)"
             echo "::error title=Gitee Release lookup failed::HTTP ${lookup_status}: ${message}"
             exit 1
           fi
 
-          sync_status="$(
+          if [[ "${release_missing}" == "true" ]]; then
+            sync_method="POST"
+            sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases"
+            common_fields+=(--data-urlencode "target_commitish=${VERIFIED_SHA}")
+            echo "Creating Gitee Release ${TAG_NAME} at verified commit ${VERIFIED_SHA}."
+          fi
+
+          if ! sync_status="$(
             curl --silent --show-error --retry 3 \
               --output "${release_response}" \
               --write-out '%{http_code}' \
               --request "${sync_method}" \
               "${common_fields[@]}" \
               "${sync_url}"
-          )"
+          )"; then
+            echo "::error title=Gitee Release sync request failed::Release ${sync_method} failed after retries."
+            exit 1
+          fi
+          echo "Gitee Release ${sync_method} returned HTTP ${sync_status}."
 
           if [[ ! "${sync_status}" =~ ^2[0-9][0-9]$ ]]; then
             message="$(jq -r '.message // "unknown Gitee API error"' "${release_response}" 2>/dev/null || true)"
             echo "::error title=Gitee Release sync failed::HTTP ${sync_status}: ${message}"
+            exit 1
+          fi
+
+          if ! verification_status="$(
+            curl --silent --show-error --retry 3 \
+              --output "${release_response}" \
+              --write-out '%{http_code}' \
+              --get \
+              --data-urlencode "access_token=${GITEE_TOKEN}" \
+              "${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${encoded_tag}"
+          )"; then
+            echo "::error title=Gitee Release verification request failed::Could not verify ${TAG_NAME} after retries."
+            exit 1
+          fi
+          echo "Gitee Release verification returned HTTP ${verification_status}."
+
+          if [[ "${verification_status}" != "200" ]]; then
+            message="$(jq -r '.message // "unknown Gitee API error"' "${release_response}" 2>/dev/null || true)"
+            echo "::error title=Gitee Release verification failed::HTTP ${verification_status}: ${message}"
             exit 1
           fi
 
