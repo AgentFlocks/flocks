@@ -2811,6 +2811,12 @@ class ScanStore:
             ).fetchone()[0]
             if count:
                 raise ValueError("CyberGym task has artifacts and must select one for finalization")
+            active_run = connection.execute(
+                "SELECT 1 FROM cybergym_runs WHERE scan_id = ? AND status = 'running' LIMIT 1",
+                (scan_id,),
+            ).fetchone()
+            if active_run is not None:
+                raise ValueError("CyberGym execution is still running; wait before marking no artifact")
             cursor = connection.execute(
                 "UPDATE cybergym_tasks SET status = 'failed_no_artifact', local_validation = 'failed_no_artifact', "
                 "selection_reason = 'no generated artifact', updated_at = ? WHERE scan_id = ? AND status = 'active'",

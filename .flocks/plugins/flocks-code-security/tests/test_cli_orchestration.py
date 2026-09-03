@@ -80,6 +80,59 @@ async def _final_adjudication(
 
 
 @pytest.mark.asyncio
+async def test_cybergym_solver_fallback_finalizes_completed_worker_without_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def run_phase(_ctx, _scan_id, phase, _progress, _observation):
+        assert phase == "cybergym_solving"
+        return {"status": "completed"}, {"scan_id": "scan_cybergym", "counts": {}}
+
+    async def status(_ctx, scan_id: str) -> ToolResult:
+        assert scan_id == "scan_cybergym"
+        return _result(
+            {
+                "scan_id": scan_id,
+                "counts": {},
+                "cybergym": {"status": "failed_no_artifact"},
+            }
+        )
+
+    class Store:
+        @staticmethod
+        def get_cybergym_task(_scan_id: str):
+            return {"status": "active"}
+
+    class CyberGym:
+        store = Store()
+
+        @staticmethod
+        def select_final_artifact(_scan_id: str):
+            calls.append("select")
+            return None
+
+        @staticmethod
+        def mark_failed_no_artifact(_scan_id: str):
+            calls.append("mark_failed_no_artifact")
+            return {"status": "failed_no_artifact"}
+
+    monkeypatch.setattr(audit_cli, "_run_phase", run_phase)
+    monkeypatch.setattr(audit_cli, "audit_status", status)
+    monkeypatch.setattr(audit_cli, "get_runtime", lambda: SimpleNamespace(cybergym=CyberGym()))
+
+    result = await audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+        scan_mode="cybergym_level1",
+    )._run_cybergym_solver("scan_cybergym", {"counts": {}}, None)
+
+    assert result["cybergym"]["status"] == "failed_no_artifact"
+    assert calls == ["select", "mark_failed_no_artifact"]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_runs_all_required_phases_and_emits_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

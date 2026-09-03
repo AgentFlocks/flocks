@@ -600,8 +600,11 @@ class AuditOrchestrator:
                 self.progress,
                 parent,
             )
-            if batch.get("status") != "completed":
-                runtime = get_runtime().cybergym
+            runtime = get_runtime().cybergym
+            task = runtime.store.get_cybergym_task(scan_id)
+            if task is None:
+                raise RuntimeError("CyberGym task is missing after solver phase")
+            if batch.get("status") != "completed" or task["status"] == "active":
                 selected = runtime.select_final_artifact(scan_id)
                 if selected is None:
                     runtime.mark_failed_no_artifact(scan_id)
@@ -614,6 +617,8 @@ class AuditOrchestrator:
                     )
                 status = _require_success(await audit_status(self.ctx, scan_id))
                 _emit(self.progress, "scan.status", status, observation_parent=parent)
+            elif task["status"] not in {"submitted", "failed_no_artifact"}:
+                raise RuntimeError(f"CyberGym task is not finalizable: {task['status']}")
             _end_observation(scope, output={"status": "completed", "counts": status.get("counts", {})})
             return status
         except BaseException as exc:

@@ -87,6 +87,7 @@ def _ruleset_digest() -> str:
         "coverage.py",
         "dockerfile_policy.py",
         "dynamic_validation.py",
+        "cybergym_judge_worker.py",
         "cybergym_runtime.py",
         "orchestration.py",
         "reporting.py",

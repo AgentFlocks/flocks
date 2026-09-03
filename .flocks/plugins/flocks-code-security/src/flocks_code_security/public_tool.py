@@ -165,6 +165,7 @@ async def code_security_audit(
                 "finding_summary": detail["finding_summary"],
                 "coverage_summary": detail["coverage_summary"],
                 "dynamic_validation": detail["dynamic_validation"],
+                "cybergym": detail.get("cybergym"),
                 "phase_runs": detail["phase_runs"],
             }
         elif action == "wait":

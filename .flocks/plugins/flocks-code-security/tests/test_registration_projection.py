@@ -441,3 +441,33 @@ async def test_public_tool_caller_uses_authenticated_session_scope(
     assert caller.is_admin is False
     assert caller.workspace_ref == "project-1"
     assert caller.authorized_root == workspace.resolve()
+
+
+@pytest.mark.asyncio
+async def test_public_status_exposes_cybergym_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Service:
+        async def get_scan(self, scan_id, _caller):
+            return {
+                "schema_version": "flocks.code-security.tool.v1",
+                "scan": {"scan_id": scan_id},
+                "counts": {},
+                "finding_summary": {},
+                "coverage_summary": {},
+                "dynamic_validation": {},
+                "cybergym": {"task_id": "fixture", "status": "submitted"},
+                "phase_runs": [],
+            }
+
+    monkeypatch.setattr(public_tool, "get_audit_service", lambda: Service())
+    monkeypatch.setattr(public_tool, "_caller", AsyncMock(return_value=object()))
+
+    result = await public_tool.code_security_audit(
+        ToolContext("session-1", "message-1"),
+        action="status",
+        scan_id="scan-1",
+    )
+
+    assert result.success is True
+    assert result.output["cybergym"] == {"task_id": "fixture", "status": "submitted"}

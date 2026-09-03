@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
 from flocks_code_security.manifest import RepositoryManifestService
-from flocks_code_security.cybergym_runtime import CyberGymRuntime
+from flocks_code_security.cybergym_runtime import CyberGymRuntime, OfficialCyberGymJudgeAdapter
 from flocks_code_security.paths import (
     data_dir,
     ensure_private_directory,
@@ -41,12 +42,17 @@ def build_runtime(root: Path) -> PluginRuntime:
         store,
         protected_roots=(root, runtime_dir(), outputs_root()),
     )
+    official_judge = OfficialCyberGymJudgeAdapter.from_environment()
+    task_data_dir = Path(os.environ.get("FLOCKS_CYBERGYM_DATA_DIR", "/home/cybergym/cybergym-server-data"))
+    configured_data_dir = getattr(official_judge, "data_dir", None)
+    if isinstance(configured_data_dir, Path):
+        task_data_dir = configured_data_dir
     return PluginRuntime(
         store=store,
         snapshots=snapshot_service,
         manifests=snapshot_service.manifests,
         source=AuditSourceRepository(store),
-        cybergym=CyberGymRuntime(store),
+        cybergym=CyberGymRuntime(store, submitter=official_judge, task_data_dir=task_data_dir),
     )
 
 

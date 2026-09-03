@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from flocks_code_security.agents import register_agents
@@ -23,5 +24,9 @@ def register(_loader: Any = None) -> None:
     register_projection()
     register_agents()
     if not _service_initialized:
-        get_audit_service().recover_orphaned_scans()
+        # Parallel batch workers share one database; a worker must not recover
+        # scans owned by sibling processes during plugin initialization.
+        skip_recovery = os.environ.get("FLOCKS_CODE_SECURITY_SKIP_ORPHAN_RECOVERY", "").lower()
+        if skip_recovery not in {"1", "true", "yes"}:
+            get_audit_service().recover_orphaned_scans()
         _service_initialized = True
