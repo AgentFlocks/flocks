@@ -80,10 +80,11 @@ def test_maybe_register_on_env_off_by_default():
     os.environ.pop("FLOCKS_AUTH", None)
     registered = maybe_register_on_env()
     assert registered is False
-    assert AuthService.get_backend() is not None or True  # LocalAuthBackend may exist; just check our class wasn't injected
+    # get_backend() 返回类对象本身(register_backend 存 class),
+    # 因此用 `is` 比较而非 isinstance(isinstance(类, 类) 恒 False)
     from flocks.workshop_auth.backend import TeamJWTAuthBackend
 
-    assert not isinstance(AuthService.get_backend(), TeamJWTAuthBackend)
+    assert AuthService.get_backend() is not TeamJWTAuthBackend
 
 
 def test_maybe_register_on_env_workshop_jwt(monkeypatch):
@@ -94,7 +95,7 @@ def test_maybe_register_on_env_workshop_jwt(monkeypatch):
     from flocks.workshop_auth.backend import TeamJWTAuthBackend
 
     assert maybe_register_on_env() is True
-    assert isinstance(AuthService.get_backend(), TeamJWTAuthBackend)
+    assert AuthService.get_backend() is TeamJWTAuthBackend
 
 
 def test_register_workshop_auth_idempotent(monkeypatch):
@@ -106,7 +107,7 @@ def test_register_workshop_auth_idempotent(monkeypatch):
     register_workshop_auth()  # second call must not throw
     from flocks.auth.service import AuthService
 
-    assert isinstance(AuthService.get_backend(), TeamJWTAuthBackend)
+    assert AuthService.get_backend() is TeamJWTAuthBackend
 
 
 # ---------------------------------------------------------------------------
@@ -208,14 +209,16 @@ async def test_backend_hs256_expired(monkeypatch):
 
 
 def test_backend_rs256_requires_jwks_url(monkeypatch):
+    """RS256 模式未配 JWKS_URL 时, _decode(现为 async)必须拒。
+    用 asyncio.run 驱动而非事件循环内 await(该用例为同步测试)。"""
+    import asyncio
+
     monkeypatch.setenv("WORKSHOP_JWT_ALG", "RS256")
     monkeypatch.delenv("WORKSHOP_JWKS_URL", raising=False)
     monkeypatch.setenv("WORKSHOP_JWT_SECRET", "test-secret")
     from flocks.workshop_auth.backend import _decode
     import jwt as pyjwt
 
-    # Build a syntactically valid RS256-looking JWT (signature won't verify, but
-    # we expect the env check to fire first).
     token = pyjwt.encode(
         {"sub": "x", "iss": "ai-agent-workshop", "aud": "flocks",
          "iat": int(time.time()), "exp": int(time.time()) + 60},
@@ -223,7 +226,7 @@ def test_backend_rs256_requires_jwks_url(monkeypatch):
         algorithm="HS256",  # wrong alg on purpose — env check fires first
     )
     with pytest.raises(RuntimeError, match="WORKSHOP_JWKS_URL"):
-        _decode(token)
+        asyncio.run(_decode(token))
 
 
 # ---------------------------------------------------------------------------
