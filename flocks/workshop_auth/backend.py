@@ -107,7 +107,13 @@ class TeamJWTAuthBackend:
         # Lazy import to avoid a cycle: LocalUser is defined in service.py.
         from flocks.auth.service import LocalUser
 
-        payload = await _decode(session_id)
+        # 集成契约: token 无效时返回 None(框架语义 → 401 "登录已过期"),
+        # 而非让 pyjwt 异常裸穿(全局异常处理器会包成 500, 破坏客户端
+        # 重试语义)。真实服务联调(2026-09-03)发现并修正。
+        try:
+            payload = await _decode(session_id)
+        except Exception:
+            return None
         return LocalUser(
             id=payload["sub"],
             username=payload.get("username", payload["sub"]),

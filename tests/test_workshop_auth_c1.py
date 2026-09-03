@@ -188,13 +188,14 @@ async def test_backend_hs256_happy(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_backend_hs256_forged_signature(monkeypatch):
+    """伪造签名 → backend 返回 None(框架语义: 401 登录已过期),
+    而非异常裸穿(全局处理器会包 500)。"""
     monkeypatch.setenv("WORKSHOP_JWT_ALG", "HS256")
     monkeypatch.setenv("WORKSHOP_JWT_SECRET", "test-secret")
     from flocks.workshop_auth.backend import TeamJWTAuthBackend
 
     token = _hs256_token("wrong-secret", teams=["team_A"])
-    with pytest.raises(Exception):  # InvalidSignatureError
-        await TeamJWTAuthBackend.get_user_by_session_id(token)
+    assert await TeamJWTAuthBackend.get_user_by_session_id(token) is None
 
 
 @pytest.mark.asyncio
@@ -204,8 +205,7 @@ async def test_backend_hs256_expired(monkeypatch):
     from flocks.workshop_auth.backend import TeamJWTAuthBackend
 
     token = _hs256_token("test-secret", teams=["team_A"], exp_s=-10)
-    with pytest.raises(Exception):  # ExpiredSignatureError
-        await TeamJWTAuthBackend.get_user_by_session_id(token)
+    assert await TeamJWTAuthBackend.get_user_by_session_id(token) is None
 
 
 def test_backend_rs256_requires_jwks_url(monkeypatch):
