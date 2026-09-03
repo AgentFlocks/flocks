@@ -24,7 +24,7 @@ from flocks_code_security.store import ScanStore
 
 
 def _manifest(*, fuzzer_supported: bool = True) -> dict:
-    return {
+    manifest = {
         "task_id": "fixture-level1",
         "task_kind": "other",
         "vulnerable_runner": "fixture:latest",
@@ -46,6 +46,9 @@ def _manifest(*, fuzzer_supported: bool = True) -> dict:
             "max_minimize_runs": 2,
         },
     }
+    if fuzzer_supported:
+        manifest["input_contract"] = {}
+    return manifest
 
 
 def _store(tmp_path: Path, manifest: dict | None = None) -> tuple[ScanStore, str]:
@@ -109,6 +112,43 @@ def test_manifest_rejects_root_mount_and_persists_only_valid_tasks(tmp_path: Pat
     assert task is not None
     assert task["manifest"]["target_binary"] == "/opt/fixture-target"
     assert task["status"] == "active"
+
+
+def test_manifest_input_contract_is_enforced_and_persisted_with_seed_provenance(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest["input_contract"] = {"required_suffix_hex": "01 00 00 00"}
+
+    parsed = CyberGymTargetManifest.from_dict(manifest)
+    assert parsed.public_dict()["input_contract"] == {"required_prefix_hex": "", "required_suffix_hex": "01000000"}
+
+    store, scan_id = _store(tmp_path, manifest)
+    runtime = CyberGymRuntime(store)
+    with pytest.raises(ValueError, match="input_contract"):
+        runtime.artifact_create(scan_id, kind="seed", raw=b"font\x00\x00\x00\x00")
+
+    seed = runtime.artifact_create(
+        scan_id,
+        kind="seed",
+        raw=b"font\x01\x00\x00\x00",
+        provenance={"operation": "fixture"},
+    )
+
+    assert seed["provenance"] == {
+        "input_contract": {"required_prefix_hex": "", "required_suffix_hex": "01000000"},
+        "operation": "fixture",
+    }
+
+
+def test_fuzzer_manifest_requires_structured_input_contract() -> None:
+    missing_contract = _manifest()
+    del missing_contract["input_contract"]
+    with pytest.raises(CyberGymManifestError, match="requires input_contract"):
+        CyberGymTargetManifest.from_dict(missing_contract)
+
+    invalid_contract = _manifest()
+    invalid_contract["input_contract"] = "trailing selector is one"
+    with pytest.raises(CyberGymManifestError, match="input_contract must be an object"):
+        CyberGymTargetManifest.from_dict(invalid_contract)
 
 
 @pytest.mark.asyncio
@@ -187,6 +227,41 @@ async def test_runtime_persists_artifacts_before_execution_and_submits_once(tmp_
             local_validation="verified",
             selection_reason="second attempt",
         )
+
+
+@pytest.mark.asyncio
+async def test_fuzz_requires_vulnerable_replay_preflight(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=_FixtureExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+
+    with pytest.raises(ValueError, match="replay preflight"):
+        await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+
+    assert store.cybergym_budget(scan_id)["fuzz"] == 0
+
+
+@pytest.mark.asyncio
+async def test_clean_replayed_seed_can_fuzz_without_gdb_target_reachability(tmp_path: Path) -> None:
+    class _CleanExecutor(_FixtureExecutor):
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            return CommandResult(0, "", "")
+
+    store, scan_id = _store(tmp_path)
+    executor = _CleanExecutor()
+    runtime = CyberGymRuntime(store, executor=executor)
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    for _ in range(20):
+        status = runtime.fuzz_status(scan_id, started["run_id"])
+        if status["status"] != "running":
+            break
+        await asyncio.sleep(0)
+
+    assert status["status"] == "completed"
+    assert store.cybergym_budget(scan_id)["fuzz"] == 1
 
 
 def test_no_artifact_is_terminal_and_does_not_consume_budget(tmp_path: Path) -> None:

@@ -2883,7 +2883,7 @@ def register_tools() -> None:
     )
     _register(
         "audit_cybergym_fuzz_start",
-        "Start a manifest-locked libFuzzer job from persisted seed artifacts.",
+        "Start a manifest-locked libFuzzer job from persisted seed artifacts after vulnerable replay preflight.",
         audit_cybergym_fuzz_start,
         [
             _parameter("seed_artifact_ids", ParameterType.ARRAY, "One to 32 persisted seed artifact IDs.", json_schema={"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": {"type": "string", "minLength": 1}}),

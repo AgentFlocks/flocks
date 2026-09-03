@@ -82,6 +82,42 @@ class CyberGymLimits:
 
 
 @dataclass(frozen=True)
+class CyberGymInputContract:
+    """Trusted fixed bytes required at the boundaries of every raw seed."""
+
+    required_prefix_hex: str = ""
+    required_suffix_hex: str = ""
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "CyberGymInputContract":
+        if not isinstance(value, dict):
+            raise CyberGymManifestError("input_contract must be an object")
+        allowed = set(cls.__dataclass_fields__)
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise CyberGymManifestError(f"input_contract contains unknown fields: {', '.join(unknown)}")
+        normalized: dict[str, str] = {}
+        for name in allowed:
+            raw = value.get(name, "")
+            if not isinstance(raw, str) or len(raw) > 4_096:
+                raise CyberGymManifestError(f"input_contract {name} must be a hex string of at most 4096 characters")
+            try:
+                normalized[name] = bytes.fromhex(raw).hex()
+            except ValueError as exc:
+                raise CyberGymManifestError(f"input_contract {name} must be valid hexadecimal") from exc
+        return cls(**normalized)
+
+    def public_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+    def validate_seed(self, raw: bytes) -> None:
+        prefix = bytes.fromhex(self.required_prefix_hex)
+        suffix = bytes.fromhex(self.required_suffix_hex)
+        if len(raw) < len(prefix) + len(suffix) or not raw.startswith(prefix) or not raw.endswith(suffix):
+            raise ValueError("Seed does not satisfy the trusted input_contract")
+
+
+@dataclass(frozen=True)
 class CyberGymTargetManifest:
     task_id: str
     task_kind: str
@@ -89,6 +125,7 @@ class CyberGymTargetManifest:
     target_binary: str
     argv_template: tuple[str, ...]
     input_path: str
+    input_contract: CyberGymInputContract | None
     allow_empty_input: bool
     fuzzer_supported: bool
     fuzzer_target: str | None
@@ -101,13 +138,13 @@ class CyberGymTargetManifest:
             raise CyberGymManifestError("cybergym manifest must be an object")
         allowed = {
             "task_id", "task_kind", "vulnerable_runner", "target_binary", "argv_template",
-            "input_path", "allow_empty_input", "fuzzer_supported", "fuzzer_target",
+            "input_path", "input_contract", "allow_empty_input", "fuzzer_supported", "fuzzer_target",
             "gdb_supported", "limits",
         }
         unknown = sorted(set(value) - allowed)
         if unknown:
             raise CyberGymManifestError(f"cybergym manifest contains unknown fields: {', '.join(unknown)}")
-        required = allowed - {"allow_empty_input", "fuzzer_target"}
+        required = allowed - {"input_contract", "allow_empty_input", "fuzzer_target"}
         missing = sorted(name for name in required if name not in value)
         if missing:
             raise CyberGymManifestError(f"cybergym manifest is missing: {', '.join(missing)}")
@@ -133,6 +170,14 @@ class CyberGymTargetManifest:
         for boolean in ("fuzzer_supported", "gdb_supported"):
             if not isinstance(value[boolean], bool):
                 raise CyberGymManifestError(f"{boolean} must be a boolean")
+        input_contract_value = value.get("input_contract")
+        if value["fuzzer_supported"] and input_contract_value is None:
+            raise CyberGymManifestError("fuzzer_supported requires input_contract")
+        input_contract = (
+            CyberGymInputContract.from_dict(input_contract_value)
+            if input_contract_value is not None
+            else None
+        )
         fuzzer_target = value.get("fuzzer_target")
         if value["fuzzer_supported"]:
             fuzzer_target = _container_path(fuzzer_target, "fuzzer_target")
@@ -148,6 +193,7 @@ class CyberGymTargetManifest:
             target_binary=binary,
             argv_template=argv_template,
             input_path=input_path,
+            input_contract=input_contract,
             allow_empty_input=allow_empty,
             fuzzer_supported=value["fuzzer_supported"],
             fuzzer_target=fuzzer_target,
@@ -459,12 +505,21 @@ class CyberGymRuntime:
             raise ValueError("The trusted manifest does not allow empty input")
         if len(raw) > manifest.limits.max_artifact_bytes:
             raise ValueError("Artifact exceeds the trusted manifest size limit")
+        artifact_provenance = provenance or {}
+        if kind == "seed" and manifest.input_contract is not None:
+            if not isinstance(artifact_provenance, dict):
+                raise ValueError("CyberGym artifact provenance must be an object")
+            manifest.input_contract.validate_seed(raw)
+            artifact_provenance = {
+                **artifact_provenance,
+                "input_contract": manifest.input_contract.public_dict(),
+            }
         return self.store.create_cybergym_artifact(
             scan_id,
             kind=kind,
             raw=raw,
             parent_id=parent_id,
-            provenance=provenance or {},
+            provenance=artifact_provenance,
         )
 
     async def replay(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
@@ -538,6 +593,7 @@ class CyberGymRuntime:
             if artifact is None:
                 raise ValueError("A fuzz seed artifact is not available for this CyberGym task")
             seeds.append(artifact)
+        self._assert_fuzz_preflight(scan_id, seed_ids)
         self.store.consume_cybergym_budget(scan_id, "fuzz", manifest.limits.max_fuzz_runs)
         run = self.store.start_cybergym_run(
             scan_id,
@@ -557,6 +613,22 @@ class CyberGymRuntime:
         if run is None or run["kind"] != "fuzz":
             raise ValueError("Fuzz run is not available for this CyberGym task")
         return run
+
+    def _assert_fuzz_preflight(
+        self,
+        scan_id: str,
+        seed_ids: list[str],
+    ) -> None:
+        missing_replay: list[str] = []
+        for artifact_id in seed_ids:
+            evidence = self.store.cybergym_artifact_evidence(scan_id, artifact_id)
+            if not any(
+                isinstance(result, dict) and result.get("status") in {"clean", "crash"}
+                for result in evidence["replay"]
+            ):
+                missing_replay.append(artifact_id)
+        if missing_replay:
+            raise ValueError("fuzz_start requires vulnerable replay preflight for every seed")
 
     async def minimize(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
         manifest = self._manifest(scan_id)
