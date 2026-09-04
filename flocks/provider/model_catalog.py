@@ -117,6 +117,25 @@ def _parse_provider_meta(provider_id: str, raw: Dict[str, Any]) -> ProviderMeta:
     )
 
 
+def _parse_price_config(raw: Any) -> Optional[PriceConfig]:
+    """Parse one catalog price object into the shared typed representation."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return PriceConfig(
+        input=raw.get("input", 0.0),
+        output=raw.get("output", 0.0),
+        unit=raw.get("unit", 1_000_000),
+        cache_read=raw.get("cache_read"),
+        cache_write=raw.get("cache_write"),
+        cache_read_uses_input=raw.get("cache_read_uses_input", False),
+        reasoning_uses_output=raw.get("reasoning_uses_output", False),
+        cost_rounding_places=raw.get("cost_rounding_places"),
+        currency=raw.get("currency", "USD"),
+        price_tiers=raw.get("price_tiers"),
+        price_version=raw.get("price_version"),
+    )
+
+
 def _parse_model_definitions(
     provider_id: str, raw_models: Dict[str, Any]
 ) -> List[ModelDefinition]:
@@ -151,15 +170,7 @@ def _parse_model_definitions(
             max_output_tokens=limits_raw.get("max_output_tokens", 4096),
         )
 
-        pricing = None
-        if pricing_raw:
-            pricing = PriceConfig(
-                input=pricing_raw.get("input", 0.0),
-                output=pricing_raw.get("output", 0.0),
-                cache_read=pricing_raw.get("cache_read"),
-                cache_write=pricing_raw.get("cache_write"),
-                currency=pricing_raw.get("currency", "USD"),
-            )
+        pricing = _parse_price_config(pricing_raw)
 
         model_type_str = m.get("model_type", "llm")
         try:
@@ -278,6 +289,19 @@ def get_provider_model_definitions(provider_id: str) -> List[ModelDefinition]:
     """Get model definitions from catalog."""
     entry = get_catalog().get(provider_id)
     return list(entry["models"]) if entry else []
+
+
+def get_provider_pricing_profile(
+    provider_id: str,
+    profile: str,
+    model_id: str,
+) -> Optional[PriceConfig]:
+    """Get a credential-specific price without changing the catalog model list."""
+    provider = get_raw_catalog().get(provider_id, {})
+    profiles = provider.get("pricing_profiles", {})
+    profile_prices = profiles.get(profile, {}) if isinstance(profiles, dict) else {}
+    raw_price = profile_prices.get(model_id) if isinstance(profile_prices, dict) else None
+    return _parse_price_config(raw_price)
 
 
 def get_provider_npm(provider_id: str) -> str:

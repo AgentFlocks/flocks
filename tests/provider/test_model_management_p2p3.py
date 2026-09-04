@@ -23,6 +23,7 @@ from flocks.provider.types import (
     ModelSetting,
     ModelType,
     PriceConfig,
+    PriceTierConfig,
     UsageCost,
 )
 
@@ -183,6 +184,53 @@ class TestModelCatalog:
 
         assert models[0].capabilities.supports_reasoning is True
         assert ModelFeature.REASONING in models[0].capabilities.features
+
+    def test_model_catalog_parses_tiered_pricing_and_version(self):
+        from flocks.provider.model_catalog import _parse_model_definitions
+
+        models = _parse_model_definitions(
+            "tiered-provider",
+            {
+                "tiered-model": {
+                    "name": "Tiered Model",
+                    "pricing": {
+                        "input": 4.2,
+                        "output": 16.8,
+                        "unit": 1_000_000,
+                        "currency": "CNY",
+                        "reasoning_uses_output": True,
+                        "cost_rounding_places": 6,
+                        "price_tiers": [
+                            {
+                                "max_input_tokens": 512000,
+                                "input": 4.2,
+                                "output": 16.8,
+                            },
+                            {
+                                "max_input_tokens": None,
+                                "input": 8.4,
+                                "output": 33.6,
+                            },
+                        ],
+                        "price_version": "2026061601",
+                    },
+                }
+            },
+        )
+
+        pricing = models[0].pricing
+        assert pricing is not None
+        assert pricing.unit == 1_000_000
+        assert pricing.price_version == "2026061601"
+        assert pricing.reasoning_uses_output is True
+        assert pricing.cost_rounding_places == 6
+        assert pricing.price_tiers is not None
+        assert [tier.max_input_tokens for tier in pricing.price_tiers] == [
+            512000,
+            None,
+        ]
+        assert pricing.price_tiers[1].input == 8.4
+        assert pricing.price_tiers[1].output == 33.6
 
     def test_google_gemini_multimodal(self):
         from flocks.provider.model_catalog import get_provider_model_definitions
@@ -431,6 +479,164 @@ class TestCostCalculator:
         cost = CostCalculator.calculate(1000, 1000, pricing, cached_tokens=500)
         # cache_read is None, so no cache cost
         assert cost.cache_cost == 0.0
+
+    def test_tiered_pricing_uses_prompt_token_bucket_and_keeps_cache_prices(self):
+        from flocks.provider.cost_calculator import CostCalculator
+
+        pricing = PriceConfig(
+            input=4.2,
+            output=16.8,
+            currency="CNY",
+            cache_read=0.2,
+            cache_write=1.0,
+            price_tiers=[
+                PriceTierConfig(
+                    max_input_tokens=512000,
+                    input=4.2,
+                    output=16.8,
+                ),
+                PriceTierConfig(
+                    max_input_tokens=None,
+                    input=8.4,
+                    output=33.6,
+                ),
+            ],
+        )
+
+        boundary = CostCalculator.calculate(512000, 100000, pricing)
+        assert boundary.input_cost == 2.1504
+        assert boundary.output_cost == 1.68
+
+        # Tier selection uses the complete 600k-token prompt, while only the
+        # non-cached 500k tokens use the selected tier's input price.
+        above_boundary = CostCalculator.calculate(
+            600000,
+            100000,
+            pricing,
+            cached_tokens=100000,
+            cache_write_tokens=50000,
+        )
+        assert above_boundary.input_cost == 4.2
+        assert above_boundary.output_cost == 3.36
+        assert above_boundary.cache_cost == 0.07
+        assert above_boundary.total_cost == 7.63
+
+    def test_router_profile_matches_cache_reasoning_and_rounding_rules(self):
+        from flocks.provider.cost_calculator import CostCalculator
+
+        pricing = PriceConfig(
+            input=4.2,
+            output=16.8,
+            currency="CNY",
+            cache_read_uses_input=True,
+            reasoning_uses_output=True,
+            cost_rounding_places=6,
+            price_tiers=[
+                PriceTierConfig(
+                    max_input_tokens=512000,
+                    input=4.2,
+                    output=16.8,
+                ),
+                PriceTierConfig(
+                    max_input_tokens=None,
+                    input=8.4,
+                    output=33.6,
+                ),
+            ],
+        )
+
+        cost = CostCalculator.calculate(
+            600000,
+            100000,
+            pricing,
+            cached_tokens=100000,
+            reasoning_tokens=20000,
+        )
+
+        assert cost.input_cost == 5.04
+        assert cost.output_cost == 4.032
+        assert cost.cache_cost == 0.0
+        assert cost.total_cost == 9.072
+
+        rounded = CostCalculator.calculate(1, 0, pricing)
+        assert rounded.input_cost == 0.000004
+        assert rounded.total_cost == 0.000004
+
+        half_tie = CostCalculator.calculate(
+            65,
+            0,
+            PriceConfig(
+                input=2.1,
+                output=8.4,
+                currency="CNY",
+                cost_rounding_places=6,
+            ),
+        )
+        assert half_tie.input_cost == 0.000137
+
+    def test_usage_pricing_uses_router_profile_without_config_models(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from types import SimpleNamespace
+
+        from flocks.provider.provider import Provider
+        from flocks.provider.usage_service import resolve_usage_pricing
+
+        provider = SimpleNamespace(
+            _config_models=[],
+            _uses_router_key=lambda: True,
+        )
+        monkeypatch.setattr(
+            Provider,
+            "get",
+            classmethod(lambda cls, provider_id: provider),
+        )
+
+        pricing = resolve_usage_pricing("threatbook-cn-llm", "minimax-m3")
+
+        assert pricing is not None
+        assert pricing.price_version == "2026061601"
+        assert pricing.cache_read_uses_input is True
+        assert pricing.reasoning_uses_output is True
+        assert pricing.cost_rounding_places == 6
+        assert pricing.price_tiers is not None
+        assert pricing.price_tiers[1].output == 33.6
+
+    def test_usage_pricing_keeps_legacy_flat_config_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from types import SimpleNamespace
+        from flocks.provider.provider import Provider
+        from flocks.provider.usage_service import resolve_usage_pricing
+
+        config_model = SimpleNamespace(
+            id="legacy-model",
+            pricing={"input": 9.0, "output": 18.0, "currency": "CNY"},
+        )
+        provider = SimpleNamespace(
+            _config_models=[config_model],
+            _uses_router_key=lambda: False,
+        )
+        monkeypatch.setattr(
+            Provider,
+            "get",
+            classmethod(lambda cls, provider_id: provider),
+        )
+
+        pricing = resolve_usage_pricing("threatbook-cn-llm", "legacy-model")
+
+        assert pricing is not None
+        assert pricing.input == 9.0
+        assert pricing.price_tiers is None
+
+        provider._uses_router_key = lambda: True
+        historical = resolve_usage_pricing(
+            "threatbook-cn-llm",
+            "legacy-model",
+            allow_credential_profile=False,
+        )
+        assert historical is not None
+        assert historical.input == 9.0
 
 
 # ==================== usage.py (recording & stats — SQLite dynamic data) ====================

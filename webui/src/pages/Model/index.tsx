@@ -1255,6 +1255,16 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     [catalog, selectedCatalogId]
   );
 
+  const selectedPricingProfile = useMemo(() => {
+    if (
+      selectedCatalogId === 'threatbook-cn-llm'
+      && apiKey.trim().startsWith('fr_')
+    ) {
+      return selectedCatalog?.pricing_profiles?.router;
+    }
+    return undefined;
+  }, [apiKey, selectedCatalog, selectedCatalogId]);
+
   // Get credential fields for the selected provider
   const credentialFields = useMemo<CatalogCredentialField[]>(() => {
     if (!selectedCatalog) return [];
@@ -1782,38 +1792,41 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             </button>
                           </div>
                           <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-gray-100">
-                            {selectedCatalog.models.map(model => (
-                              <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={selectedModelIds.has(model.id)}
-                                  onChange={() => handleToggleModel(model.id)}
-                                  className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
-                                />
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-sm font-medium text-gray-900">{model.name}</span>
-                                    <CatalogModelBadges model={model} />
+                            {selectedCatalog.models.map((model) => {
+                              const pricing = selectedPricingProfile?.[model.id] ?? model.pricing;
+                              return (
+                                <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedModelIds.has(model.id)}
+                                    onChange={() => handleToggleModel(model.id)}
+                                    className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
+                                  />
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-sm font-medium text-gray-900">{model.name}</span>
+                                      <CatalogModelBadges model={model} />
+                                    </div>
+                                    <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+                                      <span className="font-mono">{model.id}</span>
+                                      {model.limits && (
+                                        <span>
+                                          {model.limits.context_window >= 1000000
+                                            ? `${(model.limits.context_window / 1000000).toFixed(0)}M`
+                                            : `${(model.limits.context_window / 1000).toFixed(0)}K`} ctx
+                                        </span>
+                                      )}
+                                      {pricing && !isPricingFree(pricing) && (
+                                        <span>{formatPricingPerMillion(pricing)}</span>
+                                      )}
+                                      {pricing && isPricingFree(pricing) && (
+                                        <span className="text-green-600">{t('status.free')}</span>
+                                      )}
+                                    </div>
                                   </div>
-                                  <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                                    <span className="font-mono">{model.id}</span>
-                                    {model.limits && (
-                                      <span>
-                                        {model.limits.context_window >= 1000000
-                                          ? `${(model.limits.context_window / 1000000).toFixed(0)}M`
-                                          : `${(model.limits.context_window / 1000).toFixed(0)}K`} ctx
-                                      </span>
-                                    )}
-                                    {model.pricing && !isPricingFree(model.pricing) && (
-                                      <span>{formatPricingPerMillion(model.pricing)}</span>
-                                    )}
-                                    {model.pricing && isPricingFree(model.pricing) && (
-                                      <span className="text-green-600">{t('status.free')}</span>
-                                    )}
-                                  </div>
-                                </div>
-                              </label>
-                            ))}
+                                </label>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
@@ -2795,6 +2808,8 @@ function ModelDetailSheet({
   const features = model.capabilities?.features || [];
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
   const isPredefined = model.fetch_from === 'predefined';
+  const isManagedRouterPricing = provider.id === 'threatbook-cn-llm'
+    && model.pricing?.price_version != null;
   const visionToggleLocked = isPredefined && !allowsBuiltInVisionToggle(model.id);
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
@@ -2849,23 +2864,28 @@ function ModelDetailSheet({
   const handleSave = async () => {
     setLoading(true);
     try {
+      const definition: CustomModelCreate = {
+        model_id: model.id,
+        name: name.trim() || model.id,
+        context_window: parseInt(contextWindow) || undefined,
+        max_output_tokens: parseInt(maxOutput) || undefined,
+        supports_vision: supportsVision,
+        supports_tools: supportsTools,
+        supports_streaming: supportsStreaming,
+        supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
+      };
+      if (isManagedRouterPricing) {
+        definition.preserve_pricing = true;
+      } else {
+        definition.input_price = parseFloat(inputPrice) || 0;
+        definition.output_price = parseFloat(outputPrice) || 0;
+        definition.cache_read_price = cacheReadPrice.trim() === ''
+          ? null
+          : parseFloat(cacheReadPrice) || 0;
+        definition.currency = currency;
+      }
       await Promise.all([
-        modelV2API.createDefinition(provider.id, {
-          model_id: model.id,
-          name: name.trim() || model.id,
-          context_window: parseInt(contextWindow) || undefined,
-          max_output_tokens: parseInt(maxOutput) || undefined,
-          supports_vision: supportsVision,
-          supports_tools: supportsTools,
-          supports_streaming: supportsStreaming,
-          supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
-          input_price: parseFloat(inputPrice) || 0,
-          output_price: parseFloat(outputPrice) || 0,
-          cache_read_price: cacheReadPrice.trim() === ''
-            ? null
-            : parseFloat(cacheReadPrice) || 0,
-          currency,
-        }),
+        modelV2API.createDefinition(provider.id, definition),
         modelSettingsAPI.update(provider.id, model.id, {
           enabled,
           default_parameters: modelSupportsReasoning
@@ -2969,40 +2989,47 @@ function ModelDetailSheet({
               </div>
             </div>
 
-            {/* 价格 — 可编辑 */}
+            {/* Router prices are service-managed; legacy/custom prices stay editable. */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
-                  <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={inputCls} />
+              {isManagedRouterPricing && model.pricing ? (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900">
+                  <span>{formatPricingPerMillion(model.pricing)}</span>
+                  <span className="text-xs text-gray-500">v{model.pricing.price_version}</span>
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
-                  <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={inputCls} />
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
+                    <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={inputCls} />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
+                    <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={inputCls} />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={cacheReadPrice}
+                      onChange={e => setCacheReadPrice(e.target.value)}
+                      className={inputCls}
+                      placeholder="—"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
+                    <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={inputCls}>
+                      {currency !== 'USD' && currency !== 'CNY' && (
+                        <option value={currency}>{currency}</option>
+                      )}
+                      <option value="USD">USD</option>
+                      <option value="CNY">CNY</option>
+                    </select>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={cacheReadPrice}
-                    onChange={e => setCacheReadPrice(e.target.value)}
-                    className={inputCls}
-                    placeholder="—"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
-                  <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={inputCls}>
-                    {currency !== 'USD' && currency !== 'CNY' && (
-                      <option value={currency}>{currency}</option>
-                    )}
-                    <option value="USD">USD</option>
-                    <option value="CNY">CNY</option>
-                  </select>
-                </div>
-              </div>
+              )}
             </div>
 
             {/* 启用此模型 — 可编辑 */}

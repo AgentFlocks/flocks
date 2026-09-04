@@ -11,12 +11,13 @@ Model unique name format: "{provider_id}/{model_id}"
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from flocks.config.config_writer import ConfigWriter
+from flocks.provider.model_catalog import get_provider_pricing_profile
 from flocks.provider.provider import (
     BaseProvider,
     ModelCapabilities,
@@ -133,6 +134,7 @@ class CreateModelReq(BaseModel):
     output_price: float = Field(0.0, ge=0)
     cache_read_price: Optional[float] = Field(None, ge=0)
     currency: str = "USD"
+    preserve_pricing: bool = False
 
 
 class ModelResp(BaseModel):
@@ -286,6 +288,24 @@ async def create_model(provider_id: str, body: CreateModelReq):
 
     models = raw.get("models", {})
     existing_model = models.get(body.model_id)
+    runtime_provider = Provider.get(provider_id)
+    uses_router_pricing = (
+        provider_id == "threatbook-cn-llm"
+        and runtime_provider is not None
+        and getattr(runtime_provider, "_uses_router_key", lambda: False)()
+    )
+    has_router_profile = (
+        uses_router_pricing
+        and get_provider_pricing_profile(
+            provider_id,
+            "router",
+            body.model_id,
+        ) is not None
+    )
+    preserve_pricing = (
+        has_router_profile
+        or (body.preserve_pricing and existing_model is not None)
+    )
     limits = await _resolve_model_limits(provider_id, body, raw)
     cache_read_price = body.cache_read_price
     if existing_model and "cache_read_price" not in body.model_fields_set:
@@ -300,12 +320,25 @@ async def create_model(provider_id: str, body: CreateModelReq):
         "supports_tools": body.supports_tools,
         "supports_streaming": body.supports_streaming,
         "supports_reasoning": body.supports_reasoning,
-        "input_price": body.input_price,
-        "output_price": body.output_price,
-        "cache_read_price": cache_read_price,
-        "currency": body.currency,
         "created_at": existing_model.get("created_at", now) if existing_model else now,
     }
+    pricing_fields = (
+        "input_price",
+        "output_price",
+        "cache_read_price",
+        "currency",
+    )
+    if preserve_pricing:
+        for field in pricing_fields:
+            if field in (existing_model or {}):
+                model_config[field] = existing_model[field]
+    else:
+        model_config.update({
+            "input_price": body.input_price,
+            "output_price": body.output_price,
+            "cache_read_price": cache_read_price,
+            "currency": body.currency,
+        })
 
     # Write to flocks.json (upsert — create or update)
     ConfigWriter.add_model(provider_id, body.model_id, model_config)
@@ -316,6 +349,8 @@ async def create_model(provider_id: str, body: CreateModelReq):
         body.model_copy(update={"cache_read_price": cache_read_price}),
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
+        pricing_source=existing_model if preserve_pricing else None,
+        preserve_pricing=preserve_pricing,
     )
 
     action = "updated" if existing_model else "created"
@@ -330,9 +365,10 @@ async def create_model(provider_id: str, body: CreateModelReq):
         unique_name=f"{provider_id}/{body.model_id}", name=body.name,
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
-        input_price=body.input_price, output_price=body.output_price,
-        cache_read_price=cache_read_price,
-        currency=body.currency, created_at=now,
+        input_price=float(model_config.get("input_price", 0.0) or 0.0),
+        output_price=float(model_config.get("output_price", 0.0) or 0.0),
+        cache_read_price=model_config.get("cache_read_price"),
+        currency=model_config.get("currency", "USD"), created_at=now,
     )
 
 
@@ -618,6 +654,8 @@ def _add_model_to_runtime(
     *,
     context_window: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
+    pricing_source: Optional[Dict[str, Any]] = None,
+    preserve_pricing: bool = False,
 ):
     """Add (or upsert) a model in the runtime Provider registry.
 
@@ -625,7 +663,24 @@ def _add_model_to_runtime(
     / OpenAICompatibleProvider (_config_models).
     """
     _pricing = None
-    if (
+    if preserve_pricing:
+        source = pricing_source or {}
+        input_price = source.get("input_price")
+        output_price = source.get("output_price")
+        cache_read_price = source.get("cache_read_price")
+        if (
+            input_price is not None
+            or output_price is not None
+            or cache_read_price is not None
+        ):
+            _pricing = {
+                "input": float(input_price or 0.0),
+                "output": float(output_price or 0.0),
+                "currency": source.get("currency", "USD"),
+            }
+            if cache_read_price is not None:
+                _pricing["cache_read"] = float(cache_read_price)
+    elif (
         body.input_price is not None
         or body.output_price is not None
         or body.cache_read_price is not None
@@ -662,9 +717,23 @@ def _add_model_to_runtime(
     mi._explicit_keys = {
         "name", "context_window", "max_output_tokens",
         "supports_streaming", "supports_tools", "supports_vision",
-        "supports_reasoning", "input_price", "output_price",
-        "cache_read_price", "currency",
+        "supports_reasoning",
     }
+    if preserve_pricing:
+        mi._explicit_keys.update(
+            field
+            for field in (
+                "input_price",
+                "output_price",
+                "cache_read_price",
+                "currency",
+            )
+            if field in (pricing_source or {})
+        )
+    else:
+        mi._explicit_keys.update({
+            "input_price", "output_price", "cache_read_price", "currency",
+        })
     Provider._models[body.model_id] = mi
     p = Provider.get(provider_id)
     if p:

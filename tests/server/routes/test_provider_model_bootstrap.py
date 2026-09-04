@@ -35,6 +35,18 @@ class TestThreatBookProviderModelBootstrap:
                 "currency": "CNY",
             }
 
+        router_prices = providers["threatbook-cn-llm"]["pricing_profiles"]["router"]
+        assert set(router_prices) == {
+            model.id
+            for model in get_provider_model_definitions("threatbook-cn-llm")
+        }
+        assert router_prices["minimax-m3"]["price_tiers"][1] == {
+            "max_input_tokens": None,
+            "input": 8.4,
+            "output": 33.6,
+        }
+        assert "base_url" not in router_prices["minimax-m3"]
+
     @pytest.mark.asyncio
     async def test_set_provider_credentials_bootstraps_kimi_k26_from_catalog(
         self, monkeypatch: pytest.MonkeyPatch

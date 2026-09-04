@@ -3,8 +3,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from flocks.provider.provider import ModelCapabilities, ModelInfo, Provider
+from flocks.config.config_writer import ConfigWriter
+from flocks.provider.provider import (
+    ModelCapabilities,
+    ModelInfo,
+    Provider,
+    ProviderConfig,
+)
 from flocks.provider.sdk.azure import AzureProvider
+from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
 from flocks.server.routes import custom_provider
 from flocks.server.routes.custom_provider import (
     CreateModelReq,
@@ -65,6 +72,95 @@ def test_add_model_to_runtime_preserves_reasoning_and_currency(monkeypatch):
         assert provider._config_models[0].capabilities.supports_reasoning is True
     finally:
         Provider._models = original_models
+
+
+@pytest.mark.asyncio
+async def test_managed_model_update_preserves_existing_pricing(monkeypatch):
+    provider_id = "threatbook-cn-llm"
+    models = {
+        "catalog-only": {"name": "Catalog only"},
+        "legacy-custom": {
+            "name": "Legacy custom",
+            "input_price": 4.23,
+            "output_price": 16.8,
+            "cache_read_price": 0.5,
+            "currency": "CNY",
+        },
+    }
+    ConfigWriter.add_provider(
+        provider_id,
+        ConfigWriter.build_provider_config(provider_id, models=models),
+    )
+    provider = ThreatBookCnLLMProvider()
+    provider._config_models = []
+    monkeypatch.setattr(Provider, "_models", {})
+    monkeypatch.setattr(
+        "flocks.provider.credential.get_api_key",
+        lambda requested_id: "fr_stored-key" if requested_id == provider_id else None,
+    )
+    monkeypatch.setattr(
+        Provider,
+        "get",
+        classmethod(lambda cls, requested_id: provider),
+    )
+
+    for model_id in models:
+        await custom_provider.create_model(
+            provider_id,
+            CreateModelReq(
+                model_id=model_id,
+                name=models[model_id]["name"],
+                context_window=128000,
+                max_output_tokens=4096,
+                preserve_pricing=True,
+            ),
+        )
+
+    await custom_provider.create_model(
+        provider_id,
+        CreateModelReq(
+            model_id="minimax-m3",
+            name="MiniMax M3",
+            context_window=1000000,
+            max_output_tokens=128000,
+        ),
+    )
+    await custom_provider.create_model(
+        provider_id,
+        CreateModelReq(
+            model_id="user-model",
+            name="User Model",
+            context_window=128000,
+            max_output_tokens=4096,
+            input_price=7.0,
+            output_price=21.0,
+            currency="CNY",
+        ),
+    )
+
+    saved_models = ConfigWriter.get_provider_raw(provider_id)["models"]
+    assert "input_price" not in saved_models["catalog-only"]
+    assert saved_models["legacy-custom"]["input_price"] == 4.23
+    assert saved_models["legacy-custom"]["cache_read_price"] == 0.5
+    assert "input_price" not in saved_models["minimax-m3"]
+    assert saved_models["user-model"]["input_price"] == 7.0
+    runtime_by_id = {model.id: model for model in provider._config_models}
+    assert runtime_by_id["catalog-only"].pricing is None
+    assert runtime_by_id["legacy-custom"].pricing["input"] == 4.23
+    assert runtime_by_id["minimax-m3"].pricing is None
+    assert runtime_by_id["user-model"].pricing["input"] == 7.0
+
+    legacy = ThreatBookCnLLMProvider()
+    legacy._config_models = [runtime_by_id["minimax-m3"]]
+    legacy.configure(ProviderConfig(
+        provider_id=provider_id,
+        api_key="legacy-key",
+        base_url="https://llm.threatbook.cn/v1",
+    ))
+    legacy_price = legacy.get_model_definitions()[0].pricing
+    assert legacy_price is not None
+    assert legacy_price.input == 4.2
+    assert legacy_price.price_tiers is None
 
 
 def test_add_azure_deployment_to_runtime_config_models(monkeypatch):

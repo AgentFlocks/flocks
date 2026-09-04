@@ -661,6 +661,10 @@ async def get_provider_catalog():
             "env_vars": raw.get("env_vars", []),
             "default_base_url": raw.get("default_base_url"),
             "model_count": len(models),
+            # Credential-specific prices are public catalog metadata. The Web
+            # UI chooses a profile from the entered key prefix; no Router URL
+            # or other connection detail is exposed here.
+            "pricing_profiles": raw.get("pricing_profiles", {}),
             "models": [
                 {
                     "id": m.id,

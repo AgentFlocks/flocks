@@ -503,13 +503,24 @@ export interface ModelLimitsV2 {
   max_output_tokens: number;
 }
 
+export interface PriceTierV2 {
+  max_input_tokens?: number | null;
+  input: number;
+  output: number;
+}
+
 export interface PriceConfigV2 {
   input: number;
   output: number;
   cache_read?: number;
   cache_write?: number;
+  cache_read_uses_input?: boolean;
+  reasoning_uses_output?: boolean;
+  cost_rounding_places?: number | null;
   unit: number;
   currency: string;
+  price_tiers?: PriceTierV2[] | null;
+  price_version?: string | null;
 }
 
 export interface ParameterRuleV2 {
@@ -607,6 +618,7 @@ export interface CustomModelCreate {
   output_price?: number;
   cache_read_price?: number | null;
   currency?: string;
+  preserve_pricing?: boolean;
 }
 
 export interface CustomModelInfo {
@@ -648,7 +660,22 @@ export interface CatalogProvider {
   default_base_url: string | null;
   model_count: number;
   models: CatalogModel[];
+  pricing_profiles?: Record<string, Record<string, CatalogPricing>>;
   allow_multiple?: boolean;
+}
+
+export interface CatalogPricing {
+  input: number;
+  output: number;
+  cache_read?: number | null;
+  cache_write?: number | null;
+  cache_read_uses_input?: boolean;
+  reasoning_uses_output?: boolean;
+  cost_rounding_places?: number | null;
+  unit?: number;
+  currency: string;
+  price_tiers?: PriceTierV2[] | null;
+  price_version?: string | null;
 }
 
 export interface CatalogCredentialSchema {
@@ -683,13 +710,7 @@ export interface CatalogModel {
     max_input_tokens?: number;
     max_output_tokens: number;
   };
-  pricing?: {
-    input: number;
-    output: number;
-    cache_read?: number;
-    cache_write?: number;
-    currency: string;
-  };
+  pricing?: CatalogPricing;
 }
 
 export interface Config {

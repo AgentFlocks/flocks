@@ -16,6 +16,7 @@ import aiosqlite
 from pydantic import BaseModel, Field
 
 from flocks.provider.cost_calculator import CostCalculator
+from flocks.provider.model_catalog import get_provider_pricing_profile
 from flocks.provider.provider import Provider
 from flocks.provider.types import PriceConfig, UsageCost, UsageRecord
 from flocks.session.message import Message
@@ -120,11 +121,34 @@ class BackfillUsageResult(BaseModel):
     skipped_missing_data: int = 0
 
 
-def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConfig]:
+def resolve_usage_pricing(
+    provider_id: str,
+    model_id: str,
+    *,
+    allow_credential_profile: bool = True,
+) -> Optional[PriceConfig]:
     """Resolve runtime pricing for a provider/model pair."""
     model_info = None
     provider = Provider.get(provider_id)
-    if provider:
+    # Only Router-issued ThreatBook credentials need the config-aware full
+    # definition. Preserve the historical flat-config lookup for every other
+    # provider and for legacy ThreatBook keys.
+    uses_router_pricing = (
+        allow_credential_profile
+        and provider_id == "threatbook-cn-llm"
+        and provider is not None
+        and getattr(provider, "_uses_router_key", lambda: False)()
+    )
+    if uses_router_pricing:
+        router_pricing = get_provider_pricing_profile(
+            provider_id,
+            "router",
+            model_id,
+        )
+        if router_pricing is not None:
+            return router_pricing
+
+    if model_info is None and provider:
         for candidate in getattr(provider, "_config_models", []):
             if candidate.id == model_id:
                 model_info = candidate
@@ -148,6 +172,23 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
             currency=getattr(pricing, "currency", "USD"),
             cache_read=getattr(pricing, "cache_read", None),
             cache_write=getattr(pricing, "cache_write", None),
+            cache_read_uses_input=getattr(
+                pricing,
+                "cache_read_uses_input",
+                False,
+            ),
+            reasoning_uses_output=getattr(
+                pricing,
+                "reasoning_uses_output",
+                False,
+            ),
+            cost_rounding_places=getattr(
+                pricing,
+                "cost_rounding_places",
+                None,
+            ),
+            price_tiers=getattr(pricing, "price_tiers", None),
+            price_version=getattr(pricing, "price_version", None),
         )
 
     if isinstance(pricing, dict):
@@ -158,6 +199,11 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
             currency=pricing.get("currency", "USD"),
             cache_read=pricing.get("cache_read"),
             cache_write=pricing.get("cache_write"),
+            cache_read_uses_input=pricing.get("cache_read_uses_input", False),
+            reasoning_uses_output=pricing.get("reasoning_uses_output", False),
+            cost_rounding_places=pricing.get("cost_rounding_places"),
+            price_tiers=pricing.get("price_tiers"),
+            price_version=pricing.get("price_version"),
         )
 
     return None
@@ -323,6 +369,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
             pricing=req.pricing,
             cached_tokens=req.cached_tokens,
             cache_write_tokens=req.cache_write_tokens,
+            reasoning_tokens=req.reasoning_tokens,
         )
         input_cost = computed_cost.input_cost
         output_cost = computed_cost.output_cost
@@ -735,7 +782,14 @@ async def _backfill_message_if_needed(
     if not has_tokens and cost <= 0:
         return "missing"
 
-    pricing = resolve_usage_pricing(provider_id, model_id)
+    # Historical messages do not retain which credential/profile produced
+    # them. Never rewrite their cost using whichever key happens to be active
+    # when backfill runs.
+    pricing = resolve_usage_pricing(
+        provider_id,
+        model_id,
+        allow_credential_profile=False,
+    )
     cost_override = None
     if cost > 0:
         currency = pricing.currency if pricing else "USD"

@@ -6,9 +6,12 @@ from flocks.provider.model_catalog import (
     get_provider_default_url,
     get_provider_meta,
     get_provider_model_definitions,
+    get_provider_pricing_profile,
     get_raw_catalog,
     list_catalog_provider_ids,
 )
+from flocks.provider.provider import ModelCapabilities, ModelInfo, ProviderConfig
+from flocks.provider.sdk.threatbook import ThreatBookCnLLMProvider
 
 
 class TestCuratedCatalogProviders:
@@ -363,6 +366,21 @@ class TestCuratedCatalogModels:
         assert m3.capabilities.supports_vision is True
         assert m3.capabilities.supports_reasoning is True
         assert m3.capabilities.interleaved["field"] == "reasoning_details"
+        router_m3 = get_provider_pricing_profile(
+            "threatbook-cn-llm",
+            "router",
+            "minimax-m3",
+        )
+        assert router_m3 is not None
+        assert router_m3.price_version == "2026061601"
+        assert router_m3.price_tiers is not None
+        assert [tier.max_input_tokens for tier in router_m3.price_tiers] == [
+            512000,
+            None,
+        ]
+        assert [
+            (tier.input, tier.output) for tier in router_m3.price_tiers
+        ] == [(4.2, 16.8), (8.4, 33.6)]
 
         flash_cn = next(m for m in models if m.id == "deepseek-v4-flash")
         assert flash_cn.pricing.input == 1.0
@@ -384,6 +402,42 @@ class TestCuratedCatalogModels:
             },
         }
 
+        # Router pricing is synchronized onto the existing dev model set only;
+        # model discovery/naming remains governed by the local catalog.
+        expected_router_prices = {
+            "GLM-5": (4.0, 18.0, "2026061601"),
+            "minimax-m2.7": (2.1, 8.4, "2026061601"),
+            "minimax-m2.5": (2.1, 8.4, "2026061601"),
+            "qwen3.6-plus": (2.0, 12.0, "2026061601"),
+            "qwen3-max": (2.5, 10.0, "2026061601"),
+            "kimi-k2.6": (6.5, 27.0, "2026061601"),
+            "deepseek-v4-flash": (1.0, 2.0, "2026061601"),
+            "minimax-m3": (4.2, 16.8, "2026061601"),
+            "kimi-k2.7-code": (6.5, 27.0, "2026072001"),
+            "deepseek-v4-flash-0731": (1.0, 2.0, "2026080301"),
+        }
+        assert set(expected_router_prices) == {model.id for model in models}
+        assert set(
+            get_raw_catalog()["threatbook-cn-llm"]["pricing_profiles"]["router"]
+        ) == set(expected_router_prices)
+        for model in models:
+            expected_input, expected_output, expected_version = (
+                expected_router_prices[model.id]
+            )
+            router_pricing = get_provider_pricing_profile(
+                "threatbook-cn-llm",
+                "router",
+                model.id,
+            )
+            assert router_pricing is not None
+            assert router_pricing.input == expected_input
+            assert router_pricing.output == expected_output
+            assert router_pricing.price_version == expected_version
+            assert router_pricing.cache_read is None
+            assert router_pricing.cache_read_uses_input is True
+            assert router_pricing.reasoning_uses_output is True
+            assert router_pricing.cost_rounding_places == 6
+
         kimi = next(m for m in models if m.id == "kimi-k2.6")
         assert kimi.capabilities.supports_vision is True
         assert kimi.capabilities.supports_reasoning is True
@@ -395,6 +449,53 @@ class TestCuratedCatalogModels:
         assert kimi.limits.context_window == 256000
         assert kimi.limits.max_input_tokens == 224000
         assert kimi.limits.max_output_tokens == 16000
+
+    def test_threatbook_cn_selects_price_profile_by_key_type(self):
+        configured_model = ModelInfo(
+            id="minimax-m3",
+            name="minimax-m3",
+            provider_id="threatbook-cn-llm",
+            capabilities=ModelCapabilities(),
+            pricing={
+                "input": 4.23,
+                "output": 16.8,
+                "cache_read": 0.5,
+                "currency": "CNY",
+            },
+        )
+
+        legacy = ThreatBookCnLLMProvider()
+        legacy._config_models = [configured_model]
+        legacy.configure(ProviderConfig(
+            provider_id=legacy.id,
+            api_key="legacy-test-key",
+            base_url="https://llm.threatbook.cn/v1",
+        ))
+        legacy_price = legacy.get_model_definitions()[0].pricing
+        assert legacy_price is not None
+        assert legacy_price.input == 4.23
+        assert legacy_price.cache_read == 0.5
+        assert legacy_price.price_tiers is None
+
+        router = ThreatBookCnLLMProvider()
+        router._config_models = [configured_model]
+        router.configure(ProviderConfig(
+            provider_id=router.id,
+            api_key="fr_test-key",
+            base_url="https://llm.threatbook.cn/v1",
+        ))
+        router_price = router.get_model_definitions()[0].pricing
+        assert router_price is not None
+        assert router_price.input == 4.2
+        assert router_price.output == 16.8
+        assert router_price.cache_read is None
+        assert router_price.cache_read_uses_input is True
+        assert router_price.reasoning_uses_output is True
+        assert router_price.cost_rounding_places == 6
+        assert router_price.price_version == "2026061601"
+        assert router_price.price_tiers is not None
+        assert router_price.price_tiers[1].input == 8.4
+        assert router._config.base_url == "https://llm.threatbook.cn/v1"
 
     def test_threatbook_io_llm_catalog(self):
         meta = get_provider_meta("threatbook-io-llm")

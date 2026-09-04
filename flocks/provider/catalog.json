@@ -51,6 +51,112 @@
     "env_vars": [
       "THREATBOOK_CN_LLM_API_KEY"
     ],
+    "pricing_profiles": {
+      "router": {
+        "deepseek-v4-flash-0731": {
+          "input": 1.0,
+          "output": 2.0,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026080301"
+        },
+        "kimi-k2.7-code": {
+          "input": 6.5,
+          "output": 27.0,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026072001"
+        },
+        "minimax-m3": {
+          "input": 4.2,
+          "output": 16.8,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601",
+          "price_tiers": [
+            {
+              "max_input_tokens": 512000,
+              "input": 4.2,
+              "output": 16.8
+            },
+            {
+              "max_input_tokens": null,
+              "input": 8.4,
+              "output": 33.6
+            }
+          ]
+        },
+        "minimax-m2.7": {
+          "input": 2.1,
+          "output": 8.4,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601"
+        },
+        "minimax-m2.5": {
+          "input": 2.1,
+          "output": 8.4,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601"
+        },
+        "GLM-5": {
+          "input": 4.0,
+          "output": 18.0,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601"
+        },
+        "qwen3.6-plus": {
+          "input": 2.0,
+          "output": 12.0,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601"
+        },
+        "qwen3-max": {
+          "input": 2.5,
+          "output": 10.0,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601"
+        },
+        "kimi-k2.6": {
+          "input": 6.5,
+          "output": 27.0,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601"
+        },
+        "deepseek-v4-flash": {
+          "input": 1.0,
+          "output": 2.0,
+          "currency": "CNY",
+          "cache_read_uses_input": true,
+          "reasoning_uses_output": true,
+          "cost_rounding_places": 6,
+          "price_version": "2026061601"
+        }
+      }
+    },
     "models": {
       "deepseek-v4-flash-0731": {
         "name": "deepseek-v4-flash-0731",
