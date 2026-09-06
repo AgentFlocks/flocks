@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertCircle,
@@ -10,18 +10,22 @@ import {
   Pencil,
   RefreshCw,
 } from "lucide-react";
-import { mcpAPI } from "@/api/mcp";
+import { providerAPI } from "@/api/provider";
 import {
-  inferThreatBookRegionFromMcpUrl,
   THREATBOOK_REGION_CONFIG,
+  type ThreatBookRegion,
 } from "@/constants/threatbook";
-import type { MCPCredentials, MCPServer } from "@/types";
+import type { ProviderCredentials } from "@/types";
 
 interface Props {
-  serverName: string;
-  serverStatus: MCPServer["status"];
-  configUrl?: string;
+  serviceName: string;
+  credentials: ProviderCredentials | null;
+  initialStatus?: { status: string; latency_ms?: number };
   onConfigured: () => Promise<void>;
+  onTestResult?: (
+    name: string,
+    result: { status: string; latency_ms?: number },
+  ) => void;
 }
 
 type OperationResult = { success: boolean; message: string } | null;
@@ -41,20 +45,18 @@ function ResultMessage({ result }: { result: Exclude<OperationResult, null> }) {
   );
 }
 
-export default function ThreatBookMCPConfigPanel({
-  serverName,
-  serverStatus,
-  configUrl,
+export default function ThreatBookAPIConfigPanel({
+  serviceName,
+  credentials,
+  initialStatus,
   onConfigured,
+  onTestResult,
 }: Props) {
   const { t } = useTranslation("tool");
-  const configuredRegion = useMemo(
-    () => inferThreatBookRegionFromMcpUrl(configUrl),
-    [configUrl],
-  );
-  const [credentials, setCredentials] = useState<MCPCredentials | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(true);
+  const region: ThreatBookRegion =
+    serviceName.trim().toLowerCase() === "threatbook-io" ? "global" : "cn";
+  const config = THREATBOOK_REGION_CONFIG[region];
+  const [editing, setEditing] = useState(!credentials?.has_credential);
   const [apiKey, setApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [storedKeyLoaded, setStoredKeyLoaded] = useState(false);
@@ -63,35 +65,18 @@ export default function ThreatBookMCPConfigPanel({
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<OperationResult>(null);
 
-  const loadCredentials = async () => {
-    try {
-      setLoading(true);
-      const response = await mcpAPI.getCredentials(serverName);
-      setCredentials(response.data);
-      setEditing(!(response.data.has_credential && configuredRegion));
-    } catch {
-      setCredentials(null);
-      setEditing(true);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadCredentials();
-  }, [serverName, configuredRegion]);
-
-  const regionConfig = THREATBOOK_REGION_CONFIG.cn;
-  const isConfigured = Boolean(
-    credentials?.has_credential && configuredRegion === "cn",
-  );
-  const isLegacyGlobal = Boolean(
-    credentials?.has_credential && configuredRegion === "global",
-  );
+  const isConfigured = Boolean(credentials?.has_credential);
   const showingStoredMask = isConfigured && !showApiKey;
   const displayedApiKey = showingStoredMask
     ? credentials?.api_key_masked || ""
     : apiKey;
+  const regionLabel = t(`detail.threatbookApi.regions.${region}`);
+  const statusConnected = useMemo(
+    () =>
+      initialStatus?.status === "connected" ||
+      initialStatus?.status === "healthy",
+    [initialStatus?.status],
+  );
 
   const resetEditor = () => {
     setApiKey("");
@@ -109,8 +94,9 @@ export default function ThreatBookMCPConfigPanel({
       try {
         setRevealing(true);
         setResult(null);
-        const response = await mcpAPI.revealCredentials(serverName);
-        setApiKey(response.data.api_key);
+        const response =
+          await providerAPI.revealServiceCredentials(serviceName);
+        setApiKey(response.data.api_key || "");
         setStoredKeyLoaded(true);
       } catch (error: any) {
         setResult({
@@ -118,7 +104,7 @@ export default function ThreatBookMCPConfigPanel({
           message:
             error.response?.data?.detail ||
             error.message ||
-            t("detail.threatbookMcp.revealFailed"),
+            t("detail.threatbookApi.revealFailed"),
         });
         return;
       } finally {
@@ -128,42 +114,56 @@ export default function ThreatBookMCPConfigPanel({
     setShowApiKey(true);
   };
 
+  const testSavedKey = async () => {
+    const response = await providerAPI.testCredentials(serviceName);
+    setResult({
+      success: response.data.success,
+      message: response.data.message,
+    });
+    onTestResult?.(serviceName, {
+      status: response.data.success ? "connected" : "error",
+      latency_ms: response.data.latency_ms,
+    });
+    return response.data.success;
+  };
+
   const handleSave = async () => {
     const value = apiKey.trim();
     if (!value) {
       setResult({
         success: false,
-        message: t("detail.threatbookMcp.keyRequired"),
+        message: t("detail.threatbookApi.keyRequired"),
       });
       return;
     }
     try {
       setSaving(true);
       setResult(null);
-      const response = await mcpAPI.configureThreatBook(serverName, {
-        region: "cn",
+      await providerAPI.setServiceCredentials(serviceName, {
         api_key: value,
+        fields: { api_key: value },
       });
-      if (!response.data.success) {
-        setResult({ success: false, message: response.data.message });
-        return;
+      const success = await testSavedKey();
+      if (success) {
+        await onConfigured();
+        resetEditor();
+        setResult({
+          success: true,
+          message: t("detail.threatbookApi.saveSuccess", {
+            region: regionLabel,
+          }),
+        });
+        setEditing(false);
       }
-      resetEditor();
-      setResult({
-        success: true,
-        message: t("detail.threatbookMcp.saveSuccess"),
-      });
-      await onConfigured();
-      await loadCredentials();
-      setEditing(false);
     } catch (error: any) {
       setResult({
         success: false,
         message:
           error.response?.data?.detail ||
           error.message ||
-          t("detail.threatbookMcp.saveFailed"),
+          t("detail.threatbookApi.saveFailed"),
       });
+      onTestResult?.(serviceName, { status: "error" });
     } finally {
       setSaving(false);
     }
@@ -173,70 +173,31 @@ export default function ThreatBookMCPConfigPanel({
     try {
       setTesting(true);
       setResult(null);
-      const response = await mcpAPI.testCredentials(serverName);
-      setResult({
-        success: response.data.success,
-        message: response.data.message,
-      });
-      if (response.data.success) await onConfigured();
+      await testSavedKey();
     } catch (error: any) {
       setResult({
         success: false,
         message:
           error.response?.data?.detail ||
           error.message ||
-          t("detail.threatbookMcp.testFailed"),
+          t("detail.threatbookApi.testFailed"),
       });
+      onTestResult?.(serviceName, { status: "error" });
     } finally {
       setTesting(false);
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-8 text-gray-500">
-        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        <span className="text-sm">{t("detail.threatbookMcp.loading")}</span>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-5">
       <div>
         <h3 className="text-base font-semibold text-gray-900">
-          {t("detail.threatbookMcp.title")}
+          {t("detail.threatbookApi.title", { service: serviceName })}
         </h3>
         <p className="mt-1 text-sm leading-6 text-gray-600">
-          {t("detail.threatbookMcp.description")}
+          {t(`detail.threatbookApi.descriptions.${region}`)}
         </p>
       </div>
-
-      {isLegacyGlobal && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600" />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-gray-900">
-                {t("detail.threatbookMcp.legacyGlobalTitle")}
-              </p>
-              <p className="mt-1 text-xs leading-5 text-gray-600">
-                {t("detail.threatbookMcp.legacyGlobalDescription")}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                resetEditor();
-                setEditing(true);
-              }}
-              className="h-9 rounded-md border border-amber-300 bg-white px-3 text-sm font-medium text-amber-800 hover:bg-amber-100"
-            >
-              {t("detail.threatbookMcp.migrateToChina")}
-            </button>
-          </div>
-        </div>
-      )}
 
       {isConfigured && !editing ? (
         <div className="rounded-lg border border-green-200 bg-green-50/60 p-4">
@@ -245,12 +206,14 @@ export default function ThreatBookMCPConfigPanel({
               <CheckCircle2 className="mt-0.5 h-5 w-5 text-green-600" />
               <div>
                 <p className="text-sm font-semibold text-gray-900">
-                  {t("detail.threatbookMcp.configuredTitle")}
+                  {t("detail.threatbookApi.configuredTitle", {
+                    region: regionLabel,
+                  })}
                 </p>
                 <p className="mt-1 text-xs text-gray-600">
-                  {serverStatus === "connected"
-                    ? t("detail.threatbookMcp.connected")
-                    : t("detail.threatbookMcp.savedNotConnected")}
+                  {statusConnected
+                    ? t("detail.threatbookApi.connected")
+                    : t("detail.threatbookApi.saved")}
                 </p>
               </div>
             </div>
@@ -265,8 +228,8 @@ export default function ThreatBookMCPConfigPanel({
                   className={`h-4 w-4 ${testing ? "animate-spin" : ""}`}
                 />
                 {testing
-                  ? t("detail.threatbookMcp.testing")
-                  : t("detail.threatbookMcp.retest")}
+                  ? t("detail.threatbookApi.testing")
+                  : t("detail.threatbookApi.retest")}
               </button>
               <button
                 type="button"
@@ -277,69 +240,67 @@ export default function ThreatBookMCPConfigPanel({
                 className="inline-flex h-9 items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
                 <Pencil className="h-4 w-4" />
-                {t("detail.threatbookMcp.edit")}
+                {t("detail.threatbookApi.edit")}
               </button>
             </div>
           </div>
           <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
               <dt className="text-xs text-gray-500">
-                {t("detail.threatbookMcp.region")}
+                {t("detail.threatbookApi.region")}
               </dt>
-              <dd className="mt-1 text-sm font-medium">
-                {t("detail.threatbookMcp.regions.cn")}
-              </dd>
+              <dd className="mt-1 text-sm font-medium">{regionLabel}</dd>
             </div>
             <div>
               <dt className="text-xs text-gray-500">
-                {t("detail.threatbookMcp.apiKey")}
+                {t("detail.threatbookApi.apiKey")}
               </dt>
               <dd className="mt-1 text-sm font-medium">
                 {credentials?.api_key_masked ||
-                  t("detail.threatbookMcp.keyConfigured")}
+                  t("detail.threatbookApi.keyConfigured")}
               </dd>
             </div>
             <div className="min-w-0">
               <dt className="text-xs text-gray-500">
-                {t("detail.threatbookMcp.endpoint")}
+                {t("detail.threatbookApi.endpoint")}
               </dt>
               <dd
                 className="mt-1 truncate font-mono text-sm"
-                title={regionConfig.mcpEndpoint}
+                title={config.apiEndpoint}
               >
-                {regionConfig.mcpEndpoint}
+                {config.apiEndpoint}
               </dd>
             </div>
           </dl>
         </div>
-      ) : !isLegacyGlobal || editing ? (
+      ) : (
         <div className="space-y-5 border-t border-gray-200 pt-5">
           <div>
             <p className="text-sm font-semibold text-gray-900">
-              {t("detail.threatbookMcp.region")}
+              {t("detail.threatbookApi.region")}
             </p>
             <p className="mt-1 text-xs text-gray-500">
-              {t("detail.threatbookMcp.regionHint")}
+              {t("detail.threatbookApi.regionHint")}
             </p>
             <div className="mt-3 inline-flex rounded-md border border-green-200 bg-green-50 px-4 py-2 text-sm font-semibold text-green-700">
-              {t("detail.threatbookMcp.regions.cn")}
+              {regionLabel}
             </div>
           </div>
           <div className="inline-flex rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
-            {t("detail.threatbookMcp.freeService")}
+            {t("detail.threatbookApi.freeService")}
           </div>
           <div>
             <label
-              htmlFor="threatbook-mcp-api-key"
+              htmlFor={`${serviceName}-api-key`}
               className="mb-1.5 block text-sm font-medium text-gray-700"
             >
-              {t("detail.threatbookMcp.apiKey")}{" "}
+              {t("detail.threatbookApi.apiKey")}{" "}
               <span className="text-red-500">*</span>
             </label>
             <div className="flex flex-col gap-2 sm:flex-row">
               <div className="relative min-w-0 flex-1">
                 <input
-                  id="threatbook-mcp-api-key"
+                  id={`${serviceName}-api-key`}
                   type={showApiKey ? "text" : "password"}
                   value={displayedApiKey}
                   readOnly={showingStoredMask}
@@ -347,7 +308,9 @@ export default function ThreatBookMCPConfigPanel({
                     setApiKey(event.target.value);
                     setResult(null);
                   }}
-                  placeholder={t("detail.threatbookMcp.keyPlaceholder")}
+                  placeholder={t("detail.threatbookApi.keyPlaceholder", {
+                    region: regionLabel,
+                  })}
                   autoComplete="off"
                   className="h-10 w-full rounded-lg border border-gray-300 bg-white px-3 pr-10 text-sm focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/30"
                 />
@@ -368,34 +331,36 @@ export default function ThreatBookMCPConfigPanel({
                 </button>
               </div>
               <a
-                href={regionConfig.activationUrl}
+                href={config.activationUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-4 text-sm font-semibold text-green-700 hover:bg-green-100"
               >
                 <ExternalLink className="h-4 w-4" />
-                {t("detail.threatbookMcp.claimFreeKey")}
+                {t("detail.threatbookApi.claimFreeKey", {
+                  region: regionLabel,
+                })}
               </a>
             </div>
             <p className="mt-1.5 text-xs text-gray-500">
-              {t("detail.threatbookMcp.keyHint")}
+              {t("detail.threatbookApi.keyHint")}
             </p>
           </div>
           <div>
             <label
-              htmlFor="threatbook-mcp-endpoint"
+              htmlFor={`${serviceName}-endpoint`}
               className="mb-1.5 block text-sm font-medium text-gray-700"
             >
-              {t("detail.threatbookMcp.endpoint")}
+              {t("detail.threatbookApi.endpoint")}
             </label>
             <input
-              id="threatbook-mcp-endpoint"
+              id={`${serviceName}-endpoint`}
               readOnly
-              value={regionConfig.mcpEndpoint}
+              value={config.apiEndpoint}
               className="h-10 w-full cursor-default rounded-lg border border-gray-200 bg-gray-50 px-3 font-mono text-sm text-gray-700"
             />
             <p className="mt-1.5 text-xs text-gray-500">
-              {t("detail.threatbookMcp.endpointHint")}
+              {t("detail.threatbookApi.endpointHint")}
             </p>
           </div>
           {result && <ResultMessage result={result} />}
@@ -421,12 +386,12 @@ export default function ThreatBookMCPConfigPanel({
             >
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
               {saving
-                ? t("detail.threatbookMcp.saving")
-                : t("detail.threatbookMcp.saveAndVerify")}
+                ? t("detail.threatbookApi.saving")
+                : t("detail.threatbookApi.saveAndVerify")}
             </button>
           </div>
         </div>
-      ) : null}
+      )}
       {result && isConfigured && !editing && <ResultMessage result={result} />}
     </div>
   );

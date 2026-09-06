@@ -1125,7 +1125,7 @@ class TestMcpRoutes:
         assert "timed out" in resp.text.lower()
 
     @pytest.mark.asyncio
-    async def test_configure_threatbook_mcp_validates_then_saves_global_region(
+    async def test_configure_threatbook_mcp_rejects_global_region_without_mutation(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ):
         raw_state: dict = {"mcp": {}}
@@ -1179,16 +1179,12 @@ class TestMcpRoutes:
             json={"region": "global", "api_key": "global key"},
         )
 
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["connected"] is True
-        assert validated_configs[0]["url"] == (
-            "https://mcp.threatbook.io/mcp?apikey=global%20key"
-        )
-        assert raw_state["mcp"]["threatbook_mcp"]["url"] == (
-            "https://mcp.threatbook.io/mcp?apikey={secret:threatbook_mcp_key}"
-        )
-        assert secret_state["threatbook_mcp_key"] == "global key"
-        assert connected_configs
+        assert resp.status_code == 400, resp.text
+        assert "China region only" in resp.json()["message"]
+        assert validated_configs == []
+        assert raw_state == {"mcp": {}}
+        assert secret_state == {}
+        assert connected_configs == []
 
     @pytest.mark.asyncio
     async def test_get_threatbook_mcp_credentials_uses_non_duplicated_secret_id(
@@ -1332,7 +1328,7 @@ class TestMcpRoutes:
 
         resp = await client.post(
             "/api/mcp/threatbook_mcp/threatbook-configure",
-            json={"region": "global", "api_key": "new-key"},
+            json={"region": "cn", "api_key": "new-key"},
         )
 
         assert resp.status_code == 500, resp.text

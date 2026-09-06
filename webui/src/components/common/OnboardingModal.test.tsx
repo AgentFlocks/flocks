@@ -126,7 +126,7 @@ function makeStatus(overrides: Record<string, any> = {}) {
       mcp_name: 'threatbook_mcp',
       service_matrix: {
         cn: ['api', 'mcp'],
-        global: ['api', 'mcp'],
+        global: ['api'],
       },
     },
     ...overrides,
@@ -354,7 +354,7 @@ describe('OnboardingModal', () => {
     const bootstrap = zhCNCommon.onboarding.bootstrap;
 
     expect(bootstrap.skipModelDescription).toBe('可以先跳过此步骤，稍后在左侧导航栏「模型清单」中继续完成默认模型配置。');
-    expect(bootstrap.skipIntelDescription).toBe('可以先跳过此步骤，稍后在左侧导航栏「工具清单」页面的「MCP」页签中，找到 ThreatBook MCP 后继续完成微步情报 API 与 MCP 配置。');
+    expect(bootstrap.skipIntelDescription).toBe('可以先跳过此步骤。稍后可在左侧导航栏「工具清单」的 API 页签中找到 threatbook-cn 或 threatbook-io 配置情报 API；中国区 MCP 可在 MCP 页签的 ThreatBook MCP 中继续配置。');
     expect(bootstrap.skipModelDescription).not.toMatch(/无法|不可用|不能|失败/);
     expect(bootstrap.skipIntelDescription).not.toMatch(/无法|不可用|不能|失败/);
   });
@@ -375,7 +375,7 @@ describe('OnboardingModal', () => {
 
     const globalLink = screen.getByRole('link', { name: 'onboarding.bootstrap.intelKeyLink' });
     expect(globalLink).toHaveAttribute('href', 'https://i.threatbook.io/flocks/activate');
-    expect(screen.getByText('onboarding.bootstrap.intelMcpCapability')).toBeInTheDocument();
+    expect(screen.queryByText('onboarding.bootstrap.intelMcpCapability')).not.toBeInTheDocument();
   });
 
   it('defaults intelligence setup to the international region in English', async () => {
@@ -389,7 +389,7 @@ describe('OnboardingModal', () => {
 
     const keyLink = screen.getByRole('link', { name: 'onboarding.bootstrap.intelKeyLink' });
     expect(keyLink).toHaveAttribute('href', 'https://i.threatbook.io/flocks/activate');
-    expect(screen.getByText('onboarding.bootstrap.intelMcpCapability')).toBeInTheDocument();
+    expect(screen.queryByText('onboarding.bootstrap.intelMcpCapability')).not.toBeInTheDocument();
   });
 
   it('shows configured keys masked in edit mode and reveals them on demand', async () => {
@@ -414,7 +414,7 @@ describe('OnboardingModal', () => {
           mcp_name: 'threatbook_mcp',
           service_matrix: {
             cn: ['api', 'mcp'],
-            global: ['api', 'mcp'],
+            global: ['api'],
           },
         },
       }),

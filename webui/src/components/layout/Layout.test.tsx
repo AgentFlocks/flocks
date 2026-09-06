@@ -226,7 +226,7 @@ function makeOnboardingStatus(overrides: Record<string, any> = {}) {
       mcp_name: 'threatbook_mcp',
       service_matrix: {
         cn: ['api', 'mcp'],
-        global: ['api', 'mcp'],
+        global: ['api'],
       },
     },
     ...overrides,

@@ -16,9 +16,14 @@ import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, getMCPFormError, MC
 import type { MCPFormData, ConnStatus as MCPConnStatus } from '../ToolSheets';
 import type { APIServiceCredentialField, APIServiceMetadata, ProviderCredentials } from '@/types';
 import ThreatBookMCPConfigPanel from './ThreatBookMCPConfigPanel';
+import ThreatBookAPIConfigPanel from './ThreatBookAPIConfigPanel';
 
 function isThreatBookMCPServer(serverName: string): boolean {
   return serverName.trim().toLowerCase() === 'threatbook_mcp';
+}
+
+function isThreatBookAPIService(serviceName: string): boolean {
+  return ['threatbook-cn', 'threatbook-io'].includes(serviceName.trim().toLowerCase());
 }
 
 function KvRowValue({ value }: { value: string }) {
@@ -810,6 +815,15 @@ export function APIServiceDetailPanel({
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : detailTab === 'overview' ? (
           <div className="space-y-5">
+            {isThreatBookAPIService(serviceName) ? (
+              <ThreatBookAPIConfigPanel
+                serviceName={serviceName}
+                credentials={credentials}
+                initialStatus={initialStatus}
+                onConfigured={loadData}
+                onTestResult={onTestResult}
+              />
+            ) : (
             <div className="rounded-lg border border-gray-200 divide-y divide-gray-100">
               {(() => {
                 const status = quickTesting
@@ -930,6 +944,7 @@ export function APIServiceDetailPanel({
                 </button>
               </div>
             </div>
+            )}
 
             <div className="flex flex-col gap-2">
               <button onClick={handleQuickTestConnectivity} disabled={quickTesting} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors">

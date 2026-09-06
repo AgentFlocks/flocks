@@ -621,10 +621,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   }, [intelConfigured, intelRegionLabel, t]);
 
   const currentIntelCapabilities = useMemo(() => {
-    const matrix = intelRuntimeStatus?.service_matrix || { cn: ['api', 'mcp'], global: ['api', 'mcp'] };
+    const matrix = intelRuntimeStatus?.service_matrix || { cn: ['api', 'mcp'], global: ['api'] };
     const configuredCapabilities = new Set(matrix[intelRegion] || []);
     configuredCapabilities.add('api');
-    configuredCapabilities.add('mcp');
     return ['api', 'mcp'].filter((capability) => configuredCapabilities.has(capability));
   }, [intelRegion, intelRuntimeStatus?.service_matrix]);
 
@@ -1180,16 +1179,18 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 ? t('onboarding.bootstrap.statusConfigured')
                 : t('onboarding.bootstrap.statusNotConfigured')}
             />
-            <StatusMetric
-              label={t('onboarding.bootstrap.intelMcpLabel')}
-              value={intelMcpStatusValue}
-            />
+            {currentIntelCapabilities.includes('mcp') && (
+              <StatusMetric
+                label={t('onboarding.bootstrap.intelMcpLabel')}
+                value={intelMcpStatusValue}
+              />
+            )}
           </div>
 
           <ValidationPanel
             t={t}
             status={intelStatus}
-            visibleResourceKeys={['threatbook_api', 'threatbook_mcp']}
+            visibleResourceKeys={currentIntelCapabilities.map((capability) => `threatbook_${capability}`)}
             compactResourceList
             minimal
           />
@@ -1289,7 +1290,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           <ValidationPanel
             t={t}
             status={intelStatus}
-            visibleResourceKeys={['threatbook_api', 'threatbook_mcp']}
+            visibleResourceKeys={currentIntelCapabilities.map((capability) => `threatbook_${capability}`)}
             compactResourceList
             onSwitchRegion={
               intelStatus?.validation?.error_code === 'region_mismatch'

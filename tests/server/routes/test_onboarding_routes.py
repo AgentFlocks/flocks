@@ -20,7 +20,7 @@ def _intel_status(**overrides):
         "mcp_name": "threatbook_mcp",
         "service_matrix": {
             "cn": ["api", "mcp"],
-            "global": ["api", "mcp"],
+            "global": ["api"],
         },
     }
     data.update(overrides)
@@ -117,7 +117,7 @@ class TestOnboardingStatusRoutes:
         assert data["threatbook_intel"]["mcp_connected"] is True
 
     @pytest.mark.asyncio
-    async def test_intel_status_infers_global_region_from_mcp_endpoint(
+    async def test_intel_status_ignores_legacy_global_mcp_for_global_api(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         async def fake_api_credentials(service_id: str):
@@ -145,8 +145,9 @@ class TestOnboardingStatusRoutes:
 
         assert status.region == "global"
         assert status.api_service_id == "threatbook-io"
-        assert status.mcp_connected is True
-        assert status.service_matrix["global"] == ["api", "mcp"]
+        assert status.mcp_connected is False
+        assert status.mcp_status == "not_required"
+        assert status.service_matrix["global"] == ["api"]
 
 
 class TestOnboardingValidateRoutes:
@@ -290,6 +291,40 @@ class TestOnboardingValidateRoutes:
         assert data["resource_results"]["threatbook_mcp"]["success"] is True
 
     @pytest.mark.asyncio
+    async def test_validate_global_intelligence_configures_api_without_mcp(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fake_test_provider(provider_id: str, api_key: str, **kwargs):
+            assert provider_id == "threatbook-io"
+            assert kwargs["service"] is True
+            return {"success": True, "message": "global api ok"}
+
+        async def fake_test_mcp(region: str, api_key: str):
+            raise AssertionError("International intelligence must not test MCP")
+
+        monkeypatch.setattr(
+            onboarding_routes,
+            "_test_provider_or_service_with_temp_credentials",
+            fake_test_provider,
+        )
+        monkeypatch.setattr(onboarding_routes, "_test_mcp_with_temp_key", fake_test_mcp)
+
+        resp = await client.post(
+            "/api/onboarding/validate",
+            json={
+                "region": "global",
+                "use_threatbook_model": False,
+                "threatbook_services_only": True,
+                "threatbook_api_key": "tb-global-key",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["success"] is True
+        assert set(data["resource_results"]) == {"threatbook_api"}
+
+    @pytest.mark.asyncio
     async def test_validate_threatbook_model_only_skips_api_and_mcp_validation(
         self, client, monkeypatch: pytest.MonkeyPatch
     ):
@@ -342,10 +377,11 @@ class TestOnboardingApplyRoutes:
         assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["activation_url"] == (
             "https://i.threatbook.io/flocks/activate"
         )
-        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["threatbook_mcp_endpoint"] == (
-            "https://mcp.threatbook.io/mcp"
-        )
-        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["requires_mcp"] is True
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["threatbook_mcp_endpoint"] is None
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["requires_mcp"] is False
+        assert onboarding_routes._get_threatbook_resources(
+            "global", include_llm=False, include_services=True
+        ) == ["threatbook_api"]
 
     def test_ensure_threatbook_mcp_config_uses_explicit_secret_reference(
         self, monkeypatch: pytest.MonkeyPatch
@@ -380,9 +416,8 @@ class TestOnboardingApplyRoutes:
         )
 
         onboarding_routes._ensure_threatbook_mcp_config("global")
-
         assert captured["config"]["url"] == (
-            "https://mcp.threatbook.io/mcp?apikey={secret:threatbook_mcp_key}"
+            "https://mcp.threatbook.cn/mcp?apikey={secret:threatbook_mcp_key}"
         )
 
     @pytest.mark.asyncio
@@ -629,9 +664,63 @@ class TestOnboardingApplyRoutes:
         data = resp.json()
         assert data["success"] is True
         assert data["threatbook_enabled"] is False
-        assert set(data["skipped"]) == {"threatbook_api", "threatbook_mcp"}
+        assert data["skipped"] == ["threatbook_api"]
         assert ("provider", "openai") in calls
         assert ("default_model", "openai") in calls
+
+    @pytest.mark.asyncio
+    async def test_apply_global_intelligence_key_configures_api_only(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls: list[tuple[str, str]] = []
+
+        async def fake_validate(request):
+            return onboarding_routes.OnboardingValidateResponse(
+                success=True,
+                can_apply=True,
+                threatbook_enabled=True,
+                threatbook_key_valid=True,
+                threatbook_region_match=True,
+                suggested_region=None,
+                error_code=None,
+                message="ok",
+                threatbook_resources=["threatbook_api"],
+                third_party_llm_valid=None,
+                resource_results={},
+            )
+
+        async def fake_set_service_credentials(provider_id, request):
+            calls.append(("service", provider_id))
+            return {"success": True}
+
+        async def fake_update_api_service(provider_id, request):
+            calls.append(("service_enabled", provider_id))
+            return {"success": True}
+
+        def fail_ensure_mcp(region: str):
+            raise AssertionError("International intelligence must not configure MCP")
+
+        monkeypatch.setattr(onboarding_routes, "_validate_onboarding_request", fake_validate)
+        monkeypatch.setattr(onboarding_routes, "set_service_credentials", fake_set_service_credentials)
+        monkeypatch.setattr(onboarding_routes, "update_api_service", fake_update_api_service)
+        monkeypatch.setattr(onboarding_routes, "_ensure_threatbook_mcp_config", fail_ensure_mcp)
+
+        resp = await client.post(
+            "/api/onboarding/apply",
+            json={
+                "region": "global",
+                "use_threatbook_model": False,
+                "threatbook_services_only": True,
+                "threatbook_api_key": "tb-global-key",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["configured"] == ["threatbook_api"]
+        assert calls == [
+            ("service", "threatbook-io"),
+            ("service_enabled", "threatbook-io"),
+        ]
 
     @pytest.mark.asyncio
     async def test_apply_cn_third_party_model_with_threatbook_key_only_configures_api_mcp(

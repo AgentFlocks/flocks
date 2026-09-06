@@ -410,7 +410,12 @@ async def configure_threatbook_mcp(
     name: str,
     request: ThreatBookMcpConfigureRequest,
 ) -> ThreatBookMcpConfigureResponse:
-    """Validate first, then persist the regional endpoint and secret reference."""
+    """Validate first, then persist the China endpoint and secret reference."""
+    if request.region != "cn":
+        raise HTTPException(
+            status_code=400,
+            detail="ThreatBook MCP is currently available in the China region only",
+        )
     preset = THREATBOOK_REGION_PRESETS[request.region]
     if name != preset["threatbook_mcp_name"]:
         raise HTTPException(status_code=400, detail="This setup flow is only available for ThreatBook MCP")

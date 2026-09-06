@@ -255,17 +255,18 @@ async def _build_threatbook_intel_status() -> ThreatBookIntelStatus:
     )
 
     region: Optional[Region] = None
-    if mcp_status["configured"] and mcp_region:
-        region = mcp_region
-    elif cn_api_configured:
+    if cn_api_configured:
         region = "cn"
     elif global_api_configured:
         region = "global"
+    elif mcp_status["configured"] and mcp_region == "cn":
+        region = "cn"
 
     api_configured = cn_api_configured if region != "global" else global_api_configured
+    cn_mcp_configured = bool(region == "cn" and mcp_region == "cn" and mcp_status["configured"])
 
     return ThreatBookIntelStatus(
-        configured=bool(cn_api_configured or global_api_configured or mcp_status["configured"]),
+        configured=bool(cn_api_configured or global_api_configured or cn_mcp_configured),
         region=region,
         api_configured=api_configured,
         api_service_id=(
@@ -273,13 +274,13 @@ async def _build_threatbook_intel_status() -> ThreatBookIntelStatus:
             if region == "global"
             else cn_preset["threatbook_api_service_id"]
         ),
-        mcp_configured=mcp_status["configured"],
-        mcp_connected=mcp_status["connected"],
-        mcp_status=mcp_status["status"],
+        mcp_configured=cn_mcp_configured,
+        mcp_connected=bool(cn_mcp_configured and mcp_status["connected"]),
+        mcp_status=mcp_status["status"] if region == "cn" else "not_required",
         mcp_name=mcp_name,
         service_matrix={
             "cn": ["api", "mcp"],
-            "global": ["api", "mcp"],
+            "global": ["api"],
         },
     )
 
