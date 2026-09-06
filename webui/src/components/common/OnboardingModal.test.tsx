@@ -9,6 +9,7 @@ import zhCNCommon from '@/locales/zh-CN/common.json';
 const {
   catalogAPI,
   clientPost,
+  currentLanguage,
   defaultModelAPI,
   onboardingAPI,
   sessionApi,
@@ -17,6 +18,9 @@ const {
     list: vi.fn(),
   },
   clientPost: vi.fn(),
+  currentLanguage: {
+    value: 'zh-CN',
+  },
   defaultModelAPI: {
     getResolved: vi.fn(),
   },
@@ -52,7 +56,7 @@ vi.mock('@/api/client', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
-    i18n: { language: 'zh-CN' },
+    i18n: { language: currentLanguage.value },
   }),
 }));
 
@@ -142,6 +146,7 @@ function renderOnboarding() {
 describe('OnboardingModal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    currentLanguage.value = 'zh-CN';
     defaultModelAPI.getResolved.mockRejectedValue(new Error('no default model'));
     onboardingAPI.getStatus.mockResolvedValue({
       data: makeStatus(),
@@ -325,8 +330,8 @@ describe('OnboardingModal', () => {
   it('uses neutral skip descriptions that point users to later setup locations', () => {
     const bootstrap = zhCNCommon.onboarding.bootstrap;
 
-    expect(bootstrap.skipModelDescription).toBe('可以先跳过此步骤，稍后在模型清单中继续完成默认模型配置。');
-    expect(bootstrap.skipIntelDescription).toBe('可以先跳过此步骤，稍后在情报 MCP 中继续完成微步情报 API 与 MCP 配置。');
+    expect(bootstrap.skipModelDescription).toBe('可以先跳过此步骤，稍后在左侧导航栏「模型清单」中继续完成默认模型配置。');
+    expect(bootstrap.skipIntelDescription).toBe('可以先跳过此步骤，稍后在左侧导航栏「工具清单」页面的「MCP」页签中，找到 ThreatBook MCP 后继续完成微步情报 API 与 MCP 配置。');
     expect(bootstrap.skipModelDescription).not.toMatch(/无法|不可用|不能|失败/);
     expect(bootstrap.skipIntelDescription).not.toMatch(/无法|不可用|不能|失败/);
   });
@@ -347,6 +352,20 @@ describe('OnboardingModal', () => {
 
     const globalLink = screen.getByRole('link', { name: 'onboarding.bootstrap.intelKeyLink' });
     expect(globalLink).toHaveAttribute('href', 'https://i.threatbook.io/flocks/activate');
+    expect(screen.getByText('onboarding.bootstrap.intelMcpCapability')).toBeInTheDocument();
+  });
+
+  it('defaults intelligence setup to the international region in English', async () => {
+    const user = userEvent.setup();
+    currentLanguage.value = 'en-US';
+
+    renderOnboarding();
+
+    await screen.findByRole('button', { name: 'onboarding.bootstrap.savePrimary' });
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.nextStep' }));
+
+    const keyLink = screen.getByRole('link', { name: 'onboarding.bootstrap.intelKeyLink' });
+    expect(keyLink).toHaveAttribute('href', 'https://i.threatbook.io/flocks/activate');
     expect(screen.getByText('onboarding.bootstrap.intelMcpCapability')).toBeInTheDocument();
   });
 

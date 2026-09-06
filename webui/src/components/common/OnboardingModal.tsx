@@ -58,6 +58,10 @@ function regionForProvider(providerId: string | null | undefined): OnboardingReg
   return providerId === 'threatbook-io-llm' ? 'global' : 'cn';
 }
 
+function getDefaultIntelRegion(language: string | undefined): OnboardingRegion {
+  return language?.toLowerCase().startsWith('en') ? 'global' : 'cn';
+}
+
 function statusStyles(tone: SectionTone) {
   if (tone === 'success') {
     return {
@@ -310,8 +314,9 @@ function SkipConfirmDialog({
 }
 
 export default function OnboardingModal({ onClose }: OnboardingModalProps) {
-  const { t } = useTranslation('common');
+  const { t, i18n } = useTranslation('common');
   const navigate = useNavigate();
+  const defaultIntelRegion = useMemo(() => getDefaultIntelRegion(i18n.language), [i18n.language]);
 
   const [step, setStep] = useState<OnboardingStep>('model');
   const [catalog, setCatalog] = useState<CatalogProvider[]>([]);
@@ -333,7 +338,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [modelRegion, setModelRegion] = useState<OnboardingRegion>('cn');
   const [modelSkipped, setModelSkipped] = useState(false);
 
-  const [intelRegion, setIntelRegion] = useState<OnboardingRegion>('cn');
+  const [intelRegion, setIntelRegion] = useState<OnboardingRegion>(() => getDefaultIntelRegion(i18n.language));
   const [intelApiKey, setIntelApiKey] = useState('');
   const [intelSaving, setIntelSaving] = useState(false);
   const [intelConfigured, setIntelConfigured] = useState(false);
@@ -365,7 +370,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
         const intel = res.data.threatbook_intel;
         setIntelRuntimeStatus(intel);
         setIntelConfigured(intel.configured);
-        setIntelRegion(intel.region || 'cn');
+        setIntelRegion(intel.region || defaultIntelRegion);
         if (intel.configured) setIntelEditing(false);
       }
     } catch {
@@ -389,7 +394,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     } finally {
       if (!silent) setStatusLoading(false);
     }
-  }, []);
+  }, [defaultIntelRegion]);
 
   useEffect(() => {
     refreshOnboardingStatus();
