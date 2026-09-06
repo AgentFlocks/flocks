@@ -2146,6 +2146,87 @@ async def get_service_credentials(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _load_api_service_primary_key(provider_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Load the primary API key for an API service without logging its value."""
+    from flocks.security import get_secret_manager
+
+    secrets = get_secret_manager()
+    raw_service = ConfigWriter.get_api_service_raw(provider_id)
+    metadata = _load_api_service_metadata_data(provider_id) or {}
+
+    for candidate in _get_api_service_secret_candidates(
+        provider_id,
+        raw_service,
+        field_name="api_key",
+    ):
+        value = secrets.get(candidate)
+        if not value:
+            continue
+
+        auth = metadata.get("authentication") or metadata.get("auth")
+        expects_secondary_secret = (
+            isinstance(auth, dict)
+            and bool(auth.get("secret_secret"))
+            and _should_persist_secondary_secret(metadata)
+        )
+        if expects_secondary_secret:
+            split_result = _split_compound_service_credentials(value)
+            if split_result:
+                value = split_result[0]
+        return candidate, value
+
+    return None, None
+
+
+@router.post(
+    "/{provider_id}/service-credentials/reveal",
+    response_model=ProviderCredentialResponse,
+    summary="Reveal API service credentials",
+    description="Reveal the primary API key for an API service to an administrator.",
+)
+async def reveal_service_credentials(
+    provider_id: str,
+    request: Request,
+    response: Response,
+    admin: AuthUser = Depends(require_admin),
+):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+    try:
+        secret_id, api_key = _load_api_service_primary_key(provider_id)
+        credentials = ProviderCredentialResponse(
+            secret_id=secret_id,
+            api_key=api_key,
+            api_key_masked=SecretManager.mask(api_key) if api_key else None,
+            has_credential=bool(api_key),
+        )
+        try:
+            await emit_audit_event(
+                "provider.service_credentials_reveal",
+                {
+                    "action": "service_credentials_reveal",
+                    "actor_id": admin.id,
+                    "actor_name": admin.username,
+                    "user_id": admin.id,
+                    "username": admin.username,
+                    "provider_id": provider_id,
+                    "secret_id": secret_id,
+                    "ip": get_request_ip(request),
+                    "user_agent": get_request_user_agent(request),
+                },
+            )
+        except Exception as audit_error:
+            log.warn(
+                "service.credentials.reveal.audit_failed",
+                {"provider_id": provider_id, "error": str(audit_error)},
+            )
+        return credentials
+    except Exception as e:
+        log.error("service.credentials.reveal.error", {"provider_id": provider_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post(
     "/{provider_id}/service-credentials",
     response_model=Dict[str, Any],

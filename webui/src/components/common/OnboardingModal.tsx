@@ -1,10 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, ArrowRight, CheckCircle2, ExternalLink, X, XCircle } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Loader2,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
-import { catalogAPI, defaultModelAPI } from '@/api/provider';
+import { catalogAPI, defaultModelAPI, providerAPI } from '@/api/provider';
+import { mcpAPI } from '@/api/mcp';
 import {
   onboardingAPI,
   type OnboardingApplyResponse,
@@ -20,6 +31,7 @@ const MODEL_KEY_LINK = 'https://portal.agentflocks.com';
 
 const THREATBOOK_PROVIDER_IDS = ['threatbook-cn-llm', 'threatbook-io-llm'] as const;
 const THREATBOOK_FREE_PROVIDER_OPTION = 'threatbook-free';
+const STORED_KEY_MASK = '************';
 
 type SectionTone = 'success' | 'warning' | 'error';
 type OnboardingStep = 'model' | 'intel';
@@ -226,11 +238,13 @@ function RegionChooser({
   onChange,
   chinaLabel,
   globalLabel,
+  disabled = false,
 }: {
   value: OnboardingRegion;
   onChange: (value: OnboardingRegion) => void;
   chinaLabel: string;
   globalLabel: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1.5 shadow-sm">
@@ -242,15 +256,67 @@ function RegionChooser({
           key={candidate}
           type="button"
           onClick={() => onChange(candidate)}
+          disabled={disabled}
           className={`rounded-lg px-5 py-2 text-sm font-semibold transition-colors ${
             value === candidate
               ? 'bg-green-50 text-green-700 ring-1 ring-green-200'
               : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
-          }`}
+          } disabled:cursor-not-allowed disabled:opacity-50`}
         >
           {label}
         </button>
       ))}
+    </div>
+  );
+}
+
+function OnboardingSecretInput({
+  value,
+  hasStoredKey,
+  visible,
+  revealing,
+  placeholder,
+  showLabel,
+  hideLabel,
+  onChange,
+  onToggleVisibility,
+}: {
+  value: string;
+  hasStoredKey: boolean;
+  visible: boolean;
+  revealing: boolean;
+  placeholder: string;
+  showLabel: string;
+  hideLabel: string;
+  onChange: (value: string) => void;
+  onToggleVisibility: () => void;
+}) {
+  const showingStoredMask = hasStoredKey && !visible;
+
+  return (
+    <div className="relative min-w-0 flex-1">
+      <input
+        type={visible ? 'text' : 'password'}
+        value={showingStoredMask ? STORED_KEY_MASK : value}
+        readOnly={showingStoredMask}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        autoComplete="off"
+        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 pr-10 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+      />
+      <button
+        type="button"
+        onClick={onToggleVisibility}
+        disabled={revealing || (!hasStoredKey && !value)}
+        title={visible ? hideLabel : showLabel}
+        className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {revealing
+          ? <Loader2 className="h-4 w-4 animate-spin" />
+          : visible
+            ? <EyeOff className="h-4 w-4" />
+            : <Eye className="h-4 w-4" />}
+      </button>
     </div>
   );
 }
@@ -327,6 +393,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [primaryConfigured, setPrimaryConfigured] = useState(false);
   const [primaryStatus, setPrimaryStatus] = useState<SectionStatus | null>(null);
   const [primaryEditing, setPrimaryEditing] = useState(false);
+  const [primaryKeyVisible, setPrimaryKeyVisible] = useState(false);
+  const [primaryKeyRevealed, setPrimaryKeyRevealed] = useState(false);
+  const [primaryKeyRevealing, setPrimaryKeyRevealing] = useState(false);
   const [modelRegion, setModelRegion] = useState<OnboardingRegion>('cn');
   const [modelSkipped, setModelSkipped] = useState(false);
 
@@ -336,6 +405,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [intelConfigured, setIntelConfigured] = useState(false);
   const [intelStatus, setIntelStatus] = useState<SectionStatus | null>(null);
   const [intelEditing, setIntelEditing] = useState(false);
+  const [intelKeyVisible, setIntelKeyVisible] = useState(false);
+  const [intelKeyRevealed, setIntelKeyRevealed] = useState(false);
+  const [intelKeyRevealing, setIntelKeyRevealing] = useState(false);
   const [intelSkipped, setIntelSkipped] = useState(false);
   const [intelRuntimeStatus, setIntelRuntimeStatus] = useState<ThreatBookIntelStatus | null>(null);
 
@@ -562,6 +634,18 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const canSaveIntel = Boolean(intelApiKey.trim());
   const showPrimaryConfiguredDetails = primaryConfigured && !primaryEditing;
   const showIntelConfiguredDetails = intelConfigured && !intelEditing;
+  const hasStoredPrimaryKey = Boolean(
+    primaryConfigured
+    && primaryEditing
+    && resolvedDefaultModel
+    && primaryProviderId === resolvedDefaultModel.providerId,
+  );
+  const hasStoredIntelKey = Boolean(
+    intelConfigured
+    && intelEditing
+    && intelRuntimeStatus?.region === intelRegion
+    && (intelRuntimeStatus.api_configured || intelRuntimeStatus.mcp_configured),
+  );
 
   const buildPrimaryPayload = (): OnboardingRequest => {
     if (primaryProviderIsThreatBook) {
@@ -621,11 +705,77 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       setPrimaryProviderId(providerId);
     }
     setPrimaryApiKey('');
+    setPrimaryKeyVisible(false);
+    setPrimaryKeyRevealed(false);
     setPrimaryBaseUrl('');
     setPrimaryStatus(null);
-    setPrimaryConfigured(false);
     setPrimaryEditing(true);
     setModelSkipped(false);
+  };
+
+  const handlePrimaryKeyVisibility = async () => {
+    if (primaryKeyVisible) {
+      setPrimaryKeyVisible(false);
+      return;
+    }
+
+    if (hasStoredPrimaryKey && !primaryKeyRevealed) {
+      try {
+        setPrimaryKeyRevealing(true);
+        setPrimaryStatus(null);
+        const response = await providerAPI.revealCredentials(primaryProviderId);
+        if (!response.data.api_key) throw new Error(t('onboarding.bootstrap.revealModelKeyError'));
+        setPrimaryApiKey(response.data.api_key);
+        setPrimaryKeyRevealed(true);
+      } catch (err: any) {
+        setPrimaryStatus({
+          tone: 'error',
+          message: err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.revealModelKeyError'),
+        });
+        return;
+      } finally {
+        setPrimaryKeyRevealing(false);
+      }
+    }
+
+    setPrimaryKeyVisible(true);
+  };
+
+  const handleIntelKeyVisibility = async () => {
+    if (intelKeyVisible) {
+      setIntelKeyVisible(false);
+      return;
+    }
+
+    if (hasStoredIntelKey && !intelKeyRevealed) {
+      try {
+        setIntelKeyRevealing(true);
+        setIntelStatus(null);
+        let apiKey: string | null | undefined;
+        if (intelRuntimeStatus?.api_configured) {
+          const serviceId = intelRuntimeStatus.api_service_id
+            || THREATBOOK_REGION_CONFIG[intelRegion].apiServiceId;
+          const response = await providerAPI.revealServiceCredentials(serviceId);
+          apiKey = response.data.api_key;
+        } else if (intelRuntimeStatus?.mcp_configured && intelRuntimeStatus.mcp_name) {
+          const response = await mcpAPI.revealCredentials(intelRuntimeStatus.mcp_name);
+          apiKey = response.data.api_key;
+        }
+        if (!apiKey) throw new Error(t('onboarding.bootstrap.revealIntelKeyError'));
+        setIntelApiKey(apiKey);
+        setIntelKeyRevealed(true);
+      } catch (err: any) {
+        setIntelStatus({
+          tone: 'error',
+          message: err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.revealIntelKeyError'),
+        });
+        return;
+      } finally {
+        setIntelKeyRevealing(false);
+      }
+    }
+
+    setIntelKeyVisible(true);
   };
 
   const handleSavePrimary = async () => {
@@ -676,6 +826,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       setModelRegion(regionForProvider(savedProviderId));
       setPrimaryConfigured(true);
       setPrimaryEditing(false);
+      setPrimaryApiKey('');
+      setPrimaryKeyVisible(false);
+      setPrimaryKeyRevealed(false);
       setModelSkipped(false);
       setHasLLM(true);
 
@@ -729,6 +882,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       setIntelRegion(payload.region);
       setIntelConfigured(true);
       setIntelEditing(false);
+      setIntelApiKey('');
+      setIntelKeyVisible(false);
+      setIntelKeyRevealed(false);
       setIntelSkipped(false);
       setIntelStatus(buildSuccessStatus(
         validateData,
@@ -806,6 +962,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
             <button
               type="button"
               onClick={() => {
+                setPrimaryApiKey('');
+                setPrimaryKeyVisible(false);
+                setPrimaryKeyRevealed(false);
                 setPrimaryEditing(true);
                 setPrimaryStatus(null);
               }}
@@ -844,6 +1003,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
             <select
               value={primaryProviderIsThreatBook ? THREATBOOK_FREE_PROVIDER_OPTION : primaryProviderId}
               onChange={(event) => handlePrimaryProviderChange(event.target.value)}
+              disabled={primaryKeyRevealing || primarySaving}
               className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
             >
               {providerOptions.hasThreatBook && (
@@ -916,24 +1076,31 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                     setModelRegion(regionForProvider(resolvedDefaultModel.providerId));
                   }
                   setPrimaryApiKey('');
+                  setPrimaryKeyVisible(false);
+                  setPrimaryKeyRevealed(false);
                   setPrimaryBaseUrl('');
                   setPrimaryStatus(null);
                   setPrimaryEditing(false);
                 }}
-                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                disabled={primaryKeyRevealing || primarySaving}
+                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {t('onboarding.bootstrap.backToConfiguredDetails')}
               </button>
             )}
-            <input
-              type="password"
+            <OnboardingSecretInput
               value={primaryApiKey}
-              onChange={(event) => {
-                setPrimaryApiKey(event.target.value);
+              hasStoredKey={hasStoredPrimaryKey}
+              visible={primaryKeyVisible}
+              revealing={primaryKeyRevealing}
+              onChange={(value) => {
+                setPrimaryApiKey(value);
                 setPrimaryStatus(null);
               }}
               placeholder={primaryApiPlaceholder}
-              className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+              showLabel={t('onboarding.bootstrap.showKey')}
+              hideLabel={t('onboarding.bootstrap.hideKey')}
+              onToggleVisibility={handlePrimaryKeyVisibility}
             />
             {primaryProviderIsThreatBook && (
               <a
@@ -986,6 +1153,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
             <button
               type="button"
               onClick={() => {
+                setIntelApiKey('');
+                setIntelKeyVisible(false);
+                setIntelKeyRevealed(false);
                 setIntelEditing(true);
                 setIntelStatus(null);
               }}
@@ -1037,12 +1207,15 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               value={intelRegion}
               onChange={(region) => {
                 setIntelRegion(region);
+                setIntelApiKey('');
+                setIntelKeyVisible(false);
+                setIntelKeyRevealed(false);
                 setIntelStatus(null);
-                setIntelConfigured(false);
                 setIntelSkipped(false);
               }}
               chinaLabel={t('onboarding.bootstrap.intelRegionChina')}
               globalLabel={t('onboarding.bootstrap.intelRegionGlobal')}
+              disabled={intelKeyRevealing || intelSaving}
             />
           </div>
 
@@ -1064,24 +1237,32 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               <button
                 type="button"
                 onClick={() => {
+                  setIntelRegion(intelRuntimeStatus?.region || defaultIntelRegion);
                   setIntelApiKey('');
+                  setIntelKeyVisible(false);
+                  setIntelKeyRevealed(false);
                   setIntelStatus(null);
                   setIntelEditing(false);
                 }}
-                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                disabled={intelKeyRevealing || intelSaving}
+                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {t('onboarding.bootstrap.backToConfiguredDetails')}
               </button>
             )}
-            <input
-              type="password"
+            <OnboardingSecretInput
               value={intelApiKey}
-              onChange={(event) => {
-                setIntelApiKey(event.target.value);
+              hasStoredKey={hasStoredIntelKey}
+              visible={intelKeyVisible}
+              revealing={intelKeyRevealing}
+              onChange={(value) => {
+                setIntelApiKey(value);
                 setIntelStatus(null);
               }}
               placeholder={t('onboarding.bootstrap.intelKeyPlaceholder')}
-              className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+              showLabel={t('onboarding.bootstrap.showKey')}
+              hideLabel={t('onboarding.bootstrap.hideKey')}
+              onToggleVisibility={handleIntelKeyVisibility}
             />
             <a
               href={THREATBOOK_REGION_CONFIG[intelRegion].activationUrl}
@@ -1155,12 +1336,12 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const footerPrimaryAction = step === 'model'
     ? {
         label: t('onboarding.bootstrap.nextStep'),
-        disabled: statusLoading || primarySaving,
+        disabled: statusLoading || primarySaving || primaryKeyRevealing,
         onClick: () => setStep('intel'),
       }
     : {
         label: starting ? t('onboarding.startingButton') : t('onboarding.startButton'),
-        disabled: starting || primarySaving || intelSaving,
+        disabled: starting || primarySaving || intelSaving || intelKeyRevealing,
         onClick: handleStart,
       };
 
@@ -1209,7 +1390,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               <button
                 type="button"
                 onClick={() => setSkipConfirm(step)}
-                disabled={starting || primarySaving || intelSaving || statusLoading}
+                disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing || statusLoading}
                 className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {t('onboarding.bootstrap.skipPage')}
@@ -1218,7 +1399,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 <button
                   type="button"
                   onClick={() => setStep('model')}
-                  disabled={starting || primarySaving || intelSaving}
+                  disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing}
                   className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {t('onboarding.bootstrap.previousStep')}

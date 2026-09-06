@@ -122,6 +122,9 @@ export const providerAPI = {
   getServiceCredentials: (id: string) =>
     client.get<ProviderCredentials>(`/api/provider/${id}/service-credentials`),
 
+  revealServiceCredentials: (id: string) =>
+    client.post<ProviderCredentials>(`/api/provider/${id}/service-credentials/reveal`),
+
   setServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
     client.post<{ success: boolean; message: string }>(`/api/provider/${id}/service-credentials`, credentials)
       .then((response) => {

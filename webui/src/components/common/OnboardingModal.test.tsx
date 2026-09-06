@@ -11,7 +11,9 @@ const {
   clientPost,
   currentLanguage,
   defaultModelAPI,
+  mcpAPI,
   onboardingAPI,
+  providerAPI,
   sessionApi,
 } = vi.hoisted(() => ({
   catalogAPI: {
@@ -24,10 +26,17 @@ const {
   defaultModelAPI: {
     getResolved: vi.fn(),
   },
+  mcpAPI: {
+    revealCredentials: vi.fn(),
+  },
   onboardingAPI: {
     getStatus: vi.fn(),
     validate: vi.fn(),
     apply: vi.fn(),
+  },
+  providerAPI: {
+    revealCredentials: vi.fn(),
+    revealServiceCredentials: vi.fn(),
   },
   sessionApi: {
     create: vi.fn(),
@@ -37,6 +46,11 @@ const {
 vi.mock('@/api/provider', () => ({
   catalogAPI,
   defaultModelAPI,
+  providerAPI,
+}));
+
+vi.mock('@/api/mcp', () => ({
+  mcpAPI,
 }));
 
 vi.mock('@/api/onboarding', () => ({
@@ -148,6 +162,15 @@ describe('OnboardingModal', () => {
     vi.clearAllMocks();
     currentLanguage.value = 'zh-CN';
     defaultModelAPI.getResolved.mockRejectedValue(new Error('no default model'));
+    providerAPI.revealCredentials.mockResolvedValue({
+      data: { has_credential: true, api_key: 'saved-model-key' },
+    });
+    providerAPI.revealServiceCredentials.mockResolvedValue({
+      data: { has_credential: true, api_key: 'saved-intel-key' },
+    });
+    mcpAPI.revealCredentials.mockResolvedValue({
+      data: { api_key: 'saved-intel-mcp-key' },
+    });
     onboardingAPI.getStatus.mockResolvedValue({
       data: makeStatus(),
     });
@@ -369,7 +392,7 @@ describe('OnboardingModal', () => {
     expect(screen.getByText('onboarding.bootstrap.intelMcpCapability')).toBeInTheDocument();
   });
 
-  it('shows configured summaries and lets users enter edit mode', async () => {
+  it('shows configured keys masked in edit mode and reveals them on demand', async () => {
     const user = userEvent.setup();
 
     onboardingAPI.getStatus.mockResolvedValue({
@@ -404,11 +427,60 @@ describe('OnboardingModal', () => {
 
     await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.editPrimary' }));
     expect(screen.getByRole('button', { name: 'onboarding.bootstrap.savePrimary' })).toBeInTheDocument();
+    const modelKeyInput = screen.getByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder');
+    expect(modelKeyInput).toHaveValue('************');
+    expect(modelKeyInput).toHaveAttribute('type', 'password');
+    expect(modelKeyInput).toHaveAttribute('readonly');
+    expect(providerAPI.revealCredentials).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTitle('onboarding.bootstrap.showKey'));
+    await waitFor(() => {
+      expect(providerAPI.revealCredentials).toHaveBeenCalledWith('threatbook-cn-llm');
+      expect(modelKeyInput).toHaveValue('saved-model-key');
+    });
+    expect(modelKeyInput).toHaveAttribute('type', 'text');
+
+    await user.click(screen.getByTitle('onboarding.bootstrap.hideKey'));
+    expect(modelKeyInput).toHaveValue('************');
+    expect(modelKeyInput).toHaveAttribute('type', 'password');
+
+    const providerSelect = screen.getByRole('combobox');
+    await user.selectOptions(providerSelect, 'openai-compatible');
+    expect(modelKeyInput).toHaveValue('');
+    expect(modelKeyInput).not.toHaveAttribute('readonly');
+    await user.selectOptions(providerSelect, 'threatbook-free');
+    expect(modelKeyInput).toHaveValue('************');
+    expect(modelKeyInput).toHaveAttribute('readonly');
 
     await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.nextStep' }));
     expect(screen.getByText('onboarding.bootstrap.intelConfiguredHint')).toBeInTheDocument();
     expect(screen.getAllByText('onboarding.bootstrap.intelConfiguredVerified').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'onboarding.bootstrap.editIntel' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.editIntel' }));
+    const intelKeyInput = screen.getByPlaceholderText('onboarding.bootstrap.intelKeyPlaceholder');
+    expect(intelKeyInput).toHaveValue('************');
+    expect(intelKeyInput).toHaveAttribute('type', 'password');
+    expect(intelKeyInput).toHaveAttribute('readonly');
+    expect(providerAPI.revealServiceCredentials).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTitle('onboarding.bootstrap.showKey'));
+    await waitFor(() => {
+      expect(providerAPI.revealServiceCredentials).toHaveBeenCalledWith('threatbook-cn');
+      expect(intelKeyInput).toHaveValue('saved-intel-key');
+    });
+    expect(intelKeyInput).toHaveAttribute('type', 'text');
+
+    await user.click(screen.getByTitle('onboarding.bootstrap.hideKey'));
+    expect(intelKeyInput).toHaveValue('************');
+    expect(intelKeyInput).toHaveAttribute('type', 'password');
+
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.intelRegionGlobal' }));
+    expect(intelKeyInput).toHaveValue('');
+    expect(intelKeyInput).not.toHaveAttribute('readonly');
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.intelRegionChina' }));
+    expect(intelKeyInput).toHaveValue('************');
+    expect(intelKeyInput).toHaveAttribute('readonly');
   });
 
   it('starts Rex onboarding after skipping intelligence setup', async () => {

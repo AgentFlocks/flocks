@@ -151,4 +151,13 @@ describe('providerAPI.revealCredentials', () => {
 
     expect(mockPost).toHaveBeenCalledWith('/api/provider/openai/credentials/reveal');
   });
+
+  it('uses the explicit API service credential reveal endpoint', async () => {
+    mockPost.mockResolvedValue({ data: { api_key: 'service-key', has_credential: true } });
+
+    const { providerAPI } = await import('./provider');
+    await providerAPI.revealServiceCredentials('threatbook-cn');
+
+    expect(mockPost).toHaveBeenCalledWith('/api/provider/threatbook-cn/service-credentials/reveal');
+  });
 });

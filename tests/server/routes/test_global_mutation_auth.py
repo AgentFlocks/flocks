@@ -44,6 +44,7 @@ def test_provider_global_configuration_credentials_and_tests_require_admin():
         client.post("/api/provider/example/credentials", json={"api_key": "secret"}),
         client.delete("/api/provider/example/credentials"),
         client.get("/api/provider/example/service-credentials"),
+        client.post("/api/provider/example/service-credentials/reveal"),
         client.post("/api/provider/example/service-credentials", json={"api_key": "secret"}),
         client.post("/api/provider/example/test-credentials", json={}),
         client.patch("/api/provider/api-services/example", json={"enabled": False}),
@@ -107,13 +108,16 @@ def test_admin_reveal_returns_raw_llm_key_with_audit_and_no_store(
     llm_response = client.get("/api/provider/llm-example/credentials")
     reveal_response = client.post("/api/provider/llm-example/credentials/reveal")
     service_response = client.get("/api/provider/service-example/service-credentials")
+    service_reveal_response = client.post("/api/provider/service-example/service-credentials/reveal")
 
     assert llm_response.status_code == 200
     assert reveal_response.status_code == 200
     assert service_response.status_code == 200
+    assert service_reveal_response.status_code == 200
     llm_payload = llm_response.json()
     reveal_payload = reveal_response.json()
     service_payload = service_response.json()
+    service_reveal_payload = service_reveal_response.json()
     assert llm_payload["api_key"] is None
     assert llm_payload["api_key_masked"]
     assert reveal_payload["api_key"] == raw_llm_key
@@ -123,15 +127,23 @@ def test_admin_reveal_returns_raw_llm_key_with_audit_and_no_store(
     assert service_payload["api_key_masked"]
     assert service_payload["fields"]["api_key"] != raw_service_key
     assert service_payload["fields"]["base_url"] == "https://service.example.test"
+    assert service_reveal_payload["api_key"] == raw_service_key
+    assert service_reveal_response.headers["Cache-Control"] == "no-store"
+    assert service_reveal_response.headers["Pragma"] == "no-cache"
     assert raw_llm_key not in llm_response.text
     assert raw_llm_key in reveal_response.text
     assert raw_service_key not in service_response.text
-    audit.assert_awaited_once()
-    event_type, audit_payload = audit.await_args.args
-    assert event_type == "provider.credentials_reveal"
-    assert audit_payload["provider_id"] == "llm-example"
-    assert audit_payload["username"] == "admin-test"
-    assert raw_llm_key not in repr(audit_payload)
+    assert raw_service_key in service_reveal_response.text
+    assert audit.await_count == 2
+    audit_events = [call.args for call in audit.await_args_list]
+    assert [event_type for event_type, _ in audit_events] == [
+        "provider.credentials_reveal",
+        "provider.service_credentials_reveal",
+    ]
+    for _, audit_payload in audit_events:
+        assert audit_payload["username"] == "admin-test"
+        assert raw_llm_key not in repr(audit_payload)
+        assert raw_service_key not in repr(audit_payload)
 
 
 def test_admin_provider_update_never_writes_raw_api_key_to_storage(monkeypatch: pytest.MonkeyPatch):
