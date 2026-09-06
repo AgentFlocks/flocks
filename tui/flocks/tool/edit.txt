@@ -1,10 +1,10 @@
-Performs exact string replacements in files. 
+Performs one or more targeted string replacements in an existing file.
 
 Usage:
-- You must use your `Read` tool at least once before editing a file. CRITICAL: After each successful edit, the file content changes. You MUST re-read the file with `Read` before making any further edits to that file, otherwise oldString will not match the updated content and the edit will fail.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: NNNNN| (5-digit zero-padded line number, then pipe, then a single space). Everything after that "| " is the actual file content to match. Never include any part of the line number prefix in the oldString or newString. For example, if Read outputs "00042|     return x", the actual content to use in oldString is "    return x" (4 spaces + "return x").
+- Pass every replacement inside the required `edits` array: `{"filePath":"path/to/file","edits":[{"oldString":"current text","newString":"replacement text"}]}`.
+- You must use your `Read` tool at least once before editing a file. After each successful edit, re-read the file before making another edit call because the file contents have changed.
+- Each `edits[].oldString` is matched against the original file snapshot. It must be non-empty, unique, and must not overlap another replacement in the same call.
+- When editing text from Read tool output, preserve the exact indentation after the `NNNNN| ` line-number prefix. Never include the prefix itself in `oldString` or `newString`.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
-- The edit will FAIL if `oldString` is found multiple times in the file with an error "oldString found multiple times and requires more code context to uniquely identify the intended match". Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`. 
-- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+- If a target is missing or appears more than once, provide a larger unique snippet from the current file contents.
