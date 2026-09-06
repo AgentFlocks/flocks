@@ -37,6 +37,7 @@ const {
     getCredentials: vi.fn(),
   },
   onboardingAPI: {
+    getStatus: vi.fn(),
     validate: vi.fn(),
     apply: vi.fn(),
   },
@@ -206,6 +207,32 @@ function makeProvider(id: string, name: string, models: Array<{ id: string; name
   };
 }
 
+function makeOnboardingStatus(overrides: Record<string, any> = {}) {
+  return {
+    completed: true,
+    has_default_model: true,
+    default_model: {
+      provider_id: 'threatbook-cn-llm',
+      model_id: 'minimax-m2.7',
+    },
+    threatbook_intel: {
+      configured: false,
+      region: null,
+      api_configured: false,
+      api_service_id: 'threatbook-cn',
+      mcp_configured: false,
+      mcp_connected: false,
+      mcp_status: 'not_configured',
+      mcp_name: 'threatbook_mcp',
+      service_matrix: {
+        cn: ['api', 'mcp'],
+        global: ['api'],
+      },
+    },
+    ...overrides,
+  };
+}
+
 function renderHomeWithLayout() {
   return render(
     <MemoryRouter initialEntries={['/']}>
@@ -311,6 +338,9 @@ describe('Layout onboarding entry', () => {
         model_id: 'minimax-m2.7',
       },
     });
+    onboardingAPI.getStatus.mockResolvedValue({
+      data: makeOnboardingStatus(),
+    });
 
     catalogAPI.list.mockResolvedValue({
       data: {
@@ -363,12 +393,26 @@ describe('Layout onboarding entry', () => {
 
     await screen.findByText('onboarding.bootstrap.primaryConfiguredSummary');
 
-    await user.click(screen.getByText('onboarding.bootstrap.primaryTitle'));
-
     expect(screen.getByText('onboarding.bootstrap.configuredDetailsTitle')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'onboarding.bootstrap.editPrimary' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'onboarding.bootstrap.savePrimary' })).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText('onboarding.bootstrap.tbPlaceholder')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder')).not.toBeInTheDocument();
+  });
+
+  it('auto-opens onboarding from backend status even when the old dismissed flag exists', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    onboardingAPI.getStatus.mockResolvedValue({
+      data: makeOnboardingStatus({
+        completed: false,
+        has_default_model: false,
+        default_model: null,
+      }),
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('onboarding.bootstrap.modelPageTitle')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'onboarding.bootstrap.savePrimary' })).toBeInTheDocument();
   });
 
   it('keeps standard pages out of a flex column content wrapper', async () => {

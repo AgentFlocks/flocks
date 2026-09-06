@@ -5,6 +5,33 @@ import pytest
 from flocks.server.routes import onboarding as onboarding_routes
 
 
+def _intel_status(**overrides):
+    data = {
+        "configured": False,
+        "region": None,
+        "api_configured": False,
+        "api_service_id": "threatbook-cn",
+        "mcp_configured": False,
+        "mcp_connected": False,
+        "mcp_status": "not_configured",
+        "mcp_name": "threatbook_mcp",
+        "service_matrix": {
+            "cn": ["api", "mcp"],
+            "global": ["api"],
+        },
+    }
+    data.update(overrides)
+    return onboarding_routes.ThreatBookIntelStatus(**data)
+
+
+@pytest.fixture(autouse=True)
+def default_threatbook_intel_status(monkeypatch: pytest.MonkeyPatch):
+    async def fake_status():
+        return _intel_status()
+
+    monkeypatch.setattr(onboarding_routes, "_build_threatbook_intel_status", fake_status)
+
+
 class TestOnboardingStatusRoutes:
     @pytest.mark.asyncio
     async def test_status_incomplete_when_no_default_model(self, client, monkeypatch: pytest.MonkeyPatch):
@@ -19,6 +46,8 @@ class TestOnboardingStatusRoutes:
         assert data["completed"] is False
         assert data["has_default_model"] is False
         assert data["default_model"] is None
+        assert data["threatbook_intel"]["configured"] is False
+        assert data["threatbook_intel"]["service_matrix"]["cn"] == ["api", "mcp"]
 
     @pytest.mark.asyncio
     async def test_status_incomplete_when_default_without_credentials(
@@ -54,6 +83,35 @@ class TestOnboardingStatusRoutes:
         assert data["has_default_model"] is True
         assert data["default_model"]["provider_id"] == "threatbook-cn-llm"
         assert data["default_model"]["model_id"] == "minimax-m2.7"
+
+    @pytest.mark.asyncio
+    async def test_status_includes_threatbook_intel_configuration(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fake_resolve():
+            return {"provider_id": "openai", "model_id": "gpt-4o"}
+
+        async def fake_intel_status():
+            return _intel_status(
+                configured=True,
+                region="cn",
+                api_configured=True,
+                mcp_configured=True,
+                mcp_connected=True,
+                mcp_status="connected",
+            )
+
+        monkeypatch.setattr(onboarding_routes.Config, "resolve_default_llm", fake_resolve)
+        monkeypatch.setattr(onboarding_routes, "_llm_provider_has_usable_credentials", lambda _pid: True)
+        monkeypatch.setattr(onboarding_routes, "_build_threatbook_intel_status", fake_intel_status)
+
+        resp = await client.get("/api/onboarding/status")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["threatbook_intel"]["configured"] is True
+        assert data["threatbook_intel"]["region"] == "cn"
+        assert data["threatbook_intel"]["api_configured"] is True
+        assert data["threatbook_intel"]["mcp_connected"] is True
 
 
 class TestOnboardingValidateRoutes:
@@ -196,6 +254,47 @@ class TestOnboardingValidateRoutes:
         assert data["resource_results"]["threatbook_api"]["success"] is True
         assert data["resource_results"]["threatbook_mcp"]["success"] is True
 
+    @pytest.mark.asyncio
+    async def test_validate_threatbook_model_only_skips_api_and_mcp_validation(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fake_test_provider(provider_id: str, api_key: str, **kwargs):
+            assert provider_id == "threatbook-cn-llm"
+            assert kwargs["model_id"] == "deepseek-v4-flash-0731"
+            return {"success": True, "message": "tb model ok"}
+
+        async def fake_test_mcp(region: str, api_key: str):
+            raise AssertionError("MCP should not be tested for model-only setup")
+
+        monkeypatch.setattr(
+            onboarding_routes,
+            "_test_provider_or_service_with_temp_credentials",
+            fake_test_provider,
+        )
+        monkeypatch.setattr(
+            onboarding_routes,
+            "_test_mcp_with_temp_key",
+            fake_test_mcp,
+        )
+
+        resp = await client.post(
+            "/api/onboarding/validate",
+            json={
+                "region": "cn",
+                "use_threatbook_model": True,
+                "threatbook_model_only": True,
+                "threatbook_api_key": "tb-key",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["success"] is True
+        assert data["can_apply"] is True
+        assert data["resource_results"]["threatbook_llm"]["success"] is True
+        assert "threatbook_api" not in data["resource_results"]
+        assert "threatbook_mcp" not in data["resource_results"]
+
 
 class TestOnboardingApplyRoutes:
     def test_threatbook_region_presets_use_deepseek_v4_flash_0731(self):
@@ -204,6 +303,9 @@ class TestOnboardingApplyRoutes:
         )
         assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["threatbook_default_model_id"] == (
             "deepseek-v4-flash-0731"
+        )
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["activation_url"] == (
+            "https://i.threatbook.io/flocks/activate"
         )
 
     def test_ensure_threatbook_mcp_config_uses_explicit_secret_reference(
@@ -318,6 +420,86 @@ class TestOnboardingApplyRoutes:
         assert ("mcp_credentials", "threatbook_mcp") in calls
         assert ("mcp_connect", "threatbook_mcp") in calls
         assert ("default_model", "threatbook-cn-llm", "deepseek-v4-flash-0731") in calls
+
+    @pytest.mark.asyncio
+    async def test_apply_threatbook_model_only_does_not_configure_intel_services(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls: list[tuple[str, str]] = []
+
+        async def fake_validate(request):
+            assert request.threatbook_model_only is True
+            return onboarding_routes.OnboardingValidateResponse(
+                success=True,
+                can_apply=True,
+                threatbook_enabled=True,
+                threatbook_key_valid=True,
+                threatbook_region_match=True,
+                suggested_region=None,
+                error_code=None,
+                message="ok",
+                threatbook_resources=["threatbook_llm"],
+                third_party_llm_valid=None,
+                resource_results={},
+            )
+
+        async def fake_set_provider_credentials(provider_id, request):
+            calls.append(("provider", provider_id))
+            return {"success": True}
+
+        async def fake_set_service_credentials(provider_id, request):
+            calls.append(("service", provider_id))
+            return {"success": True}
+
+        async def fake_update_api_service(provider_id, request):
+            calls.append(("service_enabled", provider_id))
+            return {"success": True}
+
+        def fake_ensure_mcp(region: str):
+            calls.append(("ensure_mcp", region))
+
+        async def fake_set_mcp_credentials(name: str, request):
+            calls.append(("mcp_credentials", name))
+            return {"success": True}
+
+        async def fake_connect_mcp(name: str):
+            calls.append(("mcp_connect", name))
+            return True
+
+        async def fake_set_default_model(model_type, body):
+            calls.append(("default_model", body.provider_id))
+            return {"provider_id": body.provider_id, "model_id": body.model_id}
+
+        monkeypatch.setattr(onboarding_routes, "_validate_onboarding_request", fake_validate)
+        monkeypatch.setattr(onboarding_routes, "set_provider_credentials", fake_set_provider_credentials)
+        monkeypatch.setattr(onboarding_routes, "set_service_credentials", fake_set_service_credentials)
+        monkeypatch.setattr(onboarding_routes, "update_api_service", fake_update_api_service)
+        monkeypatch.setattr(onboarding_routes, "_ensure_threatbook_mcp_config", fake_ensure_mcp)
+        monkeypatch.setattr(onboarding_routes, "set_mcp_credentials", fake_set_mcp_credentials)
+        monkeypatch.setattr(onboarding_routes, "connect_mcp_server", fake_connect_mcp)
+        monkeypatch.setattr(onboarding_routes, "set_default_model", fake_set_default_model)
+
+        resp = await client.post(
+            "/api/onboarding/apply",
+            json={
+                "region": "cn",
+                "use_threatbook_model": True,
+                "threatbook_model_only": True,
+                "threatbook_api_key": "tb-key",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["success"] is True
+        assert ("provider", "threatbook-cn-llm") in calls
+        assert ("default_model", "threatbook-cn-llm") in calls
+        assert ("service", "threatbook-cn") not in calls
+        assert ("service_enabled", "threatbook-cn") not in calls
+        assert ("ensure_mcp", "cn") not in calls
+        assert ("mcp_credentials", "threatbook_mcp") not in calls
+        assert ("mcp_connect", "threatbook_mcp") not in calls
+        assert data["configured"] == ["threatbook_llm", "default_llm"]
 
     @pytest.mark.asyncio
     async def test_apply_returns_400_when_validation_fails(

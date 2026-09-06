@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from flocks.config.config import Config
 from flocks.provider.credential import get_api_key as get_llm_provider_api_key
 from flocks.config.config_writer import ConfigWriter
+from flocks.mcp import MCP, McpStatus
 from flocks.provider.provider import Provider
 from flocks.provider.types import ModelType
 from flocks.security import get_secret_manager
@@ -29,6 +30,7 @@ from flocks.server.routes.mcp import (
     McpCredentialRequest,
     McpTestRequest,
     connect_mcp_server,
+    get_mcp_credentials,
     set_mcp_credentials,
     test_mcp_connection,
 )
@@ -37,6 +39,7 @@ from flocks.server.routes.provider import (
     ProviderCredentialRequest,
     TestCredentialRequest,
     _get_inline_provider_api_key,
+    get_service_credentials,
     set_provider_credentials,
     set_service_credentials,
     test_provider_credentials,
@@ -87,6 +90,10 @@ class OnboardingValidateRequest(BaseModel):
         default=False,
         description="Only validate/apply ThreatBook API/MCP services without revalidating default LLM",
     )
+    threatbook_model_only: bool = Field(
+        default=False,
+        description="Only validate/apply ThreatBook LLM without configuring intelligence API/MCP services",
+    )
 
 
 class OnboardingValidateResponse(BaseModel):
@@ -113,6 +120,18 @@ class OnboardingApplyResponse(BaseModel):
     default_model: Optional[Dict[str, str]] = None
 
 
+class ThreatBookIntelStatus(BaseModel):
+    configured: bool
+    region: Optional[Region] = None
+    api_configured: bool
+    api_service_id: Optional[str] = None
+    mcp_configured: bool
+    mcp_connected: bool
+    mcp_status: str
+    mcp_name: Optional[str] = None
+    service_matrix: Dict[str, List[str]]
+
+
 class OnboardingStatusResponse(BaseModel):
     """Derived onboarding completion state (no separate persistence)."""
 
@@ -127,6 +146,10 @@ class OnboardingStatusResponse(BaseModel):
     default_model: Optional[Dict[str, str]] = Field(
         None,
         description="Current resolved default LLM when configured.",
+    )
+    threatbook_intel: ThreatBookIntelStatus = Field(
+        ...,
+        description="Current ThreatBook intelligence API/MCP onboarding state.",
     )
 
 
@@ -149,7 +172,7 @@ ONBOARDING_REGION_PRESETS: Dict[Region, Dict[str, Any]] = {
         "requires_mcp": True,
     },
     "global": {
-        "activation_url": "https://threatbook.io/flocks/activate",
+        "activation_url": "https://i.threatbook.io/flocks/activate",
         "threatbook_llm_provider_id": "threatbook-io-llm",
         "threatbook_default_model_id": "deepseek-v4-flash-0731",
         "threatbook_api_service_id": "threatbook-io",
@@ -161,11 +184,125 @@ ONBOARDING_REGION_PRESETS: Dict[Region, Dict[str, Any]] = {
 }
 
 
-def _get_threatbook_resources(region: Region, *, include_llm: bool = True) -> List[str]:
-    resources: List[str] = ["threatbook_api"]
+async def _api_service_has_credentials(service_id: str) -> bool:
+    try:
+        response = await get_service_credentials(service_id)
+        fields = getattr(response, "fields", None) or {}
+        if isinstance(fields, dict) and any(
+            value for key, value in fields.items() if key not in {"base_url"}
+        ):
+            return True
+        return any(
+            getattr(response, attr, None)
+            for attr in (
+                "api_key",
+                "api_key_masked",
+                "secret",
+                "secret_masked",
+                "username",
+            )
+        )
+    except Exception:
+        return False
+
+
+async def _detect_mcp_status(name: Optional[str]) -> Dict[str, Any]:
+    if not name:
+        return {
+            "status": "not_available",
+            "configured": False,
+            "connected": False,
+            "has_credential": False,
+        }
+
+    raw_config = ConfigWriter.get_mcp_server(name)
+    has_config = raw_config is not None
+    enabled = bool(raw_config.get("enabled", True)) if isinstance(raw_config, dict) else True
+
+    has_credential = False
+    try:
+        credential_info = await get_mcp_credentials(name)
+        has_credential = bool(getattr(credential_info, "has_credential", False))
+    except Exception:
+        has_credential = False
+
+    runtime_status = None
+    try:
+        runtime = await MCP.status()
+        info = runtime.get(name)
+        if info is not None:
+            status_value = getattr(info, "status", None)
+            runtime_status = status_value.value if isinstance(status_value, McpStatus) else str(status_value)
+    except Exception:
+        runtime_status = None
+
+    if runtime_status == McpStatus.CONNECTED.value:
+        status = "connected"
+    elif runtime_status in {McpStatus.FAILED.value, McpStatus.NEEDS_AUTH.value}:
+        status = "error"
+    elif runtime_status == McpStatus.DISABLED.value or (has_config and not enabled):
+        status = "disabled"
+    elif has_config or has_credential or runtime_status in {
+        McpStatus.DISCONNECTED.value,
+        McpStatus.CONNECTING.value,
+    }:
+        status = "configured"
+    else:
+        status = "not_configured"
+
+    return {
+        "status": status,
+        "configured": status != "not_configured",
+        "connected": status == "connected",
+        "has_credential": has_credential,
+    }
+
+
+async def _build_threatbook_intel_status() -> ThreatBookIntelStatus:
+    cn_preset = ONBOARDING_REGION_PRESETS["cn"]
+    global_preset = ONBOARDING_REGION_PRESETS["global"]
+    cn_api_configured = await _api_service_has_credentials(cn_preset["threatbook_api_service_id"])
+    global_api_configured = await _api_service_has_credentials(global_preset["threatbook_api_service_id"])
+    cn_mcp = await _detect_mcp_status(cn_preset["threatbook_mcp_name"])
+
+    region: Optional[Region] = None
+    if cn_api_configured or cn_mcp["configured"]:
+        region = "cn"
+    elif global_api_configured:
+        region = "global"
+
+    api_configured = cn_api_configured if region != "global" else global_api_configured
+
+    return ThreatBookIntelStatus(
+        configured=bool(cn_api_configured or global_api_configured or cn_mcp["configured"]),
+        region=region,
+        api_configured=api_configured,
+        api_service_id=(
+            global_preset["threatbook_api_service_id"]
+            if region == "global"
+            else cn_preset["threatbook_api_service_id"]
+        ),
+        mcp_configured=cn_mcp["configured"],
+        mcp_connected=cn_mcp["connected"],
+        mcp_status=cn_mcp["status"],
+        mcp_name=cn_preset["threatbook_mcp_name"],
+        service_matrix={
+            "cn": ["api", "mcp"],
+            "global": ["api"],
+        },
+    )
+
+
+def _get_threatbook_resources(
+    region: Region,
+    *,
+    include_llm: bool = True,
+    include_services: bool = True,
+) -> List[str]:
+    resources: List[str] = ["threatbook_api"] if include_services else []
     if include_llm:
         resources.insert(0, "threatbook_llm")
-    if ONBOARDING_REGION_PRESETS[region]["requires_mcp"]:
+    if include_services and ONBOARDING_REGION_PRESETS[region]["requires_mcp"]:
         resources.append("threatbook_mcp")
     return resources
 
@@ -311,6 +448,7 @@ async def _validate_threatbook_resources(
     threatbook_api_key: str,
     *,
     include_llm: bool = True,
+    include_services: bool = True,
 ) -> Dict[str, Any]:
     preset = ONBOARDING_REGION_PRESETS[region]
     resource_results: Dict[str, ResourceValidationResult] = {}
@@ -322,17 +460,19 @@ async def _validate_threatbook_resources(
             model_id=preset["threatbook_default_model_id"],
         )
         resource_results["threatbook_llm"] = _normalize_test_result(llm_result)
-    api_result = await _test_provider_or_service_with_temp_credentials(
-        preset["threatbook_api_service_id"],
-        threatbook_api_key,
-        service=True,
-    )
 
-    resource_results["threatbook_api"] = _normalize_test_result(api_result)
+    if include_services:
+        api_result = await _test_provider_or_service_with_temp_credentials(
+            preset["threatbook_api_service_id"],
+            threatbook_api_key,
+            service=True,
+        )
 
-    if preset["requires_mcp"]:
-        mcp_result = await _test_mcp_with_temp_key(region, threatbook_api_key)
-        resource_results["threatbook_mcp"] = _normalize_test_result(mcp_result)
+        resource_results["threatbook_api"] = _normalize_test_result(api_result)
+
+        if preset["requires_mcp"]:
+            mcp_result = await _test_mcp_with_temp_key(region, threatbook_api_key)
+            resource_results["threatbook_mcp"] = _normalize_test_result(mcp_result)
 
     formal_success = all(
         result.success is True
@@ -351,11 +491,18 @@ async def _validate_threatbook_resources(
 
     other_region: Region = "global" if region == "cn" else "cn"
     other_preset = ONBOARDING_REGION_PRESETS[other_region]
-    fallback_api_result = await _test_provider_or_service_with_temp_credentials(
-        other_preset["threatbook_api_service_id"],
-        threatbook_api_key,
-        service=True,
-    )
+    if include_services:
+        fallback_api_result = await _test_provider_or_service_with_temp_credentials(
+            other_preset["threatbook_api_service_id"],
+            threatbook_api_key,
+            service=True,
+        )
+    else:
+        fallback_api_result = await _test_provider_or_service_with_temp_credentials(
+            other_preset["threatbook_llm_provider_id"],
+            threatbook_api_key,
+            model_id=other_preset["threatbook_default_model_id"],
+        )
     fallback_api = _normalize_test_result(
         fallback_api_result,
         fallback_code="region_probe_failed",
@@ -403,9 +550,11 @@ def _validate_third_party_shape(
 async def _validate_onboarding_request(
     request: OnboardingValidateRequest,
 ) -> OnboardingValidateResponse:
+    include_threatbook_services = not request.threatbook_model_only
     threatbook_resources = _get_threatbook_resources(
         request.region,
         include_llm=request.use_threatbook_model,
+        include_services=include_threatbook_services,
     )
     resource_results: Dict[str, ResourceValidationResult] = {}
     threatbook_api_key = (request.threatbook_api_key or "").strip()
@@ -452,6 +601,7 @@ async def _validate_onboarding_request(
             request.region,
             threatbook_api_key,
             include_llm=request.use_threatbook_model,
+            include_services=include_threatbook_services,
         )
         threatbook_key_valid = bool(threatbook_validation["success"])
         threatbook_region_match = threatbook_validation["region_match"]
@@ -643,12 +793,14 @@ def _ensure_threatbook_mcp_config(region: Region) -> None:
     ),
 )
 async def get_onboarding_status() -> OnboardingStatusResponse:
+    threatbook_intel = await _build_threatbook_intel_status()
     resolved = await Config.resolve_default_llm()
     if not resolved:
         return OnboardingStatusResponse(
             completed=False,
             has_default_model=False,
             default_model=None,
+            threatbook_intel=threatbook_intel,
         )
     provider_id = resolved["provider_id"]
     model_id = resolved["model_id"]
@@ -658,6 +810,7 @@ async def get_onboarding_status() -> OnboardingStatusResponse:
         completed=has_cred,
         has_default_model=True,
         default_model=default_model,
+        threatbook_intel=threatbook_intel,
     )
 
 
@@ -682,6 +835,7 @@ async def apply_onboarding(request: OnboardingValidateRequest) -> OnboardingAppl
     if not validation.can_apply:
         raise HTTPException(status_code=400, detail=validation.message or "Validation failed")
 
+    include_threatbook_services = not request.threatbook_model_only
     preset = ONBOARDING_REGION_PRESETS[request.region]
     threatbook_api_key = (request.threatbook_api_key or "").strip()
     configured: List[str] = []
@@ -698,32 +852,34 @@ async def apply_onboarding(request: OnboardingValidateRequest) -> OnboardingAppl
                     )
                     configured.append("threatbook_llm")
 
-                await set_service_credentials(
-                    preset["threatbook_api_service_id"],
-                    ProviderCredentialRequest(api_key=threatbook_api_key),
-                )
-                await update_api_service(
-                    preset["threatbook_api_service_id"],
-                    APIServiceUpdateRequest(enabled=True),
-                )
-                configured.append("threatbook_api")
-
-                if preset["requires_mcp"]:
-                    _ensure_threatbook_mcp_config(request.region)
-                    await set_mcp_credentials(
-                        preset["threatbook_mcp_name"],
-                        McpCredentialRequest(
-                            api_key=threatbook_api_key,
-                            secret_id=preset["threatbook_mcp_secret_id"],
-                        ),
+                if include_threatbook_services:
+                    await set_service_credentials(
+                        preset["threatbook_api_service_id"],
+                        ProviderCredentialRequest(api_key=threatbook_api_key),
                     )
-                    await connect_mcp_server(preset["threatbook_mcp_name"])
-                    configured.append("threatbook_mcp")
+                    await update_api_service(
+                        preset["threatbook_api_service_id"],
+                        APIServiceUpdateRequest(enabled=True),
+                    )
+                    configured.append("threatbook_api")
+
+                    if preset["requires_mcp"]:
+                        _ensure_threatbook_mcp_config(request.region)
+                        await set_mcp_credentials(
+                            preset["threatbook_mcp_name"],
+                            McpCredentialRequest(
+                                api_key=threatbook_api_key,
+                                secret_id=preset["threatbook_mcp_secret_id"],
+                            ),
+                        )
+                        await connect_mcp_server(preset["threatbook_mcp_name"])
+                        configured.append("threatbook_mcp")
             else:
                 skipped.extend(
                     _get_threatbook_resources(
                         request.region,
                         include_llm=request.use_threatbook_model,
+                        include_services=include_threatbook_services,
                     )
                 )
 

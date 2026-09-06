@@ -25,15 +25,13 @@ import {
   Loader2,
   type LucideIcon,
 } from 'lucide-react';
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import type { ComponentType, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { onboardingAPI } from '@/api/onboarding';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
-// the home page never needs. To keep the lazy split effective, we don't
-// re-import dismissal helpers from the modal modules (a static named import
-// would force Rollup to bundle the whole module eagerly).
-const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
+// the home page never needs.
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
 const SIDEBAR_WIDTH_KEY = 'flocks_layout_sidebar_width';
 const SIDEBAR_DEFAULT_WIDTH = 208;
@@ -55,10 +53,6 @@ function lazyLayoutComponent<T extends LazyLayoutModule>(
       preloadI18nNamespaces(namespaces),
     ]).then(([module]) => module),
   ));
-}
-
-function isOnboardingDismissed(): boolean {
-  return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
 
 function readCollapsedNavSectionIds(): Set<string> {
@@ -380,12 +374,25 @@ export default function Layout() {
     updateSidebarWidth(sidebarWidth + (event.key === 'ArrowRight' ? 16 : -16));
   }, [collapsed, sidebarWidth, updateSidebarWidth]);
 
-  // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
-  // It also re-runs when the user navigates back to /, covering both cases in one place.
-  useLayoutEffect(() => {
-    if (isHome && !isOnboardingDismissed()) {
-      setShowOnboarding(true);
-    }
+  useEffect(() => {
+    if (!isHome) return undefined;
+
+    let cancelled = false;
+    onboardingAPI.getStatus()
+      .then((res) => {
+        if (!cancelled && !res.data.completed) {
+          setShowOnboarding(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setShowOnboarding(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [isHome]);
 
   const handleOpenOnboarding = useCallback(() => setShowOnboarding(true), []);
