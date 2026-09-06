@@ -111,6 +111,7 @@
     "apiKeyOptionalHint": "If Base URL points to an internal/self-hosted endpoint with no auth, leave this empty and the system will use a placeholder.",
     "apiKeyOptionalPlaceholder": "Leave empty for no-auth gateway",
     "apiKeyKeepExisting": "Leave blank to keep the existing API key",
+    "claimFreeKey": "Claim free key",
     "hide": "Hide",
     "show": "Show",
     "availableModels": "Available Models",

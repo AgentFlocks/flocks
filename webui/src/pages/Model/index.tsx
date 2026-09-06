@@ -9,7 +9,7 @@ import {
   ChevronDown, Check, AlertCircle, Loader2,
   X, Shield, Pencil, Star, AlertTriangle,
   CheckCircle2, ArrowUp, ArrowDown, ListOrdered,
-  Info,
+  Info, ExternalLink,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -66,9 +66,15 @@ function isCatalogBaseUrlRequired(providerId: string): boolean {
 }
 
 const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
+const THREATBOOK_LLM_PROVIDER_IDS = new Set(['threatbook-cn-llm', 'threatbook-io-llm']);
+const THREATBOOK_FREE_KEY_URL = 'https://portal.agentflocks.com/';
 
 function isAzureProviderId(providerId: string): boolean {
   return AZURE_PROVIDER_IDS.has(providerId);
+}
+
+function isThreatBookLLMProviderId(providerId: string): boolean {
+  return THREATBOOK_LLM_PROVIDER_IDS.has(providerId);
 }
 
 function convertEditablePrice(
@@ -1724,6 +1730,17 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                           </button>
                         </div>
+                        {isThreatBookLLMProviderId(selectedCatalogId) && (
+                          <a
+                            href={THREATBOOK_FREE_KEY_URL}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                            {t('form.claimFreeKey')}
+                          </a>
+                        )}
                         {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
                           <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
                         )}

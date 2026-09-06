@@ -173,6 +173,68 @@ describe('ModelPage add provider dialog', () => {
       data: {
         providers: [
           {
+            id: 'threatbook-cn-llm',
+            name: 'ThreatBook-cn-llm',
+            description: 'ThreatBook China LLM Service',
+            credential_schemas: [{
+              auth_method: 'api_key',
+              fields: [{
+                name: 'api_key',
+                label: 'API Key',
+                type: 'secret',
+                required: true,
+                placeholder: 'Paste ThreatBook CN LLM API Key',
+              }],
+            }],
+            env_vars: [],
+            default_base_url: 'https://llm.threatbook.cn/v1',
+            model_count: 1,
+            models: [{
+              id: 'deepseek-v4-flash-0731',
+              name: 'deepseek-v4-flash-0731',
+              model_type: 'llm',
+              status: 'active',
+              capabilities: {
+                supports_tools: true,
+                supports_vision: false,
+                supports_reasoning: true,
+                supports_streaming: true,
+              },
+            }],
+            allow_multiple: false,
+          },
+          {
+            id: 'threatbook-io-llm',
+            name: 'ThreatBook-io-llm',
+            description: 'ThreatBook International LLM Service',
+            credential_schemas: [{
+              auth_method: 'api_key',
+              fields: [{
+                name: 'api_key',
+                label: 'API Key',
+                type: 'secret',
+                required: true,
+                placeholder: 'Paste ThreatBook IO LLM API Key',
+              }],
+            }],
+            env_vars: [],
+            default_base_url: 'https://llm.threatbook.io/v1',
+            model_count: 1,
+            models: [{
+              id: 'deepseek-v4-flash-0731',
+              name: 'deepseek-v4-flash-0731',
+              model_type: 'llm',
+              status: 'active',
+              capabilities: {
+                supports_tools: true,
+                supports_vision: false,
+                supports_reasoning: true,
+                supports_streaming: true,
+              },
+            }],
+            allow_multiple: false,
+          },
+          {
             id: 'openai-compatible',
             name: 'OpenAI Compatible',
             description: 'Compatible endpoint',
@@ -191,6 +253,27 @@ describe('ModelPage add provider dialog', () => {
         id: 'custom-my-api',
       },
     });
+  });
+
+  it('keeps ThreatBook CN and IO providers separate and shows a shared free key link', async () => {
+    const user = userEvent.setup();
+
+    renderWithRouter(<ModelPage />);
+
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
+
+    expect(await screen.findByRole('button', { name: /ThreatBook-cn-llm/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /ThreatBook-io-llm/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /ThreatBook-cn-llm/i }));
+    let keyLink = screen.getByRole('link', { name: 'form.claimFreeKey' });
+    expect(keyLink).toHaveAttribute('href', 'https://portal.agentflocks.com/');
+
+    await user.click(screen.getByRole('button', { name: /ThreatBook-cn-llm/i }));
+    await user.click(screen.getByRole('button', { name: /ThreatBook-io-llm/i }));
+    keyLink = screen.getByRole('link', { name: 'form.claimFreeKey' });
+    expect(keyLink).toHaveAttribute('href', 'https://portal.agentflocks.com/');
   });
 
   it('blocks openai-compatible creation until Base URL is filled and submits once provided', async () => {
