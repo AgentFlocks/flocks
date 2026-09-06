@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Info, Wrench, FileText, Activity, Zap, RefreshCw, Power, PowerOff,
   CheckCircle, XCircle, Cloud, Database, AlertTriangle, Eye, EyeOff, Save, Trash2,
+  ExternalLink,
 } from 'lucide-react';
 import type { Tool } from '@/api/tool';
 import type { MCPCatalogCategory, MCPCatalogEntry, MCPCredentials, MCPServer, MCPServerDetail } from '@/types';
@@ -15,6 +16,23 @@ import { EnabledBadge } from './badges';
 import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, getMCPFormError, MCPFormFields } from '../ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from '../ToolSheets';
 import type { APIServiceCredentialField, APIServiceMetadata, ProviderCredentials } from '@/types';
+
+const THREATBOOK_MCP_SERVER_NAMES = new Set(['threatbook_mcp', 'threatbook-mcp']);
+const THREATBOOK_MCP_ACTIVATION_URLS = {
+  cn: 'https://x.threatbook.com/flocks/activate',
+  global: 'https://i.threatbook.io/flocks/activate',
+} as const;
+
+function isThreatBookMCPServer(serverName: string): boolean {
+  return THREATBOOK_MCP_SERVER_NAMES.has(serverName.trim().toLowerCase());
+}
+
+export function getThreatBookMCPActivationUrl(language: string): string {
+  const normalizedLanguage = language.toLowerCase().replace('_', '-');
+  return normalizedLanguage.startsWith('zh')
+    ? THREATBOOK_MCP_ACTIVATION_URLS.cn
+    : THREATBOOK_MCP_ACTIVATION_URLS.global;
+}
 
 function KvRowValue({ value }: { value: string }) {
   const [showTooltip, setShowTooltip] = useState(false);
@@ -72,7 +90,7 @@ export function MCPServerDetailPanel({
   onRemove?: () => void;
   onSelectTool: (tool: Tool) => void;
 }) {
-  const { t } = useTranslation('tool');
+  const { t, i18n } = useTranslation('tool');
   const [detailTab, setDetailTab] = useState<'overview' | 'tools' | 'resources'>('overview');
   const [serverDetail, setServerDetail] = useState<MCPServerDetail | null>(null);
   const [formData, setFormData] = useState<MCPFormData | null>(null);
@@ -82,6 +100,9 @@ export function MCPServerDetailPanel({
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number; tools_count?: number } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
+  const threatBookActivationUrl = isThreatBookMCPServer(server.name)
+    ? getThreatBookMCPActivationUrl(i18n.resolvedLanguage || i18n.language)
+    : null;
 
   const createFormData = useCallback((detail: MCPServerDetail | null): MCPFormData => (
     buildMCPFormDataFromConfig(server.name, detail?.config, server.url)
@@ -244,6 +265,17 @@ export function MCPServerDetailPanel({
                 testResult={testResult ? { success: testResult.success, message: testResult.message, tools_count: testResult.tools_count } : null}
                 onTestConnection={handleTestConnection}
                 isTesting={testingConnection}
+                serviceUrlAction={threatBookActivationUrl ? (
+                  <a
+                    href={threatBookActivationUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-green-200 bg-green-50 px-2.5 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100 hover:text-green-800"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    {t('detail.claimFreeApiKey')}
+                  </a>
+                ) : undefined}
               />
             )}
 
