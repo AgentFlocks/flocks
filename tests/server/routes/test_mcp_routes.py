@@ -1208,7 +1208,7 @@ class TestMcpRoutes:
         assert resp.status_code == 200, resp.text
         assert resp.json()["has_credential"] is True
         assert resp.json()["secret_id"] == "threatbook_mcp_key"
-        assert resp.json()["api_key_masked"] == "312xxxx321"
+        assert resp.json()["api_key_masked"] == "************"
         assert "312abcdef321" not in resp.text
         assert requested_ids == ["threatbook_mcp_key"]
 

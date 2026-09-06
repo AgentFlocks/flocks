@@ -305,7 +305,7 @@ export default function ThreatBookMCPConfigPanel({
               <div className="relative min-w-0 flex-1">
                 <input
                   id="threatbook-mcp-api-key"
-                  type={showApiKey || showingStoredKeyMask ? 'text' : 'password'}
+                  type={showApiKey ? 'text' : 'password'}
                   value={displayedApiKey}
                   readOnly={showingStoredKeyMask}
                   onChange={(event) => {

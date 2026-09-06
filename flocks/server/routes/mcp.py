@@ -992,10 +992,8 @@ def _get_mcp_credential(name: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _mask_mcp_credential(api_key: str) -> str:
-    """Mask an MCP key as three visible chars on each side."""
-    if len(api_key) <= 6:
-        return "xxxx"
-    return f"{api_key[:3]}xxxx{api_key[-3:]}"
+    """Mask an MCP key without exposing any part of it."""
+    return "************" if api_key else ""
 
 
 @router.get(

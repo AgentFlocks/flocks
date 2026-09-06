@@ -370,7 +370,7 @@ describe('MCPServerDetailPanel', () => {
       data: {
         has_credential: true,
         secret_id: 'threatbook_mcp_key',
-        api_key_masked: '312xxxx321',
+        api_key_masked: '************',
       },
     });
 
@@ -408,7 +408,7 @@ describe('MCPServerDetailPanel', () => {
       data: {
         has_credential: true,
         secret_id: 'threatbook_mcp_key',
-        api_key_masked: '312xxxx321',
+        api_key_masked: '************',
       },
     });
 
@@ -427,7 +427,8 @@ describe('MCPServerDetailPanel', () => {
     await user.click(await screen.findByRole('button', { name: '编辑配置' }));
 
     const keyInput = screen.getByLabelText('API Key *');
-    expect(keyInput).toHaveValue('312xxxx321');
+    expect(keyInput).toHaveValue('************');
+    expect(keyInput).toHaveAttribute('type', 'password');
     expect(keyInput).toHaveAttribute('readonly');
     expect(screen.queryByDisplayValue('312abcdef321')).not.toBeInTheDocument();
 
@@ -437,10 +438,12 @@ describe('MCPServerDetailPanel', () => {
       expect(mcpAPI.revealCredentials).toHaveBeenCalledWith('threatbook_mcp');
       expect(keyInput).toHaveValue('312abcdef321');
     });
+    expect(keyInput).toHaveAttribute('type', 'text');
     expect(keyInput).not.toHaveAttribute('readonly');
 
     await user.click(screen.getByTitle('隐藏'));
-    expect(keyInput).toHaveValue('312xxxx321');
+    expect(keyInput).toHaveValue('************');
+    expect(keyInput).toHaveAttribute('type', 'password');
     expect(keyInput).toHaveAttribute('readonly');
 
     await user.click(screen.getByRole('button', { name: '国际区' }));
@@ -469,7 +472,7 @@ describe('MCPServerDetailPanel', () => {
       data: {
         has_credential: true,
         secret_id: 'threatbook_mcp_key',
-        api_key_masked: '312xxxx321',
+        api_key_masked: '************',
       },
     });
 
