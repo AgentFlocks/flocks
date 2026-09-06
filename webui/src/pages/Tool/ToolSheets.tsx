@@ -6,7 +6,7 @@
  * - GenerateToolSheet: AI 生成自定义工具
  */
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Database, Cloud, Code, Info, CheckCircle, XCircle, Activity, Wifi, WifiOff, Loader2 } from 'lucide-react';
 import EntitySheet from '@/components/common/EntitySheet';
@@ -252,7 +252,6 @@ interface MCPFormFieldsProps {
   testResult: { success: boolean; message: string; tools_count?: number } | null;
   onTestConnection: () => void;
   isTesting: boolean;
-  serviceUrlAction?: ReactNode;
 }
 
 export function MCPFormFields({
@@ -263,7 +262,6 @@ export function MCPFormFields({
   testResult,
   onTestConnection,
   isTesting,
-  serviceUrlAction,
 }: MCPFormFieldsProps) {
   const { t } = useTranslation('tool');
   const readOnly = !onChange;
@@ -359,12 +357,9 @@ export function MCPFormFields({
       {formData.connType === 'sse' && (
         <div className="space-y-4">
           <div>
-            <div className="flex items-center justify-between gap-3 mb-1.5">
-              <label className="block text-sm font-medium text-gray-700">
-                {t('addMCP.serviceUrl')}{!readOnly && <span className="text-red-500"> *</span>}
-              </label>
-              {serviceUrlAction}
-            </div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              {t('addMCP.serviceUrl')}{!readOnly && <span className="text-red-500"> *</span>}
+            </label>
             <div className="flex gap-2">
               <input
                 type="text"

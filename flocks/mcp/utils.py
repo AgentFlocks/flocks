@@ -335,8 +335,9 @@ def extract_api_key_from_mcp_url(server_name: str, config: Dict[str, Any]) -> Di
         key = unquote(key_encoded)
         value = unquote(value_encoded)
         if key.lower() in _SENSITIVE_QUERY_PARAMS and not value.startswith("{secret:"):
-            secret_key = f"{server_name}_mcp_key"
             from flocks.security import get_secret_manager
+            from flocks.security.secrets import get_mcp_secret_id
+            secret_key = get_mcp_secret_id(server_name)
             get_secret_manager().set(secret_key, value)
             new_parts.append(f"{key_encoded}={{secret:{secret_key}}}")
             extracted = True
@@ -383,7 +384,8 @@ def extract_auth_value_from_mcp_config(server_name: str, config: Dict[str, Any])
     elif "scheme" in updated_auth and not scheme:
         updated_auth.pop("scheme", None)
 
-    secret_key = str(auth_config.get("secret_id") or f"{server_name}_mcp_key")
+    from flocks.security.secrets import get_mcp_secret_id
+    secret_key = str(auth_config.get("secret_id") or get_mcp_secret_id(server_name))
     from flocks.security import get_secret_manager
 
     get_secret_manager().set(secret_key, auth_value)

@@ -8,6 +8,7 @@ MCP state is instance-scoped for project isolation.
 """
 
 import asyncio
+import copy
 from typing import Dict, Optional, List, Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -41,6 +42,13 @@ from flocks.mcp.utils import (
 )
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
+from flocks.security.secrets import get_mcp_secret_id
+from flocks.server.threatbook_regions import (
+    THREATBOOK_REGION_PRESETS,
+    ThreatBookRegion,
+    build_threatbook_mcp_url,
+)
 from flocks.utils.log import Log
 
 
@@ -293,6 +301,22 @@ class McpUpdateRequest(BaseModel):
     config: Dict[str, Any] = Field(..., description="Partial or full MCP server configuration")
 
 
+class ThreatBookMcpConfigureRequest(BaseModel):
+    """Region-aware ThreatBook MCP setup request."""
+
+    region: ThreatBookRegion
+    api_key: str = Field(..., min_length=1, description="ThreatBook regional API key")
+
+
+class ThreatBookMcpConfigureResponse(BaseModel):
+    success: bool
+    message: str
+    region: ThreatBookRegion
+    endpoint: str
+    connected: bool
+    tools_count: int = 0
+
+
 @router.post(
     "/test",
     response_model=Dict[str, Any],
@@ -342,6 +366,138 @@ async def test_mcp_connection(request: McpTestRequest):
             await MCP.remove(temp_name)
         except Exception as e:
             log.warn("mcp.test.cleanup_failed", {"server": temp_name, "error": str(e)})
+
+
+async def _restore_threatbook_mcp_setup(
+    name: str,
+    config_snapshot: Dict[str, Any],
+    secret_snapshot: Dict[str, Any],
+    previous_config: Optional[Dict[str, Any]],
+    was_connected: bool,
+) -> None:
+    """Restore persisted and runtime state after a failed ThreatBook apply."""
+    secrets = get_secret_manager()
+    ConfigWriter._write_raw(config_snapshot)
+    secrets._save(secret_snapshot)
+
+    from flocks.tool.tool_loader import delete_mcp_config, save_mcp_config
+
+    if previous_config:
+        save_mcp_config(name, previous_config)
+    else:
+        delete_mcp_config(name)
+
+    try:
+        runtime_status = await MCP.status()
+        if name in runtime_status:
+            await MCP.remove(name)
+        if was_connected and previous_config:
+            restored_config = await _load_mcp_server_config(name)
+            if restored_config:
+                await MCP.connect(name, restored_config)
+    except Exception as exc:
+        log.warning("mcp.threatbook.restore_runtime_failed", {"name": name, "error": str(exc)})
+
+
+@router.post(
+    "/{name}/threatbook-configure",
+    response_model=ThreatBookMcpConfigureResponse,
+    summary="Configure ThreatBook MCP by region",
+    description="Validate a regional ThreatBook key before atomically saving and connecting MCP.",
+    operation_id="mcp.threatbook_configure",
+)
+async def configure_threatbook_mcp(
+    name: str,
+    request: ThreatBookMcpConfigureRequest,
+) -> ThreatBookMcpConfigureResponse:
+    """Validate first, then persist the regional endpoint and secret reference."""
+    preset = THREATBOOK_REGION_PRESETS[request.region]
+    if name != preset["threatbook_mcp_name"]:
+        raise HTTPException(status_code=400, detail="This setup flow is only available for ThreatBook MCP")
+
+    api_key = request.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key required")
+
+    endpoint = preset["threatbook_mcp_endpoint"]
+    validation = await test_mcp_connection(
+        McpTestRequest(
+            name=name,
+            config={
+                "type": "remote",
+                "url": build_threatbook_mcp_url(request.region, api_key),
+                "transport": "auto",
+            },
+        )
+    )
+    if not validation.get("success"):
+        return ThreatBookMcpConfigureResponse(
+            success=False,
+            message=validation.get("message") or "ThreatBook MCP validation failed",
+            region=request.region,
+            endpoint=endpoint,
+            connected=False,
+            tools_count=0,
+        )
+
+    secrets = get_secret_manager()
+    config_snapshot = copy.deepcopy(ConfigWriter._read_raw())
+    secret_snapshot = copy.deepcopy(secrets._load())
+    previous_config = copy.deepcopy(_load_raw_mcp_server_config(name))
+    runtime_status = await MCP.status()
+    previous_status = runtime_status.get(name)
+    was_connected = bool(
+        previous_status is not None
+        and previous_status.status == McpStatus.CONNECTED
+    )
+    secret_id = preset["threatbook_mcp_secret_id"]
+    next_config = {
+        "type": "remote",
+        "url": build_threatbook_mcp_url(
+            request.region,
+            f"{{secret:{secret_id}}}",
+            encode_key=False,
+        ),
+        "transport": "auto",
+        "enabled": True,
+    }
+
+    try:
+        secrets.set(secret_id, api_key)
+        _persist_mcp_server_config(name, next_config)
+
+        if previous_status is not None:
+            await MCP.remove(name)
+        resolved_config = await _load_mcp_server_config(name)
+        if not resolved_config or not await MCP.connect(name, resolved_config):
+            raise ValueError("ThreatBook MCP could not reconnect after saving")
+
+        tools_count = await MCP.refresh_tools(name)
+        return ThreatBookMcpConfigureResponse(
+            success=True,
+            message="ThreatBook MCP configured and connected successfully",
+            region=request.region,
+            endpoint=endpoint,
+            connected=True,
+            tools_count=tools_count,
+        )
+    except Exception as exc:
+        await _restore_threatbook_mcp_setup(
+            name,
+            config_snapshot,
+            secret_snapshot,
+            previous_config,
+            was_connected,
+        )
+        log.error("mcp.threatbook.configure_failed", {
+            "name": name,
+            "region": request.region,
+            "error": str(exc),
+        })
+        raise HTTPException(
+            status_code=500,
+            detail=f"ThreatBook MCP configuration failed: {exc}",
+        ) from exc
 
 
 @router.post(
@@ -819,18 +975,22 @@ class McpCredentialResponse(BaseModel):
 async def get_mcp_credentials(name: str):
     """Get masked credential info for a server.
 
-    Looks up the convention-based secret_id '{name}_mcp_key' in .secret.json.
-    Falls back to legacy '{name}_api_key' for backward compatibility.
+    Avoids duplicating an existing ``_mcp`` suffix and falls back to historical
+    ``{name}_mcp_key`` / ``{name}_api_key`` variants for compatibility.
     """
-    from flocks.security import get_secret_manager
     from flocks.security.secrets import SecretManager
 
     try:
         secrets = get_secret_manager()
 
-        # Convention-based secret_id: _mcp_key first, fall back to legacy _api_key
-        secret_id = f"{name}_mcp_key"
+        # Convention-based secret_id first, fall back to historical variants.
+        secret_id = get_mcp_secret_id(name)
         api_key = secrets.get(secret_id)
+        duplicated_suffix_id = f"{name}_mcp_key"
+        if not api_key and duplicated_suffix_id != secret_id:
+            api_key = secrets.get(duplicated_suffix_id)
+            if api_key:
+                secret_id = duplicated_suffix_id
         if not api_key:
             legacy_id = f"{name}_api_key"
             api_key = secrets.get(legacy_id)
@@ -858,16 +1018,14 @@ async def set_mcp_credentials(name: str, request: McpCredentialRequest):
 
     Stores in .secret.json with flat KV format.
     """
-    from flocks.security import get_secret_manager
-
     try:
         if not request.api_key:
             raise HTTPException(status_code=400, detail="API key required")
 
         secrets = get_secret_manager()
 
-        # Use provided secret_id or convention-based default (_mcp_key for MCP servers)
-        secret_id = request.secret_id or f"{name}_mcp_key"
+        # Use the provided secret ID or the canonical MCP naming convention.
+        secret_id = request.secret_id or get_mcp_secret_id(name)
         secrets.set(secret_id, request.api_key)
 
         log.info("mcp.credentials.set", {"name": name, "secret_id": secret_id})
@@ -893,13 +1051,14 @@ async def set_mcp_credentials(name: str, request: McpCredentialRequest):
 )
 async def delete_mcp_credentials(name: str):
     """Delete credentials for a server."""
-    from flocks.security import get_secret_manager
-
     try:
         secrets = get_secret_manager()
-        # Delete both current (_mcp_key) and legacy (_api_key) entries
-        secret_id = f"{name}_mcp_key"
+        # Delete current and historical credential IDs.
+        secret_id = get_mcp_secret_id(name)
         deleted = secrets.delete(secret_id)
+        duplicated_suffix_id = f"{name}_mcp_key"
+        if duplicated_suffix_id != secret_id:
+            deleted = secrets.delete(duplicated_suffix_id) or deleted
         deleted = secrets.delete(f"{name}_api_key") or deleted
 
         if deleted:

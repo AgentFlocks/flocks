@@ -8,6 +8,7 @@ import type {
   MCPCatalogCategory,
   MCPCatalogStats,
 } from '@/types';
+import type { ThreatBookRegion } from '@/constants/threatbook';
 
 export type { MCPServer, MCPServerDetail };
 
@@ -65,6 +66,16 @@ export const mcpAPI = {
       `/api/mcp/${server}/test`,
       { config }
     ),
+
+  configureThreatBook: (server: string, payload: { region: ThreatBookRegion; api_key: string }) =>
+    client.post<{
+      success: boolean;
+      message: string;
+      region: ThreatBookRegion;
+      endpoint: string;
+      connected: boolean;
+      tools_count: number;
+    }>(`/api/mcp/${server}/threatbook-configure`, payload),
 
   // Catalog
   catalogList: () =>

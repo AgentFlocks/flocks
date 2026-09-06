@@ -8,6 +8,9 @@ const { currentLanguage, mcpAPI } = vi.hoisted(() => ({
   currentLanguage: { value: 'zh-CN' },
   mcpAPI: {
     get: vi.fn(),
+    getCredentials: vi.fn(),
+    configureThreatBook: vi.fn(),
+    testCredentials: vi.fn(),
     update: vi.fn(),
     testExisting: vi.fn(),
   },
@@ -68,13 +71,11 @@ vi.mock('../ToolSheets', () => ({
     onChange,
     onTestConnection,
     testResult,
-    serviceUrlAction,
   }: {
     formData: { url: string };
     onChange?: (fields: { url: string }) => void;
     onTestConnection: () => void;
     testResult: { message: string } | null;
-    serviceUrlAction?: React.ReactNode;
   }) => (
     <div>
       <input
@@ -85,7 +86,6 @@ vi.mock('../ToolSheets', () => ({
       <button type="button" onClick={onTestConnection}>
         trigger-test
       </button>
-      {serviceUrlAction}
       {testResult && <div>{testResult.message}</div>}
     </div>
   ),
@@ -93,7 +93,8 @@ vi.mock('../ToolSheets', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => {
+    t: (key: string, options?: Record<string, unknown>) => {
+      const isChinese = currentLanguage.value.startsWith('zh');
       const translations: Record<string, string> = {
         'detail.tabs.overview': '概览',
         'detail.tabs.tools': '工具',
@@ -110,10 +111,37 @@ vi.mock('react-i18next', () => ({
         'button.save': '保存',
         'button.saving': '保存中...',
         'detail.testFailed': '连接测试失败',
-        'detail.claimFreeApiKey': currentLanguage.value.startsWith('zh') ? '免费领取 API Key' : 'Claim free API key',
+        'detail.show': isChinese ? '显示' : 'Show',
+        'detail.hide': isChinese ? '隐藏' : 'Hide',
+        'detail.threatbookMcp.title': isChinese ? '配置 ThreatBook MCP' : 'Configure ThreatBook MCP',
+        'detail.threatbookMcp.description': isChinese ? '免费启用微步威胁情报 MCP 服务' : 'Enable the free ThreatBook intelligence MCP service',
+        'detail.threatbookMcp.region': isChinese ? '服务区域' : 'Service region',
+        'detail.threatbookMcp.regionHint': isChinese ? '选择区域' : 'Choose region',
+        'detail.threatbookMcp.regions.cn': isChinese ? '中国区' : 'China',
+        'detail.threatbookMcp.regions.global': isChinese ? '国际区' : 'International',
+        'detail.threatbookMcp.freeService': isChinese ? '免费 ThreatBook MCP 服务' : 'Free ThreatBook MCP service',
+        'detail.threatbookMcp.apiKey': 'API Key',
+        'detail.threatbookMcp.keyPlaceholder': isChinese ? '粘贴当前区域的 ThreatBook API Key' : 'Paste the ThreatBook API key for this region',
+        'detail.threatbookMcp.keyHint': isChinese ? '领取后填写' : 'Paste after claiming',
+        'detail.threatbookMcp.keyRequired': isChinese ? '请填写 Key' : 'Enter API key',
+        'detail.threatbookMcp.claimFreeKey': isChinese ? '领取免费 API Key' : 'Claim free API key',
+        'detail.threatbookMcp.endpoint': isChinese ? 'MCP 服务地址' : 'MCP endpoint',
+        'detail.threatbookMcp.endpointHint': isChinese ? '自动生成地址' : 'Endpoint is generated automatically',
+        'detail.threatbookMcp.saveAndVerify': isChinese ? '保存并验证连接' : 'Save and verify connection',
+        'detail.threatbookMcp.saving': isChinese ? '正在验证并保存...' : 'Verifying and saving...',
+        'detail.threatbookMcp.saveSuccess': isChinese ? '配置成功' : 'Configured',
+        'detail.threatbookMcp.saveFailed': isChinese ? '配置失败' : 'Setup failed',
+        'detail.threatbookMcp.loading': isChinese ? '读取配置' : 'Loading configuration',
+        'detail.threatbookMcp.configuredTitle': isChinese ? '已配置{{region}}' : '{{region}} configured',
+        'detail.threatbookMcp.connected': isChinese ? '当前已连接' : 'Connected',
+        'detail.threatbookMcp.savedNotConnected': isChinese ? '当前未连接' : 'Not connected',
+        'detail.threatbookMcp.keyConfigured': isChinese ? '已安全配置' : 'Securely configured',
+        'detail.threatbookMcp.edit': isChinese ? '编辑配置' : 'Edit configuration',
+        'detail.threatbookMcp.retest': isChinese ? '重新测试' : 'Test again',
+        'detail.threatbookMcp.testing': isChinese ? '测试中...' : 'Testing...',
         'alert.connectionOk': '连接成功',
       };
-      return translations[key] ?? key;
+      return (translations[key] ?? key).replace('{{region}}', String(options?.region ?? ''));
     },
     i18n: {
       language: currentLanguage.value,
@@ -155,6 +183,22 @@ describe('MCPServerDetailPanel', () => {
     vi.clearAllMocks();
     currentLanguage.value = 'zh-CN';
     mcpAPI.get.mockResolvedValue(detailResponse);
+    mcpAPI.getCredentials.mockResolvedValue({
+      data: { has_credential: false },
+    });
+    mcpAPI.configureThreatBook.mockResolvedValue({
+      data: {
+        success: true,
+        message: 'ok',
+        region: 'cn',
+        endpoint: 'https://mcp.threatbook.cn/mcp',
+        connected: true,
+        tools_count: 3,
+      },
+    });
+    mcpAPI.testCredentials.mockResolvedValue({
+      data: { success: true, message: 'ok', tools_count: 3 },
+    });
     mcpAPI.update.mockResolvedValue({
       data: { success: true },
     });
@@ -248,9 +292,11 @@ describe('MCPServerDetailPanel', () => {
       />,
     );
 
-    const link = await screen.findByRole('link', { name: '免费领取 API Key' });
+    const link = await screen.findByRole('link', { name: '领取免费 API Key' });
     expect(link).toHaveAttribute('href', 'https://x.threatbook.com/flocks/activate');
     expect(link).toHaveAttribute('target', '_blank');
+    expect(screen.getByRole('button', { name: '中国区' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('https://mcp.threatbook.cn/mcp')).toBeInTheDocument();
   });
 
   it('shows the international free key link for ThreatBook MCP in English', async () => {
@@ -270,6 +316,74 @@ describe('MCPServerDetailPanel', () => {
 
     const link = await screen.findByRole('link', { name: 'Claim free API key' });
     expect(link).toHaveAttribute('href', 'https://i.threatbook.io/flocks/activate');
+    expect(screen.getByRole('button', { name: 'International' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('https://mcp.threatbook.io/mcp')).toBeInTheDocument();
+  });
+
+  it('sends the selected region and API key through the closed-loop setup action', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <MCPServerDetailPanel
+        server={{ ...server, name: 'threatbook_mcp' }}
+        serverTools={[]}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onStatusChange={vi.fn().mockResolvedValue(undefined)}
+        onRemove={vi.fn()}
+        onSelectTool={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '国际区' }));
+    await user.type(screen.getByPlaceholderText('粘贴当前区域的 ThreatBook API Key'), 'global-key');
+    await user.click(screen.getByRole('button', { name: '保存并验证连接' }));
+
+    await waitFor(() => {
+      expect(mcpAPI.configureThreatBook).toHaveBeenCalledWith('threatbook_mcp', {
+        region: 'global',
+        api_key: 'global-key',
+      });
+    });
+  });
+
+  it('shows the configured region instead of changing it with the interface language', async () => {
+    currentLanguage.value = 'en-US';
+    mcpAPI.get.mockResolvedValue({
+      ...detailResponse,
+      data: {
+        ...detailResponse.data,
+        name: 'threatbook_mcp',
+        config: {
+          type: 'sse',
+          url: 'https://mcp.threatbook.cn/mcp?apikey={secret:threatbook_mcp_key}',
+        },
+      },
+    });
+    mcpAPI.getCredentials.mockResolvedValue({
+      data: {
+        has_credential: true,
+        secret_id: 'threatbook_mcp_key',
+        api_key_masked: 'conf****-key',
+      },
+    });
+
+    render(
+      <MCPServerDetailPanel
+        server={{ ...server, name: 'threatbook_mcp' }}
+        serverTools={[]}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onRemove={vi.fn()}
+        onSelectTool={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('China configured')).toBeInTheDocument();
+    expect(screen.getByText('https://mcp.threatbook.cn/mcp')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit configuration' })).toBeInTheDocument();
   });
 
   it('does not show the free key link for other MCP servers', async () => {
@@ -286,6 +400,6 @@ describe('MCPServerDetailPanel', () => {
     );
 
     await screen.findByLabelText('service-url');
-    expect(screen.queryByRole('link', { name: '免费领取 API Key' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '领取免费 API Key' })).not.toBeInTheDocument();
   });
 });

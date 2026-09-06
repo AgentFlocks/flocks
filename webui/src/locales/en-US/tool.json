@@ -357,7 +357,6 @@
     "quickActions": "Quick Actions",
     "testingConn": "Testing...",
     "testConnection": "Test Connection",
-    "claimFreeApiKey": "Claim free API key",
     "refreshingTools": "Refreshing...",
     "refreshTools": "Refresh Tools",
     "disconnectConn": "Disconnect",
@@ -387,7 +386,38 @@
     "disableServer": "Disable Server",
     "enableServer": "Enable Server",
     "hide": "Hide",
-    "show": "Show"
+    "show": "Show",
+    "threatbookMcp": {
+      "title": "Configure ThreatBook MCP",
+      "description": "Enable the free ThreatBook intelligence MCP service for IOC lookup, threat analysis, and security operations in Rex.",
+      "region": "Service region",
+      "regionHint": "Choose the region for your API key. Flocks will match the claim page and MCP endpoint automatically.",
+      "regions": {
+        "cn": "China",
+        "global": "International"
+      },
+      "freeService": "Free ThreatBook MCP service",
+      "apiKey": "API Key",
+      "keyPlaceholder": "Paste the ThreatBook API key for this region",
+      "keyHint": "After claiming a key, paste it here. Flocks will build the service URL and store the key securely.",
+      "keyRequired": "Enter the API key for the selected region.",
+      "keyConfigured": "Securely configured",
+      "claimFreeKey": "Claim free API key",
+      "endpoint": "MCP endpoint",
+      "endpointHint": "The endpoint is selected automatically. Your API key is stored separately and never needs to be appended manually.",
+      "saveAndVerify": "Save and verify connection",
+      "saving": "Verifying and saving...",
+      "saveSuccess": "ThreatBook MCP is configured and verified.",
+      "saveFailed": "ThreatBook MCP setup failed. Check the region and API key.",
+      "configuredTitle": "{{region}} configured",
+      "connected": "The configuration is verified and the MCP service is connected.",
+      "savedNotConnected": "The configuration is saved, but the MCP service is not connected.",
+      "edit": "Edit configuration",
+      "retest": "Test again",
+      "testing": "Testing...",
+      "testFailed": "Connection test failed.",
+      "loading": "Loading ThreatBook MCP configuration..."
+    }
   },
 
   "credentials": {

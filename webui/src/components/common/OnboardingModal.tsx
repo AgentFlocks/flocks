@@ -14,13 +14,9 @@ import {
   type OnboardingValidateResponse,
 } from '@/api/onboarding';
 import type { CatalogProvider } from '@/types';
+import { getDefaultThreatBookRegion, THREATBOOK_REGION_CONFIG } from '@/constants/threatbook';
 
 const MODEL_KEY_LINK = 'https://portal.agentflocks.com';
-
-const TBCLOUD_LINKS: Record<OnboardingRegion, string> = {
-  cn: 'https://x.threatbook.com/flocks/activate',
-  global: 'https://i.threatbook.io/flocks/activate',
-};
 
 const THREATBOOK_PROVIDER_IDS = ['threatbook-cn-llm', 'threatbook-io-llm'] as const;
 const THREATBOOK_FREE_PROVIDER_OPTION = 'threatbook-free';
@@ -56,10 +52,6 @@ function providerIdForRegion(region: OnboardingRegion): string {
 
 function regionForProvider(providerId: string | null | undefined): OnboardingRegion {
   return providerId === 'threatbook-io-llm' ? 'global' : 'cn';
-}
-
-function getDefaultIntelRegion(language: string | undefined): OnboardingRegion {
-  return language?.toLowerCase().startsWith('en') ? 'global' : 'cn';
 }
 
 function statusStyles(tone: SectionTone) {
@@ -316,7 +308,7 @@ function SkipConfirmDialog({
 export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const { t, i18n } = useTranslation('common');
   const navigate = useNavigate();
-  const defaultIntelRegion = useMemo(() => getDefaultIntelRegion(i18n.language), [i18n.language]);
+  const defaultIntelRegion = useMemo(() => getDefaultThreatBookRegion(i18n.language), [i18n.language]);
 
   const [step, setStep] = useState<OnboardingStep>('model');
   const [catalog, setCatalog] = useState<CatalogProvider[]>([]);
@@ -338,7 +330,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [modelRegion, setModelRegion] = useState<OnboardingRegion>('cn');
   const [modelSkipped, setModelSkipped] = useState(false);
 
-  const [intelRegion, setIntelRegion] = useState<OnboardingRegion>(() => getDefaultIntelRegion(i18n.language));
+  const [intelRegion, setIntelRegion] = useState<OnboardingRegion>(() => getDefaultThreatBookRegion(i18n.language));
   const [intelApiKey, setIntelApiKey] = useState('');
   const [intelSaving, setIntelSaving] = useState(false);
   const [intelConfigured, setIntelConfigured] = useState(false);
@@ -1092,7 +1084,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
             />
             <a
-              href={TBCLOUD_LINKS[intelRegion]}
+              href={THREATBOOK_REGION_CONFIG[intelRegion].activationUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:border-amber-400 hover:bg-amber-50"

@@ -5,6 +5,9 @@ import pytest
 from flocks.server.routes import onboarding as onboarding_routes
 
 
+REAL_BUILD_THREATBOOK_INTEL_STATUS = onboarding_routes._build_threatbook_intel_status
+
+
 def _intel_status(**overrides):
     data = {
         "configured": False,
@@ -17,7 +20,7 @@ def _intel_status(**overrides):
         "mcp_name": "threatbook_mcp",
         "service_matrix": {
             "cn": ["api", "mcp"],
-            "global": ["api"],
+            "global": ["api", "mcp"],
         },
     }
     data.update(overrides)
@@ -112,6 +115,38 @@ class TestOnboardingStatusRoutes:
         assert data["threatbook_intel"]["region"] == "cn"
         assert data["threatbook_intel"]["api_configured"] is True
         assert data["threatbook_intel"]["mcp_connected"] is True
+
+    @pytest.mark.asyncio
+    async def test_intel_status_infers_global_region_from_mcp_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fake_api_credentials(service_id: str):
+            return service_id == "threatbook-io"
+
+        async def fake_mcp_status(name: str):
+            return {
+                "status": "connected",
+                "configured": True,
+                "connected": True,
+                "has_credential": True,
+            }
+
+        monkeypatch.setattr(onboarding_routes, "_api_service_has_credentials", fake_api_credentials)
+        monkeypatch.setattr(onboarding_routes, "_detect_mcp_status", fake_mcp_status)
+        monkeypatch.setattr(
+            onboarding_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "url": "https://mcp.threatbook.io/mcp?apikey={secret:threatbook_mcp_key}",
+            },
+        )
+
+        status = await REAL_BUILD_THREATBOOK_INTEL_STATUS()
+
+        assert status.region == "global"
+        assert status.api_service_id == "threatbook-io"
+        assert status.mcp_connected is True
+        assert status.service_matrix["global"] == ["api", "mcp"]
 
 
 class TestOnboardingValidateRoutes:
@@ -307,6 +342,10 @@ class TestOnboardingApplyRoutes:
         assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["activation_url"] == (
             "https://i.threatbook.io/flocks/activate"
         )
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["threatbook_mcp_endpoint"] == (
+            "https://mcp.threatbook.io/mcp"
+        )
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["requires_mcp"] is True
 
     def test_ensure_threatbook_mcp_config_uses_explicit_secret_reference(
         self, monkeypatch: pytest.MonkeyPatch
@@ -338,6 +377,12 @@ class TestOnboardingApplyRoutes:
         assert captured["saved_name"] == "threatbook_mcp"
         assert captured["config"]["url"] == (
             "https://mcp.threatbook.cn/mcp?apikey={secret:threatbook_mcp_key}"
+        )
+
+        onboarding_routes._ensure_threatbook_mcp_config("global")
+
+        assert captured["config"]["url"] == (
+            "https://mcp.threatbook.io/mcp?apikey={secret:threatbook_mcp_key}"
         )
 
     @pytest.mark.asyncio
@@ -584,7 +629,7 @@ class TestOnboardingApplyRoutes:
         data = resp.json()
         assert data["success"] is True
         assert data["threatbook_enabled"] is False
-        assert set(data["skipped"]) == {"threatbook_api"}
+        assert set(data["skipped"]) == {"threatbook_api", "threatbook_mcp"}
         assert ("provider", "openai") in calls
         assert ("default_model", "openai") in calls
 

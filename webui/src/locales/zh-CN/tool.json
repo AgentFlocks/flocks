@@ -357,7 +357,6 @@
     "quickActions": "快捷操作",
     "testingConn": "测试中...",
     "testConnection": "测试连接",
-    "claimFreeApiKey": "免费领取 API Key",
     "refreshingTools": "刷新中...",
     "refreshTools": "刷新工具列表",
     "disconnectConn": "断开连接",
@@ -387,7 +386,38 @@
     "disableServer": "禁用服务器",
     "enableServer": "启用服务器",
     "hide": "隐藏",
-    "show": "显示"
+    "show": "显示",
+    "threatbookMcp": {
+      "title": "配置 ThreatBook MCP",
+      "description": "免费启用微步威胁情报 MCP 服务，为 Rex 提供 IOC 查询、威胁情报研判和安全分析能力。",
+      "region": "服务区域",
+      "regionHint": "请选择 API Key 所属区域，系统会自动匹配对应的领取入口和 MCP 服务地址。",
+      "regions": {
+        "cn": "中国区",
+        "global": "国际区"
+      },
+      "freeService": "免费 ThreatBook MCP 服务",
+      "apiKey": "API Key",
+      "keyPlaceholder": "粘贴当前区域的 ThreatBook API Key",
+      "keyHint": "领取后将 Key 粘贴到此处，系统会自动完成服务地址拼接和安全存储。",
+      "keyRequired": "请先填写当前区域的 API Key。",
+      "keyConfigured": "已安全配置",
+      "claimFreeKey": "领取免费 API Key",
+      "endpoint": "MCP 服务地址",
+      "endpointHint": "服务地址由所选区域自动生成，API Key 将单独加密保存，无需手动拼接。",
+      "saveAndVerify": "保存并验证连接",
+      "saving": "正在验证并保存...",
+      "saveSuccess": "ThreatBook MCP 已配置并验证通过。",
+      "saveFailed": "ThreatBook MCP 配置失败，请检查区域和 API Key。",
+      "configuredTitle": "已配置{{region}}",
+      "connected": "配置已验证，MCP 服务当前已连接。",
+      "savedNotConnected": "配置已保存，MCP 服务当前未连接。",
+      "edit": "编辑配置",
+      "retest": "重新测试",
+      "testing": "测试中...",
+      "testFailed": "连接测试失败。",
+      "loading": "正在读取 ThreatBook MCP 配置..."
+    }
   },
 
   "credentials": {
