@@ -22,6 +22,7 @@
   "systemLog": "系统日志",
   "flocksproUpgrade": "升级",
   "checkUpdate": "检查更新",
+  "flocksLlmUsageQuota": "Flocks llm 用量&额度",
   "auditLogs": "审计日志",
   "settings": "设置",
   "settingsBack": "返回",

@@ -22,6 +22,7 @@
   "systemLog": "System Logs",
   "flocksproUpgrade": "Upgrade",
   "checkUpdate": "Check for updates",
+  "flocksLlmUsageQuota": "Flocks LLM Usage & Quota",
   "auditLogs": "Audit Logs",
   "settings": "Settings",
   "settingsBack": "Back",

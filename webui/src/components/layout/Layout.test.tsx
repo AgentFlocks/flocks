@@ -731,7 +731,14 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
     expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
-    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    const updateEntry = screen.getByRole('button', { name: 'checkUpdate' });
+    const usageEntry = screen.getByRole('link', { name: 'flocksLlmUsageQuota' });
+    const settingsEntry = screen.getByRole('link', { name: 'settings' });
+    expect(usageEntry).toHaveAttribute('href', 'https://portal.agentflocks.com');
+    expect(usageEntry).toHaveAttribute('target', '_blank');
+    expect(settingsEntry).toHaveAttribute('href', '/settings/preferences');
+    expect(updateEntry.compareDocumentPosition(usageEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(usageEntry.compareDocumentPosition(settingsEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
     expect(logout).toHaveBeenCalledTimes(1);
