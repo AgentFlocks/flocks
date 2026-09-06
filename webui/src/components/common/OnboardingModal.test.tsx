@@ -4,6 +4,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import OnboardingModal from './OnboardingModal';
+import zhCNCommon from '@/locales/zh-CN/common.json';
 
 const {
   catalogAPI,
@@ -319,6 +320,15 @@ describe('OnboardingModal', () => {
     await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.confirmSkip' }));
 
     expect(screen.getByText('onboarding.bootstrap.intelPageTitle')).toBeInTheDocument();
+  });
+
+  it('uses neutral skip descriptions that point users to later setup locations', () => {
+    const bootstrap = zhCNCommon.onboarding.bootstrap;
+
+    expect(bootstrap.skipModelDescription).toBe('可以先跳过此步骤，稍后在模型清单中继续完成默认模型配置。');
+    expect(bootstrap.skipIntelDescription).toBe('可以先跳过此步骤，稍后在情报 MCP 中继续完成微步情报 API 与 MCP 配置。');
+    expect(bootstrap.skipModelDescription).not.toMatch(/无法|不可用|不能|失败/);
+    expect(bootstrap.skipIntelDescription).not.toMatch(/无法|不可用|不能|失败/);
   });
 
   it('shows domestic and global intelligence activation links by selected region', async () => {
