@@ -401,6 +401,7 @@
       "keyPlaceholder": "Paste the ThreatBook API key for this region",
       "keyHint": "After claiming a key, paste it here. Flocks will build the service URL and store the key securely.",
       "keyRequired": "Enter the API key for the selected region.",
+      "revealFailed": "Failed to retrieve the saved API key. Try again.",
       "keyConfigured": "Securely configured",
       "claimFreeKey": "Claim free API key",
       "endpoint": "MCP endpoint",

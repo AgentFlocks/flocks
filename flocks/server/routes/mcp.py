@@ -10,7 +10,7 @@ MCP state is instance-scoped for project isolation.
 import asyncio
 import copy
 from typing import Dict, Optional, List, Any
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -966,6 +966,38 @@ class McpCredentialResponse(BaseModel):
     has_credential: bool
 
 
+class McpCredentialRevealResponse(BaseModel):
+    """Response containing a credential explicitly requested by the user."""
+    api_key: str
+
+
+def _get_mcp_credential(name: str) -> tuple[Optional[str], Optional[str]]:
+    """Load an MCP credential while supporting historical secret IDs."""
+    secrets = get_secret_manager()
+
+    secret_id = get_mcp_secret_id(name)
+    api_key = secrets.get(secret_id)
+    duplicated_suffix_id = f"{name}_mcp_key"
+    if not api_key and duplicated_suffix_id != secret_id:
+        api_key = secrets.get(duplicated_suffix_id)
+        if api_key:
+            secret_id = duplicated_suffix_id
+    if not api_key:
+        legacy_id = f"{name}_api_key"
+        api_key = secrets.get(legacy_id)
+        if api_key:
+            secret_id = legacy_id
+
+    return (secret_id, api_key) if api_key else (None, None)
+
+
+def _mask_mcp_credential(api_key: str) -> str:
+    """Mask an MCP key as three visible chars on each side."""
+    if len(api_key) <= 6:
+        return "xxxx"
+    return f"{api_key[:3]}xxxx{api_key[-3:]}"
+
+
 @router.get(
     "/{name}/credentials",
     response_model=McpCredentialResponse,
@@ -978,32 +1010,38 @@ async def get_mcp_credentials(name: str):
     Avoids duplicating an existing ``_mcp`` suffix and falls back to historical
     ``{name}_mcp_key`` / ``{name}_api_key`` variants for compatibility.
     """
-    from flocks.security.secrets import SecretManager
-
     try:
-        secrets = get_secret_manager()
-
-        # Convention-based secret_id first, fall back to historical variants.
-        secret_id = get_mcp_secret_id(name)
-        api_key = secrets.get(secret_id)
-        duplicated_suffix_id = f"{name}_mcp_key"
-        if not api_key and duplicated_suffix_id != secret_id:
-            api_key = secrets.get(duplicated_suffix_id)
-            if api_key:
-                secret_id = duplicated_suffix_id
-        if not api_key:
-            legacy_id = f"{name}_api_key"
-            api_key = secrets.get(legacy_id)
-            if api_key:
-                secret_id = legacy_id
+        secret_id, api_key = _get_mcp_credential(name)
 
         return McpCredentialResponse(
-            secret_id=secret_id if api_key else None,
-            api_key_masked=SecretManager.mask(api_key) if api_key else None,
+            secret_id=secret_id,
+            api_key_masked=_mask_mcp_credential(api_key) if api_key else None,
             has_credential=bool(api_key),
         )
     except Exception as e:
         log.error("mcp.credentials.get.error", {"name": name, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/{name}/credentials/reveal",
+    response_model=McpCredentialRevealResponse,
+    summary="Reveal MCP server credential",
+    description="Reveal a stored MCP credential after an explicit user action."
+)
+async def reveal_mcp_credential(name: str, response: Response):
+    """Return the full key only for an explicit reveal request."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    try:
+        _, api_key = _get_mcp_credential(name)
+        if not api_key:
+            raise HTTPException(status_code=404, detail="No credentials found for this server")
+        return McpCredentialRevealResponse(api_key=api_key)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("mcp.credentials.reveal.error", {"name": name, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 

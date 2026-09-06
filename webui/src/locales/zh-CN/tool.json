@@ -401,6 +401,7 @@
       "keyPlaceholder": "粘贴当前区域的 ThreatBook API Key",
       "keyHint": "领取后将 Key 粘贴到此处，系统会自动完成服务地址拼接和安全存储。",
       "keyRequired": "请先填写当前区域的 API Key。",
+      "revealFailed": "读取已保存的 API Key 失败，请重试。",
       "keyConfigured": "已安全配置",
       "claimFreeKey": "领取免费 API Key",
       "endpoint": "MCP 服务地址",

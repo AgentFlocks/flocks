@@ -40,6 +40,9 @@ export const mcpAPI = {
   // Credentials management
   getCredentials: (server: string) =>
     client.get<MCPCredentials>(`/api/mcp/${server}/credentials`),
+
+  revealCredentials: (server: string) =>
+    client.post<{api_key: string}>(`/api/mcp/${server}/credentials/reveal`),
   
   setCredentials: (server: string, credentials: MCPCredentialInput) =>
     client.post<{success: boolean; message: string}>(`/api/mcp/${server}/credentials`, credentials),

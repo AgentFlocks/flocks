@@ -9,6 +9,7 @@ const { currentLanguage, mcpAPI } = vi.hoisted(() => ({
   mcpAPI: {
     get: vi.fn(),
     getCredentials: vi.fn(),
+    revealCredentials: vi.fn(),
     configureThreatBook: vi.fn(),
     testCredentials: vi.fn(),
     update: vi.fn(),
@@ -124,6 +125,7 @@ vi.mock('react-i18next', () => ({
         'detail.threatbookMcp.keyPlaceholder': isChinese ? '粘贴当前区域的 ThreatBook API Key' : 'Paste the ThreatBook API key for this region',
         'detail.threatbookMcp.keyHint': isChinese ? '领取后填写' : 'Paste after claiming',
         'detail.threatbookMcp.keyRequired': isChinese ? '请填写 Key' : 'Enter API key',
+        'detail.threatbookMcp.revealFailed': isChinese ? '读取 Key 失败' : 'Failed to retrieve API key',
         'detail.threatbookMcp.claimFreeKey': isChinese ? '领取免费 API Key' : 'Claim free API key',
         'detail.threatbookMcp.endpoint': isChinese ? 'MCP 服务地址' : 'MCP endpoint',
         'detail.threatbookMcp.endpointHint': isChinese ? '自动生成地址' : 'Endpoint is generated automatically',
@@ -185,6 +187,9 @@ describe('MCPServerDetailPanel', () => {
     mcpAPI.get.mockResolvedValue(detailResponse);
     mcpAPI.getCredentials.mockResolvedValue({
       data: { has_credential: false },
+    });
+    mcpAPI.revealCredentials.mockResolvedValue({
+      data: { api_key: '312abcdef321' },
     });
     mcpAPI.configureThreatBook.mockResolvedValue({
       data: {
@@ -365,7 +370,7 @@ describe('MCPServerDetailPanel', () => {
       data: {
         has_credential: true,
         secret_id: 'threatbook_mcp_key',
-        api_key_masked: 'conf****-key',
+        api_key_masked: '312xxxx321',
       },
     });
 
@@ -384,6 +389,111 @@ describe('MCPServerDetailPanel', () => {
     expect(await screen.findByText('China configured')).toBeInTheDocument();
     expect(screen.getByText('https://mcp.threatbook.cn/mcp')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit configuration' })).toBeInTheDocument();
+  });
+
+  it('shows the saved key masked in edit mode and reveals it only on demand', async () => {
+    const user = userEvent.setup();
+    mcpAPI.get.mockResolvedValue({
+      ...detailResponse,
+      data: {
+        ...detailResponse.data,
+        name: 'threatbook_mcp',
+        config: {
+          type: 'sse',
+          url: 'https://mcp.threatbook.cn/mcp?apikey={secret:threatbook_mcp_key}',
+        },
+      },
+    });
+    mcpAPI.getCredentials.mockResolvedValue({
+      data: {
+        has_credential: true,
+        secret_id: 'threatbook_mcp_key',
+        api_key_masked: '312xxxx321',
+      },
+    });
+
+    render(
+      <MCPServerDetailPanel
+        server={{ ...server, name: 'threatbook_mcp' }}
+        serverTools={[]}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onRemove={vi.fn()}
+        onSelectTool={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '编辑配置' }));
+
+    const keyInput = screen.getByLabelText('API Key *');
+    expect(keyInput).toHaveValue('312xxxx321');
+    expect(keyInput).toHaveAttribute('readonly');
+    expect(screen.queryByDisplayValue('312abcdef321')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTitle('显示'));
+
+    await waitFor(() => {
+      expect(mcpAPI.revealCredentials).toHaveBeenCalledWith('threatbook_mcp');
+      expect(keyInput).toHaveValue('312abcdef321');
+    });
+    expect(keyInput).not.toHaveAttribute('readonly');
+
+    await user.click(screen.getByTitle('隐藏'));
+    expect(keyInput).toHaveValue('312xxxx321');
+    expect(keyInput).toHaveAttribute('readonly');
+
+    await user.click(screen.getByRole('button', { name: '国际区' }));
+    expect(keyInput).toHaveValue('');
+    expect(keyInput).not.toHaveAttribute('readonly');
+  });
+
+  it('locks region switching while the saved key is being revealed', async () => {
+    const user = userEvent.setup();
+    let resolveReveal: ((value: { data: { api_key: string } }) => void) | undefined;
+    mcpAPI.revealCredentials.mockReturnValue(new Promise((resolve) => {
+      resolveReveal = resolve;
+    }));
+    mcpAPI.get.mockResolvedValue({
+      ...detailResponse,
+      data: {
+        ...detailResponse.data,
+        name: 'threatbook_mcp',
+        config: {
+          type: 'sse',
+          url: 'https://mcp.threatbook.cn/mcp?apikey={secret:threatbook_mcp_key}',
+        },
+      },
+    });
+    mcpAPI.getCredentials.mockResolvedValue({
+      data: {
+        has_credential: true,
+        secret_id: 'threatbook_mcp_key',
+        api_key_masked: '312xxxx321',
+      },
+    });
+
+    render(
+      <MCPServerDetailPanel
+        server={{ ...server, name: 'threatbook_mcp' }}
+        serverTools={[]}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onRemove={vi.fn()}
+        onSelectTool={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '编辑配置' }));
+    await user.click(screen.getByTitle('显示'));
+
+    expect(screen.getByRole('button', { name: '国际区' })).toBeDisabled();
+
+    resolveReveal?.({ data: { api_key: '312abcdef321' } });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '国际区' })).toBeEnabled();
+    });
   });
 
   it('does not show the free key link for other MCP servers', async () => {

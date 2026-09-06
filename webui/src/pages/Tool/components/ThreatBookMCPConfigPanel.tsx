@@ -52,6 +52,8 @@ export default function ThreatBookMCPConfigPanel({
   const [editing, setEditing] = useState(true);
   const [apiKey, setApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
+  const [storedKeyLoaded, setStoredKeyLoaded] = useState(false);
+  const [revealingKey, setRevealingKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<OperationResult>(null);
@@ -82,13 +84,48 @@ export default function ThreatBookMCPConfigPanel({
   const summaryRegion = configuredRegion || region;
   const isConfigured = Boolean(credentials?.has_credential && configuredRegion);
   const isConnected = serverStatus === 'connected';
+  const hasStoredKeyForRegion = Boolean(
+    credentials?.has_credential && configuredRegion && configuredRegion === region,
+  );
+  const showingStoredKeyMask = hasStoredKeyForRegion && !showApiKey;
+  const displayedApiKey = showingStoredKeyMask
+    ? credentials?.api_key_masked || ''
+    : apiKey;
 
   const handleRegionChange = (nextRegion: ThreatBookRegion) => {
     if (nextRegion === region) return;
     setRegion(nextRegion);
     setApiKey('');
     setShowApiKey(false);
+    setStoredKeyLoaded(false);
     setResult(null);
+  };
+
+  const handleApiKeyVisibility = async () => {
+    if (showApiKey) {
+      setShowApiKey(false);
+      return;
+    }
+
+    if (hasStoredKeyForRegion && !storedKeyLoaded) {
+      try {
+        setRevealingKey(true);
+        setResult(null);
+        const response = await mcpAPI.revealCredentials(serverName);
+        setApiKey(response.data.api_key);
+        setStoredKeyLoaded(true);
+      } catch (error: any) {
+        setResult({
+          success: false,
+          message: error.response?.data?.detail || error.message || t('detail.threatbookMcp.revealFailed'),
+        });
+        return;
+      } finally {
+        setRevealingKey(false);
+      }
+    }
+
+    setShowApiKey(true);
   };
 
   const handleSave = async () => {
@@ -112,6 +149,7 @@ export default function ThreatBookMCPConfigPanel({
 
       setApiKey('');
       setShowApiKey(false);
+      setStoredKeyLoaded(false);
       setResult({ success: true, message: t('detail.threatbookMcp.saveSuccess') });
       await onConfigured();
       await loadCredentials();
@@ -195,6 +233,8 @@ export default function ThreatBookMCPConfigPanel({
                 onClick={() => {
                   setRegion(configuredRegion || languageDefaultRegion);
                   setApiKey('');
+                  setShowApiKey(false);
+                  setStoredKeyLoaded(false);
                   setResult(null);
                   setEditing(true);
                 }}
@@ -240,11 +280,12 @@ export default function ThreatBookMCPConfigPanel({
                   key={item}
                   type="button"
                   onClick={() => handleRegionChange(item)}
+                  disabled={revealingKey || saving}
                   className={`min-w-[96px] rounded-md px-4 py-2 text-sm font-semibold transition-colors ${
                     region === item
                       ? 'bg-white text-green-700 shadow-sm ring-1 ring-green-200'
                       : 'text-gray-500 hover:text-gray-700'
-                  }`}
+                  } disabled:cursor-not-allowed disabled:opacity-50`}
                 >
                   {t(`detail.threatbookMcp.regions.${item}`)}
                 </button>
@@ -264,8 +305,9 @@ export default function ThreatBookMCPConfigPanel({
               <div className="relative min-w-0 flex-1">
                 <input
                   id="threatbook-mcp-api-key"
-                  type={showApiKey ? 'text' : 'password'}
-                  value={apiKey}
+                  type={showApiKey || showingStoredKeyMask ? 'text' : 'password'}
+                  value={displayedApiKey}
+                  readOnly={showingStoredKeyMask}
                   onChange={(event) => {
                     setApiKey(event.target.value);
                     setResult(null);
@@ -276,11 +318,16 @@ export default function ThreatBookMCPConfigPanel({
                 />
                 <button
                   type="button"
-                  onClick={() => setShowApiKey((value) => !value)}
+                  onClick={handleApiKeyVisibility}
+                  disabled={revealingKey || (!hasStoredKeyForRegion && !apiKey)}
                   title={showApiKey ? t('detail.hide') : t('detail.show')}
-                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 hover:text-gray-600"
+                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  {revealingKey
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : showApiKey
+                      ? <EyeOff className="h-4 w-4" />
+                      : <Eye className="h-4 w-4" />}
                 </button>
               </div>
               <a
@@ -330,6 +377,8 @@ export default function ThreatBookMCPConfigPanel({
                 onClick={() => {
                   setRegion(configuredRegion || languageDefaultRegion);
                   setApiKey('');
+                  setShowApiKey(false);
+                  setStoredKeyLoaded(false);
                   setResult(null);
                   setEditing(false);
                 }}

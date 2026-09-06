@@ -1199,7 +1199,7 @@ class TestMcpRoutes:
         class FakeSecrets:
             def get(self, secret_id: str):
                 requested_ids.append(secret_id)
-                return "configured-key" if secret_id == "threatbook_mcp_key" else None
+                return "312abcdef321" if secret_id == "threatbook_mcp_key" else None
 
         monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
 
@@ -1208,7 +1208,39 @@ class TestMcpRoutes:
         assert resp.status_code == 200, resp.text
         assert resp.json()["has_credential"] is True
         assert resp.json()["secret_id"] == "threatbook_mcp_key"
+        assert resp.json()["api_key_masked"] == "312xxxx321"
+        assert "312abcdef321" not in resp.text
         assert requested_ids == ["threatbook_mcp_key"]
+
+    @pytest.mark.asyncio
+    async def test_reveal_threatbook_mcp_credentials_returns_full_key_on_demand(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeSecrets:
+            def get(self, secret_id: str):
+                return "312abcdef321" if secret_id == "threatbook_mcp_key" else None
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+
+        resp = await client.post("/api/mcp/threatbook_mcp/credentials/reveal")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"api_key": "312abcdef321"}
+        assert resp.headers["cache-control"] == "no-store"
+
+    @pytest.mark.asyncio
+    async def test_reveal_mcp_credentials_returns_not_found_when_missing(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeSecrets:
+            def get(self, secret_id: str):
+                return None
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+
+        resp = await client.post("/api/mcp/threatbook_mcp/credentials/reveal")
+
+        assert resp.status_code == 404, resp.text
 
     @pytest.mark.asyncio
     async def test_configure_threatbook_mcp_does_not_persist_failed_validation(
