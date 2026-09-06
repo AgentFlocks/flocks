@@ -237,7 +237,7 @@ function RegionChooser({
   globalLabel: string;
 }) {
   return (
-    <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
+    <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1.5 shadow-sm">
       {([
         ['cn', chinaLabel],
         ['global', globalLabel],
@@ -246,10 +246,10 @@ function RegionChooser({
           key={candidate}
           type="button"
           onClick={() => onChange(candidate)}
-          className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+          className={`rounded-lg px-5 py-2 text-sm font-semibold transition-colors ${
             value === candidate
-              ? 'bg-white text-red-700 shadow-sm ring-1 ring-gray-200'
-              : 'text-gray-500 hover:text-gray-700'
+              ? 'bg-green-50 text-green-700 ring-1 ring-green-200'
+              : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
           }`}
         >
           {label}
@@ -540,9 +540,23 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     return t('onboarding.bootstrap.statusConfigured');
   }, [intelRuntimeStatus, t]);
 
+  const intelRegionLabel = useMemo(() => (
+    intelRegion === 'cn'
+      ? t('onboarding.bootstrap.intelRegionChina')
+      : t('onboarding.bootstrap.intelRegionGlobal')
+  ), [intelRegion, t]);
+
+  const intelConfiguredStatusValue = useMemo(() => {
+    if (!intelConfigured) return t('onboarding.bootstrap.statusNotConfigured');
+    return t('onboarding.bootstrap.intelConfiguredVerified', { region: intelRegionLabel });
+  }, [intelConfigured, intelRegionLabel, t]);
+
   const currentIntelCapabilities = useMemo(() => {
-    const matrix = intelRuntimeStatus?.service_matrix || { cn: ['api', 'mcp'], global: ['api'] };
-    return matrix[intelRegion] || [];
+    const matrix = intelRuntimeStatus?.service_matrix || { cn: ['api', 'mcp'], global: ['api', 'mcp'] };
+    const configuredCapabilities = new Set(matrix[intelRegion] || []);
+    configuredCapabilities.add('api');
+    configuredCapabilities.add('mcp');
+    return ['api', 'mcp'].filter((capability) => configuredCapabilities.has(capability));
   }, [intelRegion, intelRuntimeStatus?.service_matrix]);
 
   const canSavePrimary = primaryProviderIsThreatBook
@@ -695,9 +709,18 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     setStartStatus(null);
 
     try {
-      const payload = buildIntelPayload();
-      const validateRes = await onboardingAPI.validate(payload);
-      const validateData = validateRes.data;
+      let payload = buildIntelPayload();
+      let validateRes = await onboardingAPI.validate(payload);
+      let validateData = validateRes.data;
+
+      if (validateData.error_code === 'region_mismatch' && validateData.suggested_region) {
+        payload = {
+          ...payload,
+          region: validateData.suggested_region,
+        };
+        validateRes = await onboardingAPI.validate(payload);
+        validateData = validateRes.data;
+      }
 
       if (!validateData.can_apply) {
         setIntelStatus(buildErrorStatus(validateData, t('onboarding.bootstrap.serviceTestFailed')));
@@ -706,13 +729,14 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
       const applyRes = await onboardingAPI.apply(payload);
       const applyData = applyRes.data;
+      setIntelRegion(payload.region);
       setIntelConfigured(true);
       setIntelEditing(false);
       setIntelSkipped(false);
       setIntelStatus(buildSuccessStatus(
         validateData,
         applyData,
-        intelRegion === 'cn'
+        payload.region === 'cn'
           ? t('onboarding.bootstrap.intelChinaSuccess')
           : t('onboarding.bootstrap.intelGlobalSuccess'),
       ));
@@ -977,11 +1001,11 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <StatusMetric
               label={t('onboarding.bootstrap.configuredStatusLabel')}
-              value={t('onboarding.bootstrap.statusConfigured')}
+              value={intelConfiguredStatusValue}
             />
             <StatusMetric
               label={t('onboarding.bootstrap.configuredRegionLabel')}
-              value={intelRegion === 'cn' ? t('onboarding.bootstrap.regionChina') : t('onboarding.bootstrap.regionGlobal')}
+              value={intelRegionLabel}
             />
             <StatusMetric
               label={t('onboarding.bootstrap.intelApiLabel')}
@@ -1009,8 +1033,8 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
         <div className="rounded-xl border border-gray-200 p-4 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-xs font-medium text-gray-700">{t('onboarding.bootstrap.intelRegionTitle')}</p>
-              <p className="mt-1 text-[11px] text-gray-500">{t('onboarding.bootstrap.intelRegionHint')}</p>
+              <p className="text-sm font-semibold text-gray-800">{t('onboarding.bootstrap.intelRegionTitle')}</p>
+              <p className="mt-1 text-xs text-gray-500">{t('onboarding.bootstrap.intelRegionHint')}</p>
             </div>
             <RegionChooser
               value={intelRegion}
@@ -1027,12 +1051,12 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
           <div className="flex flex-wrap gap-2">
             {currentIntelCapabilities.includes('api') && (
-              <span className="rounded-full bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-700 ring-1 ring-red-100">
+              <span className="rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
                 {t('onboarding.bootstrap.intelApiCapability')}
               </span>
             )}
             {currentIntelCapabilities.includes('mcp') && (
-              <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700 ring-1 ring-amber-100">
+              <span className="rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
                 {t('onboarding.bootstrap.intelMcpCapability')}
               </span>
             )}
@@ -1117,7 +1141,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           <StatusMetric
             label={t('onboarding.bootstrap.summaryIntel')}
             value={intelConfigured
-              ? t('onboarding.bootstrap.statusConfigured')
+              ? intelConfiguredStatusValue
               : intelSkipped
                 ? t('onboarding.bootstrap.statusSkipped')
                 : t('onboarding.bootstrap.statusNotConfigured')}

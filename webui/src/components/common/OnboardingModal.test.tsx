@@ -107,7 +107,7 @@ function makeStatus(overrides: Record<string, any> = {}) {
       mcp_name: 'threatbook_mcp',
       service_matrix: {
         cn: ['api', 'mcp'],
-        global: ['api'],
+        global: ['api', 'mcp'],
       },
     },
     ...overrides,
@@ -337,7 +337,7 @@ describe('OnboardingModal', () => {
 
     const globalLink = screen.getByRole('link', { name: 'onboarding.bootstrap.intelKeyLink' });
     expect(globalLink).toHaveAttribute('href', 'https://i.threatbook.io/flocks/activate');
-    expect(screen.queryByText('onboarding.bootstrap.intelMcpCapability')).not.toBeInTheDocument();
+    expect(screen.getByText('onboarding.bootstrap.intelMcpCapability')).toBeInTheDocument();
   });
 
   it('shows configured summaries and lets users enter edit mode', async () => {
@@ -362,7 +362,7 @@ describe('OnboardingModal', () => {
           mcp_name: 'threatbook_mcp',
           service_matrix: {
             cn: ['api', 'mcp'],
-            global: ['api'],
+            global: ['api', 'mcp'],
           },
         },
       }),
@@ -378,6 +378,7 @@ describe('OnboardingModal', () => {
 
     await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.nextStep' }));
     expect(screen.getByText('onboarding.bootstrap.intelConfiguredHint')).toBeInTheDocument();
+    expect(screen.getAllByText('onboarding.bootstrap.intelConfiguredVerified').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'onboarding.bootstrap.editIntel' })).toBeInTheDocument();
   });
 
