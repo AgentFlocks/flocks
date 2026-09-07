@@ -917,6 +917,51 @@ class TestToolCallExecution:
         assert state.status == "error"
 
     @pytest.mark.asyncio
+    async def test_strict_agent_rejects_undeclared_tool_before_execution(self):
+        event_callback = AsyncMock()
+        agent = _make_agent("restricted-report-agent")
+        agent.options = {"strict_tools": True}
+        agent.tools = ["situation_product_report_write"]
+        proc = StreamProcessor(
+            session_id="ses_strict_tools",
+            assistant_message=_make_assistant_msg("ses_strict_tools"),
+            agent=agent,
+            event_publish_callback=event_callback,
+        )
+        execute_mock = AsyncMock(
+            return_value=ToolResult(success=True, output="must not run")
+        )
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(),
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=execute_mock,
+            ),
+        ):
+            await proc.process_event(
+                ToolCallEvent(
+                    tool_call_id="tc_strict_bash",
+                    tool_name="bash",
+                    input={"command": "pwd"},
+                )
+            )
+
+        execute_mock.assert_not_awaited()
+        state = proc.tool_calls["tc_strict_bash"]
+        assert state.status == "error"
+        assert state.error == (
+            "Tool 'bash' is not declared for strict agent "
+            "'restricted-report-agent'"
+        )
+        published_part = event_callback.await_args.args[1]["part"]
+        assert published_part["tool"] == "bash"
+        assert published_part["state"]["status"] == "error"
+
+    @pytest.mark.asyncio
     async def test_invalid_tool_call_records_parse_error_without_registry_execution(self):
         event_callback = AsyncMock()
         proc = _make_processor(event_callback=event_callback)

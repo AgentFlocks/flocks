@@ -42,6 +42,7 @@ from flocks.session.streaming.stream_events import (
 from flocks.tool.registry import ToolRegistry, ToolContext, ToolResult
 from flocks.permission import PermissionNext
 from flocks.agent.agent import AgentInfo
+from flocks.agent.toolset import agent_declares_tool
 from flocks.utils.langfuse import span_scope
 from flocks.session.core.defaults import DOOM_LOOP_THRESHOLD
 
@@ -574,6 +575,58 @@ class StreamProcessor:
                 "tool_name": original_tool,
                 "error": parse_error,
             })
+            return
+
+        agent_options = getattr(self.agent, "options", None)
+        strict_tools = (
+            isinstance(agent_options, dict)
+            and bool(agent_options.get("strict_tools"))
+        )
+        if strict_tools and not agent_declares_tool(self.agent, tool_name):
+            error = (
+                f"Tool '{tool_name}' is not declared for strict agent "
+                f"'{self.agent.name}'"
+            )
+            tool_state.status = "error"
+            tool_state.error = error
+            tool_error_time = int(datetime.now().timestamp() * 1000)
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=ToolStateError(
+                    status="error",
+                    input=tool_input,
+                    error=error,
+                    time={"start": tool_error_time, "end": tool_error_time},
+                ),
+            )
+            await Message.store_part(
+                self.session_id,
+                self.assistant_message.id,
+                error_part,
+            )
+            if self.event_publish_callback:
+                await self.event_publish_callback(
+                    "message.part.updated",
+                    {
+                        "part": error_part.model_dump(
+                            by_alias=True,
+                            exclude_none=True,
+                        )
+                    },
+                )
+            log.warn(
+                "stream.tool_call.strict_agent_rejected",
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "agent": self.agent.name,
+                },
+            )
             return
 
         tool_state.status = "running"
