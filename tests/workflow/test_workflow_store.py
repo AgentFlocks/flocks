@@ -24,6 +24,7 @@ def _reset_state() -> None:
     WorkflowStore._init_pid = None
     WorkflowStore._db_path = None
     WorkflowStore._completion_lock = None
+    WorkflowStore._last_metric_prune_at = 0
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +97,106 @@ async def test_workflow_store_records_execution_steps_config_and_kv() -> None:
     await WorkflowStore.kv_put("workflow_runtime/wf-1", {"status": "active"})
     assert await WorkflowStore.kv_get("workflow_runtime/wf-1") == {"status": "active"}
     assert await WorkflowStore.kv_list_keys("workflow_runtime/") == ["workflow_runtime/wf-1"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_trim_keeps_active_executions() -> None:
+    await WorkflowStore.init()
+    for index, status in enumerate(("running", "queued", "pending", "success", "failed", "success")):
+        await WorkflowStore.upsert_execution(
+            {
+                "id": f"exec-{index}",
+                "workflowId": "wf-trim",
+                "status": status,
+                "startedAt": 100 + index,
+            }
+        )
+
+    trimmed = await WorkflowStore.trim_executions("wf-trim", keep=1)
+    remaining = await WorkflowStore.list_executions("wf-trim", limit=20)
+
+    assert set(trimmed) == {"exec-3", "exec-4"}
+    assert {row["id"] for row in remaining} == {"exec-0", "exec-1", "exec-2", "exec-5"}
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_rolls_up_denoise_metrics_idempotently() -> None:
+    await WorkflowStore.init()
+    now_ms = WorkflowStore._now_ms()
+    execution = {
+        "id": "denoise-exec-1",
+        "workflowId": "stream_alert_denoise",
+        "status": "success",
+        "startedAt": now_ms,
+        "finishedAt": now_ms + 1_000,
+        "outputResults": {
+            "stats": {
+                "metric_schema_version": 2,
+                "raw_count": 10,
+                "normalized_count": 10,
+                "after_filter_count": 6,
+                "after_dedup_count": 2,
+                "normalize_type_counts": {"tdp": 8, "skyeye": 2},
+            }
+        },
+    }
+
+    await WorkflowStore.complete_execution(execution, [])
+    await WorkflowStore.complete_execution(execution, [])
+
+    db = await WorkflowStore.raw_db()
+    async with db.execute(
+        "SELECT raw_count, normalized_count, after_filter_count, unique_count, "
+        "filter_removed_count, duplicate_count, source_counts, source_covered_count, "
+        "success_count, error_count, invalid_count, schema_version "
+        "FROM workflow_metric_rollups WHERE workflow_id = ?",
+        ("stream_alert_denoise",),
+    ) as cursor:
+        row = await cursor.fetchone()
+    async with db.execute("SELECT COUNT(*) AS total FROM workflow_metric_contributions") as cursor:
+        contribution_count = (await cursor.fetchone())["total"]
+
+    assert row is not None
+    assert tuple(row[:6]) == (10, 10, 6, 2, 4, 4)
+    assert row["source_counts"] == '{"tdp": 8, "skyeye": 2}'
+    assert row["source_covered_count"] == 10
+    assert tuple(row[8:12]) == (1, 0, 0, 2)
+    assert contribution_count == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_marks_legacy_batch_metrics_invalid() -> None:
+    await WorkflowStore.init()
+    now_ms = WorkflowStore._now_ms()
+
+    await WorkflowStore.complete_execution(
+        {
+            "id": "denoise-legacy-batch",
+            "workflowId": "stream_alert_denoise",
+            "status": "success",
+            "startedAt": now_ms,
+            "outputResults": {
+                "stats": {
+                    "raw_count": 2,
+                    "normalized_count": 2,
+                    "after_filter_count": 2,
+                    "after_dedup_count": 2,
+                }
+            },
+        },
+        [],
+    )
+
+    db = await WorkflowStore.raw_db()
+    async with db.execute(
+        "SELECT raw_count, success_count, invalid_count FROM workflow_metric_rollups "
+        "WHERE workflow_id = ?",
+        ("stream_alert_denoise",),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert tuple(row) == (0, 1, 1)
 
 
 @pytest.mark.asyncio

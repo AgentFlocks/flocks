@@ -37,6 +37,12 @@ _WORKFLOW_TABLE_PREFIXES = (
     "workflow_syslog_config/",
 )
 _WORKFLOW_PREFIXES = _WORKFLOW_KV_PREFIXES + _WORKFLOW_TABLE_PREFIXES
+_SOC_DENOISE_WORKFLOW_ID = "stream_alert_denoise"
+_METRIC_RETENTION_MS = 35 * 24 * 60 * 60 * 1000
+# Idempotency keys only need to cover realistic completion retries. Keeping
+# this table bounded avoids growth proportional to high-volume syslog traffic.
+_METRIC_CONTRIBUTION_KEEP = 100_000
+_METRIC_PRUNE_INTERVAL_MS = 5 * 60 * 1000
 _EXECUTION_UPSERT_SQL = """
     INSERT OR REPLACE INTO workflow_executions
     (id, workflow_id, status, current_phase, current_node_id, current_node_type,
@@ -55,6 +61,7 @@ class WorkflowStore:
     _init_pid: Optional[int] = None
     _db_path: Optional[Path] = None
     _completion_lock: Optional[asyncio.Lock] = None
+    _last_metric_prune_at: int = 0
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -88,6 +95,7 @@ class WorkflowStore:
             cls._initialized = False
             cls._init_pid = None
             cls._completion_lock = None
+            cls._last_metric_prune_at = 0
 
         await Storage._ensure_init()
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +159,7 @@ class WorkflowStore:
         cls._init_pid = None
         cls._db_path = None
         cls._completion_lock = None
+        cls._last_metric_prune_at = 0
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
@@ -355,6 +364,182 @@ class WorkflowStore:
         )
 
     @classmethod
+    def _pipeline_metric_contribution(cls, exec_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        workflow_id = str(exec_data.get("workflowId") or "")
+        if workflow_id != _SOC_DENOISE_WORKFLOW_ID:
+            return None
+        output = exec_data.get("outputResults")
+        output = output if isinstance(output, dict) else {}
+        stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
+        status = str(exec_data.get("status") or "").lower()
+        success = status in {"success", "completed"}
+        error_count = 0 if success else 1
+        invalid_count = 0
+
+        def metric_value(key: str) -> Optional[int]:
+            value = stats.get(key)
+            if isinstance(value, bool):
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return parsed if parsed >= 0 else None
+
+        raw_count = metric_value("raw_count")
+        normalized_count = metric_value("normalized_count")
+        after_filter_count = metric_value("after_filter_count")
+        unique_count = metric_value("after_dedup_count")
+        schema_version = metric_value("metric_schema_version") or 0
+        required = (raw_count, normalized_count, after_filter_count, unique_count)
+        valid = success and all(value is not None for value in required)
+        if valid and not (
+            raw_count >= normalized_count >= after_filter_count >= unique_count >= 0
+        ):
+            valid = False
+        if valid and schema_version < 2:
+            if raw_count == 1 and output.get("is_duplicate") is True:
+                unique_count = 0
+            elif raw_count > 1:
+                valid = False
+        if success and not valid:
+            invalid_count = 1
+        if not valid:
+            raw_count = normalized_count = after_filter_count = unique_count = 0
+
+        filter_removed_count = max(normalized_count - after_filter_count, 0)
+        duplicate_count = max(after_filter_count - unique_count, 0)
+        source_counts = {}
+        raw_source_counts = stats.get("normalize_type_counts")
+        if valid and isinstance(raw_source_counts, dict) and raw_source_counts.get("_type") != "dict":
+            for key, value in raw_source_counts.items():
+                parsed = cls._as_int(value)
+                if parsed is not None and parsed > 0:
+                    source_counts[str(key).strip().lower() or "unknown"] = parsed
+        source_covered_count = (
+            normalized_count
+            if source_counts and sum(source_counts.values()) == normalized_count
+            else 0
+        )
+        started_at = cls._as_int(exec_data.get("startedAt")) or cls._now_ms()
+        bucket_start = started_at - (started_at % 60000)
+        return {
+            "execution_id": str(exec_data.get("id") or ""),
+            "workflow_id": workflow_id,
+            "bucket_start": bucket_start,
+            "raw_count": raw_count,
+            "normalized_count": normalized_count,
+            "after_filter_count": after_filter_count,
+            "unique_count": unique_count,
+            "filter_removed_count": filter_removed_count,
+            "duplicate_count": duplicate_count,
+            "source_counts": source_counts,
+            "source_covered_count": source_covered_count,
+            "success_count": 1 if success else 0,
+            "error_count": error_count,
+            "invalid_count": invalid_count,
+            "schema_version": schema_version,
+        }
+
+    @classmethod
+    async def _record_pipeline_metric_contribution(
+        cls,
+        db: aiosqlite.Connection,
+        contribution: Optional[Dict[str, Any]],
+    ) -> None:
+        if not contribution or not contribution["execution_id"]:
+            return
+        now_ms = cls._now_ms()
+        cursor = await db.execute(
+            """
+            INSERT OR IGNORE INTO workflow_metric_contributions
+            (execution_id, workflow_id, bucket_start, recorded_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                contribution["execution_id"],
+                contribution["workflow_id"],
+                contribution["bucket_start"],
+                now_ms,
+            ),
+        )
+        if cursor.rowcount <= 0:
+            return
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO workflow_metric_meta
+            (workflow_id, coverage_started_at, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (contribution["workflow_id"], now_ms, now_ms),
+        )
+        existing = await db.execute(
+            "SELECT source_counts FROM workflow_metric_rollups "
+            "WHERE workflow_id = ? AND bucket_start = ?",
+            (contribution["workflow_id"], contribution["bucket_start"]),
+        )
+        existing_row = await existing.fetchone()
+        merged_sources = cls._json_loads(existing_row["source_counts"], {}) if existing_row else {}
+        if not isinstance(merged_sources, dict):
+            merged_sources = {}
+        for key, value in contribution["source_counts"].items():
+            merged_sources[key] = max(cls._as_int(merged_sources.get(key)) or 0, 0) + value
+        await db.execute(
+            """
+            INSERT INTO workflow_metric_rollups
+            (workflow_id, bucket_start, raw_count, normalized_count,
+             after_filter_count, unique_count, filter_removed_count,
+             duplicate_count, source_counts, source_covered_count,
+             success_count, error_count, invalid_count, schema_version, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workflow_id, bucket_start) DO UPDATE SET
+              raw_count = raw_count + excluded.raw_count,
+              normalized_count = normalized_count + excluded.normalized_count,
+              after_filter_count = after_filter_count + excluded.after_filter_count,
+              unique_count = unique_count + excluded.unique_count,
+              filter_removed_count = filter_removed_count + excluded.filter_removed_count,
+              duplicate_count = duplicate_count + excluded.duplicate_count,
+              source_counts = excluded.source_counts,
+              source_covered_count = source_covered_count + excluded.source_covered_count,
+              success_count = success_count + excluded.success_count,
+              error_count = error_count + excluded.error_count,
+              invalid_count = invalid_count + excluded.invalid_count,
+              schema_version = MAX(schema_version, excluded.schema_version),
+              updated_at = excluded.updated_at
+            """,
+            (
+                contribution["workflow_id"],
+                contribution["bucket_start"],
+                contribution["raw_count"],
+                contribution["normalized_count"],
+                contribution["after_filter_count"],
+                contribution["unique_count"],
+                contribution["filter_removed_count"],
+                contribution["duplicate_count"],
+                cls._json_dumps(merged_sources),
+                contribution["source_covered_count"],
+                contribution["success_count"],
+                contribution["error_count"],
+                contribution["invalid_count"],
+                contribution["schema_version"],
+                now_ms,
+            ),
+        )
+        if now_ms - cls._last_metric_prune_at >= _METRIC_PRUNE_INTERVAL_MS:
+            cutoff = now_ms - _METRIC_RETENTION_MS
+            await db.execute(
+                "DELETE FROM workflow_metric_contributions WHERE execution_id IN ("
+                "SELECT execution_id FROM workflow_metric_contributions "
+                "ORDER BY recorded_at DESC LIMIT -1 OFFSET ?)",
+                (_METRIC_CONTRIBUTION_KEEP,),
+            )
+            await db.execute(
+                "DELETE FROM workflow_metric_rollups WHERE bucket_start < ?",
+                (cutoff - (cutoff % 60000),),
+            )
+            cls._last_metric_prune_at = now_ms
+
+    @classmethod
     async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
         db = await cls._db()
         _, _, row = cls._execution_row(exec_data)
@@ -434,11 +619,13 @@ class WorkflowStore:
 
     @classmethod
     async def trim_executions(cls, workflow_id: str, *, keep: int) -> List[str]:
+        """Trim terminal history without deleting queued or running executions."""
         db = await cls._db()
         async with db.execute(
             """
             SELECT id FROM workflow_executions
             WHERE workflow_id = ?
+              AND status NOT IN ('running', 'queued', 'pending')
             ORDER BY started_at DESC, rowid DESC
             LIMIT -1 OFFSET ?
             """,
@@ -509,6 +696,7 @@ class WorkflowStore:
         """Atomically persist one final execution summary and its step batch."""
         db = await cls._completion_db()
         exec_id, workflow_id, execution_row = cls._execution_row(exec_data)
+        metric_contribution = cls._pipeline_metric_contribution(exec_data)
         step_rows = cls._step_rows(exec_id, steps)
         lock = cls._completion_lock
         if lock is None:
@@ -528,6 +716,7 @@ class WorkflowStore:
                         step_rows,
                     )
                 await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
+                await cls._record_pipeline_metric_contribution(db, metric_contribution)
                 await db.commit()
             except BaseException:
                 try:
@@ -861,6 +1050,38 @@ CREATE TABLE IF NOT EXISTS workflow_stats (
     updated_at    INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS workflow_metric_rollups (
+    workflow_id          TEXT NOT NULL,
+    bucket_start         INTEGER NOT NULL,
+    raw_count            INTEGER NOT NULL DEFAULT 0,
+    normalized_count     INTEGER NOT NULL DEFAULT 0,
+    after_filter_count   INTEGER NOT NULL DEFAULT 0,
+    unique_count         INTEGER NOT NULL DEFAULT 0,
+    filter_removed_count INTEGER NOT NULL DEFAULT 0,
+    duplicate_count      INTEGER NOT NULL DEFAULT 0,
+    source_counts        TEXT NOT NULL DEFAULT '{}',
+    source_covered_count INTEGER NOT NULL DEFAULT 0,
+    success_count        INTEGER NOT NULL DEFAULT 0,
+    error_count          INTEGER NOT NULL DEFAULT 0,
+    invalid_count        INTEGER NOT NULL DEFAULT 0,
+    schema_version       INTEGER NOT NULL DEFAULT 0,
+    updated_at           INTEGER NOT NULL,
+    PRIMARY KEY (workflow_id, bucket_start)
+);
+
+CREATE TABLE IF NOT EXISTS workflow_metric_contributions (
+    execution_id TEXT PRIMARY KEY,
+    workflow_id  TEXT NOT NULL,
+    bucket_start INTEGER NOT NULL,
+    recorded_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_metric_meta (
+    workflow_id        TEXT PRIMARY KEY,
+    coverage_started_at INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workflow_configs (
     workflow_id TEXT NOT NULL,
     kind        TEXT NOT NULL,
@@ -884,4 +1105,6 @@ _INDEX_STMTS = [
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_status ON workflow_executions(workflow_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_trigger ON workflow_executions(workflow_id, trigger_type, trigger_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_execution_steps_exec_step ON workflow_execution_steps(exec_id, step_index)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_metric_rollups_workflow_bucket ON workflow_metric_rollups(workflow_id, bucket_start)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_metric_contributions_recorded ON workflow_metric_contributions(recorded_at)",
 ]

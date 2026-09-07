@@ -708,6 +708,240 @@ def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_
     assert payload["workflowEvents"][0]["sessionId"] == "session-1"
 
 
+def test_soc_dashboard_ai_tasks_use_authoritative_active_status(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    now_ms = int(datetime.now().timestamp() * 1000)
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_phase TEXT,
+                current_step_index INTEGER,
+                step_count INTEGER,
+                input_params TEXT NOT NULL DEFAULT '{}',
+                output_results TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                updated_at INTEGER,
+                payload TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        rows = [
+            (
+                "triage-running", "stream_alert_triage", "running", "analysis", 2, 3,
+                "{}", json.dumps({"triage_results": [{"alert_name": "SSRF盲打探测"}]}), "",
+                now_ms - 2_000, None, now_ms, "{}",
+            ),
+            (
+                "denoise-queued", "stream_alert_denoise", "queued", "queued", 0, 7,
+                json.dumps({"raw_alerts": [{"id": "a"}, {"id": "b"}]}), "{}", "",
+                now_ms - 1_000, None, 0, "{}",
+            ),
+            (
+                "denoise-empty-completed", "stream_alert_denoise", "success", "completed", 7, 7,
+                "{}",
+                json.dumps({"stats": {"raw_count": 0, "normalized_count": 0, "after_filter_count": 0, "after_dedup_count": 0}}),
+                "", now_ms - 3_000, now_ms - 2_500, now_ms - 2_500, "{}",
+            ),
+            (
+                "denoise-stale", "stream_alert_denoise", "running", "dedup", 3, 7,
+                "{}", "{}", "", now_ms - 3 * 60 * 60 * 1000, None,
+                now_ms - 3 * 60 * 60 * 1000, "{}",
+            ),
+        ]
+        conn.executemany(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_ai_tasks()
+
+    assert payload["connection"] == "online"
+    assert payload["summary"] == {
+        "active": 2,
+        "running": 1,
+        "waiting": 1,
+        "stale": 1,
+        "disabled": 0,
+        "returned": 2,
+        "truncated": False,
+    }
+    assert [task["executionId"] for task in payload["tasks"]] == [
+        "triage-running",
+        "denoise-queued",
+    ]
+    assert payload["tasks"][0]["progress"]["label"] == "第 2/4 步"
+    assert payload["tasks"][1]["dataQuality"] == "pending"
+    assert payload["tasks"][1]["counts"]["raw"] == 2
+    assert payload["tasks"][1]["rawCountSource"] == "workflow_input"
+    assert all(task["executionId"] != "denoise-empty-completed" for task in payload["tasks"])
+
+
+def test_soc_dashboard_ai_tasks_report_missing_workflow_database(tmp_path: Path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = tmp_path / "missing.db"
+
+    payload = handlers._get_ai_tasks()
+
+    assert payload["connection"] == "unavailable"
+    assert payload["reason"] == "workflow_db_missing"
+    assert payload["tasks"] == []
+
+
+def test_soc_dashboard_reads_persisted_denoise_metric_rollups(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    start_time = 1_800_000
+    end_time = start_time + 3600
+    start_ms = start_time * 1000
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            "CREATE TABLE workflow_metric_meta "
+            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_metric_rollups (
+                workflow_id TEXT,
+                bucket_start INTEGER,
+                raw_count INTEGER,
+                normalized_count INTEGER,
+                after_filter_count INTEGER,
+                unique_count INTEGER,
+                filter_removed_count INTEGER,
+                duplicate_count INTEGER,
+                source_counts TEXT,
+                source_covered_count INTEGER,
+                success_count INTEGER,
+                error_count INTEGER,
+                invalid_count INTEGER,
+                schema_version INTEGER,
+                updated_at INTEGER,
+                PRIMARY KEY (workflow_id, bucket_start)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
+            ("stream_alert_denoise", start_ms - 60_000, start_ms + 120_000),
+        )
+        conn.executemany(
+            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("stream_alert_denoise", start_ms, 10, 10, 8, 3, 2, 5, '{"tdp": 10}', 10, 1, 0, 0, 2, start_ms),
+                ("stream_alert_denoise", start_ms + 60_000, 4, 4, 4, 1, 0, 3, '{"skyeye": 4}', 4, 1, 0, 0, 2, start_ms + 60_000),
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = workflow_db
+
+    stats = handlers._get_workflow_denoise_stats(
+        "stream_alert_denoise",
+        start_time,
+        end_time,
+        force=True,
+    )
+
+    assert stats["metricsAvailable"] is True
+    assert stats["dataQuality"] == "complete"
+    assert stats["rawCount"] == 14
+    assert stats["normalizedCount"] == 14
+    assert stats["afterFilterCount"] == 12
+    assert stats["uniqueCount"] == 4
+    assert stats["filterRemovedCount"] == 2
+    assert stats["duplicateCount"] == 8
+    assert stats["sourceCounts"] == {"tdp": 10, "skyeye": 4}
+    assert stats["sourceCoverageRate"] == 1
+    assert sum(stats["seriesRaw"]) == 14
+    assert sum(stats["seriesUnique"]) == 4
+
+
+def test_soc_dashboard_does_not_replace_full_window_with_partial_rollup(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    start_time = 1_800_000
+    end_time = start_time + 3600
+    start_ms = start_time * 1000
+    coverage_ms = start_ms + 180_000
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            "CREATE TABLE workflow_metric_meta "
+            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_metric_rollups (
+                workflow_id TEXT,
+                bucket_start INTEGER,
+                raw_count INTEGER,
+                normalized_count INTEGER,
+                after_filter_count INTEGER,
+                unique_count INTEGER,
+                filter_removed_count INTEGER,
+                duplicate_count INTEGER,
+                source_counts TEXT,
+                source_covered_count INTEGER,
+                success_count INTEGER,
+                error_count INTEGER,
+                invalid_count INTEGER,
+                schema_version INTEGER,
+                updated_at INTEGER,
+                PRIMARY KEY (workflow_id, bucket_start)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE TABLE workflow_executions "
+            "(workflow_id TEXT, status TEXT, started_at INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
+            ("stream_alert_denoise", coverage_ms, coverage_ms),
+        )
+        conn.execute(
+            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "stream_alert_denoise", coverage_ms, 2, 2, 2, 1, 0, 1,
+                '{"tdp": 2}', 2, 1, 0, 0, 2, coverage_ms,
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?)",
+            [
+                ("stream_alert_denoise", "success", start_ms + offset)
+                for offset in (60_000, 120_000, 180_000)
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = workflow_db
+
+    stats = handlers._get_workflow_denoise_stats(
+        "stream_alert_denoise",
+        start_time,
+        end_time,
+        force=True,
+    )
+
+    assert stats["metricsAvailable"] is False
+    assert stats["dataQuality"] == "legacy-partial"
+    assert stats["coverageComplete"] is False
+    assert stats["coverageStartedAt"] == coverage_ms
+    assert stats["callCount"] == 3
+    assert stats["rawCount"] == 3
+    assert stats["shadowMetricsAvailable"] is True
+
+
 def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path, monkeypatch):
     tasks_db = tmp_path / "tasks.db"
     today_at_1100 = datetime.now().astimezone().replace(

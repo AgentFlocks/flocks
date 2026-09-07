@@ -50,6 +50,15 @@ describe('SOC dashboard contract page runtime', () => {
           },
         });
       }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 0 },
+            tasks: [],
+          },
+        });
+      }
       if (path === '/task-center') {
         return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
       }
@@ -73,6 +82,7 @@ describe('SOC dashboard contract page runtime', () => {
     await waitFor(() => {
       expect(pageGetMock).toHaveBeenCalledWith('/stats', expect.anything());
       expect(pageGetMock).toHaveBeenCalledWith('/activity', expect.anything());
+      expect(pageGetMock).toHaveBeenCalledWith('/ai-tasks', expect.anything());
       expect(pageGetMock).toHaveBeenCalledWith('/task-center', expect.anything());
     });
 
@@ -166,6 +176,15 @@ describe('SOC dashboard contract page runtime', () => {
       if (path === '/task-center') {
         return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
       }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 0 },
+            tasks: [],
+          },
+        });
+      }
       return Promise.reject(new Error(`unexpected path: ${path}`));
     });
 
@@ -191,6 +210,15 @@ describe('SOC dashboard contract page runtime', () => {
             batch: {},
             workflowStats: { callCount: 0, latestStartedAt: 0 },
             tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [] },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 0 },
+            tasks: [],
           },
         });
       }
@@ -278,6 +306,82 @@ describe('SOC dashboard contract page runtime', () => {
     const workflowStats = container.querySelector('.task-center-stats.workflow-stats') as HTMLElement;
     expect(within(workflowStats).getByText('调用')).toBeInTheDocument();
     expect(within(workflowStats).getByText('今日调用')).toBeInTheDocument();
+  });
+
+  it('uses authoritative workflow task status instead of activity playback state', async () => {
+    const now = Date.now();
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') return Promise.resolve({ data: {} });
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor',
+            events: [],
+            recentEvents: [],
+            workflowEvents: [
+              {
+                eventId: 'workflow-execution:completed-history',
+                stage: 'denoise',
+                status: 'completed',
+                occurredAt: new Date(now).toISOString(),
+                triggerSource: 'workflow_execution',
+                workflowId: 'stream_alert_denoise',
+                alert: { id: 'history', threatName: '不应进入任务栏' },
+                result: { isDuplicate: false, rawCount: 0 },
+              },
+            ],
+            batch: {},
+            workflowStats: { callCount: 0, latestStartedAt: 0 },
+            tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [] },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 2, running: 1, waiting: 1, stale: 0 },
+            tasks: [
+              {
+                taskId: 'workflow-execution:running-1',
+                workflowId: 'stream_alert_triage',
+                executionId: 'running-1',
+                stage: 'triage',
+                status: 'running',
+                startedAt: now,
+                title: 'SSRF盲打探测攻击结果未知',
+                counts: { raw: null },
+                dataQuality: 'pending',
+                progress: { mode: 'steps', current: 2, total: 3, percent: 0.6667, label: '第 2/3 步' },
+              },
+              {
+                taskId: 'workflow-execution:queued-1',
+                workflowId: 'stream_alert_denoise',
+                executionId: 'queued-1',
+                stage: 'denoise',
+                status: 'queued',
+                startedAt: now - 1000,
+                title: '降噪批次 · 原始条数待生成',
+                counts: { raw: null },
+                dataQuality: 'pending',
+                progress: { mode: 'waiting', percent: null, label: '等待调度' },
+              },
+            ],
+          },
+        });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    render(<Page />);
+
+    expect(await screen.findByText('正在处理 1 个，等待 1 个')).toBeInTheDocument();
+    expect(screen.getByText('SSRF盲打探测攻击结果未知')).toBeInTheDocument();
+    expect(screen.getByText('降噪批次 · 原始条数待生成')).toBeInTheDocument();
+    expect(screen.getByText('第 2/3 步')).toBeInTheDocument();
+    expect(screen.queryByText('不应进入任务栏')).not.toBeInTheDocument();
+    expect(screen.queryByText('降噪处理完成')).not.toBeInTheDocument();
   });
 
   it('uses dashboard mock rows with the same workflow execution field shape as real task-center data', async () => {
