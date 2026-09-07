@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -883,7 +884,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_cancels_when_verification_makes_no_progress(
+async def test_pipeline_failure_does_not_cancel_when_verification_makes_no_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: False)
@@ -900,8 +901,6 @@ async def test_pipeline_cancels_when_verification_makes_no_progress(
             },
         ]
     )
-    cancelled: list[str] = []
-
     async def prepare(_ctx, _target_path: str) -> ToolResult:
         return _result({"scan_id": "scan_stalled"})
 
@@ -914,15 +913,14 @@ async def test_pipeline_cancels_when_verification_makes_no_progress(
     async def status(_ctx, _scan_id: str) -> ToolResult:
         return _result(next(statuses))
 
-    async def cancel(_ctx, scan_id: str) -> ToolResult:
-        cancelled.append(scan_id)
-        return _result({"scan_id": scan_id, "status": "cancelled"})
+    async def unexpected_cancel(_ctx, _scan_id: str) -> ToolResult:
+        pytest.fail("an internal orchestration failure must not overwrite scan=failed")
 
     monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
     monkeypatch.setattr(audit_cli, "audit_run_workers", run_workers)
     monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
     monkeypatch.setattr(audit_cli, "audit_status", status)
-    monkeypatch.setattr(audit_cli, "audit_cancel", cancel)
+    monkeypatch.setattr(audit_cli, "audit_cancel", unexpected_cancel)
     monkeypatch.setattr(
         audit_cli.AuditOrchestrator,
         "_run_parent_adjudication",
@@ -937,7 +935,39 @@ async def test_pipeline_cancels_when_verification_makes_no_progress(
             lambda event, _payload: events.append(event),
         ).run()
 
-    assert cancelled == ["scan_stalled"]
+    assert "scan.cancelled" not in events
+
+
+@pytest.mark.asyncio
+async def test_pipeline_cancels_only_on_task_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: False)
+    cancelled: list[str] = []
+
+    async def prepare(_ctx, _target_path: str) -> ToolResult:
+        return _result({"scan_id": "scan_cancelled"})
+
+    async def run_workers(_ctx, _scan_id: str, _phase: str) -> ToolResult:
+        raise asyncio.CancelledError
+
+    async def cancel(_ctx, scan_id: str) -> ToolResult:
+        cancelled.append(scan_id)
+        return _result({"scan_id": scan_id, "status": "cancelled"})
+
+    monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
+    monkeypatch.setattr(audit_cli, "audit_run_workers", run_workers)
+    monkeypatch.setattr(audit_cli, "audit_cancel", cancel)
+
+    events: list[str] = []
+    with pytest.raises(asyncio.CancelledError):
+        await audit_cli.AuditOrchestrator(
+            ToolContext("session", "message", agent="code-security"),
+            Path("/target"),
+            lambda event, _payload: events.append(event),
+        ).run()
+
+    assert cancelled == ["scan_cancelled"]
     assert events[-1] == "scan.cancelled"
 
 

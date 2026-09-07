@@ -51,6 +51,7 @@ from flocks_code_security.orchestration import (
     plan_poc_units,
     plan_threat_model_units,
     plan_verification_units,
+    poc_generator_prompt,
     probe_prompt,
     targeted_rescan_prompt,
     threat_model_prompt,

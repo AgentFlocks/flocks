@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import flocks_code_security.tools as tools_module
 from flocks_code_security.models import SnapshotRef
 from flocks_code_security.orchestration import plan_poc_units, poc_generator_prompt
 from flocks_code_security.store import ScanStore, _ranges_cover
@@ -41,6 +42,11 @@ def test_poc_prompt_preserves_target_language_delivery_distinction() -> None:
     assert "PoC language does not have to match the target language" in prompt
     assert "source_harness" in prompt
     assert "later dynamic-validation consumer" in prompt
+
+
+def test_worker_launcher_imports_the_poc_prompt_builder() -> None:
+    """PoC worker launch must fail after task creation only for real launch errors."""
+    assert tools_module.poc_generator_prompt is poc_generator_prompt
 
 
 def test_poc_evidence_read_ranges_may_be_covered_in_chunks() -> None:

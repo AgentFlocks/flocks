@@ -866,7 +866,7 @@ class AuditOrchestrator:
             )
             _end_observation(scan_scope, output=finalized)
             return finalized
-        except BaseException as exc:
+        except asyncio.CancelledError as exc:
             cancelled_output: dict[str, Any] | None = None
             if scan_id is not None:
                 try:
@@ -885,8 +885,24 @@ class AuditOrchestrator:
                 scan_scope,
                 output={
                     "scan_id": scan_id,
+                    "status": "cancelled",
                     "error_type": type(exc).__name__,
                     "cancellation": cancelled_output,
+                },
+                level="WARNING",
+                status_message=type(exc).__name__,
+            )
+            raise
+        except BaseException as exc:
+            # Do not call audit_cancel for an internal error.  The service
+            # boundary converts this exception into scan=failed with its root
+            # failure code; cancelling here would overwrite that diagnosis.
+            _end_observation(
+                scan_scope,
+                output={
+                    "scan_id": scan_id,
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
                 },
                 level="ERROR",
                 status_message=type(exc).__name__,
