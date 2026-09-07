@@ -381,21 +381,21 @@ class WorkflowStore:
         invalid_count = 0
 
         def sequence_count(value: Any) -> Optional[int]:
-            if isinstance(value, (list, tuple)):
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return None
+            if isinstance(value, list):
                 return len(value)
             if isinstance(value, dict):
                 if value.get("_type") in {"list", "tuple", "set"}:
                     count = cls._as_int(value.get("count"))
                     return count if count is not None and count >= 0 else None
-                data = value.get("data")
-                if isinstance(data, (list, tuple)):
-                    return len(data)
-            if isinstance(value, str):
-                try:
-                    return sequence_count(json.loads(value))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    return None
-            return None
+                if "data" in value:
+                    value = value.get("data")
+                    return len(value) if isinstance(value, list) else (1 if value else 0)
+            return 1 if value else 0
 
         def input_alert_count() -> Optional[int]:
             inputs = exec_data.get("inputParams")
@@ -408,31 +408,41 @@ class WorkflowStore:
             syslog_message = inputs.get("syslog_message") or inputs.get("syslog")
             if isinstance(syslog_message, dict) and syslog_message.get("message"):
                 try:
-                    json.loads(str(syslog_message["message"]))
+                    parsed_syslog = json.loads(str(syslog_message["message"]))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
                 else:
-                    return 1
+                    if isinstance(parsed_syslog, dict):
+                        return 1
 
-            known_empty = False
-            for key in ("raw_alerts", "alerts", "alert_list"):
-                marker = cls._as_int(inputs.get(f"_{key}_count"))
+            # `alerts` shadows `alert_list` even when empty, matching the
+            # receive node's inputs.get('alerts', inputs.get('alert_list', [])).
+            for key in ("alerts", "alert_list"):
+                marker_key = f"_{key}_count"
+                if key not in inputs and marker_key not in inputs:
+                    continue
+                materialized_count = sequence_count(inputs.get(key)) if key in inputs else None
+                if materialized_count is not None:
+                    return materialized_count
+                marker = cls._as_int(inputs.get(marker_key))
                 if marker is not None and marker >= 0:
-                    if marker > 0:
-                        return marker
-                    known_empty = True
-                count = sequence_count(inputs.get(key))
-                if count is not None:
-                    if count > 0:
-                        return count
-                    known_empty = True
+                    return marker
+                return None
+
+            # Compatibility fallback for pre-v3/compacted rows which stored
+            # the accepted batch under raw_alerts rather than the API field.
+            marker = cls._as_int(inputs.get("_raw_alerts_count"))
+            if marker is not None and marker >= 0:
+                return marker
+            if "raw_alerts" in inputs:
+                return sequence_count(inputs.get("raw_alerts"))
 
             # File inputs are intentionally unknown here: reading a user file
             # while committing execution state would introduce I/O and TOCTOU
             # races. Successful output metrics remain authoritative for them.
             if inputs.get("alert_file"):
                 return None
-            return 0 if known_empty else None
+            return None
 
         input_count = input_alert_count()
         input_params = exec_data.get("inputParams")

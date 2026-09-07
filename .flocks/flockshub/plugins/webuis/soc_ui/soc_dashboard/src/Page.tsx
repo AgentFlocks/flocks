@@ -24,56 +24,56 @@ const EMPTY_STATS = {
   eventRange: { start: '', end: '', label: '', source: '' },
   generatedAt: '',
   latencyMs: 0,
-  sourceStatus: { workflowRoot: '', denoise: [], triage: [], denoiseFiles: [], triageFiles: [], missing: [], metricQuality: {} },
+  sourceStatus: { workflowRoot: '', denoise: [], triage: [], denoiseFiles: [], triageFiles: [], missing: [], metricQuality: {}, triageQuality: {} },
   denoise: {
-    totalRaw: 0,
-    totalNormalized: 0,
-    afterFilter: 0,
-    totalUnique: 0,
-    filterRemoved: 0,
-    dedupRemoved: 0,
-    duplicates: 0,
-    duplicateRate: 0,
-    dedupRate: 0,
-    uniqueRate: 0,
-    files: 0,
-    parseErrors: 0,
+    totalRaw: null,
+    totalNormalized: null,
+    afterFilter: null,
+    totalUnique: null,
+    filterRemoved: null,
+    dedupRemoved: null,
+    duplicates: null,
+    duplicateRate: null,
+    dedupRate: null,
+    uniqueRate: null,
+    files: null,
+    parseErrors: null,
   },
   triage: {
-    totalRecords: 0,
-    newTriaged: 0,
-    cacheHit: 0,
-    triageFailed: 0,
-    followersReused: 0,
-    attackTotal: 0,
-    attackSuccess: 0,
-    attack: 0,
-    attackFailed: 0,
-    benign: 0,
-    unknown: 0,
-    attackRate: 0,
-    successRate: 0,
-    cacheRate: 0,
-    coverageRate: 0,
-    avgTriageMs: 0,
-    files: 0,
-    parseErrors: 0,
+    totalRecords: null,
+    newTriaged: null,
+    cacheHit: null,
+    triageFailed: null,
+    followersReused: null,
+    attackTotal: null,
+    attackSuccess: null,
+    attack: null,
+    attackFailed: null,
+    benign: null,
+    unknown: null,
+    attackRate: null,
+    successRate: null,
+    cacheRate: null,
+    coverageRate: null,
+    avgTriageMs: null,
+    files: null,
+    parseErrors: null,
   },
   pipeline: {
-    raw: 0,
-    unique: 0,
-    triageTotal: 0,
-    attackTotal: 0,
-    reductionSaved: 0,
-    llmSaved: 0,
-    uniqueRate: 0,
-    workloadReuseRate: 0,
-    coverageRate: 0,
-    attackRate: 0,
-    successRate: 0,
+    raw: null,
+    unique: null,
+    triageTotal: null,
+    attackTotal: null,
+    reductionSaved: null,
+    llmSaved: null,
+    uniqueRate: null,
+    workloadReuseRate: null,
+    coverageRate: null,
+    attackRate: null,
+    successRate: null,
   },
   sources: [],
-  closedLoop: { autoClosed: 0, resolved: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
+  closedLoop: { autoClosed: null, resolved: null, manualDecision: null, pending: null, resolutionRate: null },
   tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [], dailyLabels: [], source: '' },
   verdicts: [],
   attackProfile: [],
@@ -782,9 +782,15 @@ function mergeStats(raw) {
       ...(EMPTY_STATS.sourceStatus.metricQuality || {}),
       ...((raw || {}).sourceStatus?.metricQuality || {}),
     },
+    triageQuality: {
+      ...(EMPTY_STATS.sourceStatus.triageQuality || {}),
+      ...((raw || {}).sourceStatus?.triageQuality || {}),
+    },
   };
   const metricQuality = sourceStatus.metricQuality || {};
+  const triageQuality = sourceStatus.triageQuality || {};
   const denoiseMetricsUnavailable = metricQuality.metricsAvailable === false;
+  const triageMetricsUnavailable = triageQuality.metricsAvailable === false;
   const sourceMetricsUnavailable = denoiseMetricsUnavailable
     || metricQuality.sourceMetricsAvailable === false;
   const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
@@ -796,26 +802,44 @@ function mergeStats(raw) {
     ]) denoise[key] = null;
     if (metricQuality.dataAvailable === false) denoise.files = null;
   }
+  const triage = { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) };
+  if (triageMetricsUnavailable) {
+    for (const key of Object.keys(EMPTY_STATS.triage)) triage[key] = null;
+  }
   const pipeline = { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) };
   if (denoiseMetricsUnavailable) {
     for (const key of ['raw', 'unique', 'reductionSaved', 'uniqueRate', 'coverageRate']) {
       pipeline[key] = null;
     }
   }
+  if (triageMetricsUnavailable) {
+    for (const key of [
+      'triageTotal', 'attackTotal', 'llmSaved', 'workloadReuseRate',
+      'attackRate', 'successRate',
+    ]) pipeline[key] = null;
+  }
   const timeline = { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) };
   if (denoiseMetricsUnavailable) {
     timeline.denoiseRaw = [];
     timeline.denoiseUnique = [];
   }
+  if (triageMetricsUnavailable) {
+    timeline.triageTotal = [];
+    timeline.triageAttack = [];
+  }
   const sources = Array.isArray((raw || {}).sources) ? raw.sources : [];
+  const closedLoop = { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) };
+  if (triageMetricsUnavailable) {
+    for (const key of Object.keys(EMPTY_STATS.closedLoop)) closedLoop[key] = null;
+  }
   return {
     ...EMPTY_STATS,
     ...(raw || {}),
     sourceStatus,
     denoise,
-    triage: { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) },
+    triage,
     pipeline,
-    closedLoop: { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) },
+    closedLoop,
     tokenUsage: { ...EMPTY_STATS.tokenUsage, ...((raw || {}).tokenUsage || {}) },
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
@@ -823,6 +847,13 @@ function mergeStats(raw) {
     sources: sourceMetricsUnavailable
       ? sources.map((item) => ({ ...item, value: null, rate: null, active: false }))
       : sources,
+    verdicts: triageMetricsUnavailable
+      ? ((raw || {}).verdicts || []).map((item) => ({ ...item, value: null }))
+      : ((raw || {}).verdicts || []),
+    attackProfile: triageMetricsUnavailable ? [] : ((raw || {}).attackProfile || []),
+    topThreatTypes: triageMetricsUnavailable ? [] : ((raw || {}).topThreatTypes || []),
+    severityLevels: triageMetricsUnavailable ? [] : ((raw || {}).severityLevels || []),
+    riskLevels: triageMetricsUnavailable ? [] : ((raw || {}).riskLevels || []),
   };
 }
 
@@ -1860,6 +1891,9 @@ function laneLinkStatus(kind, event, peerLane) {
 }
 
 function triageContextText(stats) {
+  if (stats?.sourceStatus?.triageQuality?.metricsAvailable === false) {
+    return '窗口研判数据不可用';
+  }
   const triage = stats?.triage || EMPTY_STATS.triage;
   const total = Math.max(Number(triage.totalRecords || 0), 0);
   const newTriaged = Math.max(Number(triage.newTriaged || 0), 0);
@@ -1939,8 +1973,10 @@ function CommandGraph({ stats, activity }) {
   const activeSeverityTone = severityToneFor(activity.triage.current);
   const recentSeverityTone = severityToneFor(activity.triage.last);
   const activeSources = [...(stats.sources || [])].sort((a, b) => Number(b.value || 0) - Number(a.value || 0)).slice(0, 2);
-  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: 0 });
-  const severities = severityRows(stats);
+  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: null });
+  const triageMetricsAvailable = Boolean(stats.generatedAt)
+    && stats.sourceStatus?.triageQuality?.metricsAvailable !== false;
+  const severities = severityRows(stats, triageMetricsAvailable);
   return h('section', { className: cx('command-graph', denoiseActive && 'denoise-running', triageActive && 'triage-running', `load-${activity.mode}`) }, [
     h(CommandConnections, { key: 'links' }),
     h('div', { className: 'source-stack', key: 'sources' }, activeSources.map((source) => h('div', { className: 'command-source', key: source.key }, [
@@ -2554,7 +2590,13 @@ function CommandAiTaskPanel({ aiTasks }) {
         ? waiting ? '待研判' : '智能研判'
         : waiting ? '待降噪' : '智能降噪';
       const stateLabel = processing ? '处理中' : '等待处理';
-      const qualityDetail = task.dataQuality === 'invalid'
+      const unverifiedZero = task.stage === 'denoise'
+        && Number(task.counts?.raw) === 0
+        && !task.emptyInput
+        && task.rawCountSource !== 'workflow_input';
+      const qualityDetail = unverifiedZero
+        ? ' · 原始条数待校验'
+        : task.dataQuality === 'invalid'
         ? ' · 指标格式异常'
         : task.dataQuality === 'empty-input'
           ? ' · 空输入任务'
@@ -2563,7 +2605,7 @@ function CommandAiTaskPanel({ aiTasks }) {
           : task.dataQuality === 'pending' && (task.counts?.raw === null || task.counts?.raw === undefined)
             ? ' · 原始条数待生成'
             : '';
-      const rawDetail = task.stage === 'denoise' && !task.emptyInput && task.counts?.raw !== null && task.counts?.raw !== undefined
+      const rawDetail = task.stage === 'denoise' && !task.emptyInput && !unverifiedZero && task.counts?.raw !== null && task.counts?.raw !== undefined
         ? ` · 原始 ${task.counts.raw} 条`
         : '';
       const detail = task.stage === 'triage'
@@ -3105,6 +3147,7 @@ export default function Page() {
     || displayActivity.batch?.triageUpdatedCount
   );
   const metricQuality = stats.sourceStatus?.metricQuality || {};
+  const triageQuality = stats.sourceStatus?.triageQuality || {};
   const metricIssues = [];
   if (Number(metricQuality.invalidExecutionCount || 0) > 0) {
     metricIssues.push(`${metricQuality.invalidExecutionCount} 次指标格式异常`);
@@ -3136,6 +3179,13 @@ export default function Page() {
     : metricQuality.status === 'legacy-partial'
       ? `精确降噪指标尚未覆盖当前时间范围，相关数字已隐藏；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
       : '精确降噪指标尚不可用，相关数字已隐藏；新指标链路产生数据后将自动显示';
+  const triageQualityWarning = !stats.generatedAt || triageQuality.metricsAvailable !== false
+    ? ''
+    : triageQuality.unavailableReason === 'soc_db_missing'
+      ? 'SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试'
+      : triageQuality.unavailableReason === 'soc_dashboard_schema_unavailable'
+        ? 'SOC 统计结构尚未就绪，研判、事件与闭环数字已隐藏；系统正在重试'
+      : 'SOC 研判统计查询失败，研判、事件与闭环数字已隐藏；系统正在重试';
 
   return h('div', {
     className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
@@ -3158,6 +3208,7 @@ export default function Page() {
     }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
     metricQualityWarning ? h('div', { className: 'quality-banner', key: 'quality' }, metricQualityWarning) : null,
+    triageQualityWarning ? h('div', { className: 'quality-banner', key: 'triage-quality' }, triageQualityWarning) : null,
     h('main', {
       className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
       key: 'main',

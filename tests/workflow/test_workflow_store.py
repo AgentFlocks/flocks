@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -297,6 +298,97 @@ async def test_workflow_store_does_not_count_malformed_syslog_as_accepted_alert(
 
     assert row is not None
     assert tuple(row) == (0, 0)
+
+    await WorkflowStore.complete_execution(
+        {
+            "id": "denoise-non-object-syslog",
+            "workflowId": "stream_alert_denoise",
+            "status": "success",
+            "startedAt": now_ms,
+            "inputParams": {"syslog_message": {"message": "[]"}},
+            "outputResults": {
+                "stats": {
+                    "metric_schema_version": 2,
+                    "raw_count": 0,
+                    "normalized_count": 0,
+                    "after_filter_count": 0,
+                    "after_dedup_count": 0,
+                }
+            },
+        },
+        [],
+    )
+
+    async with db.execute(
+        "SELECT raw_count, invalid_count FROM workflow_metric_rollups WHERE workflow_id = ?",
+        ("stream_alert_denoise",),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert tuple(row) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_input_reconciliation_matches_receive_node_priority() -> None:
+    await WorkflowStore.init()
+    now_ms = WorkflowStore._now_ms()
+    cases = [
+        (
+            "syslog-wins",
+            {
+                "syslog_message": {"message": json.dumps({"id": "single"})},
+                "alerts": [{"id": index} for index in range(5)],
+            },
+            1,
+        ),
+        (
+            "alerts-shadow-alert-list",
+            {"alerts": [], "alert_list": [{"id": "shadowed"}]},
+            0,
+        ),
+        (
+            "canonical-alerts-win",
+            {"raw_alerts": [{"id": index} for index in range(5)], "alerts": [{"id": "api"}]},
+            1,
+        ),
+        (
+            "materialized-alerts-win-over-stale-marker",
+            {"_alerts_count": 0, "alerts": [{"id": "materialized"}]},
+            1,
+        ),
+    ]
+    for execution_id, input_params, raw_count in cases:
+        await WorkflowStore.complete_execution(
+            {
+                "id": execution_id,
+                "workflowId": "stream_alert_denoise",
+                "status": "success",
+                "startedAt": now_ms,
+                "inputParams": input_params,
+                "outputResults": {
+                    "stats": {
+                        "metric_schema_version": 2,
+                        "raw_count": raw_count,
+                        "normalized_count": raw_count,
+                        "after_filter_count": raw_count,
+                        "after_dedup_count": raw_count,
+                    }
+                },
+            },
+            [],
+        )
+
+    db = await WorkflowStore.raw_db()
+    async with db.execute(
+        "SELECT raw_count, success_count, invalid_count FROM workflow_metric_rollups "
+        "WHERE workflow_id = ?",
+        ("stream_alert_denoise",),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert tuple(row) == (3, 4, 0)
 
 
 @pytest.mark.asyncio

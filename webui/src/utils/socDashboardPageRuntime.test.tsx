@@ -134,6 +134,71 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container.querySelector('.command-source b')).toHaveAttribute('title', '数据不可用');
   });
 
+  it('shows unavailable SOC triage metrics as dashes instead of false zeros', async () => {
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') {
+        return Promise.resolve({
+          data: {
+            generatedAt: new Date().toISOString(),
+            denoise: { totalRaw: 10, totalUnique: 4, duplicateRate: 0.6, duplicates: 6 },
+            triage: {
+              totalRecords: 0,
+              attackTotal: 0,
+              attackSuccess: 0,
+              benign: 0,
+              unknown: 0,
+            },
+            pipeline: { attackRate: 0, successRate: 0 },
+            closedLoop: { autoClosed: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
+            severityLevels: [],
+            sourceStatus: {
+              metricQuality: { status: 'complete', metricsAvailable: true },
+              triageQuality: {
+                status: 'unavailable',
+                dataAvailable: false,
+                metricsAvailable: false,
+                unavailableReason: 'soc_db_missing',
+              },
+            },
+          },
+        });
+      }
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor', events: [], recentEvents: [], workflowEvents: [], batch: {},
+            workflowStats: { callCount: 1, latestStartedAt: Date.now() },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({ data: { connection: 'online', summary: {}, tasks: [] } });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    render(<Page />);
+
+    expect(await screen.findByText('SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试')).toBeInTheDocument();
+    const eventMetric = screen.getByText('安全事件量').closest('.command-metric') as HTMLElement;
+    expect(within(eventMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    const criticalSeverity = screen.getByText('严重').closest('.severity-node') as HTMLElement;
+    expect(within(criticalSeverity).getByText('--')).toHaveAttribute('title', '数据不可用');
+    expect(screen.queryByText('SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试')).toBeInTheDocument();
+  });
+
+  it('renders unknown metrics as dashes on the loading frame', () => {
+    pageGetMock.mockImplementation(() => new Promise(() => {}));
+
+    render(<Page />);
+
+    const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
+    const eventMetric = screen.getByText('安全事件量').closest('.command-metric') as HTMLElement;
+    expect(within(rawMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    expect(within(eventMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+  });
+
   it('pauses task-center polling while the page is hidden', async () => {
     setDocumentHidden(true);
 
@@ -406,9 +471,11 @@ describe('SOC dashboard contract page runtime', () => {
                 stage: 'denoise',
                 status: 'queued',
                 startedAt: now - 1000,
-                title: '降噪批次 · 原始条数待生成',
-                counts: { raw: null },
-                dataQuality: 'pending',
+                title: '降噪批次',
+                counts: { raw: 0 },
+                dataQuality: 'complete',
+                rawCountSource: 'workflow_output',
+                emptyInput: false,
                 progress: { mode: 'waiting', percent: null, label: '等待调度' },
               },
             ],
@@ -423,7 +490,9 @@ describe('SOC dashboard contract page runtime', () => {
 
     expect(await screen.findByText('正在处理 1 个，等待 1 个')).toBeInTheDocument();
     expect(screen.getByText('SSRF盲打探测攻击结果未知')).toBeInTheDocument();
-    expect(screen.getByText('降噪批次 · 原始条数待生成')).toBeInTheDocument();
+    expect(screen.getByText('降噪批次')).toBeInTheDocument();
+    expect(screen.getByText(/原始条数待校验/)).toBeInTheDocument();
+    expect(screen.queryByText(/原始 0 条/)).not.toBeInTheDocument();
     expect(screen.getByText('第 2/3 步')).toBeInTheDocument();
     expect(screen.queryByText('不应进入任务栏')).not.toBeInTheDocument();
     expect(screen.queryByText('降噪处理完成')).not.toBeInTheDocument();
