@@ -414,6 +414,45 @@ describe('ModelPage configure provider dialog', () => {
     expect(mocks.testCredentials).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['threatbook-cn-llm', 'ThreatBook-cn-llm'],
+    ['threatbook-io-llm', 'ThreatBook-io-llm'],
+  ])('shows the shared free key link when editing %s', async (providerId, providerName) => {
+    const user = userEvent.setup();
+    const threatbookProvider = { ...provider, id: providerId, name: providerName };
+    const threatbookModel = { ...model, provider_id: providerId };
+    mocks.useProviders.mockReturnValue({
+      providers: [threatbookProvider],
+      connectedIds: [providerId],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [threatbookModel], total: 1 } });
+    mocks.catalogList.mockResolvedValue({
+      data: {
+        providers: [{ id: providerId, models: [] }],
+      },
+    });
+
+    renderWithRouter(<ModelPage />);
+    await user.click(await screen.findByTitle('Configure'));
+
+    expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
+    expect(mocks.revealCredentials).toHaveBeenCalledWith(providerId);
+    expect(screen.getByRole('link', { name: 'form.claimFreeKey' })).toHaveAttribute(
+      'href',
+      'https://portal.agentflocks.com/',
+    );
+  });
+
+  it('does not show the ThreatBook free key link when editing another provider', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+
+    expect(screen.queryByRole('link', { name: 'form.claimFreeKey' })).not.toBeInTheDocument();
+  });
+
   it('displays and preserves the existing API key when saving a new base URL', async () => {
     const user = userEvent.setup();
     await openConfigureDialog(user);

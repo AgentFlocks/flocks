@@ -2631,6 +2631,17 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
           </div>
+          {isThreatBookLLMProviderId(provider.id) && (
+            <a
+              href={THREATBOOK_FREE_KEY_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
+            >
+              <ExternalLink className="h-4 w-4" />
+              {t('form.claimFreeKey')}
+            </a>
+          )}
           {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
             <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
           )}
