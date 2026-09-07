@@ -1111,6 +1111,12 @@ function FilesTab() {
     loadDir('');
   }, [loadDir]);
 
+  const isOutputsDirectory = currentPath === 'outputs' || currentPath.startsWith('outputs/');
+
+  useEffect(() => {
+    setSort({ field: 'name', direction: isOutputsDirectory ? 'desc' : 'asc' });
+  }, [isOutputsDirectory]);
+
   useEffect(() => {
     const node = fileListRef.current;
     if (!node) return;

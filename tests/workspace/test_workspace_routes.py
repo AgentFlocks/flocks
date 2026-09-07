@@ -128,6 +128,19 @@ class TestDirList:
         assert r.status_code == 200
         assert any(n["name"] == "sub.txt" for n in r.json())
 
+    def test_list_outputs_hides_hidden_entries_and_sorts_directories_descending(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "2026-09-06").mkdir()
+        (ws / "outputs" / "2026-09-07").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+        (ws / "outputs" / "report.md").write_text("visible")
+        (ws / "outputs" / ".DS_Store").write_text("hidden")
+
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert r.status_code == 200
+        assert [item["name"] for item in r.json()] == ["2026-09-07", "2026-09-06", "report.md"]
+
     def test_list_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/list?path=does_not_exist")
         assert r.status_code == 404
@@ -185,6 +198,18 @@ class TestDirTree:
         # depth=1: children of root listed but not recursed into
         children_names = {c["name"] for c in (r.json().get("children") or [])}
         assert "a" in children_names
+
+    def test_tree_hides_hidden_entries(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / ".hidden").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+
+        r = _client(workspace_client).get("/api/workspace/tree?depth=2")
+
+        assert r.status_code == 200
+        assert all(child["name"] != ".hidden" for child in r.json()["children"])
+        outputs = next(child for child in r.json()["children"] if child["name"] == "outputs")
+        assert all(child["name"] != ".staging" for child in outputs["children"])
 
     def test_tree_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/tree?path=nope")

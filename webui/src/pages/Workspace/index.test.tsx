@@ -264,6 +264,33 @@ describe('WorkspacePage', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith('Deleted');
   });
 
+  it('进入 outputs 后默认按名称倒序显示目录', async () => {
+    mocks.list.mockImplementation((path = '') => {
+      if (path === '') {
+        return Promise.resolve({ data: [directory('outputs', 'outputs')] });
+      }
+      if (path === 'outputs') {
+        return Promise.resolve({
+          data: [
+            directory('2026-09-06', 'outputs/2026-09-06'),
+            directory('2026-09-07', 'outputs/2026-09-07'),
+          ],
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('outputs'));
+
+    await waitFor(() => {
+      const rows = screen.getAllByText(/2026-09-0[67]/);
+      expect(rows.map((row) => row.textContent)).toEqual(['2026-09-07', '2026-09-06']);
+    });
+  });
+
   it('大文件预览被截断时显示提示并禁用编辑', async () => {
     mocks.list.mockResolvedValue({
       data: [file('events.jsonl', 'events.jsonl')],

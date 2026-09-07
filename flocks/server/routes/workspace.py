@@ -142,12 +142,32 @@ def _node_from_path(path: Path, root: Path) -> WorkspaceNode:
     )
 
 
+def _is_outputs_directory(directory: Path, root: Path) -> bool:
+    """Return whether *directory* is outputs or one of its descendants."""
+    return directory.relative_to(root).parts[:1] == ("outputs",)
+
+
+def _visible_children(directory: Path, root: Path) -> list[Path]:
+    """List displayable children, hiding dot-prefixed filesystem entries.
+
+    Output directories are organized by date, so show their folders newest-first
+    while retaining the normal name order for files.
+    """
+    children = [child for child in directory.iterdir() if not child.name.startswith(".")]
+    if not _is_outputs_directory(directory, root):
+        return sorted(children)
+
+    directories = sorted((child for child in children if child.is_dir()), reverse=True)
+    files = sorted(child for child in children if not child.is_dir())
+    return directories + files
+
+
 def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) -> WorkspaceNode:
     """Blocking recursive tree build — call via asyncio.to_thread."""
     node = _node_from_path(directory, root)
     if current < depth:
         node.children = []
-        for child in sorted(directory.iterdir()):
+        for child in _visible_children(directory, root):
             if child.is_dir():
                 node.children.append(_build_tree_sync(child, root, depth, current + 1))
             else:
@@ -157,7 +177,7 @@ def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) 
 
 def _list_dir_sync(directory: Path, root: Path) -> list[WorkspaceNode]:
     """Blocking single-level directory listing — call via asyncio.to_thread."""
-    return [_node_from_path(child, root) for child in sorted(directory.iterdir())]
+    return [_node_from_path(child, root) for child in _visible_children(directory, root)]
 
 
 def _dir_stats_sync(root: Path):
