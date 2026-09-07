@@ -31,6 +31,7 @@ class CreateScanRequest(BaseModel):
     max_file_bytes: int = Field(1_048_576, alias="maxFileBytes", ge=1, le=50 * 1024 * 1024)
     copy_source: bool = Field(True, alias="copySource")
     dynamic_enabled: bool = Field(False, alias="dynamicEnabled")
+    poc_enabled: bool = Field(False, alias="pocEnabled")
     dynamic_confirmed: bool = Field(False, alias="dynamicConfirmed")
     coverage_policy: str = Field(
         "evidence_backed_partial",
@@ -112,6 +113,7 @@ def _web_detail(detail: dict[str, Any]) -> dict[str, Any]:
         "coverageSummary": detail["coverage_summary"],
         "dynamicValidation": detail["dynamic_validation"],
         "cybergym": detail.get("cybergym"),
+        "pocGeneration": detail.get("poc_generation"),
         "phaseRuns": detail["phase_runs"],
         "workers": detail["workers"],
         "artifacts": detail["artifacts"],
@@ -176,6 +178,7 @@ async def create_scan(request: Request, payload: CreateScanRequest):
                 max_file_bytes=payload.max_file_bytes,
                 copy_source=payload.copy_source,
                 dynamic_enabled=payload.dynamic_enabled,
+                poc_enabled=payload.poc_enabled,
                 coverage_policy=payload.coverage_policy,
                 verification_votes=payload.verification_votes,
                 idempotency_key=payload.idempotency_key,

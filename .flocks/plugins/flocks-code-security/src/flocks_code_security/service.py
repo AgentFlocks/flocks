@@ -46,6 +46,8 @@ TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 PUBLIC_SCAN_STATUSES = {"running", *TERMINAL_SCAN_STATUSES}
 PUBLIC_PHASES = {
     "probing": "dynamic_validation",
+    "cybergym_solving": "dynamic_validation",
+    "poc_generation": "poc_generation",
 }
 ARTIFACT_FILENAMES = {
     "report_markdown": "report.md",
@@ -56,6 +58,7 @@ ARTIFACT_FILENAMES = {
     "threat_model": "threat-model.json",
     "adjudication": "adjudication.json",
     "dynamic_validation": "dynamic-validation.json",
+    "poc_generation": "poc-generation.json",
 }
 PROJECTED_ARTIFACT_KINDS = {
     "snapshot_summary",
@@ -63,6 +66,7 @@ PROJECTED_ARTIFACT_KINDS = {
     "candidate_index",
     "verification_index",
     "dynamic_validation",
+    "poc_generation",
     "adjudication",
     "coverage",
 }
@@ -76,6 +80,7 @@ EVENT_TITLES = {
     "dynamic.preflight_completed": "动态验证预检已通过",
     "dynamic.execution_started": "受限 Docker 探测已开始",
     "dynamic.execution_completed": "受限 Docker 探测已完成",
+    "dynamic.poc_consumed": "动态验证已消费通用 PoC",
     "dynamic.completed": "动态验证已完成",
     "dynamic.failed": "动态验证执行失败",
     "dynamic.cancelled": "动态验证已取消",
@@ -83,6 +88,8 @@ EVENT_TITLES = {
     "adjudication.failed": "主智能体裁决失败",
     "scan.adjudicated": "主智能体已提交裁决",
     "investigation.skipped": "聚焦调查因范围约束已跳过",
+    "poc_generation.skipped": "通用 PoC 生成已跳过",
+    "poc_generation.completed": "通用 PoC 生成已完成",
     "scan.finalized": "最终产物已完成完整性校验",
     "scan.coverage_blocked": "覆盖策略阻止生成最终产物",
     "scan.cancelled": "代码审计已取消",
@@ -124,6 +131,7 @@ class StartScanRequest:
     max_file_bytes: int = 1_048_576
     copy_source: bool = True
     dynamic_enabled: bool = False
+    poc_enabled: bool = False
     coverage_policy: str = "evidence_backed_partial"
     verification_votes: int = 1
     idempotency_key: str | None = None
@@ -186,7 +194,12 @@ def _final_finding_metric(
         value = dynamic_summary.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             dynamic_execution_count += value
-    uses_dynamic_result = dynamic_enabled and dynamic_summary.get("status") != "skipped" and dynamic_execution_count > 0
+    uses_dynamic_result = (
+        dynamic_enabled
+        and dynamic_summary.get("validator") != "cybergym"
+        and dynamic_summary.get("status") != "skipped"
+        and dynamic_execution_count > 0
+    )
     value = finding_summary.get("dynamic_reproduced" if uses_dynamic_result else "total")
     if not isinstance(value, int) or isinstance(value, bool):
         return {"final_finding_count": None, "final_finding_basis": "最终结果不可用"}
@@ -568,6 +581,7 @@ class AuditService:
             max_file_bytes=request.max_file_bytes,
             copy_source=bool(request.copy_source),
             dynamic_enabled=bool(request.dynamic_enabled),
+            poc_enabled=bool(request.poc_enabled),
             coverage_policy=str(request.coverage_policy or "").strip(),
             verification_votes=request.verification_votes,
             idempotency_key=(request.idempotency_key or "").strip() or None,
@@ -576,6 +590,13 @@ class AuditService:
         if normalized.scan_mode not in {"standard", "cybergym_level1"}:
             raise AuditServiceError("invalid_parameter", "Unsupported scan_mode")
         if normalized.scan_mode == "cybergym_level1":
+            # CyberGym is a dynamic validator, so its execution input must come
+            # from the independent generic PoC phase even when callers omit the
+            # convenience flag.
+            if not normalized.poc_enabled:
+                normalized = StartScanRequest(
+                    **{**normalized.__dict__, "poc_enabled": True}
+                )
             if normalized.cybergym_manifest is None:
                 raise AuditServiceError(
                     "cybergym_manifest_required",
@@ -645,6 +666,7 @@ class AuditService:
                 copy_source=normalized.copy_source,
                 mode=normalized.scan_mode,
                 dynamic_enabled=normalized.dynamic_enabled,
+                poc_enabled=normalized.poc_enabled,
                 coverage_policy=normalized.coverage_policy,
                 verification_votes=normalized.verification_votes,
                 cybergym_manifest=normalized.cybergym_manifest,
@@ -738,6 +760,7 @@ class AuditService:
                 request.target_path,
                 recorder,
                 dynamic_enabled=request.dynamic_enabled,
+                poc_enabled=request.poc_enabled,
                 scan_mode=request.scan_mode,
                 prepared=prepared,
             ).run()
@@ -825,6 +848,7 @@ class AuditService:
             "coverage_status": coverage_summary["completeness"],
             "scan_mode": scan["mode"],
             "dynamic_enabled": bool(scan["dynamic_enabled"]),
+            "poc_enabled": bool(scan.get("poc_enabled", 0)),
             "coverage_policy": scan["coverage_policy"],
             "verification_votes": scan["verification_vote_count"],
             "created_at": scan["created_at"],
@@ -844,6 +868,17 @@ class AuditService:
             ),
             "knowledge_base": knowledge_base,
             "cybergym": status.get("cybergym"),
+            "poc_generation": {
+                "enabled": bool(scan.get("poc_enabled", 0)),
+                "bundle_count": int(status.get("counts", {}).get("poc_bundles", 0)),
+                "validation_count": int(status.get("counts", {}).get("poc_validations", 0)),
+                "verified_count": int(
+                    status.get("counts", {}).get("verified_poc_validations", 0)
+                ),
+                "remaining_confirmed": int(
+                    status.get("counts", {}).get("confirmed_without_poc_bundle", 0)
+                ),
+            },
         }
         return {
             "schema_version": PUBLIC_SCHEMA_VERSION,
@@ -857,7 +892,8 @@ class AuditService:
             "coverage_summary": coverage_summary,
             "dynamic_validation": self._dynamic_summary(
                 status,
-                enabled=bool(scan["dynamic_enabled"]),
+                enabled=bool(scan["dynamic_enabled"])
+                or scan["mode"] == "cybergym_level1",
                 report_data=report_data,
             ),
             "cybergym": status.get("cybergym"),
@@ -936,7 +972,8 @@ class AuditService:
             metric = _final_finding_metric(
                 lifecycle_status=item["lifecycle_status"],
                 integrity_status="pending",
-                dynamic_enabled=bool(item["dynamic_enabled"]),
+                dynamic_enabled=bool(item["dynamic_enabled"])
+                or item.get("mode") == "cybergym_level1",
                 finding_summary={},
                 dynamic_summary={},
             )
@@ -953,12 +990,14 @@ class AuditService:
                     )
                     dynamic_summary = self._dynamic_summary(
                         status,
-                        enabled=bool(item["dynamic_enabled"]),
+                        enabled=bool(item["dynamic_enabled"])
+                        or item.get("mode") == "cybergym_level1",
                     )
                 metric = _final_finding_metric(
                     lifecycle_status=item["lifecycle_status"],
                     integrity_status=integrity_status,
-                    dynamic_enabled=bool(item["dynamic_enabled"]),
+                    dynamic_enabled=bool(item["dynamic_enabled"])
+                    or item.get("mode") == "cybergym_level1",
                     finding_summary=finding_summary,
                     dynamic_summary=dynamic_summary,
                 )
@@ -1346,6 +1385,7 @@ class AuditService:
                 dynamic_enabled=request.dynamic_enabled,
                 knowledge_base_enabled=request.knowledge_base is not None,
                 cybergym_enabled=request.scan_mode == "cybergym_level1",
+                poc_enabled=request.poc_enabled,
             )
             await Storage.init()
             provider_id, model_id = await _resolve_model(request.model)
@@ -1559,6 +1599,7 @@ class AuditService:
             "max_file_bytes": request.max_file_bytes,
             "copy_source": request.copy_source,
             "dynamic_enabled": request.dynamic_enabled,
+            "poc_enabled": request.poc_enabled,
             "coverage_policy": request.coverage_policy,
             "verification_votes": request.verification_votes,
             "knowledge_base": (
@@ -1665,6 +1706,24 @@ class AuditService:
                 "completed": 0,
                 "inconclusive": 0,
                 "not_runnable": 0,
+            }
+        cybergym = status.get("cybergym")
+        if isinstance(cybergym, dict):
+            lifecycle = {
+                "active": "running",
+                "submitting": "running",
+                "submitted": "completed",
+                "failed_no_artifact": "not_runnable",
+            }.get(cybergym.get("status"), "waiting_for_static_confirmation")
+            return {
+                "status": lifecycle,
+                "validator": "cybergym",
+                "ready": 0,
+                "completed": 1 if lifecycle == "completed" else 0,
+                "inconclusive": 0,
+                "not_runnable": 1 if lifecycle == "not_runnable" else 0,
+                "poc_consumed": int(counts.get("poc_bundles", 0)),
+                "poc_verified": int(counts.get("verified_poc_validations", 0)),
             }
         scan_id = str(status.get("scan_id") or "")
         if report_data is not None:
@@ -1953,6 +2012,7 @@ class AuditService:
             "candidate_index": bool(data["candidates"]),
             "verification_index": bool(data["verifications"]),
             "dynamic_validation": bool(data["dynamic_runs"]) or bool(scan["dynamic_enabled"]),
+            "poc_generation": bool(data.get("poc_bundles")) or bool(scan.get("poc_enabled")),
             "adjudication": bool(data["adjudications"]),
             "coverage": bool(data["coverage"]),
         }

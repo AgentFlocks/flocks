@@ -251,7 +251,8 @@ def _render_status(status: dict[str, Any]) -> None:
     console.print(
         f"[bold]Status:[/bold] {status.get('status')}  "
         f"[bold]Threat model:[/bold] {status.get('threat_model_status')}  "
-        f"[bold]Dynamic:[/bold] {'enabled' if status.get('dynamic_enabled') else 'disabled'}"
+        f"[bold]Dynamic:[/bold] {'enabled' if status.get('dynamic_enabled') else 'disabled'}  "
+        f"[bold]PoC:[/bold] {'enabled' if status.get('poc_enabled') else 'disabled'}"
     )
     adjudication = status.get("adjudication")
     if adjudication:
@@ -269,6 +270,7 @@ def _render_status(status: dict[str, Any]) -> None:
         f"verified={counts.get('verifications', 0)}, "
         f"pending={counts.get('unverified_candidates', 0)}, "
         f"dynamic_terminal={counts.get('terminal_dynamic_runs', 0)}, "
+        f"poc_bundles={counts.get('poc_bundles', 0)}, "
         f"active_work_units={counts.get('active_work_units', 0)}"
     )
 
@@ -313,6 +315,12 @@ def security_audit(
         "--dynamic",
         help="Execute validated probes in a network-isolated local Docker runtime",
     ),
+    poc: bool = typer.Option(
+        False,
+        "--poc",
+        "--generate-poc",
+        help="Generate independent source-backed PoC bundles after static adjudication",
+    ),
     copy_source: bool = typer.Option(
         True,
         "--copy/--no-copy",
@@ -350,6 +358,8 @@ def security_audit(
             audit_kwargs["copy_source"] = False
         if dynamic:
             audit_kwargs["dynamic_enabled"] = True
+        if poc:
+            audit_kwargs["poc_enabled"] = True
         if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:
             raise ValueError("Unsupported coverage policy")
         if coverage_policy != "evidence_backed_partial":

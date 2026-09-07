@@ -15,7 +15,14 @@ from flocks_code_security.models import SessionBinding, SnapshotFile
 from flocks_code_security.snapshot import TargetSnapshotService, normalize_relative_path
 from flocks_code_security.store import ScanStore
 
-SOURCE_ROLES = {"threat_modeler", "baseline", "investigator", "verifier", "prober"}
+SOURCE_ROLES = {
+    "threat_modeler",
+    "baseline",
+    "investigator",
+    "verifier",
+    "prober",
+    "poc_generator",
+}
 
 
 class AuditSourceRepository:
@@ -27,8 +34,8 @@ class AuditSourceRepository:
 
     def repository_summary(self, session_id: str) -> dict[str, Any]:
         binding = self.binding(session_id)
-        if binding.role != "threat_modeler":
-            raise ValueError("Repository summary is only available to threat-modeling workers")
+        if binding.role not in {"threat_modeler", "poc_generator"}:
+            raise ValueError("Repository summary is only available to threat-modeling and PoC-generation workers")
         manifest = RepositoryManifestService(self.store).get_or_build(
             binding.snapshot_id
         )

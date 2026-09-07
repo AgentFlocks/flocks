@@ -139,6 +139,92 @@ def test_manifest_input_contract_is_enforced_and_persisted_with_seed_provenance(
     }
 
 
+@pytest.mark.asyncio
+async def test_cybergym_consumes_generic_poc_and_records_validated_artifact(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="poc_generation",
+        role="poc_generator",
+        paths=["fixture.bin"],
+        status="completed",
+    )
+    candidate_id = "candidate_generic"
+    poc_id = "poc_generic"
+    bundle = {
+        "schema_version": 1,
+        "candidate_id": candidate_id,
+        "artifact_type": "raw_input",
+        "entrypoint": "fixture.bin",
+        "files": [{"path": "fixture.bin", "encoding": "hex", "data": "73656564"}],
+        "source_refs": [],
+        "rationale": "fixture",
+    }
+    with store._lock, store._connect() as connection:
+        connection.execute(
+            "INSERT INTO candidates (candidate_id, scan_id, work_unit_id, role, payload_json, created_at) "
+            "VALUES (?, ?, ?, 'baseline', ?, '2026-09-07T00:00:00+00:00')",
+            (candidate_id, scan_id, unit_id, json.dumps({"rule_id": "fixture"})),
+        )
+        connection.execute(
+            "INSERT INTO poc_bundles VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)",
+            (
+                poc_id,
+                scan_id,
+                candidate_id,
+                unit_id,
+                json.dumps(bundle),
+                "2026-09-07T00:00:00+00:00",
+                "2026-09-07T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO adjudications VALUES (?, 1, 'finalize', ?, '[]', NULL, NULL, ?)",
+            (scan_id, json.dumps([candidate_id]), "2026-09-07T00:00:00+00:00"),
+        )
+
+    runtime = CyberGymRuntime(store, executor=_FixtureExecutor())
+    imported = runtime.seed_from_poc_bundles(scan_id)
+    assert imported["imported_seed_count"] == 1
+    seed_id = imported["imported"][0]["artifact_id"]
+    seed = store.get_cybergym_artifact(scan_id, seed_id, include_data=True)
+    assert seed is not None and seed["data"] == b"seed"
+    assert seed["provenance"]["poc_id"] == poc_id
+
+    with pytest.raises(ValueError, match="derived from an imported generic PoC"):
+        runtime.artifact_create(scan_id, kind="seed", raw=b"unrelated")
+    refined = runtime.artifact_create(
+        scan_id,
+        kind="seed",
+        raw=b"refined",
+        parent_id=seed_id,
+        provenance={"operation": "fixture_refinement"},
+    )
+    assert refined["provenance"]["operation"] == "fixture_refinement"
+    generated = runtime.artifact_create(
+        scan_id,
+        kind="seed",
+        raw=b"generated",
+        source_poc_id=poc_id,
+        provenance={"operation": "agent_materialization"},
+    )
+    assert generated["provenance"]["poc_id"] == poc_id
+
+    await runtime.replay(scan_id, seed_id)
+    await runtime.submit(
+        scan_id,
+        seed_id,
+        local_validation="verified",
+        selection_reason="fixture replay crash",
+    )
+    validations = store.list_poc_validations(scan_id)
+    assert len(validations) == 1
+    assert validations[0]["poc_id"] == poc_id
+    assert validations[0]["candidate_id"] == candidate_id
+    assert validations[0]["status"] == "verified"
+    assert validations[0]["artifact_id"] == seed_id
+
+
 def test_fuzzer_manifest_requires_structured_input_contract() -> None:
     missing_contract = _manifest()
     del missing_contract["input_contract"]

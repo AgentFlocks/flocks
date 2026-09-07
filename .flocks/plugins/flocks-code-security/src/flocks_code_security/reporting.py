@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import json
 import os
@@ -88,6 +89,12 @@ class ReportWriter:
                 raise ValueError("A final parent-agent adjudication is required")
             accepted_candidate_ids = set(adjudications[-1]["accepted_candidate_ids"])
             dynamic_runs = {item["candidate_id"]: item for item in data["dynamic_runs"]}
+            poc_bundles = {
+                item["candidate_id"]: item for item in data.get("poc_bundles", [])
+            }
+            poc_validations = {
+                item["poc_id"]: item for item in data.get("poc_validations", [])
+            }
             dynamic_assessments = {
                 item["candidate_id"]: item for item in (adjudications[-1]["dynamic_assessments"] or [])
             }
@@ -131,6 +138,12 @@ class ReportWriter:
                         "verification": verification,
                         "dynamic_run": dynamic_runs.get(candidate_id),
                         "dynamic_assessment": dynamic_assessments.get(candidate_id),
+                        "poc_bundle": poc_bundles.get(candidate_id),
+                        "poc_validation": (
+                            poc_validations.get(poc_bundles[candidate_id]["poc_id"])
+                            if candidate_id in poc_bundles
+                            else None
+                        ),
                     }
                 )
 
@@ -264,6 +277,59 @@ class ReportWriter:
                         key: value for key, value in artifact.items() if key != "data"
                     }
                 supplemental_contents["cybergym-level1.json"] = canonical_json_bytes(cybergym_document)
+            poc_document: dict[str, Any] | None = None
+            if scan.get("poc_enabled"):
+                poc_entries: list[dict[str, Any]] = []
+                for record in data.get("poc_bundles", []):
+                    bundle = record["bundle"]
+                    candidate_prefix = f"poc/generated/{record['candidate_id']}"
+                    persisted_files: list[dict[str, Any]] = []
+                    for item in bundle.get("files", []):
+                        encoding = item.get("encoding", "utf8")
+                        if encoding == "utf8":
+                            raw = item["data"].encode("utf-8")
+                        elif encoding == "hex":
+                            raw = bytes.fromhex(item["data"])
+                        elif encoding == "base64":
+                            raw = base64.b64decode(item["data"].encode("ascii"), validate=True)
+                        else:
+                            raise ValueError("Persisted PoC contains an unsupported file encoding")
+                        path = f"{candidate_prefix}/{item['path']}"
+                        supplemental_contents[path] = raw
+                        persisted_files.append(
+                            {
+                                "path": path,
+                                "sha256": sha256_bytes(raw),
+                                "size_bytes": len(raw),
+                            }
+                        )
+                    poc_entry = {
+                        "pocId": record["poc_id"],
+                        "candidateId": record["candidate_id"],
+                        "artifactType": bundle["artifact_type"],
+                        "entrypoint": bundle["entrypoint"],
+                        "language": bundle.get("language"),
+                        "delivery": bundle.get("delivery"),
+                        "sourceRefs": bundle["source_refs"],
+                        "rationale": bundle["rationale"],
+                        "files": persisted_files,
+                    }
+                    validation = poc_validations.get(record["poc_id"])
+                    if validation is not None:
+                        poc_entry["validation"] = {
+                            key: value
+                            for key, value in validation.items()
+                            if key
+                            not in {"validation_id", "scan_id", "poc_id", "candidate_id"}
+                        }
+                    poc_entries.append(poc_entry)
+                poc_document = {
+                    "documentType": "flocks-code-security.poc-generation",
+                    "schemaVersion": "1.0",
+                    "scanId": scan_id,
+                    "bundles": poc_entries,
+                }
+                supplemental_contents["poc-generation.json"] = canonical_json_bytes(poc_document)
             artifact_contents = {
                 "findings.json": findings_bytes,
                 "coverage.json": coverage_bytes,
@@ -283,6 +349,7 @@ class ReportWriter:
                 artifacts,
                 knowledge_base=data["knowledge_base"],
                 cybergym=cybergym_document,
+                poc_generation=poc_document,
             )
             artifact_contents.update(
                 {
@@ -571,6 +638,25 @@ class ReportWriter:
         )
         if reproduced_ids:
             extensions["pocRefs"] = [f"poc/{candidate_id}/probe.sh" for candidate_id in reproduced_ids]
+        generated_poc_ids = sorted(
+            item["candidate"]["candidate_id"]
+            for item in group
+            if item.get("poc_bundle") is not None
+        )
+        if generated_poc_ids:
+            extensions["generatedPocRefs"] = [
+                f"poc/generated/{candidate_id}" for candidate_id in generated_poc_ids
+            ]
+        validated_poc_refs = sorted(
+            {
+                f"poc/cybergym/{item['poc_validation']['artifact_id']}.bin"
+                for item in group
+                if (item.get("poc_validation") or {}).get("status") == "verified"
+                and isinstance((item.get("poc_validation") or {}).get("artifact_id"), str)
+            }
+        )
+        if validated_poc_refs:
+            extensions["validatedPocRefs"] = validated_poc_refs
         if len(group) > 1:
             extensions["candidateIds"] = sorted(item["candidate"]["candidate_id"] for item in group)
         if len(severity_conflicts) > 1:
@@ -602,6 +688,18 @@ class ReportWriter:
                     if dynamic_assessment["conclusion"] == "not_reproduced"
                     else "Dynamic validation was unavailable or inconclusive."
                 ]
+        poc_validation = selected.get("poc_validation")
+        if poc_validation is not None:
+            validation["pocValidation"] = {
+                "validator": poc_validation["validator"],
+                "status": poc_validation["status"],
+                "artifactRef": (
+                    f"poc/cybergym/{poc_validation['artifact_id']}.bin"
+                    if isinstance(poc_validation.get("artifact_id"), str)
+                    else None
+                ),
+                "evidence": poc_validation["evidence"],
+            }
         return {
             "findingId": finding_id,
             "occurrenceId": occurrence_id,
@@ -974,6 +1072,7 @@ class ReportWriter:
         artifacts: list[dict[str, str]],
         knowledge_base: dict[str, Any] | None = None,
         cybergym: dict[str, Any] | None = None,
+        poc_generation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         target: dict[str, Any] = {
             "kind": snapshot.target_kind,
@@ -1014,12 +1113,19 @@ class ReportWriter:
             validation_mode = "Independent static source verification"
         if cybergym is not None:
             runtime_status = (
-                "CyberGym Level 1 used only the manifest-locked vulnerable-side runner; "
-                "fixed-side behavior was not exposed to the solver."
+                "CyberGym Level 1 consumed source-backed generic PoCs through the manifest-locked "
+                "vulnerable-side runner; fixed-side behavior was not exposed to the solver."
             )
             validation_mode = (
-                "Static source verification plus constrained vulnerable replay, batch GDB, "
-                "and libFuzzer evidence"
+                "Static source verification plus generic PoC consumption, constrained vulnerable "
+                "replay, batch GDB, and libFuzzer evidence"
+            )
+        if poc_generation is not None and cybergym is None:
+            runtime_status = (
+                "Source-backed PoC bundles were generated; target code was not executed."
+            )
+            validation_mode = (
+                "Independent static source verification plus source-backed PoC generation"
             )
         scope: dict[str, Any] = {
             "includePaths": coverage["includePaths"],
@@ -1031,8 +1137,10 @@ class ReportWriter:
             "runtimeStatus": runtime_status,
             "validationMode": validation_mode,
             "context": (
-                "CyberGym Level 1 static audit and constrained raw-input PoC solving."
+                "CyberGym Level 1 static audit, generic PoC consumption, and constrained dynamic validation."
                 if cybergym is not None
+                else "Threat-model-guided source audit with independent PoC generation."
+                if poc_generation is not None
                 else "Threat-model-guided standard source-code security audit."
             ),
         }
@@ -1071,6 +1179,12 @@ class ReportWriter:
                 "localValidation": cybergym["localValidation"],
                 "selectionReason": cybergym["selectionReason"],
                 "resultRef": "cybergym-level1.json",
+            }
+        if poc_generation is not None:
+            manifest_scan["pocGeneration"] = {
+                "enabled": True,
+                "bundleCount": len(poc_generation.get("bundles", [])),
+                "resultRef": "poc-generation.json",
             }
         return {
             "documentType": "codex-security.scan-manifest",

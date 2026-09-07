@@ -65,6 +65,15 @@ AGENT_TOOLS = {
         "audit_search",
         "audit_submit_probe",
     ],
+    "code-security-poc-generator": [
+        "audit_poc_subject",
+        "audit_knowledge_base",
+        "audit_repository_summary",
+        "audit_inventory",
+        "audit_read",
+        "audit_search",
+        "audit_submit_poc",
+    ],
     "code-security-cybergym-solver": [
         "audit_cybergym_context",
         "audit_cybergym_artifact_create",

@@ -1,0 +1,24 @@
+name: code-security-poc-generator
+description: Hidden source-backed PoC generator for confirmed code-security findings.
+mode: subagent
+hidden: true
+delegatable: false
+tags:
+  - security
+  - code-security
+  - internal
+temperature: 0.0
+steps: 48
+skills: []
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - audit_poc_subject
+  - audit_knowledge_base
+  - audit_repository_summary
+  - audit_inventory
+  - audit_read
+  - audit_search
+  - audit_submit_poc

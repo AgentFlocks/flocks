@@ -49,6 +49,7 @@ from flocks_code_security.orchestration import (
     cybergym_solver_prompt,
     plan_baseline_units,
     plan_probe_units,
+    plan_poc_units,
     plan_threat_model_units,
     plan_verification_units,
     probe_prompt,
@@ -68,6 +69,7 @@ ROLE_AGENTS = {
     "verifier": "code-security-verifier",
     "prober": "code-security-prober",
     "cybergym_solver": "code-security-cybergym-solver",
+    "poc_generator": "code-security-poc-generator",
 }
 _AGENT_DEFINITIONS_ROOT = Path(__file__).resolve().parent / "agents"
 
@@ -108,9 +110,10 @@ SOURCE_SUBMIT_ROLES = {"baseline", "investigator"}
 THREAT_MODEL_CONSUMER_ROLES = {"baseline", "investigator"}
 VERIFIER_ROLE = {"verifier"}
 PROBER_ROLE = {"prober"}
+POC_GENERATOR_ROLE = {"poc_generator"}
 CYBERGYM_SOLVER_ROLE = {"cybergym_solver"}
-KNOWLEDGE_BASE_ROLES = COORDINATOR_ROLE | THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES
-SOURCE_READ_ROLES = THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | VERIFIER_ROLE | PROBER_ROLE
+KNOWLEDGE_BASE_ROLES = COORDINATOR_ROLE | THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | POC_GENERATOR_ROLE
+SOURCE_READ_ROLES = THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | VERIFIER_ROLE | PROBER_ROLE | POC_GENERATOR_ROLE
 EVIDENCE_ROLES = {
     "user_input",
     "entrypoint",
@@ -141,6 +144,8 @@ AUDIT_TOOL_NAMES = (
     "audit_submit_candidate",
     "audit_submit_verdict",
     "audit_submit_probe",
+    "audit_poc_subject",
+    "audit_submit_poc",
     "audit_submit_coverage",
     "audit_adjudication_context",
     "audit_submit_adjudication",
@@ -311,6 +316,7 @@ async def audit_prepare(
     copy_source: bool = True,
     mode: str = "standard",
     dynamic_enabled: bool = False,
+    poc_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
     cybergym_manifest: dict[str, Any] | None = None,
@@ -347,6 +353,8 @@ async def audit_prepare(
             mode=mode,
             ruleset_digest=RULESET_DIGEST,
             dynamic_enabled=dynamic_enabled,
+            # CyberGym consumes the independent generic PoC by definition.
+            poc_enabled=bool(poc_enabled or mode == "cybergym_level1"),
             coverage_policy=coverage_policy,
             verification_vote_count=verification_votes,
         )
@@ -371,6 +379,7 @@ async def audit_prepare(
                 "scan_mode": mode,
                 "status": "running",
                 "dynamic_enabled": bool(dynamic_enabled),
+                "poc_enabled": bool(poc_enabled or mode == "cybergym_level1"),
                 "coverage_policy": coverage_policy,
                 "verification_votes": verification_votes,
                 "snapshot": snapshot.public_dict(),
@@ -422,6 +431,8 @@ async def audit_cybergym_artifact_create(
     ctx: ToolContext,
     data: str,
     encoding: str,
+    parent_artifact_id: str | None = None,
+    source_poc_id: str | None = None,
 ) -> ToolResult:
     try:
         binding = _cybergym_binding(ctx)
@@ -430,7 +441,22 @@ async def audit_cybergym_artifact_create(
             binding.scan_id,
             kind="seed",
             raw=raw,
-            provenance={"operation": "solver_artifact_create", "encoding": encoding},
+            parent_id=parent_artifact_id,
+            source_poc_id=source_poc_id,
+            provenance={
+                "operation": "solver_artifact_create",
+                "encoding": encoding,
+                **(
+                    {"parent_artifact_id": parent_artifact_id}
+                    if parent_artifact_id is not None
+                    else {}
+                ),
+                **(
+                    {"source_poc_id": source_poc_id}
+                    if source_poc_id is not None
+                    else {}
+                ),
+            },
         )
         return ToolResult(
             success=True,
@@ -591,7 +617,7 @@ async def audit_inventory(
 
 async def audit_repository_summary(ctx: ToolContext) -> ToolResult:
     try:
-        _require_agent_execution(ctx, THREAT_MODELER_ROLE)
+        _require_agent_execution(ctx, THREAT_MODELER_ROLE | POC_GENERATOR_ROLE)
         output = await asyncio.to_thread(
             get_runtime().source.repository_summary,
             ctx.session_id,
@@ -800,6 +826,40 @@ async def audit_probe_subject(ctx: ToolContext) -> ToolResult:
         )
     except STORE_ERRORS as exc:
         return _error(exc, title="Probe subject unavailable")
+
+
+async def audit_poc_subject(ctx: ToolContext) -> ToolResult:
+    try:
+        _require_agent_execution(ctx, POC_GENERATOR_ROLE)
+        runtime = get_runtime()
+        binding = runtime.store.require_binding(ctx.session_id, POC_GENERATOR_ROLE)
+        output = await asyncio.to_thread(runtime.store.get_poc_subject, binding)
+        return ToolResult(
+            success=True,
+            output=output,
+            title=f"PoC subject {output['candidate_id']}",
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="PoC subject unavailable")
+
+
+async def audit_submit_poc(
+    ctx: ToolContext,
+    poc: dict[str, Any],
+) -> ToolResult:
+    runtime = get_runtime()
+    try:
+        _require_agent_execution(ctx, POC_GENERATOR_ROLE)
+        binding = runtime.store.require_binding(ctx.session_id, POC_GENERATOR_ROLE)
+        await asyncio.to_thread(runtime.store.require_knowledge_base_consumed, binding)
+        output = await asyncio.to_thread(runtime.store.save_poc_bundle, binding, poc)
+        return ToolResult(
+            success=True,
+            output=output,
+            title=f"Submitted PoC bundle for {output['candidate_id']}",
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="PoC submission failed")
 
 
 async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) -> ToolResult:
@@ -1497,6 +1557,18 @@ async def audit_run_workers(
             candidates_by_id = {
                 item["candidate_id"]: item for item in candidates
             }
+        elif phase == "poc_generation":
+            candidates = await asyncio.to_thread(
+                runtime.store.list_confirmed_without_poc_record,
+                scan_id,
+                limit=32,
+            )
+            if not candidates:
+                raise ValueError("No confirmed candidates are available for PoC generation")
+            units = plan_poc_units(candidates)
+            candidates_by_id = {
+                item["candidate_id"]: item for item in candidates
+            }
         elif phase == "targeted_rescan":
             directive = await asyncio.to_thread(
                 runtime.store.get_targeted_rescan_directive,
@@ -1754,6 +1826,12 @@ async def _launch_worker(
         prompt = probe_prompt(
             snapshot_id=snapshot_id,
             candidate_id=candidate["candidate_id"],
+        )
+    elif phase == "poc_generation" and candidate is not None:
+        prompt = poc_generator_prompt(
+            snapshot_id=snapshot_id,
+            candidate_id=candidate["candidate_id"],
+            knowledge_base_present=knowledge_base_present,
         )
     elif phase == "cybergym_solving":
         prompt = cybergym_solver_prompt()
@@ -2705,6 +2783,61 @@ def register_tools() -> None:
             },
         ]
     }
+    poc_source_ref_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["relative_path", "blob_digest", "start_line", "end_line"],
+        "properties": {
+            "relative_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "blob_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+        },
+    }
+    poc_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "candidate_id",
+            "artifact_type",
+            "entrypoint",
+            "files",
+            "source_refs",
+            "rationale",
+        ],
+        "properties": {
+            "candidate_id": {"type": "string", "minLength": 1},
+            "artifact_type": {
+                "type": "string",
+                "enum": ["raw_input", "source_harness", "request", "bundle"],
+            },
+            "entrypoint": {"type": "string", "minLength": 1, "maxLength": 512},
+            "language": {"type": "string", "maxLength": 128},
+            "files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["path", "encoding", "data"],
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "encoding": {"type": "string", "enum": ["utf8", "hex", "base64"]},
+                        "data": {"type": "string", "minLength": 1, "maxLength": 180_000},
+                    },
+                },
+            },
+            "delivery": {"type": "object"},
+            "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": poc_source_ref_schema,
+            },
+            "rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
+        },
+    }
     dynamic_assessment_schema = {
         "type": "object",
         "additionalProperties": False,
@@ -2810,6 +2943,13 @@ def register_tools() -> None:
                 enum=["standard"],
             ),
             _parameter(
+                "poc_enabled",
+                ParameterType.BOOLEAN,
+                "Generate independent source-backed PoC bundles after static adjudication.",
+                required=False,
+                default=False,
+            ),
+            _parameter(
                 "coverage_policy",
                 ParameterType.STRING,
                 "Coverage completion policy.",
@@ -2853,17 +2993,30 @@ def register_tools() -> None:
     }
     _register(
         "audit_cybergym_context",
-        "Read the bound CyberGym Level 1 manifest, accepted candidates, artifact inventory, and budgets without fixed-side data.",
+        "Read the bound CyberGym Level 1 manifest, accepted candidates, consumed generic PoCs, artifact inventory, and budgets without fixed-side data.",
         audit_cybergym_context,
         [],
     )
     _register(
         "audit_cybergym_artifact_create",
-        "Persist one raw input seed before any CyberGym execution. Accepts only utf8, hex, or base64 bytes.",
+        "Persist one raw input seed before CyberGym execution. Seeds imported from a generic PoC "
+        "are the input contract; refined seeds must provide their parent artifact.",
         audit_cybergym_artifact_create,
         [
             _parameter("data", ParameterType.STRING, "Raw input encoded using encoding."),
             _parameter("encoding", ParameterType.STRING, "Input encoding.", enum=["utf8", "hex", "base64"]),
+            _parameter(
+                "parent_artifact_id",
+                ParameterType.STRING,
+                "Optional parent seed artifact for a refined execution candidate.",
+                required=False,
+            ),
+            _parameter(
+                "source_poc_id",
+                ParameterType.STRING,
+                "Accepted generic PoC that supplied this initial seed when no imported raw seed exists.",
+                required=False,
+            ),
         ],
     )
     _register(
@@ -3014,6 +3167,25 @@ def register_tools() -> None:
         [],
     )
     _register(
+        "audit_poc_subject",
+        "Return the confirmed finding, exact source evidence, and host execution manifest assigned to this PoC-generator work unit.",
+        audit_poc_subject,
+        [],
+    )
+    _register(
+        "audit_submit_poc",
+        "Submit one bounded source-backed PoC bundle. The host validates delivery metadata, evidence references, and file bounds.",
+        audit_submit_poc,
+        [
+            _parameter(
+                "poc",
+                ParameterType.OBJECT,
+                "Structured PoC bundle with artifact_type, entrypoint, files, source_refs, and rationale.",
+                json_schema=poc_schema,
+            )
+        ],
+    )
+    _register(
         "audit_submit_candidate",
         "Submit canonical vulnerability semantics with stable identity, CWE taxonomy, attack path, root cause, and digest-bound source evidence.",
         audit_submit_candidate,
@@ -3106,7 +3278,7 @@ def register_tools() -> None:
         _register(name, description, handler, [_parameter("scan_id", ParameterType.STRING, "Bound scan identifier.")])
     _register(
         "audit_run_workers",
-        "Create and launch isolated standard-audit workers, including at most one focused investigation and one allowed parent-directed targeted rescan.",
+        "Create and launch isolated standard-audit workers, including at most one focused investigation, one allowed parent-directed targeted rescan, and host-owned PoC generation when enabled.",
         audit_run_workers,
         [
             _parameter("scan_id", ParameterType.STRING, "Bound scan identifier."),

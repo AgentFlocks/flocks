@@ -53,6 +53,7 @@ CYBERGYM_AGENT_TOOL_NAMES = {
     "audit_cybergym_minimize",
     "audit_cybergym_submit",
 }
+POC_AGENT_TOOL_NAMES = {"audit_poc_subject", "audit_submit_poc"}
 
 
 def _require_enabled_audit_tools(
@@ -60,6 +61,7 @@ def _require_enabled_audit_tools(
     dynamic_enabled: bool = False,
     knowledge_base_enabled: bool = False,
     cybergym_enabled: bool = False,
+    poc_enabled: bool = False,
 ) -> None:
     ToolRegistry.init()
     excluded = set()
@@ -69,6 +71,8 @@ def _require_enabled_audit_tools(
         excluded.update(GUIDED_AUDIT_TOOL_NAMES)
     if not cybergym_enabled:
         excluded.update(CYBERGYM_AGENT_TOOL_NAMES)
+    if not poc_enabled:
+        excluded.update(POC_AGENT_TOOL_NAMES)
     required = tuple(name for name in AUDIT_TOOL_NAMES if name not in excluded)
     unavailable = [name for name in required if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled]
     if unavailable:
@@ -258,6 +262,7 @@ class AuditOrchestrator:
         target: Path,
         progress: ProgressCallback | None,
         dynamic_enabled: bool = False,
+        poc_enabled: bool = False,
         scan_mode: str = "standard",
         dynamic_runner: DockerDynamicRunner | None = None,
         prepared: dict[str, Any] | None = None,
@@ -266,6 +271,7 @@ class AuditOrchestrator:
         self.target = target
         self.progress = progress
         self.dynamic_enabled = bool(dynamic_enabled)
+        self.poc_enabled = bool(poc_enabled)
         self.scan_mode = scan_mode
         self.dynamic_runner = dynamic_runner
         self.prepared = prepared
@@ -390,6 +396,49 @@ class AuditOrchestrator:
         _end_observation(
             scope,
             output={"status": "completed", "counts": status.get("counts", {})},
+        )
+        return status
+
+    async def _run_poc_generation(
+        self,
+        scan_id: str,
+        status: dict[str, Any],
+        scan_observation: Any,
+    ) -> dict[str, Any]:
+        if not self.poc_enabled:
+            return status
+        if "confirmed_without_poc_bundle" not in (status.get("counts") or {}):
+            # Parent adjudication returns its decision, not a refreshed status
+            # snapshot. PoC planning must use the post-adjudication queue.
+            status = _require_success(await audit_status(self.ctx, scan_id))
+        remaining = int(status.get("counts", {}).get("confirmed_without_poc_bundle", 0))
+        if remaining == 0:
+            _emit(
+                self.progress,
+                "poc_generation.skipped",
+                {"scan_id": scan_id, "reason": "no_confirmed_candidates"},
+                observation_parent=scan_observation,
+            )
+            return status
+        while remaining > 0:
+            batch, status = await _run_phase(
+                self.ctx,
+                scan_id,
+                "poc_generation",
+                self.progress,
+                scan_observation,
+            )
+            if batch.get("status") != "completed":
+                raise RuntimeError("PoC-generation worker batch did not complete successfully")
+            current = int(status.get("counts", {}).get("confirmed_without_poc_bundle", 0))
+            if current >= remaining:
+                raise RuntimeError("PoC-generation phase made no progress")
+            remaining = current
+        _emit(
+            self.progress,
+            "poc_generation.completed",
+            {"scan_id": scan_id, "counts": status.get("counts", {})},
+            observation_parent=scan_observation,
         )
         return status
 
@@ -587,12 +636,22 @@ class AuditOrchestrator:
         status: dict[str, Any],
         scan_observation: Any,
     ) -> dict[str, Any]:
-        """Run the isolated solver after static adjudication, with a deterministic fallback gate."""
+        """Run CyberGym as a dynamic validator over the generic PoC input."""
         if self.scan_mode != "cybergym_level1":
             return status
-        scope = _start_phase_observation(scan_observation, "cybergym_solving")
+        scope = _start_phase_observation(scan_observation, "dynamic_validation")
         parent = scan_observation if scope is None else scope.observation
         try:
+            runtime = get_runtime().cybergym
+            import_seeds = getattr(runtime, "seed_from_poc_bundles", None)
+            if callable(import_seeds):
+                imported = await asyncio.to_thread(import_seeds, scan_id)
+                _emit(
+                    self.progress,
+                    "dynamic.poc_consumed",
+                    imported,
+                    observation_parent=parent,
+                )
             batch, status = await _run_phase(
                 self.ctx,
                 scan_id,
@@ -600,7 +659,6 @@ class AuditOrchestrator:
                 self.progress,
                 parent,
             )
-            runtime = get_runtime().cybergym
             task = runtime.store.get_cybergym_task(scan_id)
             if task is None:
                 raise RuntimeError("CyberGym task is missing after solver phase")
@@ -747,6 +805,13 @@ class AuditOrchestrator:
             if decision["action"] != "finalize":
                 raise RuntimeError("Parent adjudication did not finalize the audit")
 
+            if self.poc_enabled:
+                status = _require_success(await audit_status(self.ctx, scan_id))
+            status = await self._run_poc_generation(
+                scan_id,
+                status,
+                scan_observation,
+            )
             status = await self._run_cybergym_solver(
                 scan_id,
                 status,
@@ -802,6 +867,7 @@ async def run_standard_audit(
     progress: ProgressCallback | None = None,
     copy_source: bool = True,
     dynamic_enabled: bool = False,
+    poc_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
     knowledge_base: dict[str, str] | None = None,
@@ -831,6 +897,7 @@ async def run_standard_audit(
             model=model,
             copy_source=copy_source,
             dynamic_enabled=dynamic_enabled,
+            poc_enabled=poc_enabled,
             coverage_policy=coverage_policy,
             verification_votes=verification_votes,
             knowledge_base=knowledge_base_input,

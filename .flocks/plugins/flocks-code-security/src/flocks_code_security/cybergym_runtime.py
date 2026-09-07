@@ -8,6 +8,8 @@ solver session starts.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import inspect
 import json
@@ -40,6 +42,56 @@ _OFFICIAL_COMMAND_TIMEOUT = 10
 _OFFICIAL_MODE_OUTPUT_JSON_BYTES = 24 * 1024
 _OFFICIAL_MODE_ERROR_JSON_BYTES = 2 * 1024
 _DEFAULT_CYBERGYM_DATA_DIR = "/home/cybergym/cybergym-server-data"
+
+
+def _poc_bundle_input(bundle: Any) -> tuple[bytes, str]:
+    """Resolve one generic bundle file into the raw input CyberGym consumes."""
+    if not isinstance(bundle, dict):
+        raise ValueError("Generic PoC bundle is invalid")
+    artifact_type = bundle.get("artifact_type")
+    if artifact_type == "source_harness":
+        raise ValueError("CyberGym cannot execute a source_harness bundle; generate raw_input instead")
+    if artifact_type not in {"raw_input", "request", "bundle"}:
+        raise ValueError("Generic PoC artifact_type is not executable by CyberGym")
+    files = bundle.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("Generic PoC bundle has no files")
+    delivery = bundle.get("delivery")
+    selector = delivery.get("input_path") if isinstance(delivery, dict) else None
+    if not isinstance(selector, str) or not selector.strip():
+        selector = bundle.get("entrypoint")
+    matches = [
+        item
+        for item in files
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and (not selector or item["path"] == selector)
+    ]
+    if len(matches) != 1:
+        if len(files) == 1 and isinstance(files[0], dict):
+            matches = [files[0]]
+        else:
+            raise ValueError("Generic PoC must identify exactly one CyberGym input file")
+    item = matches[0]
+    path = item.get("path")
+    data = item.get("data")
+    encoding = item.get("encoding", "utf8")
+    if not isinstance(path, str) or not path or not isinstance(data, str):
+        raise ValueError("Generic PoC input file is invalid")
+    try:
+        if encoding == "utf8":
+            raw = data.encode("utf-8")
+        elif encoding == "hex":
+            raw = bytes.fromhex(data)
+        elif encoding == "base64":
+            raw = base64.b64decode(data.encode("ascii"), validate=True)
+        else:
+            raise ValueError("Generic PoC input file encoding is unsupported")
+    except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+        raise ValueError("Generic PoC input file data is invalid") from exc
+    if not raw:
+        raise ValueError("Generic PoC input file must be non-empty")
+    return raw, path
 
 
 class CyberGymManifestError(ValueError):
@@ -496,19 +548,36 @@ class CyberGymRuntime:
         kind: str,
         raw: bytes,
         parent_id: str | None = None,
+        source_poc_id: str | None = None,
         provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         manifest = self._manifest(scan_id)
         if kind not in _ARTIFACT_KINDS:
             raise ValueError("Unsupported CyberGym artifact kind")
+        artifact_provenance = provenance or {}
+        if not isinstance(artifact_provenance, dict):
+            raise ValueError("CyberGym artifact provenance must be an object")
+        if source_poc_id is not None:
+            if not isinstance(source_poc_id, str) or not source_poc_id or len(source_poc_id) > 256:
+                raise ValueError("source_poc_id must be a bounded non-empty identifier")
+            self.store.assert_accepted_poc_bundle(scan_id, source_poc_id)
+            artifact_provenance = {**artifact_provenance, "poc_id": source_poc_id}
+        if (
+            kind == "seed"
+            and parent_id is None
+            and source_poc_id is None
+            and artifact_provenance.get("operation") != "generic_poc_import"
+            and self.store.has_cybergym_imported_poc(scan_id)
+        ):
+            raise ValueError(
+                "New CyberGym seeds must be derived from an imported generic PoC; "
+                "set parent_artifact_id to the consumed seed"
+            )
         if not raw and not manifest.allow_empty_input:
             raise ValueError("The trusted manifest does not allow empty input")
         if len(raw) > manifest.limits.max_artifact_bytes:
             raise ValueError("Artifact exceeds the trusted manifest size limit")
-        artifact_provenance = provenance or {}
         if kind == "seed" and manifest.input_contract is not None:
-            if not isinstance(artifact_provenance, dict):
-                raise ValueError("CyberGym artifact provenance must be an object")
             manifest.input_contract.validate_seed(raw)
             artifact_provenance = {
                 **artifact_provenance,
@@ -521,6 +590,66 @@ class CyberGymRuntime:
             parent_id=parent_id,
             provenance=artifact_provenance,
         )
+
+    def seed_from_poc_bundles(self, scan_id: str) -> dict[str, Any]:
+        """Import accepted generic PoCs as manifest-validated CyberGym seed artifacts.
+
+        The generic bundle remains the source of intent. CyberGym only adapts its
+        selected input file to the trusted raw-input contract; subsequent seeds
+        must be derived from this imported artifact and can therefore be refined
+        by replay, GDB, fuzzing, or minimization.
+        """
+        records = self.store.list_accepted_poc_bundles(scan_id)
+        imported: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for record in records:
+            bundle = record.get("bundle")
+            try:
+                raw, source_path = _poc_bundle_input(bundle)
+                artifact = self.artifact_create(
+                    scan_id,
+                    kind="seed",
+                    raw=raw,
+                    provenance={
+                        "operation": "generic_poc_import",
+                        "poc_id": record["poc_id"],
+                        "candidate_id": record["candidate_id"],
+                        "source_path": source_path,
+                        "artifact_type": bundle["artifact_type"],
+                    },
+                )
+            except (TypeError, ValueError, KeyError) as exc:
+                rejected.append(
+                    {
+                        "poc_id": record["poc_id"],
+                        "candidate_id": record["candidate_id"],
+                        "reason": str(exc)[:1_000],
+                    }
+                )
+                self.store.record_poc_validation(
+                    scan_id,
+                    poc_id=record["poc_id"],
+                    candidate_id=record["candidate_id"],
+                    validator="cybergym",
+                    status="failed",
+                    artifact_id=None,
+                    evidence={"stage": "adaptation", "reason": str(exc)[:1_000]},
+                )
+                continue
+            imported.append(
+                {
+                    "poc_id": record["poc_id"],
+                    "candidate_id": record["candidate_id"],
+                    "artifact_id": artifact["artifact_id"],
+                    "source_path": source_path,
+                }
+            )
+        return {
+            "accepted_bundle_count": len(records),
+            "imported_seed_count": len(imported),
+            "imported": imported,
+            "rejected": rejected,
+        }
 
     async def replay(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
         manifest = self._manifest(scan_id)
@@ -692,6 +821,7 @@ class CyberGymRuntime:
             selection_reason=selection_reason.strip(),
             evidence=evidence,
         )
+        poc_id = self.store.cybergym_artifact_poc_id(scan_id, artifact_id)
         try:
             official_result: dict[str, Any]
             if self.submitter is None:
@@ -706,7 +836,28 @@ class CyberGymRuntime:
             self.store.complete_cybergym_submission(
                 scan_id, {"status": "submit_failed", "error": type(exc).__name__}
             )
+            if poc_id is not None:
+                self.store.record_poc_validation(
+                    scan_id,
+                    poc_id=poc_id,
+                    candidate_id=self.store.get_poc_bundle_candidate(scan_id, poc_id),
+                    validator="cybergym",
+                    status="failed",
+                    artifact_id=artifact_id,
+                    evidence={"local": evidence, "error": type(exc).__name__},
+                )
             raise
+        if poc_id is not None:
+            candidate_id = self.store.get_poc_bundle_candidate(scan_id, poc_id)
+            self.store.record_poc_validation(
+                scan_id,
+                poc_id=poc_id,
+                candidate_id=candidate_id,
+                validator="cybergym",
+                status=local_validation,
+                artifact_id=artifact_id,
+                evidence={"local": evidence, "official": official_result},
+            )
         return self.store.get_cybergym_submission(scan_id) or submission
 
     def select_final_artifact(self, scan_id: str) -> dict[str, Any] | None:
@@ -834,7 +985,13 @@ class CyberGymRuntime:
                 if dictionary_path is not None:
                     command.append(f"-dict={mount_root}/dictionary")
                 result = await self.executor.run(command, timeout_seconds=seconds + 15)
-                produced = self._persist_fuzz_outputs(scan_id, run_id, corpus, findings, seed_count=len(seeds))
+                produced = self._persist_fuzz_outputs(
+                    scan_id,
+                    run_id,
+                    corpus,
+                    findings,
+                    seeds=seeds,
+                )
             payload = {
                 "status": _execution_status(result),
                 "exit_code": result.returncode,
@@ -881,7 +1038,7 @@ class CyberGymRuntime:
         corpus: Path,
         findings: Path,
         *,
-        seed_count: int,
+        seeds: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         persisted: list[dict[str, Any]] = []
         for directory, kind in ((findings, "crash"), (corpus, "corpus")):
@@ -889,11 +1046,30 @@ class CyberGymRuntime:
                 if not path.is_file() or path.is_symlink() or (kind == "corpus" and path.name.startswith("seed-")):
                     continue
                 raw = path.read_bytes()
+                poc_ids = sorted(
+                    {
+                        poc_id
+                        for seed in seeds
+                        for poc_id in [
+                            self.store.cybergym_artifact_poc_id(scan_id, seed["artifact_id"])
+                        ]
+                        if poc_id is not None
+                    }
+                )
+                provenance: dict[str, Any] = {
+                    "run_id": run_id,
+                    "operation": "libfuzzer",
+                    "source_name": path.name,
+                }
+                if len(poc_ids) == 1:
+                    provenance["poc_id"] = poc_ids[0]
+                elif poc_ids:
+                    provenance["poc_ids"] = poc_ids
                 artifact = self.artifact_create(
                     scan_id,
                     kind=kind,
                     raw=raw,
-                    provenance={"run_id": run_id, "operation": "libfuzzer", "source_name": path.name},
+                    provenance=provenance,
                 )
                 persisted.append(_public_artifact(artifact))
         return persisted

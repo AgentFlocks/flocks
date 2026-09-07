@@ -713,6 +713,31 @@ def test_dynamic_summary_distinguishes_unrunnable_probes_from_success() -> None:
     }
 
 
+def test_dynamic_summary_exposes_cybergym_as_the_validator() -> None:
+    service = object.__new__(AuditService)
+    summary = service._dynamic_summary(
+        {
+            "scan_id": "scan_cybergym",
+            "status": "completed",
+            "counts": {"poc_bundles": 2, "verified_poc_validations": 1},
+            "cybergym": {"status": "submitted"},
+        },
+        enabled=True,
+        report_data={"dynamic_runs": []},
+    )
+
+    assert summary == {
+        "status": "completed",
+        "validator": "cybergym",
+        "ready": 0,
+        "completed": 1,
+        "inconclusive": 0,
+        "not_runnable": 0,
+        "poc_consumed": 2,
+        "poc_verified": 1,
+    }
+
+
 @pytest.mark.asyncio
 async def test_scan_listing_exposes_the_final_finding_metric() -> None:
     service = object.__new__(AuditService)
