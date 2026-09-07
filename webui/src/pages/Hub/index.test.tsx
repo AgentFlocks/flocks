@@ -117,6 +117,18 @@ describe('HubPage catalog loading', () => {
     });
   });
 
+  it('prioritizes installed and updateable plugins in the default catalog request', async () => {
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([catalogEntry('available', 'Available')]));
+
+    renderHub();
+
+    await waitFor(() => {
+      expect(hubAPI.catalogPage).toHaveBeenCalledWith(expect.objectContaining({
+        prioritizeInstalled: true,
+      }));
+    });
+  });
+
   it('ignores an older search response that finishes after the latest query', async () => {
     const oldSearch = deferred<ReturnType<typeof catalogPage>>();
     const latestSearch = deferred<ReturnType<typeof catalogPage>>();
@@ -175,6 +187,7 @@ describe('HubPage catalog loading', () => {
       useCases: undefined,
       tags: undefined,
       state: undefined,
+      prioritizeInstalled: true,
     });
   });
 

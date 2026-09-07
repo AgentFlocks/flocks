@@ -125,6 +125,14 @@ def _build_hub_catalog_facets_for_filters(
     return HubCatalogFacets(**counts)
 
 
+def _prioritize_installed_catalog_entries(
+    entries: list[HubCatalogEntry],
+) -> list[HubCatalogEntry]:
+    """Put plugins that need local attention at the beginning of the catalog."""
+    priority = {"updateAvailable": 0, "installed": 1}
+    return sorted(entries, key=lambda entry: priority.get(entry.state, 2))
+
+
 @router.get("/hub/catalog", response_model=Union[list[HubCatalogEntry], HubCatalogPageResponse])
 async def hub_catalog(
     type: Optional[PluginType] = Query(default=None),  # noqa: A002 - API field name
@@ -135,6 +143,7 @@ async def hub_catalog(
     trust: Optional[str] = None,
     risk: Optional[str] = None,
     q: Optional[str] = None,
+    prioritizeInstalled: bool = Query(default=False),  # noqa: N803 - API field name
     offset: int = Query(0, ge=0),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
 ):
@@ -149,11 +158,14 @@ async def hub_catalog(
         "q": q,
     }
     if limit is None and offset == 0:
-        return await asyncio.to_thread(list_catalog, **filters)
+        entries = await asyncio.to_thread(list_catalog, **filters)
+        return _prioritize_installed_catalog_entries(entries) if prioritizeInstalled else entries
 
     def load_page() -> tuple[list[HubCatalogEntry], HubCatalogFacets]:
         all_entries = list_catalog()
         entries = filter_catalog_entries(all_entries, **filters)
+        if prioritizeInstalled:
+            entries = _prioritize_installed_catalog_entries(entries)
         facets = _build_hub_catalog_facets_for_filters(all_entries, filters)
         return entries, facets
 
