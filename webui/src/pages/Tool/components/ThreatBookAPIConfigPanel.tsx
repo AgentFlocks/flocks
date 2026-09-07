@@ -68,7 +68,7 @@ export default function ThreatBookAPIConfigPanel({
   const isConfigured = Boolean(credentials?.has_credential);
   const showingStoredMask = isConfigured && !showApiKey;
   const displayedApiKey = showingStoredMask
-    ? credentials?.api_key_masked || ""
+    ? "************"
     : apiKey;
   const regionLabel = t(`detail.threatbookApi.regions.${region}`);
   const statusConnected = useMemo(
@@ -139,12 +139,19 @@ export default function ThreatBookAPIConfigPanel({
     try {
       setSaving(true);
       setResult(null);
-      await providerAPI.setServiceCredentials(serviceName, {
+      const response = await providerAPI.configureServiceCredentials(serviceName, {
         api_key: value,
         fields: { api_key: value },
       });
-      const success = await testSavedKey();
-      if (success) {
+      setResult({
+        success: response.data.success,
+        message: response.data.message,
+      });
+      onTestResult?.(serviceName, {
+        status: response.data.success ? "connected" : "error",
+        latency_ms: response.data.latency_ms,
+      });
+      if (response.data.success) {
         await onConfigured();
         resetEditor();
         setResult({
@@ -256,8 +263,9 @@ export default function ThreatBookAPIConfigPanel({
                 {t("detail.threatbookApi.apiKey")}
               </dt>
               <dd className="mt-1 text-sm font-medium">
-                {credentials?.api_key_masked ||
-                  t("detail.threatbookApi.keyConfigured")}
+                {isConfigured
+                  ? "************"
+                  : t("detail.threatbookApi.keyConfigured")}
               </dd>
             </div>
             <div className="min-w-0">

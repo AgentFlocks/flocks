@@ -160,4 +160,18 @@ describe('providerAPI.revealCredentials', () => {
 
     expect(mockPost).toHaveBeenCalledWith('/api/provider/threatbook-cn/service-credentials/reveal');
   });
+
+  it('validates and saves API service credentials through one request', async () => {
+    mockPost.mockResolvedValue({ data: { success: true, message: 'ok' } });
+
+    const { providerAPI } = await import('./provider');
+    await providerAPI.configureServiceCredentials('threatbook-cn', {
+      api_key: 'new-key',
+    });
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/provider/threatbook-cn/service-credentials/configure',
+      { api_key: 'new-key' },
+    );
+  });
 });

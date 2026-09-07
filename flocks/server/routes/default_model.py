@@ -14,6 +14,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.provider.model_manager import get_model_manager
 from flocks.provider.provider import Provider
 from flocks.provider.types import DefaultModelConfig, ModelType
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -95,6 +96,7 @@ async def get_fallback_providers() -> FallbackProvidersConfig:
     summary="Replace runtime fallback models",
     description="Atomically replace the ordered fallback model configuration",
 )
+@serialized_config_mutation
 async def set_fallback_providers(
     body: FallbackProvidersConfig,
 ) -> FallbackProvidersConfig:
@@ -226,6 +228,7 @@ async def get_default_model(model_type: ModelType) -> DefaultModelConfig:
     response_model=DefaultModelConfig,
     summary="Set default model for type",
 )
+@serialized_config_mutation
 async def set_default_model(
     model_type: ModelType, body: SetDefaultModelRequest
 ) -> DefaultModelConfig:
@@ -244,6 +247,7 @@ async def set_default_model(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete default model for type",
 )
+@serialized_config_mutation
 async def delete_default_model(model_type: ModelType):
     """Remove default model setting for a model type."""
     manager = get_model_manager()

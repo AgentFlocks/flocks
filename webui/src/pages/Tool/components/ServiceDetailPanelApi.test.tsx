@@ -10,6 +10,7 @@ const { providerAPI } = vi.hoisted(() => ({
     getServiceCredentials: vi.fn(),
     revealServiceCredentials: vi.fn(),
     setServiceCredentials: vi.fn(),
+    configureServiceCredentials: vi.fn(),
     testCredentials: vi.fn(),
   },
 }));
@@ -134,6 +135,9 @@ describe('APIServiceDetailPanel', () => {
     });
     providerAPI.setServiceCredentials.mockResolvedValue({
       data: { success: true },
+    });
+    providerAPI.configureServiceCredentials.mockResolvedValue({
+      data: { success: true, message: 'ok' },
     });
     providerAPI.revealServiceCredentials.mockResolvedValue({
       data: { api_key: 'revealed-threatbook-key', has_credential: true },
@@ -654,11 +658,11 @@ describe('APIServiceDetailPanel', () => {
     await user.click(screen.getByRole('button', { name: '保存并验证' }));
 
     await waitFor(() => {
-      expect(providerAPI.setServiceCredentials).toHaveBeenCalledWith('threatbook-io', {
+      expect(providerAPI.configureServiceCredentials).toHaveBeenCalledWith('threatbook-io', {
         api_key: 'global-key',
         fields: { api_key: 'global-key' },
       });
-      expect(providerAPI.testCredentials).toHaveBeenCalledWith('threatbook-io');
+      expect(providerAPI.testCredentials).not.toHaveBeenCalled();
     });
   });
 });

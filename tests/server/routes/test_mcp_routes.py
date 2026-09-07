@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
@@ -282,7 +283,7 @@ class TestMcpRoutes:
             "get_mcp_server",
             lambda name: {
                 "type": "remote",
-                "url": "https://example.com/mcp",
+                "url": "https://example.com/mcp?apikey=url-token&mode=full",
                 "auth": {
                     "type": "apikey",
                     "location": "header",
@@ -300,6 +301,8 @@ class TestMcpRoutes:
 
         assert resp.status_code == 200, resp.text
         data = resp.json()
+        assert data["config"]["url"] == "https://example.com/mcp?apikey=***&mode=full"
+        assert "url-token" not in resp.text
         assert data["config"]["auth"]["value"] == "***"
         assert data["config"]["headers"]["Authorization"] == "***"
         assert data["config"]["headers"]["X-Client"] == "flocks"
@@ -720,6 +723,59 @@ class TestMcpRoutes:
             == "{secret:demo-mcp_authorization_header}"
         )
         assert stored_configs["demo-mcp"]["headers"]["X-Client"] == "flocks-web"
+
+    @pytest.mark.asyncio
+    async def test_update_mcp_server_restores_masked_url_query_secret(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        stored_configs: dict[str, dict] = {}
+        saved_secrets: dict[str, str] = {}
+
+        async def fake_status() -> dict[str, McpStatusInfo]:
+            return {}
+
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://old.example.com/mcp?apikey=url-token&mode=full",
+                "enabled": False,
+            },
+        )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "add_mcp_server",
+            lambda name, config: stored_configs.__setitem__(name, config),
+        )
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+
+        class SecretManagerStub:
+            def set(self, key: str, value: str) -> None:
+                saved_secrets[key] = value
+
+        monkeypatch.setattr(
+            "flocks.security.get_secret_manager",
+            lambda: SecretManagerStub(),
+        )
+
+        resp = await client.put(
+            "/api/mcp/demo-mcp",
+            json={
+                "config": {
+                    "url": "https://new.example.com/mcp?apikey=***&mode=compact",
+                    "enabled": False,
+                }
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert saved_secrets == {"demo-mcp_mcp_key": "url-token"}
+        assert (
+            stored_configs["demo-mcp"]["url"]
+            == "https://new.example.com/mcp?apikey={secret:demo-mcp_mcp_key}&mode=compact"
+        )
 
     # ---------------------------------------------------------------------
     # should_reconnect: the contract for ``PUT /api/mcp/{name}`` is that
@@ -1217,12 +1273,48 @@ class TestMcpRoutes:
                 return "312abcdef321" if secret_id == "threatbook_mcp_key" else None
 
         monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+        audit = AsyncMock()
+        monkeypatch.setattr(mcp_routes, "emit_audit_event", audit)
 
         resp = await client.post("/api/mcp/threatbook_mcp/credentials/reveal")
 
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"api_key": "312abcdef321"}
         assert resp.headers["cache-control"] == "no-store"
+        audit.assert_awaited_once()
+        event_type, payload = audit.await_args.args
+        assert event_type == "mcp.credentials_reveal"
+        assert payload["mcp_name"] == "threatbook_mcp"
+        assert "312abcdef321" not in repr(payload)
+
+    @pytest.mark.asyncio
+    async def test_mcp_credentials_support_historical_inline_url_key(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeSecrets:
+            def get(self, secret_id: str):
+                return None
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+        monkeypatch.setattr(
+            mcp_routes,
+            "_load_raw_mcp_server_config",
+            lambda _name: {
+                "type": "remote",
+                "url": "https://mcp.threatbook.cn/mcp?apikey=historical-key",
+            },
+        )
+        monkeypatch.setattr(mcp_routes, "emit_audit_event", AsyncMock())
+
+        masked = await client.get("/api/mcp/threatbook_mcp/credentials")
+        revealed = await client.post("/api/mcp/threatbook_mcp/credentials/reveal")
+
+        assert masked.status_code == 200, masked.text
+        assert masked.json()["has_credential"] is True
+        assert masked.json()["api_key_masked"] == "************"
+        assert "historical-key" not in masked.text
+        assert revealed.status_code == 200, revealed.text
+        assert revealed.json() == {"api_key": "historical-key"}
 
     @pytest.mark.asyncio
     async def test_reveal_mcp_credentials_returns_not_found_when_missing(

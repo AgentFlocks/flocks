@@ -46,10 +46,56 @@ def test_provider_global_configuration_credentials_and_tests_require_admin():
         client.get("/api/provider/example/service-credentials"),
         client.post("/api/provider/example/service-credentials/reveal"),
         client.post("/api/provider/example/service-credentials", json={"api_key": "secret"}),
+        client.post("/api/provider/example/service-credentials/configure", json={"api_key": "secret"}),
         client.post("/api/provider/example/test-credentials", json={}),
         client.patch("/api/provider/api-services/example", json={"enabled": False}),
         client.delete("/api/provider/api-services/example"),
         client.post("/api/provider/api-services/refresh"),
+    ]
+
+    assert [response.status_code for response in responses] == [403] * len(responses)
+
+
+def test_onboarding_configuration_requires_admin():
+    from flocks.server.routes.onboarding import router
+
+    client = _user_client(router, prefix="/api/onboarding", role="member")
+    payload = {
+        "region": "cn",
+        "use_threatbook_model": True,
+        "threatbook_api_key": "secret",
+    }
+
+    assert client.post("/api/onboarding/validate", json=payload).status_code == 403
+    assert client.post("/api/onboarding/apply", json=payload).status_code == 403
+
+
+def test_mcp_credential_and_threatbook_configuration_require_admin():
+    from flocks.server.routes.mcp import router
+
+    client = _user_client(router, prefix="/api/mcp", role="member")
+    responses = [
+        client.post("/api/mcp", json={}),
+        client.post("/api/mcp/test", json={}),
+        client.put("/api/mcp/threatbook_mcp", json={}),
+        client.delete("/api/mcp/threatbook_mcp"),
+        client.post("/api/mcp/threatbook_mcp/test", json={}),
+        client.post("/api/mcp/threatbook_mcp/connect"),
+        client.post("/api/mcp/threatbook_mcp/disconnect"),
+        client.post("/api/mcp/threatbook_mcp/auth"),
+        client.delete("/api/mcp/threatbook_mcp/auth"),
+        client.post("/api/mcp/threatbook_mcp/refresh"),
+        client.get("/api/mcp/threatbook_mcp/credentials"),
+        client.post("/api/mcp/threatbook_mcp/credentials/reveal"),
+        client.post("/api/mcp/threatbook_mcp/credentials", json={"api_key": "secret"}),
+        client.delete("/api/mcp/threatbook_mcp/credentials"),
+        client.post("/api/mcp/threatbook_mcp/test-credentials"),
+        client.post(
+            "/api/mcp/threatbook_mcp/threatbook-configure",
+            json={"region": "cn", "api_key": "secret"},
+        ),
+        client.post("/api/mcp/catalog/auto-setup"),
+        client.post("/api/mcp/catalog/install", json={}),
     ]
 
     assert [response.status_code for response in responses] == [403] * len(responses)

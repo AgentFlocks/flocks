@@ -11,7 +11,7 @@ import copy
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from flocks.config.config import Config
@@ -21,6 +21,7 @@ from flocks.mcp import MCP, McpStatus
 from flocks.provider.provider import Provider
 from flocks.provider.types import ModelType
 from flocks.security import get_secret_manager
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes.default_model import (
     SetDefaultModelRequest,
     set_default_model,
@@ -28,16 +29,22 @@ from flocks.server.routes.default_model import (
 from flocks.server.routes.mcp import (
     McpCredentialRequest,
     McpTestRequest,
+    _load_raw_mcp_server_config,
+    _restore_threatbook_mcp_setup,
     connect_mcp_server,
     get_mcp_credentials,
     set_mcp_credentials,
     test_mcp_connection,
 )
+from flocks.server.auth import require_admin
 from flocks.server.routes.provider import (
     APIServiceUpdateRequest,
     ProviderCredentialRequest,
     TestCredentialRequest,
+    _get_api_service_secret_candidates,
     _get_inline_provider_api_key,
+    _load_api_service_metadata_data,
+    _test_provider_credentials_impl,
     get_service_credentials,
     set_provider_credentials,
     set_service_credentials,
@@ -381,13 +388,37 @@ async def _temporary_config_and_secret_state():
 
 
 @asynccontextmanager
-async def _rollback_on_apply_failure():
+async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
     """Rollback onboarding writes if apply fails part-way through."""
     config_snapshot, secret_snapshot = _snapshot_config_and_secret_state()
+    previous_mcp_config = (
+        copy.deepcopy(_load_raw_mcp_server_config(mcp_name)) if mcp_name else None
+    )
+    was_mcp_connected = False
+    if mcp_name:
+        try:
+            runtime_status = await MCP.status()
+            previous_status = runtime_status.get(mcp_name)
+            was_mcp_connected = bool(
+                previous_status is not None
+                and previous_status.status == McpStatus.CONNECTED
+            )
+        except Exception:
+            was_mcp_connected = False
     try:
         yield
     except Exception:
-        await _restore_config_and_secret_state(config_snapshot, secret_snapshot)
+        if mcp_name:
+            await _restore_threatbook_mcp_setup(
+                mcp_name,
+                config_snapshot,
+                secret_snapshot,
+                previous_mcp_config,
+                was_mcp_connected,
+            )
+            await _reload_runtime_state()
+        else:
+            await _restore_config_and_secret_state(config_snapshot, secret_snapshot)
         raise
 
 
@@ -400,17 +431,47 @@ async def _test_provider_or_service_with_temp_credentials(
     provider_name: Optional[str] = None,
     service: bool = False,
 ) -> Dict[str, Any]:
+    from flocks.tool.credential_context import activate_credential_overrides
+
+    body = TestCredentialRequest(model_id=model_id) if model_id else None
+    if service:
+        raw_service = ConfigWriter.get_api_service_raw(provider_id) or {}
+        metadata = _load_api_service_metadata_data(provider_id) or {}
+        secret_ids = _get_api_service_secret_candidates(
+            provider_id,
+            raw_service,
+            field_name="api_key",
+        )
+        primary_secret_id = secret_ids[0]
+        config_override = {
+            **raw_service,
+            "apiKey": f"{{secret:{primary_secret_id}}}",
+            "enabled": True,
+        }
+        async with activate_credential_overrides(
+            secret_values={secret_id: api_key for secret_id in secret_ids},
+            service_id=provider_id,
+            config_values=config_override,
+        ):
+            return await test_provider_credentials(provider_id, body)
+
+    Provider._ensure_initialized()
+    if Provider.get(provider_id) is not None:
+        return await _test_provider_credentials_impl(
+            provider_id,
+            body,
+            api_key_override=api_key,
+            isolated_provider=True,
+            base_url_override=base_url,
+        )
+
     async with _temporary_config_and_secret_state():
         request = ProviderCredentialRequest(
             api_key=api_key,
             base_url=base_url,
             provider_name=provider_name,
         )
-        if service:
-            await set_service_credentials(provider_id, request)
-        else:
-            await set_provider_credentials(provider_id, request)
-        body = TestCredentialRequest(model_id=model_id) if model_id else None
+        await set_provider_credentials(provider_id, request)
         return await test_provider_credentials(provider_id, body)
 
 
@@ -814,7 +875,11 @@ async def get_onboarding_status() -> OnboardingStatusResponse:
     summary="Validate onboarding configuration",
     description="Validate ThreatBook and/or third-party model configuration for onboarding.",
 )
-async def validate_onboarding(request: OnboardingValidateRequest) -> OnboardingValidateResponse:
+@serialized_config_mutation
+async def validate_onboarding(
+    request: OnboardingValidateRequest,
+    _admin: object = Depends(require_admin),
+) -> OnboardingValidateResponse:
     return await _validate_onboarding_request(request)
 
 
@@ -824,7 +889,15 @@ async def validate_onboarding(request: OnboardingValidateRequest) -> OnboardingV
     summary="Apply onboarding configuration",
     description="Persist onboarding configuration after validation succeeds.",
 )
-async def apply_onboarding(request: OnboardingValidateRequest) -> OnboardingApplyResponse:
+@serialized_config_mutation
+async def apply_onboarding(
+    request: OnboardingValidateRequest,
+    _admin: object = Depends(require_admin),
+) -> OnboardingApplyResponse:
+    return await _apply_onboarding(request)
+
+
+async def _apply_onboarding(request: OnboardingValidateRequest) -> OnboardingApplyResponse:
     validation = await _validate_onboarding_request(request)
     if not validation.can_apply:
         raise HTTPException(status_code=400, detail=validation.message or "Validation failed")
@@ -837,7 +910,9 @@ async def apply_onboarding(request: OnboardingValidateRequest) -> OnboardingAppl
     default_model: Optional[Dict[str, str]] = None
 
     try:
-        async with _rollback_on_apply_failure():
+        async with _rollback_on_apply_failure(
+            preset["threatbook_mcp_name"] if preset["requires_mcp"] else None
+        ):
             if threatbook_api_key:
                 if request.use_threatbook_model:
                     await set_provider_credentials(

@@ -10,10 +10,14 @@ MCP state is instance-scoped for project isolation.
 import asyncio
 import copy
 from typing import Dict, Optional, List, Any
-from fastapi import APIRouter, HTTPException, Response
+from urllib.parse import parse_qs, urlparse
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from flocks.audit import emit_audit_event
+from flocks.auth.context import AuthUser
 from flocks.mcp import (
     MCP,
     get_manager,
@@ -44,6 +48,8 @@ from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.security import get_secret_manager
 from flocks.security.secrets import get_mcp_secret_id
+from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.threatbook_regions import (
     THREATBOOK_REGION_PRESETS,
     ThreatBookRegion,
@@ -232,7 +238,11 @@ async def get_mcp_status():
     description="Dynamically add a new Model Context Protocol (MCP) server to the system.",
     operation_id="mcp.add"
 )
-async def add_mcp_server(request: McpAddRequest):
+@serialized_config_mutation
+async def add_mcp_server(
+    request: McpAddRequest,
+    _admin: object = Depends(require_admin),
+):
     """
     Add a new MCP server and persist to both flocks.json and
     ``~/.flocks/plugins/tools/mcp/``.
@@ -324,7 +334,10 @@ class ThreatBookMcpConfigureResponse(BaseModel):
     description="Test an MCP server connection without saving to configuration.",
     operation_id="mcp.test"
 )
-async def test_mcp_connection(request: McpTestRequest):
+async def test_mcp_connection(
+    request: McpTestRequest,
+    _admin: object = Depends(require_admin),
+):
     """
     Test MCP server connectivity without persisting configuration.
 
@@ -406,9 +419,11 @@ async def _restore_threatbook_mcp_setup(
     description="Validate a regional ThreatBook key before atomically saving and connecting MCP.",
     operation_id="mcp.threatbook_configure",
 )
+@serialized_config_mutation
 async def configure_threatbook_mcp(
     name: str,
     request: ThreatBookMcpConfigureRequest,
+    _admin: object = Depends(require_admin),
 ) -> ThreatBookMcpConfigureResponse:
     """Validate first, then persist the China endpoint and secret reference."""
     if request.region != "cn":
@@ -512,7 +527,11 @@ async def configure_threatbook_mcp(
     description="Test an existing MCP server using saved config merged with temporary overrides.",
     operation_id="mcp.test_existing"
 )
-async def test_existing_mcp_connection(name: str, request: McpUpdateRequest):
+async def test_existing_mcp_connection(
+    name: str,
+    request: McpUpdateRequest,
+    _admin: object = Depends(require_admin),
+):
     """Test a configured MCP server after merging temporary config overrides."""
     temp_name = f"{name}__test__"
     import time
@@ -566,7 +585,11 @@ async def test_existing_mcp_connection(name: str, request: McpUpdateRequest):
     description="Disconnect and remove an MCP server from the system and configuration.",
     operation_id="mcp.remove"
 )
-async def remove_mcp_server(name: str):
+@serialized_config_mutation
+async def remove_mcp_server(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """
     Remove an MCP server.
 
@@ -622,7 +645,12 @@ async def remove_mcp_server(name: str):
     description="Update and persist an existing MCP server configuration.",
     operation_id="mcp.update"
 )
-async def update_mcp_server(name: str, request: McpUpdateRequest):
+@serialized_config_mutation
+async def update_mcp_server(
+    name: str,
+    request: McpUpdateRequest,
+    _admin: object = Depends(require_admin),
+):
     """Update an existing MCP server configuration and clear stale runtime state."""
     try:
         existing_config = _load_raw_mcp_server_config(name)
@@ -754,7 +782,10 @@ async def get_mcp_server_info(name: str):
     description="Connect to an MCP server.",
     operation_id="mcp.connect"
 )
-async def connect_mcp_server(name: str):
+async def connect_mcp_server(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """Connect to an MCP server - returns true on success"""
     try:
         server_config = await _load_mcp_server_config(name)
@@ -801,7 +832,10 @@ async def connect_mcp_server(name: str):
     description="Disconnect from an MCP server.",
     operation_id="mcp.disconnect"
 )
-async def disconnect_mcp_server(name: str):
+async def disconnect_mcp_server(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """Disconnect from an MCP server - returns true on success"""
     try:
         success = await MCP.disconnect(name)
@@ -820,7 +854,10 @@ async def disconnect_mcp_server(name: str):
     description="Start OAuth authentication flow for a Model Context Protocol (MCP) server.",
     operation_id="mcp.auth.start"
 )
-async def start_mcp_auth(name: str):
+async def start_mcp_auth(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """
     Start OAuth authentication flow
     
@@ -839,7 +876,10 @@ async def start_mcp_auth(name: str):
     description="Remove OAuth credentials for an MCP server.",
     operation_id="mcp.auth.remove"
 )
-async def remove_mcp_auth(name: str):
+async def remove_mcp_auth(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """Remove OAuth credentials - returns {"success": true}"""
     try:
         await McpAuth.remove(name)
@@ -941,7 +981,10 @@ async def get_server_resources(name: str):
     description="Refresh tools from an MCP server.",
     operation_id="mcp.refresh"
 )
-async def refresh_mcp_tools(name: str):
+async def refresh_mcp_tools(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """Refresh tools from a server - returns count of tools registered"""
     try:
         count = await MCP.refresh_tools(name)
@@ -993,6 +1036,20 @@ def _get_mcp_credential(name: str) -> tuple[Optional[str], Optional[str]]:
         if api_key:
             secret_id = legacy_id
 
+    if not api_key:
+        raw_config = _load_raw_mcp_server_config(name) or {}
+        raw_url = raw_config.get("url")
+        if isinstance(raw_url, str):
+            query = parse_qs(urlparse(raw_url).query, keep_blank_values=True)
+            for key, values in query.items():
+                if key.lower() not in {"apikey", "api_key", "api-key", "token", "access_token"}:
+                    continue
+                candidate = values[0].strip() if values else ""
+                if candidate and not candidate.startswith("{secret:"):
+                    api_key = candidate
+                    secret_id = None
+                    break
+
     return (secret_id, api_key) if api_key else (None, None)
 
 
@@ -1007,7 +1064,10 @@ def _mask_mcp_credential(api_key: str) -> str:
     summary="Get MCP server credentials (masked)",
     description="Get masked credential information for an MCP server."
 )
-async def get_mcp_credentials(name: str):
+async def get_mcp_credentials(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """Get masked credential info for a server.
 
     Avoids duplicating an existing ``_mcp`` suffix and falls back to historical
@@ -1032,14 +1092,39 @@ async def get_mcp_credentials(name: str):
     summary="Reveal MCP server credential",
     description="Reveal a stored MCP credential after an explicit user action."
 )
-async def reveal_mcp_credential(name: str, response: Response):
+async def reveal_mcp_credential(
+    name: str,
+    request: Request,
+    response: Response,
+    admin: AuthUser = Depends(require_admin),
+):
     """Return the full key only for an explicit reveal request."""
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     try:
-        _, api_key = _get_mcp_credential(name)
+        secret_id, api_key = _get_mcp_credential(name)
         if not api_key:
             raise HTTPException(status_code=404, detail="No credentials found for this server")
+        try:
+            await emit_audit_event(
+                "mcp.credentials_reveal",
+                {
+                    "action": "mcp_credentials_reveal",
+                    "actor_id": admin.id,
+                    "actor_name": admin.username,
+                    "user_id": admin.id,
+                    "username": admin.username,
+                    "mcp_name": name,
+                    "secret_id": secret_id,
+                    "ip": get_request_ip(request),
+                    "user_agent": get_request_user_agent(request),
+                },
+            )
+        except Exception as audit_error:
+            log.warn(
+                "mcp.credentials.reveal.audit_failed",
+                {"name": name, "error": str(audit_error)},
+            )
         return McpCredentialRevealResponse(api_key=api_key)
     except HTTPException:
         raise
@@ -1054,7 +1139,12 @@ async def reveal_mcp_credential(name: str, response: Response):
     summary="Set MCP server credentials",
     description="Set authentication credentials for an MCP server."
 )
-async def set_mcp_credentials(name: str, request: McpCredentialRequest):
+@serialized_config_mutation
+async def set_mcp_credentials(
+    name: str,
+    request: McpCredentialRequest,
+    _admin: object = Depends(require_admin),
+):
     """Set credentials for a server.
 
     Stores in .secret.json with flat KV format.
@@ -1090,7 +1180,11 @@ async def set_mcp_credentials(name: str, request: McpCredentialRequest):
     summary="Delete MCP server credentials",
     description="Delete stored credentials for an MCP server."
 )
-async def delete_mcp_credentials(name: str):
+@serialized_config_mutation
+async def delete_mcp_credentials(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """Delete credentials for a server."""
     try:
         secrets = get_secret_manager()
@@ -1121,7 +1215,10 @@ async def delete_mcp_credentials(name: str):
     summary="Test MCP server credentials",
     description="Test if the stored credentials are valid by attempting connection."
 )
-async def test_mcp_credentials(name: str):
+async def test_mcp_credentials(
+    name: str,
+    _admin: object = Depends(require_admin),
+):
     """Test credentials by attempting connection"""
     try:
         import time
@@ -1311,7 +1408,10 @@ async def get_catalog_configured():
     description="Batch-configure all catalog entries that don't require API keys.",
     operation_id="mcp.catalog.auto_setup"
 )
-async def auto_setup_catalog():
+@serialized_config_mutation
+async def auto_setup_catalog(
+    _admin: object = Depends(require_admin),
+):
     """Batch write all no-secret catalog entries to flocks.json with enabled=false."""
     try:
         catalog = McpCatalog.get()
@@ -1354,7 +1454,11 @@ async def auto_setup_catalog():
     description="Add an MCP server from the catalog to your configuration.",
     operation_id="mcp.catalog.install"
 )
-async def install_from_catalog(request: CatalogInstallRequest):
+@serialized_config_mutation
+async def install_from_catalog(
+    request: CatalogInstallRequest,
+    _admin: object = Depends(require_admin),
+):
     """Install an MCP server from catalog into flocks.json.
 
     If credentials are provided, they are saved to .secret.json and the config

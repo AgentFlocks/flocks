@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from flocks.server.routes import onboarding as onboarding_routes
@@ -33,6 +36,85 @@ def default_threatbook_intel_status(monkeypatch: pytest.MonkeyPatch):
         return _intel_status()
 
     monkeypatch.setattr(onboarding_routes, "_build_threatbook_intel_status", fake_status)
+
+
+@pytest.mark.asyncio
+async def test_apply_rollback_restores_mcp_runtime(monkeypatch: pytest.MonkeyPatch):
+    config_snapshot = {"mcp": {"threatbook_mcp": {"url": "old"}}}
+    secret_snapshot = {"threatbook_mcp_key": "old-key"}
+    previous_config = {"type": "remote", "url": "old"}
+    restore = AsyncMock()
+    reload_runtime = AsyncMock()
+
+    monkeypatch.setattr(
+        onboarding_routes,
+        "_snapshot_config_and_secret_state",
+        lambda: (config_snapshot, secret_snapshot),
+    )
+    monkeypatch.setattr(
+        onboarding_routes,
+        "_load_raw_mcp_server_config",
+        lambda _name: previous_config,
+    )
+    monkeypatch.setattr(
+        onboarding_routes.MCP,
+        "status",
+        AsyncMock(
+            return_value={
+                "threatbook_mcp": SimpleNamespace(
+                    status=onboarding_routes.McpStatus.CONNECTED
+                ),
+            }
+        ),
+    )
+    monkeypatch.setattr(onboarding_routes, "_restore_threatbook_mcp_setup", restore)
+    monkeypatch.setattr(onboarding_routes, "_reload_runtime_state", reload_runtime)
+
+    with pytest.raises(RuntimeError, match="apply failed"):
+        async with onboarding_routes._rollback_on_apply_failure("threatbook_mcp"):
+            raise RuntimeError("apply failed")
+
+    restore.assert_awaited_once_with(
+        "threatbook_mcp",
+        config_snapshot,
+        secret_snapshot,
+        previous_config,
+        True,
+    )
+    reload_runtime.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_registered_provider_validation_uses_isolated_instance(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    registered_provider = object()
+    probe = AsyncMock(return_value={"success": True})
+
+    monkeypatch.setattr(onboarding_routes.Provider, "_ensure_initialized", lambda: None)
+    monkeypatch.setattr(
+        onboarding_routes.Provider,
+        "get",
+        lambda provider_id: registered_provider if provider_id == "openai" else None,
+    )
+    monkeypatch.setattr(onboarding_routes, "_test_provider_credentials_impl", probe)
+
+    result = await onboarding_routes._test_provider_or_service_with_temp_credentials(
+        "openai",
+        "candidate-key",
+        model_id="gpt-4o",
+        base_url="https://example.test/v1",
+    )
+
+    assert result == {"success": True}
+    probe.assert_awaited_once()
+    _, body = probe.await_args.args
+    assert body.model_id == "gpt-4o"
+    assert probe.await_args.kwargs == {
+        "api_key_override": "candidate-key",
+        "isolated_provider": True,
+        "base_url_override": "https://example.test/v1",
+    }
 
 
 class TestOnboardingStatusRoutes:

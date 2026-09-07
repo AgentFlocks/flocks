@@ -144,15 +144,17 @@ export default function Home() {
           </div>
 
           <div className="flex flex-wrap sm:flex-nowrap gap-3 sm:flex-shrink-0">
-            <button
-              onClick={() =>
-                window.dispatchEvent(new Event('flocks:open-onboarding'))
-              }
-              className="inline-flex items-center px-6 py-2.5 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors shadow-lg shadow-red-900/40"
-            >
-              {t('getStarted')}
-              <ChevronRight className="ml-1.5 w-4 h-4" />
-            </button>
+            {user?.role === 'admin' ? (
+              <button
+                onClick={() =>
+                  window.dispatchEvent(new Event('flocks:open-onboarding'))
+                }
+                className="inline-flex items-center px-6 py-2.5 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors shadow-lg shadow-red-900/40"
+              >
+                {t('getStarted')}
+                <ChevronRight className="ml-1.5 w-4 h-4" />
+              </button>
+            ) : null}
 
             {canCreateWebUIContractPage ? (
               <button

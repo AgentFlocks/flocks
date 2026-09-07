@@ -377,7 +377,7 @@ export default function Layout() {
   }, [collapsed, sidebarWidth, updateSidebarWidth]);
 
   useEffect(() => {
-    if (!isHome) return undefined;
+    if (!isHome || user?.role !== 'admin') return undefined;
 
     let cancelled = false;
     onboardingAPI.getStatus()
@@ -395,9 +395,13 @@ export default function Layout() {
     return () => {
       cancelled = true;
     };
-  }, [isHome]);
+  }, [isHome, user?.role]);
 
-  const handleOpenOnboarding = useCallback(() => setShowOnboarding(true), []);
+  const handleOpenOnboarding = useCallback(() => {
+    if (user?.role === 'admin') {
+      setShowOnboarding(true);
+    }
+  }, [user?.role]);
 
   useEffect(() => {
     window.addEventListener('flocks:open-onboarding', handleOpenOnboarding);

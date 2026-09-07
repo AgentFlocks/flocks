@@ -132,6 +132,17 @@ export const providerAPI = {
         return response;
       }),
 
+  configureServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
+    client.post<{
+      success: boolean; message: string; latency_ms?: number; error?: string;
+    }>(`/api/provider/${id}/service-credentials/configure`, credentials)
+      .then((response) => {
+        if (response.data.success) {
+          invalidateApiServicesListCache();
+        }
+        return response;
+      }),
+
   deleteCredentials: (id: string) =>
     client.delete<{ success: boolean }>(`/api/provider/${id}/credentials`),
 
