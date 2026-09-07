@@ -31,8 +31,10 @@ from flocks.situation_report.product.orchestrator import PRODUCTION_AGENT, run_m
 from flocks.situation_report.product.policy import ReportPolicyDecision
 from flocks.situation_report.product.session_state import load_session_state
 from flocks.situation_report.product.workspace import (
+    ProductWorkspaceError,
     _template_h2,
     read_generation_context,
+    read_material_detail,
     read_material_page,
     validate_candidate_report,
     write_candidate_report,
@@ -342,6 +344,74 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     )
     assert replay == context_path
     assert len(requests) == request_count
+
+    detail_requests: list[httpx.Request] = []
+
+    def detail_handler(request: httpx.Request) -> httpx.Response:
+        detail_requests.append(request)
+        assert request.url.path.endswith(
+            f"/{product_session.id}/materials/detail"
+        )
+        assert dict(request.url.params) == {
+            "sourceType": "REPORT",
+            "sourceId": "contract-report-v1",
+        }
+        return httpx.Response(
+            200,
+            headers={"X-Request-ID": request.headers["X-Request-ID"]},
+            json={
+                "source_type": "REPORT",
+                "source_id": "contract-report-v1",
+                "report": {
+                    "title": "契约报告素材 V1",
+                    "summary_content": "详情接口中的权威事实",
+                },
+            },
+        )
+
+    detail_sync = BackendReportSynchronizer(
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(detail_handler))
+    )
+    detail = await read_material_detail(
+        session_id=product_session.id,
+        generation_id="gen-001",
+        material_id="REPORT:contract-report-v1",
+        reason="摘要中的结论与专属字段冲突，需要确认原始详情",
+        synchronizer=detail_sync,
+    )
+    assert detail["detailType"] == "report"
+    assert detail["detail"]["summary_content"] == "详情接口中的权威事实"
+    assert detail["cacheHit"] is False
+
+    cached_detail = await read_material_detail(
+        session_id=product_session.id,
+        generation_id="gen-001",
+        material_id="REPORT:contract-report-v1",
+        reason="再次确认同一个冲突",
+        synchronizer=detail_sync,
+    )
+    assert cached_detail["cacheHit"] is True
+    assert len(detail_requests) == 1
+    with pytest.raises(
+        ProductWorkspaceError,
+        match="material_id does not identify exactly one declared material",
+    ):
+        await read_material_detail(
+            session_id=product_session.id,
+            generation_id="gen-001",
+            material_id="REPORT:not-selected",
+            reason="验证未选素材不能绕过本轮快照",
+            synchronizer=detail_sync,
+        )
+    assert len(detail_requests) == 1
+    audit_rows = [
+        json.loads(line)
+        for line in (
+            session_root(product_session.id)
+            / "runs/gen-001/audit/source_reads.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["cacheHit"] for row in audit_rows] == [False, True]
 
     report = _valid_report(template, materials)
     titled_write = await write_candidate_report(

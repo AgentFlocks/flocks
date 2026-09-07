@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .contracts import ParsedReportPrompt
 from .files import async_file_lock, atomic_write_json, read_json, session_root, utc_now
@@ -58,6 +58,50 @@ class LatestReportStateResponse(BaseModel):
     report: LatestResource
     template: LatestResource
     materials: LatestResource
+
+
+MaterialSourceType = Literal["REPORT", "VULN", "DARKWEB", "TELEGRAM"]
+MATERIAL_DETAIL_FIELDS: dict[str, str] = {
+    "REPORT": "report",
+    "VULN": "vulnerability",
+    "DARKWEB": "darkweb",
+    "TELEGRAM": "telegram",
+}
+
+
+class MaterialDetailResponse(BaseModel):
+    """Validated response from the selected-material detail endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: MaterialSourceType
+    source_id: str
+    report: Optional[dict[str, Any]] = None
+    vulnerability: Optional[dict[str, Any]] = None
+    darkweb: Optional[dict[str, Any]] = None
+    telegram: Optional[dict[str, Any]] = None
+
+    @field_validator("source_id")
+    @classmethod
+    def validate_source_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("source_id must be non-empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_detail_discriminator(self) -> "MaterialDetailResponse":
+        expected = MATERIAL_DETAIL_FIELDS[self.source_type]
+        populated = [
+            field
+            for field in MATERIAL_DETAIL_FIELDS.values()
+            if getattr(self, field) is not None
+        ]
+        if populated != [expected]:
+            raise ValueError(
+                f"Only the {expected} detail object may be populated for {self.source_type}"
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -188,6 +232,53 @@ class BackendReportSynchronizer:
             raise BackendReportSyncError(f"Current {resource} download failed: {exc}") from exc
         finally:
             temporary.unlink(missing_ok=True)
+
+    async def get_material_detail(
+        self,
+        *,
+        session_id: str,
+        source_type: MaterialSourceType,
+        source_id: str,
+        request_id: str,
+    ) -> MaterialDetailResponse:
+        """Fetch one currently selected material through the backend contract."""
+
+        normalized_source_id = source_id.strip()
+        if not normalized_source_id:
+            raise BackendReportSyncError("Material sourceId is empty")
+        url = self._url(
+            f"/internal/flocks/v1/report-sessions/{session_id}/materials/detail"
+        )
+        try:
+            async with self._client() as client:
+                response = await client.get(
+                    url,
+                    params={
+                        "sourceType": source_type,
+                        "sourceId": normalized_source_id,
+                    },
+                    headers=self._headers(request_id),
+                )
+                response.raise_for_status()
+                if response.headers.get("X-Request-ID") != request_id:
+                    raise BackendReportSyncError(
+                        "Material-detail response did not echo X-Request-ID"
+                    )
+                detail = MaterialDetailResponse.model_validate(response.json())
+                if (
+                    detail.source_type != source_type
+                    or detail.source_id != normalized_source_id
+                ):
+                    raise BackendReportSyncError(
+                        "Material-detail response identity does not match the request"
+                    )
+                return detail
+        except BackendReportSyncError:
+            raise
+        except (httpx.HTTPError, ValueError) as exc:
+            raise BackendReportSyncError(
+                f"Backend material detail query failed: {exc}"
+            ) from exc
 
 
 def _file_metadata(path: Path) -> dict[str, Any]:

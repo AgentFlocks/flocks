@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import httpx
@@ -8,9 +9,11 @@ import pytest
 
 from flocks.session.session import SessionInfo
 from flocks.situation_report.product.backend_sync import BackendReportSynchronizer
+from flocks.situation_report.product.debug_datasets import load_debug_dataset
 from flocks.situation_report.product.webui_debug import (
     is_webui_debug_session,
     publish_webui_debug_report,
+    seed_webui_debug_dataset,
     webui_debug_enabled,
     webui_debug_metadata,
 )
@@ -117,3 +120,95 @@ async def test_explicit_debug_sync_and_generated_report_publication(
     assert changed.report.exists is True
     assert changed.report.version == 1
     assert changed.report.changed is True
+
+
+@pytest.mark.asyncio
+async def test_frozen_dataset_is_seeded_with_matching_material_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _mock_app(tmp_path)
+    factory = _client_factory(app)
+    dataset_root = tmp_path / "datasets"
+    dataset_dir = dataset_root / "D01"
+    dataset_dir.mkdir(parents=True)
+    template = b"# Frozen template\n\n## Summary\n"
+    materials = (
+        json.dumps(
+            {
+                "source_type": "REPORT",
+                "source_id": "frozen-report-1",
+                "title": {"zh": "冻结素材"},
+                "summary": {"zh": "冻结摘要"},
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    details = (
+        json.dumps(
+            {
+                "source_type": "REPORT",
+                "source_id": "frozen-report-1",
+                "report": {"title": "冻结素材", "summary_content": "完整详情"},
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    (dataset_dir / "template.md").write_bytes(template)
+    (dataset_dir / "materials.jsonl").write_bytes(materials)
+    (dataset_dir / "material-details.jsonl").write_bytes(details)
+    (dataset_dir / "dataset.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "datasetID": "D01",
+                "name": "冻结数据集 D01",
+                "description": "仅验证可重复调试流程",
+                "language": "zh-CN",
+                "sourceSessionID": "ses_real_source",
+                "capturedAt": "2026-09-07T00:00:00+00:00",
+                "templateSHA256": hashlib.sha256(template).hexdigest(),
+                "materialsSHA256": hashlib.sha256(materials).hexdigest(),
+                "materialDetailsSHA256": hashlib.sha256(details).hexdigest(),
+                "materialCount": 1,
+                "materialDetailCount": 1,
+                "sourceCounts": {"REPORT": 1},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SITUATION_REPORT_DEBUG_DATASET_ROOT", str(dataset_root))
+    monkeypatch.setenv("SITUATION_REPORT_WEBUI_DEBUG_ENABLED", "true")
+    monkeypatch.setenv("SITUATION_REPORT_WEBUI_DEBUG_BACKEND_BASE_URL", "http://debug-mock")
+    monkeypatch.setenv("SITUATION_REPORT_WEBUI_DEBUG_BACKEND_TOKEN", TOKEN)
+
+    result = await seed_webui_debug_dataset(
+        session_id="ses_frozen_debug",
+        dataset=load_debug_dataset("D01"),
+        client_factory=factory,
+    )
+    assert result == {
+        "datasetID": "D01",
+        "templateVersion": 2,
+        "materialVersion": 2,
+        "materialCount": 1,
+        "materialDetailCount": 1,
+        "language": "zh-CN",
+    }
+
+    sync = BackendReportSynchronizer(
+        factory,
+        base_url="http://debug-mock",
+        token=TOKEN,
+    )
+    detail = await sync.get_material_detail(
+        session_id="ses_frozen_debug",
+        source_type="REPORT",
+        source_id="frozen-report-1",
+        request_id="req-frozen-detail",
+    )
+    assert detail.report == {"title": "冻结素材", "summary_content": "完整详情"}

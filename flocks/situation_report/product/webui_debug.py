@@ -17,6 +17,7 @@ import httpx
 from flocks.session.session import SessionInfo
 
 from .backend_sync import BackendReportSyncError, BackendReportSynchronizer
+from .debug_datasets import LoadedDebugDataset
 
 
 WEBUI_DEBUG_METADATA_KEY = "situationReportWebUIDebug"
@@ -71,6 +72,87 @@ def build_webui_debug_synchronizer() -> BackendReportSynchronizer:
         base_url=base_url,
         token=token,
     )
+
+
+async def seed_webui_debug_dataset(
+    *,
+    session_id: str,
+    dataset: LoadedDebugDataset,
+    client_factory: Optional[Callable[[], httpx.AsyncClient]] = None,
+) -> dict[str, Any]:
+    """Install one validated frozen dataset into a new Mock-backed Session."""
+
+    base_url, token = _debug_backend_config()
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        client_context = (
+            client_factory()
+            if client_factory is not None
+            else httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, connect=10.0),
+                follow_redirects=False,
+                trust_env=False,
+            )
+        )
+        async with client_context as client:
+            state_response = await client.get(
+                f"{base_url}/__mock__/report-sessions/{session_id}/state",
+                headers=headers,
+            )
+            state_response.raise_for_status()
+            state = state_response.json()
+            if (state.get("report") or {}).get("exists"):
+                raise BackendReportSyncError(
+                    "A frozen dataset cannot replace a debug Session that already has a report"
+                )
+            template_version = int((state.get("template") or {}).get("version") or 0) + 1
+            material_version = int((state.get("materials") or {}).get("version") or 0) + 1
+
+            material_response = await client.put(
+                f"{base_url}/__mock__/report-sessions/{session_id}/resources/materials",
+                params={"version": material_version},
+                headers=headers,
+                content=dataset.materials,
+            )
+            material_response.raise_for_status()
+            material_value = material_response.json()
+            if material_value.get("sha256") != dataset.manifest.materials_sha256:
+                raise BackendReportSyncError("Debug backend stored an unexpected material digest")
+
+            details_response = await client.put(
+                f"{base_url}/__mock__/report-sessions/{session_id}/materials/details",
+                params={"materialVersion": material_version},
+                headers=headers,
+                content=dataset.material_details,
+            )
+            details_response.raise_for_status()
+            details_value = details_response.json()
+            if details_value.get("sha256") != dataset.manifest.material_details_sha256:
+                raise BackendReportSyncError("Debug backend stored an unexpected material-detail digest")
+
+            template_response = await client.put(
+                f"{base_url}/__mock__/report-sessions/{session_id}/resources/template",
+                params={"version": template_version},
+                headers=headers,
+                content=dataset.template,
+            )
+            template_response.raise_for_status()
+            template_value = template_response.json()
+            if template_value.get("sha256") != dataset.manifest.template_sha256:
+                raise BackendReportSyncError("Debug backend stored an unexpected template digest")
+    except BackendReportSyncError:
+        raise
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        raise BackendReportSyncError(f"Debug dataset installation failed: {exc}") from exc
+
+    return {
+        "datasetID": dataset.manifest.dataset_id,
+        "templateVersion": template_version,
+        "materialVersion": material_version,
+        "materialCount": dataset.manifest.material_count,
+        "materialDetailCount": dataset.manifest.material_detail_count,
+        "language": dataset.manifest.language,
+    }
 
 
 async def publish_webui_debug_report(

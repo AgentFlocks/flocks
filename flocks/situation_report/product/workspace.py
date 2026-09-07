@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from flocks.session.session import Session
 
+from .backend_sync import (
+    BackendReportSyncError,
+    BackendReportSynchronizer,
+    MATERIAL_DETAIL_FIELDS,
+    MaterialSourceType,
+)
 from .contracts import SAFE_IDENTIFIER
 from .files import async_file_lock, atomic_write_bytes, atomic_write_json, read_json, session_root, utc_now
 from .session_state import ReportSessionStateError, load_session_state
@@ -26,7 +33,7 @@ def _material_id(value: dict[str, Any]) -> str:
         raise ProductWorkspaceError("Material has an invalid source_type")
     if not isinstance(source_id, str) or not source_id.strip():
         raise ProductWorkspaceError("Material has an invalid source_id")
-    return f"{source_type}:{source_id}"
+    return f"{source_type}:{source_id.strip()}"
 
 
 def file_sha256(path: Path) -> str:
@@ -160,15 +167,20 @@ async def read_material_page(
     }
 
 
-async def read_embedded_source(
+async def read_material_detail(
     *,
     session_id: str,
     generation_id: str,
     material_id: str,
     reason: str,
+    synchronizer: BackendReportSynchronizer | None = None,
 ) -> dict[str, Any]:
-    if not reason.strip():
+    normalized_reason = reason.strip()
+    if not normalized_reason:
         raise ProductWorkspaceError("A specific conflict reason is required")
+    if len(normalized_reason) > 2_000:
+        raise ProductWorkspaceError("The conflict reason is too long")
+    workspace_dir, request, _ = await _resolve_run(session_id, generation_id)
     page = await read_material_page(
         session_id=session_id,
         generation_id=generation_id,
@@ -187,24 +199,126 @@ async def read_embedded_source(
     matches = [row for row in rows if _material_id(row) == material_id]
     if len(matches) != 1:
         raise ProductWorkspaceError("material_id does not identify exactly one declared material")
-    source_record = matches[0].get("source_record")
-    if not isinstance(source_record, dict):
-        raise ProductWorkspaceError(
-            "The verified material snapshot does not embed this original source record; "
-            "the conflict cannot be resolved safely"
-        )
-    expected_hash = str(matches[0].get("source_record_sha256") or "")
-    packed = json.dumps(source_record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    actual_hash = hashlib.sha256(packed.encode("utf-8")).hexdigest()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
-        raise ProductWorkspaceError("Embedded source record is missing a valid SHA-256")
-    if actual_hash != expected_hash:
-        raise ProductWorkspaceError("Embedded source record SHA-256 mismatch")
+    material = matches[0]
+    source_type = str(material["source_type"])
+    source_id = str(material["source_id"]).strip()
+    cache_key = hashlib.sha256(material_id.encode("utf-8")).hexdigest()
+    cache_path = (
+        workspace_dir
+        / "runs"
+        / generation_id
+        / "evidence"
+        / "material-details"
+        / f"{cache_key}.json"
+    )
+    audit_path = workspace_dir / "runs" / generation_id / "audit" / "source_reads.jsonl"
+    lock_path = workspace_dir / ".locks" / "source-read.lock"
+
+    async with async_file_lock(lock_path):
+        if cache_path.is_file():
+            cached = read_json(cache_path)
+            if (
+                cached.get("materialID") != material_id
+                or cached.get("sourceType") != source_type
+                or cached.get("sourceId") != source_id
+                or not isinstance(cached.get("detail"), dict)
+            ):
+                raise ProductWorkspaceError("Cached material detail identity is inconsistent")
+            detail_payload = cached["detail"]
+            detail_hash = str(cached.get("detailSHA256") or "")
+            packed = json.dumps(
+                detail_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if hashlib.sha256(packed.encode("utf-8")).hexdigest() != detail_hash:
+                raise ProductWorkspaceError("Cached material detail SHA-256 mismatch")
+            cache_hit = True
+        else:
+            session = await Session.get_by_id(session_id)
+            if session is None:
+                raise ProductWorkspaceError("Session was not found")
+            from .webui_debug import (
+                build_webui_debug_synchronizer,
+                is_webui_debug_session,
+            )
+
+            resolved_synchronizer = synchronizer or (
+                build_webui_debug_synchronizer()
+                if is_webui_debug_session(session)
+                else BackendReportSynchronizer()
+            )
+            request_seed = f"{request.get('requestID', '')}:{material_id}"
+            detail_request_id = (
+                "detail_"
+                + hashlib.sha256(request_seed.encode("utf-8")).hexdigest()[:24]
+            )
+            try:
+                detail = await resolved_synchronizer.get_material_detail(
+                    session_id=session_id,
+                    source_type=cast(MaterialSourceType, source_type),
+                    source_id=source_id,
+                    request_id=detail_request_id,
+                )
+            except BackendReportSyncError as exc:
+                raise ProductWorkspaceError(
+                    f"Selected material detail is unavailable: {exc}"
+                ) from exc
+            detail_payload = detail.model_dump(exclude_none=True)
+            packed = json.dumps(
+                detail_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            detail_hash = hashlib.sha256(packed.encode("utf-8")).hexdigest()
+            atomic_write_json(
+                cache_path,
+                {
+                    "schemaVersion": 1,
+                    "materialID": material_id,
+                    "sourceType": source_type,
+                    "sourceId": source_id,
+                    "detailSHA256": detail_hash,
+                    "detail": detail_payload,
+                    "retrievedAt": utc_now(),
+                },
+            )
+            cache_hit = False
+
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            os.chmod(audit_path, 0o600)
+            handle.write(
+                json.dumps(
+                    {
+                        "event": "material_detail_read",
+                        "generationID": generation_id,
+                        "materialID": material_id,
+                        "reason": normalized_reason,
+                        "detailSHA256": detail_hash,
+                        "cacheHit": cache_hit,
+                        "time": utc_now(),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    detail_field = MATERIAL_DETAIL_FIELDS[source_type]
     return {
         "materialID": material_id,
-        "reason": reason,
-        "sourceSHA256": actual_hash,
-        "sourceRecord": source_record,
+        "reason": normalized_reason,
+        "detailSHA256": detail_hash,
+        "sourceType": source_type,
+        "sourceId": source_id,
+        "detailType": detail_field,
+        "detail": detail_payload[detail_field],
+        "cacheHit": cache_hit,
     }
 
 

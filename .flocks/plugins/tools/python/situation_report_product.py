@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from flocks.situation_report.product.workspace import (
-    read_embedded_source,
     read_generation_context,
+    read_material_detail,
     read_material_page,
     validate_candidate_report,
     write_candidate_report,
@@ -110,9 +110,9 @@ async def situation_product_material_read(
 @ToolRegistry.register_function(
     name="situation_product_source_read",
     description=(
-        "Read an original source record embedded and hash-protected inside the material snapshot. "
-        "Use only to resolve a specific summary conflict. The call fails closed when the backend "
-        "snapshot did not include the original record."
+        "Query the business backend for the full detail of one material selected in this report. "
+        "Use only to resolve a specific ambiguity or factual conflict; ordinary authoring must use "
+        "the immutable material snapshot. The first result is cached for this generation."
     ),
     category=ToolCategory.CUSTOM,
     parameters=[
@@ -143,7 +143,7 @@ async def situation_product_source_read(
     reason: str,
 ) -> ToolResult:
     return await _run(
-        read_embedded_source,
+        read_material_detail,
         session_id=ctx.session_id,
         generation_id=generation_id,
         material_id=material_id,

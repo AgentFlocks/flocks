@@ -37,7 +37,7 @@
 
    后端应以 `exists=false, version=null, changed=false` 表示资源不存在。为兼容整型字段的零值序列化，Flocks 也接受 `exists=false, version=0, changed=false`，并立即归一化为 `version=null`；正数版本或 `changed=true` 仍视为冲突状态。
 
-8. modify 下载当前报告；所有操作每轮无条件下载当前模板和实时素材。Flocks 校验下载响应版本、格式和大小，自行计算 SHA-256 并固化本地不可变快照；全部成功后才切换 `index.json` 当前指针。
+8. modify 下载当前报告；所有操作每轮无条件下载当前模板和实时素材。Flocks 校验下载响应版本、格式和大小，自行计算 SHA-256 并固化本地不可变快照；全部成功后才切换 `index.json` 当前指针。摘要缺失、模糊或冲突会实质影响结论时，Agent 可按已选素材的 `sourceType + sourceId` 调用 `/materials/detail`；普通写作不批量展开详情。
 9. modify 同时校验状态版本和 `X-Report-Version` 均等于请求的基线版本；regenerate 检查报告状态但不下载、不读取报告正文。
 10. A1 单 Agent 只通过受限工具读取本轮上下文和分页素材、写候选、执行校验。
 11. 输出先写不可变版本，再持久化一条不进入后续模型上下文的终态结果消息，最后发布 `situation.report.status`。终态 Event 返回结果消息的 `messageID/messagePartID` 以及原下载接口可接受的绝对输出路径；失败和取消也写对应终态消息。
@@ -58,6 +58,8 @@
     validation.json
     finalization.json
     preprocessing/generation_context_001.json
+    evidence/material-details/{materialIDHash}.json
+    audit/source_reads.jsonl
   work/{generationID}/report.md
   .locks/
   output/
@@ -78,7 +80,8 @@
 | `session_state.py` | sessionID 状态创建、读取和原子保存 |
 | `project_workspace.py` | 报告 Session 的内部 Project 创建、回滚和绑定校验 |
 | `snapshots.py` | 后端 base URL 限制及模板、素材本地格式校验 |
-| `backend_sync.py` | 每轮三资源 latest、固定当前资源下载、响应头/大小/SHA 校验和原子指针切换 |
+| `backend_sync.py` | 每轮三资源 latest、固定当前资源下载、按需素材详情查询、响应头/大小/SHA 校验和原子指针切换 |
+| `debug_datasets.py` | 开发环境冻结真实数据集的路径、哈希、数量和素材身份校验 |
 | `policy.py` | 报告意图白名单和 `open_report_config(sessionID)` |
 | `workspace.py` | Agent 受限读取、分页素材、候选写入与校验 |
 | `output.py` | 不可变输出版本、current 指针和状态文件 |
@@ -108,6 +111,7 @@ SITUATION_REPORT_PRODUCT_ROOT          可选；默认位于 Config.get_data_pat
 SITUATION_REPORT_BACKEND_BASE_URL      后端内部 API 基址
 SITUATION_REPORT_BACKEND_TOKEN         Flocks 调后端的服务凭据
 SITUATION_REPORT_MODEL_CONCURRENCY     产品 Agent 全局模型并发，默认 2
+SITUATION_REPORT_DEBUG_DATASET_ROOT    仅开发 WebUI 调试；冻结真实数据集目录
 ```
 
 禁止重新引入：`SITUATION_REPORT_CALLBACK_TOKEN`、状态 callback/outbox、`X-Flocks-User-Key`。
@@ -125,16 +129,20 @@ SITUATION_REPORT_MODEL_CONCURRENCY     产品 Agent 全局模型并发，默认 
 
 `scripts/situation_report_product_mock_backend.py` 是独立的开发联调进程，不进入
 Flocks 生产调用链。它从命令行指定的模板和 JSONL 素材初始化每个新 Session，持久化
-版本化测试资源，并实现后端正式提供的四个 HTTP 接口：
+版本化测试资源，并实现后端正式提供的五个 HTTP 接口：
 
 - `GET /internal/flocks/v1/report-sessions/{sessionID}/state/latest`
 - `GET /internal/flocks/v1/report-sessions/{sessionID}/report/download`
 - `GET /internal/flocks/v1/report-sessions/{sessionID}/template/download`
 - `GET /internal/flocks/v1/report-sessions/{sessionID}/materials/download`
+- `GET /internal/flocks/v1/report-sessions/{sessionID}/materials/detail?sourceType=...&sourceId=...`
 
 Mock 的 `/__mock__/...` 路由仅用于联调控制，不是正式后端契约。其中
 `PUT /__mock__/report-sessions/{sessionID}/resources/{report|template|materials}?version=N`
-用于模拟后端消费成功 Event 后保存报告，或用户只保存配置后升级模板/素材版本。
+用于模拟后端消费成功 Event 后保存报告，或用户只保存配置后升级模板/素材版本；
+`PUT /__mock__/report-sessions/{sessionID}/materials/details?materialVersion=N` 仅用于给对应
+素材版本注入真实详情快照。Flocks-facing 的路径、Query、请求头、成功响应和业务错误码与
+真实后端协议一致；`/__mock__` 控制接口不属于该协议。
 
 启动时显式提供本地联调模板和符合 `PirsFeedItem` JSONL 合同的素材；这些文件是 Mock 输入，不属于 Flocks 产品内置资源：
 
@@ -148,12 +156,30 @@ python scripts/situation_report_product_mock_backend.py \
   --port 18090
 ```
 
-Flocks 进程使用相同的开发凭据连接 Mock：
+WebUI 调试桥接使用相同的开发凭据连接 Mock：
 
 ```text
-SITUATION_REPORT_BACKEND_BASE_URL=http://127.0.0.1:18090
-SITUATION_REPORT_BACKEND_TOKEN=<与 Mock 相同的开发凭据>
+SITUATION_REPORT_WEBUI_DEBUG_ENABLED=true
+SITUATION_REPORT_WEBUI_DEBUG_BACKEND_BASE_URL=http://127.0.0.1:18090
+SITUATION_REPORT_WEBUI_DEBUG_BACKEND_TOKEN=<与 Mock 相同的开发凭据>
 ```
+
+这些独立的 `SITUATION_REPORT_WEBUI_DEBUG_*` 配置不覆盖真实业务后端配置。
+`scripts/export_situation_report_debug_dataset.py` 从一个真实业务 Session 同时冻结模板、素材
+以及每条已选素材的详情，并在导出前后复查版本。数据集保存在服务器受控目录，不提交仓库：
+
+```text
+{SITUATION_REPORT_DEBUG_DATASET_ROOT}/{datasetID}/
+  dataset.json
+  template.md
+  materials.jsonl
+  material-details.jsonl
+```
+
+管理员从 WebUI 新建态势报告调试时选择数据集、允许的模型和语言；页面仍先调用原始
+`POST /api/session`，再调用独立的
+`POST /api/situation-report/debug/session/{sessionID}/dataset` 完成 Mock 资源绑定。没有通过
+哈希和素材身份校验的数据集时不允许开始调试，通用 Session 创建 Schema 保持不变。
 
 真实闭环必须在提交 `prompt_async` 前订阅 Flocks `/api/event`。收到本 generation 的
 `situation.report.status: succeeded` 后，后端按 Event 的 `output.path` 调原始

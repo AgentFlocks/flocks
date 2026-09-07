@@ -18,7 +18,7 @@ from flocks.server.routes.file import download_file
 from flocks.server.routes.session import SessionCreateRequest
 from flocks.session.session import Session
 from flocks.situation_report.product.contracts import ReportAction, build_report_prompt_text
-from flocks.situation_report.product.files import session_root
+from flocks.situation_report.product.files import atomic_write_json, session_root
 from flocks.situation_report.product.orchestrator import persist_terminal_status_message
 from flocks.situation_report.product.webui_debug import webui_debug_metadata
 
@@ -92,6 +92,17 @@ async def test_webui_debug_prepare_initializes_new_session_and_builds_generate_c
         )
     )
     monkeypatch.setattr(debug_routes, "build_webui_debug_synchronizer", lambda: synchronizer)
+    atomic_write_json(
+        session_root(session_id) / "debug" / "dataset.json",
+        {
+            "datasetID": "D01",
+            "templateVersion": 2,
+            "materialVersion": 2,
+            "materialCount": 20,
+            "materialDetailCount": 20,
+            "language": "zh-CN",
+        },
+    )
 
     debug_state = await debug_routes.get_debug_session_state(
         session_id,
@@ -116,6 +127,90 @@ async def test_webui_debug_prepare_initializes_new_session_and_builds_generate_c
     assert response.baseBackendReportVersion is None
     assert response.prompt.startswith("SITUATION_REPORT_REQUEST_V1\n")
     assert '"name":"situation_report.generate"' in response.prompt
+
+
+@pytest.mark.asyncio
+async def test_webui_debug_dataset_listing_and_binding_are_separate_from_session_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    from flocks.server.routes import situation_report as debug_routes
+    from flocks.situation_report.product.debug_datasets import DebugDatasetManifest
+
+    monkeypatch.setenv("SITUATION_REPORT_WEBUI_DEBUG_ENABLED", "true")
+    monkeypatch.setenv("SITUATION_REPORT_PRODUCT_ROOT", str(tmp_path / "product"))
+    admin = AuthUser(id="usr_admin", username="admin", role="admin")
+    monkeypatch.setattr(debug_routes, "require_user", lambda _request: admin)
+    manifest = DebugDatasetManifest.model_validate(
+        {
+            "schemaVersion": 1,
+            "datasetID": "D01",
+            "name": "D01 综合素材",
+            "description": "冻结的真实后端资源",
+            "language": "zh-CN",
+            "sourceSessionID": "ses_source",
+            "capturedAt": "2026-09-07T00:00:00+00:00",
+            "templateSHA256": "a" * 64,
+            "materialsSHA256": "b" * 64,
+            "materialDetailsSHA256": "c" * 64,
+            "materialCount": 20,
+            "materialDetailCount": 20,
+            "sourceCounts": {"DARKWEB": 18, "TELEGRAM": 2},
+        }
+    )
+    dataset = SimpleNamespace(manifest=manifest)
+    monkeypatch.setattr(debug_routes, "list_debug_datasets", lambda: [manifest])
+    monkeypatch.setattr(debug_routes, "load_debug_dataset", lambda _dataset_id: dataset)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+    listed = await debug_routes.get_debug_datasets(request)
+    assert listed.items[0].datasetID == "D01"
+    assert listed.items[0].materialCount == 20
+
+    session_id = "ses_dataset_binding"
+    session = SimpleNamespace(
+        id=session_id,
+        category="situation-report",
+        metadata=webui_debug_metadata(),
+        status="active",
+    )
+    monkeypatch.setattr(
+        debug_routes,
+        "_require_debug_session",
+        AsyncMock(return_value=session),
+    )
+    monkeypatch.setattr(debug_routes, "require_report_project", AsyncMock())
+    seed = AsyncMock(
+        return_value={
+            "datasetID": "D01",
+            "templateVersion": 2,
+            "materialVersion": 2,
+            "materialCount": 20,
+            "materialDetailCount": 20,
+            "language": "zh-CN",
+        }
+    )
+    monkeypatch.setattr(debug_routes, "seed_webui_debug_dataset", seed)
+
+    bound = await debug_routes.bind_debug_dataset(
+        session_id,
+        debug_routes.DebugDatasetBindRequest(datasetID="D01"),
+        Request({"type": "http", "method": "POST", "path": "/", "headers": []}),
+    )
+    assert bound.sessionID == session_id
+    assert bound.datasetID == "D01"
+    seed.assert_awaited_once_with(session_id=session_id, dataset=dataset)
+
+    rebound = await debug_routes.bind_debug_dataset(
+        session_id,
+        debug_routes.DebugDatasetBindRequest(datasetID="D01"),
+        Request({"type": "http", "method": "POST", "path": "/", "headers": []}),
+    )
+    assert rebound == bound
+    assert seed.await_count == 1
+    assert set(SessionCreateRequest.model_fields).isdisjoint(
+        {"datasetID", "sourceSessionID", "workspace"}
+    )
 
 
 @pytest.mark.asyncio

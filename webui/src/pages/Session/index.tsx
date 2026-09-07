@@ -22,8 +22,13 @@ import SuiteInstallProgressPanel, {
   failSuiteInstallProgress,
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
+import SituationReportDebugSetupDialog from '@/components/situation-report/SituationReportDebugSetupDialog';
 import { sessionApi } from '@/api/session';
-import { situationReportAPI, type SituationReportOperation } from '@/api/situationReport';
+import {
+  situationReportAPI,
+  type SituationReportDebugDataset,
+  type SituationReportOperation,
+} from '@/api/situationReport';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
@@ -105,6 +110,12 @@ const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
 const SITUATION_REPORT_AGENT = 'situation-report-product';
 const SITUATION_REPORT_REQUEST_SENTINEL = 'SITUATION_REPORT_REQUEST_V1\n';
+const SITUATION_REPORT_MODEL_KEYS = new Set([
+  'threatbook-cn-llm::bailian:deepseek-v4-pro',
+  'threatbook-cn-llm::bailian:deepseek-v4-flash-0731',
+  'anthropic::claude-opus-4-6',
+  'anthropic::claude-opus-4-8',
+]);
 const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 
@@ -729,6 +740,12 @@ export default function SessionPage() {
   const [reportPreparing, setReportPreparing] = useState(false);
   const [reportRun, setReportRun] = useState<SituationReportRun | null>(null);
   const [reportDebugState, setReportDebugState] = useState<SituationReportDebugState>('idle');
+  const [reportSetupOpen, setReportSetupOpen] = useState(false);
+  const [reportDatasets, setReportDatasets] = useState<SituationReportDebugDataset[]>([]);
+  const [reportDatasetsLoading, setReportDatasetsLoading] = useState(false);
+  const [reportSetupDatasetID, setReportSetupDatasetID] = useState('');
+  const [reportSetupModelKey, setReportSetupModelKey] = useState('');
+  const [reportLanguage, setReportLanguage] = useState<'zh-CN' | 'en-US'>('zh-CN');
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
@@ -957,6 +974,10 @@ export default function SessionPage() {
       .filter((group) => group.models.length > 0)
       .sort((a, b) => a.providerName.localeCompare(b.providerName));
   }, [chatModelOptions, providers]);
+  const reportModelOptions = useMemo(
+    () => chatModelOptions.filter((option) => SITUATION_REPORT_MODEL_KEYS.has(option.key)),
+    [chatModelOptions],
+  );
   const listedSelectedSession = useMemo(
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
@@ -1294,6 +1315,7 @@ export default function SessionPage() {
       .then((state) => {
         if (!cancelled) {
           setReportDebugState(state.reportExists ? 'ready' : 'needs-generate');
+          if (state.language) setReportLanguage(state.language);
         }
       })
       .catch(() => {
@@ -1667,24 +1689,69 @@ export default function SessionPage() {
     }
   }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
 
+  const handleOpenSituationReportSetup = useCallback(async () => {
+    if (creating || reportDatasetsLoading || !reportDebugAvailable) return;
+    setReportDatasetsLoading(true);
+    try {
+      const datasets = await situationReportAPI.listDebugDatasets();
+      setReportDatasets(datasets);
+      const firstDataset = datasets[0];
+      setReportSetupDatasetID(firstDataset?.datasetID ?? '');
+      setReportLanguage(firstDataset?.language ?? 'zh-CN');
+      const preferredModel = reportModelOptions.find(
+        (option) => option.key === 'threatbook-cn-llm::bailian:deepseek-v4-pro',
+      ) ?? reportModelOptions[0];
+      setReportSetupModelKey(preferredModel?.key ?? '');
+      setReportSetupOpen(true);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(t('situationReport.datasetsFailed'), message);
+    } finally {
+      setReportDatasetsLoading(false);
+    }
+  }, [creating, reportDatasetsLoading, reportDebugAvailable, reportModelOptions, t, toast]);
+
   const handleCreateSituationReportSession = useCallback(async () => {
-    if (creating || !reportDebugAvailable) return;
+    if (
+      creating
+      || !reportDebugAvailable
+      || !reportSetupDatasetID
+      || !reportSetupModelKey
+    ) return;
+    const selectedDataset = reportDatasets.find(
+      (dataset) => dataset.datasetID === reportSetupDatasetID,
+    );
+    const selectedReportModel = reportModelOptions.find(
+      (option) => option.key === reportSetupModelKey,
+    );
+    if (!selectedDataset || !selectedReportModel) return;
     setCreating(true);
     try {
       const response = await client.post('/api/session', {
-        title: t('situationReport.newTitle'),
+        title: `${t('situationReport.newTitle')} · ${selectedDataset.name}`,
         category: 'situation-report',
       });
-      addSession(response.data);
-      setSelectedSessionFallback(response.data);
+      await situationReportAPI.bindDebugDataset(
+        response.data.id,
+        selectedDataset.datasetID,
+      );
+      const updatedSession = await sessionApi.update(response.data.id, {
+        provider: selectedReportModel.providerID,
+        model: selectedReportModel.modelID,
+        model_pinned: true,
+        model_auto: false,
+      });
+      addSession(updatedSession);
+      setSelectedSessionFallback(updatedSession);
       setSelectedProjectId(TASK_SESSION_GROUP_ID);
       setSelectedAgent(SITUATION_REPORT_AGENT);
       setSelectedExecutionMode('build');
-      setSelectedModelKey(null);
+      setSelectedModelKey(selectedReportModel.key);
       setReportRun(null);
       setReportDebugState('needs-generate');
-      setSelectedSessionId(response.data.id);
-      writeSessionExecutionMode(response.data.id, 'build');
+      setSelectedSessionId(updatedSession.id);
+      writeSessionExecutionMode(updatedSession.id, 'build');
+      setReportSetupOpen(false);
       await refetchSessions();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1692,7 +1759,18 @@ export default function SessionPage() {
     } finally {
       setCreating(false);
     }
-  }, [addSession, creating, refetchSessions, reportDebugAvailable, t, toast]);
+  }, [
+    addSession,
+    creating,
+    refetchSessions,
+    reportDatasets,
+    reportDebugAvailable,
+    reportModelOptions,
+    reportSetupDatasetID,
+    reportSetupModelKey,
+    t,
+    toast,
+  ]);
 
   const prepareSituationReportPrompt = useCallback(async (
     text: string,
@@ -1719,13 +1797,14 @@ export default function SessionPage() {
       selectedSessionId,
       'modify',
       text,
+      reportLanguage,
     );
     return {
       text: prepared.prompt,
       displayText: prepared.displayText,
       agentName: prepared.agent,
     };
-  }, [isSituationReportSession, reportDebugState, selectedAgent, selectedSessionId, t]);
+  }, [isSituationReportSession, reportDebugState, reportLanguage, selectedAgent, selectedSessionId, t]);
 
   const prepareSituationReportAction = useCallback(async (
     operation: 'generate' | 'regenerate',
@@ -1745,6 +1824,7 @@ export default function SessionPage() {
         selectedSessionId,
         operation,
         instruction,
+        reportLanguage,
       );
       sendPrompt(prepared.prompt, { displayText: prepared.displayText });
     } catch (err: unknown) {
@@ -1753,7 +1833,7 @@ export default function SessionPage() {
     } finally {
       setReportPreparing(false);
     }
-  }, [reportDebugState, reportPreparing, selectedSessionId, t, toast]);
+  }, [reportDebugState, reportLanguage, reportPreparing, selectedSessionId, t, toast]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -2556,13 +2636,13 @@ export default function SessionPage() {
             </div>
             {reportDebugAvailable && (
               <div className="relative mt-1 h-[34px] rounded-lg transition-colors hover:bg-blue-50 dark:hover:bg-blue-950/30">
-                {creating
+                {creating || reportDatasetsLoading
                   ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-blue-600" />
                   : <ClipboardList className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-blue-600 dark:text-blue-400" />}
                 <button
                   type="button"
-                  onClick={() => void handleCreateSituationReportSession()}
-                  disabled={creating}
+                  onClick={() => void handleOpenSituationReportSetup()}
+                  disabled={creating || reportDatasetsLoading}
                   className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-blue-700 transition-colors disabled:cursor-not-allowed disabled:opacity-60 dark:text-blue-300"
                 >
                   {t('situationReport.newSession')}
@@ -2571,6 +2651,26 @@ export default function SessionPage() {
             )}
           </div>
         </div>
+
+        {reportSetupOpen && (
+          <SituationReportDebugSetupDialog
+            datasets={reportDatasets}
+            models={reportModelOptions}
+            datasetID={reportSetupDatasetID}
+            modelKey={reportSetupModelKey}
+            language={reportLanguage}
+            creating={creating}
+            onDatasetChange={(datasetID) => {
+              setReportSetupDatasetID(datasetID);
+              const dataset = reportDatasets.find((item) => item.datasetID === datasetID);
+              if (dataset) setReportLanguage(dataset.language);
+            }}
+            onModelChange={setReportSetupModelKey}
+            onLanguageChange={setReportLanguage}
+            onCancel={() => setReportSetupOpen(false)}
+            onCreate={() => void handleCreateSituationReportSession()}
+          />
+        )}
 
         {sessionSearchOpen && (
           <div
