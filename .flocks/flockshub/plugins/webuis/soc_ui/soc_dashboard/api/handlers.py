@@ -32,6 +32,7 @@ ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
+WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION = 3
 TASK_DB = Path.home() / ".flocks" / "data" / "tasks.db"
 USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
 SOC_PINNED_WORKFLOW_NAMES = {
@@ -905,13 +906,48 @@ def _empty_workflow_denoise_stats():
         "timelineLabels": [],
         "timelineWindow": "",
         "metricsAvailable": False,
+        "dataAvailable": True,
         "dataQuality": "legacy",
+        "unavailableReason": "",
         "coverageComplete": False,
         "coverageStartedAt": 0,
         "sourceCoverageRate": 0,
+        "sourceMetricsAvailable": False,
         "invalidExecutionCount": 0,
+        "unprocessedInputCount": 0,
         "dataSource": "workflow.db.workflow_stats.call_count",
     }
+
+
+def _unavailable_workflow_denoise_stats(reason):
+    result = {
+        **_empty_workflow_denoise_stats(),
+        "dataAvailable": False,
+        "dataQuality": "unavailable",
+        "unavailableReason": str(reason or "workflow_metrics_unavailable"),
+        "dataSource": "unavailable",
+    }
+    for key in (
+        "callCount",
+        "successCount",
+        "errorCount",
+        "earliestStartedAt",
+        "latestStartedAt",
+        "rawCount",
+        "normalizedCount",
+        "afterFilterCount",
+        "uniqueCount",
+        "filterRemovedCount",
+        "duplicateCount",
+        "reducedCount",
+        "reductionRate",
+        "dedupRate",
+        "sourceCoverageRate",
+        "invalidExecutionCount",
+        "unprocessedInputCount",
+    ):
+        result[key] = None
+    return result
 
 
 def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
@@ -935,10 +971,22 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             ).fetchone()
             if meta is None:
                 return None
+            verified_row = conn.execute(
+                "SELECT MIN(bucket_start) FROM workflow_metric_rollups "
+                "WHERE workflow_id = ? AND schema_version >= ?",
+                (workflow_name, WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION),
+            ).fetchone()
+            verified_started_at = _safe_int(verified_row[0] if verified_row else 0)
+            if verified_started_at <= 0:
+                # Existing v2 rows predate input/output reconciliation and may
+                # contain false zero ingress counts. Keep them out of the exact
+                # path until a v3 contribution establishes verified coverage.
+                return None
             query = (
-                "SELECT * FROM workflow_metric_rollups WHERE workflow_id = ?"
+                "SELECT * FROM workflow_metric_rollups "
+                "WHERE workflow_id = ? AND schema_version >= ?"
             )
-            query_params = [workflow_name]
+            query_params = [workflow_name, WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION]
             if start_ms > 0 and end_ms > 0:
                 query += " AND bucket_start >= ? AND bucket_start <= ?"
                 query_params.extend((start_ms - (start_ms % 60000), end_ms))
@@ -964,9 +1012,19 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
     error_count = sum(max(_safe_int(row["error_count"]), 0) for row in rows)
     invalid_count = sum(max(_safe_int(row["invalid_count"]), 0) for row in rows)
     source_covered_count = sum(max(_safe_int(row["source_covered_count"]), 0) for row in rows)
-    coverage_started_at = max(_safe_int(meta["coverage_started_at"]), 0)
+    coverage_started_at = max(
+        _safe_int(meta["coverage_started_at"]),
+        verified_started_at,
+        0,
+    )
     complete_window = not start_ms or coverage_started_at <= start_ms
-    quality = "complete" if complete_window and invalid_count == 0 else "partial"
+    source_complete = source_covered_count == raw_count
+    metrics_complete = invalid_count == 0 and error_count == 0
+    quality = (
+        "complete"
+        if complete_window and metrics_complete and source_complete
+        else "partial"
+    )
 
     first_bucket = _safe_int(rows[0]["bucket_start"]) if rows else start_ms
     last_bucket = _safe_int(rows[-1]["bucket_start"]) if rows else end_ms
@@ -1004,12 +1062,17 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             "seriesUnique": series_unique,
             "timelineLabels": labels,
             "timelineWindow": window,
-            "metricsAvailable": True,
+            "metricsAvailable": metrics_complete,
+            "sourceMetricsAvailable": source_complete,
             "dataQuality": quality,
             "coverageComplete": complete_window,
             "coverageStartedAt": coverage_started_at,
-            "sourceCoverageRate": _ratio(source_covered_count, normalized_count),
+            # Sources describe ingress volume on the dashboard. Use the raw
+            # denominator so failed/invalid executions cannot silently vanish
+            # from coverage while still contributing to the raw total.
+            "sourceCoverageRate": _ratio(min(source_covered_count, raw_count), raw_count),
             "invalidExecutionCount": invalid_count,
+            "unprocessedInputCount": max(raw_count - normalized_count, 0),
             "dataSource": "workflow.db.workflow_metric_rollups",
         }
     )
@@ -1032,9 +1095,8 @@ def _get_workflow_denoise_stats(
             _workflow_stats_cache.move_to_end(cache_key)
             return cached["value"]
 
-    empty = _empty_workflow_denoise_stats()
     if not WORKFLOW_DB.is_file():
-        return empty
+        return _unavailable_workflow_denoise_stats("workflow_db_missing")
 
     rollup_result = _get_workflow_metric_rollups(workflow_name, start_time, end_time)
     if rollup_result is not None and rollup_result.get("coverageComplete"):
@@ -1133,7 +1195,13 @@ def _get_workflow_denoise_stats(
     except Exception:
         with _cache_lock:
             cached = _workflow_stats_cache.get(cache_key)
-            return cached["value"] if cached else empty
+            if cached:
+                return {
+                    **cached["value"],
+                    "dataQuality": "stale",
+                    "unavailableReason": "workflow_db_query_failed",
+                }
+        return _unavailable_workflow_denoise_stats("workflow_db_query_failed")
 
 
 def _get_workflow_progress(
@@ -2090,17 +2158,31 @@ def _workflow_task_metrics(output_text, status):
 
 
 def _workflow_task_input_count(inputs):
-    for key in ("_raw_alerts_count", "raw_count"):
+    for key in ("_raw_alerts_count", "_alerts_count", "_alert_list_count", "raw_count"):
         value, quality = _workflow_task_metric(inputs, key)
         if quality == "complete":
             return value
-    for key in ("raw_alerts", "alerts"):
+    for key in ("raw_alerts", "alerts", "alert_list"):
         value = inputs.get(key)
         if isinstance(value, list):
             return len(value)
-    for key in ("syslog_message", "syslog", "alert"):
-        if inputs.get(key) not in (None, "", {}):
-            return 1
+        if isinstance(value, dict) and value.get("_type") in {"list", "tuple", "set"}:
+            count, quality = _workflow_task_metric(value, "count")
+            if quality == "complete":
+                return count
+        if isinstance(value, dict) and isinstance(value.get("data"), list):
+            return len(value["data"])
+    for key in ("syslog_message", "syslog"):
+        value = inputs.get(key)
+        if not isinstance(value, dict) or not value.get("message"):
+            continue
+        try:
+            json.loads(str(value["message"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        return 1
+    if inputs.get("alert") not in (None, "", {}):
+        return 1
     return None
 
 
@@ -2117,13 +2199,17 @@ def _workflow_task_row(row, workflow_id, effective_status):
         if input_count is not None:
             counts["raw"] = input_count
             raw_count_source = "workflow_input"
+            if input_count == 0:
+                data_quality = "empty-input"
     preview = metrics["preview"]
     stage = "triage" if workflow_id in TRIAGE_WORKFLOW_IDS else "denoise"
     title = _workflow_latest_alert_name(workflow_id, output_text, input_text)
     if stage == "denoise" and not preview:
         raw_count = counts["raw"]
         title = (
-            f"降噪批次 · 原始 {raw_count} 条"
+            "降噪批次 · 空输入"
+            if data_quality == "empty-input"
+            else f"降噪批次 · 原始 {raw_count} 条"
             if raw_count is not None
             else "降噪批次 · 原始条数待生成"
         )
@@ -2164,7 +2250,8 @@ def _workflow_task_row(row, workflow_id, effective_status):
         "counts": counts,
         "dataQuality": data_quality,
         "rawCountSource": raw_count_source,
-        "emptyBatch": effective_status in WORKFLOW_SUCCESS_STATUSES and counts["raw"] == 0,
+        "emptyBatch": counts["raw"] == 0,
+        "emptyInput": data_quality == "empty-input",
         "progress": progress,
         "sessionId": session_id,
         "messageId": message_id,
@@ -2389,6 +2476,13 @@ def _get_activity(params):
 
             last_row_id = max(_safe_int(cursor.get("lastRowId")), 0)
             last_activity_id = max(_safe_int(cursor.get("lastActivityId")), 0)
+            previous_polled_at = max(_safe_int(cursor.get("polledAt")), 0)
+            current_polled_at = int(time.time() * 1000)
+            poll_window_ms = (
+                max(current_polled_at - previous_polled_at, 1)
+                if previous_polled_at
+                else ACTIVITY_WINDOW_MS
+            )
             if last_row_id > latest_row_id or last_activity_id > latest_activity_id:
                 last_row_id = 0
                 last_activity_id = 0
@@ -2401,6 +2495,7 @@ def _get_activity(params):
                 latest_row_id=latest_row_id,
                 latest_activity_id=latest_activity_id,
                 limit=limit,
+                window_ms=poll_window_ms,
             )
     except Exception as exc:
         return {
@@ -2448,9 +2543,11 @@ def _activity_response(
     workflow_stats=None,
     workflow_events=None,
 ):
+    generated_at = datetime.now().astimezone()
+    polled_at = int(generated_at.timestamp() * 1000)
     return {
-        "cursor": _encode_activity_cursor(last_row_id, last_activity_id),
-        "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "cursor": _encode_activity_cursor(last_row_id, last_activity_id, polled_at),
+        "generatedAt": generated_at.isoformat(timespec="seconds"),
         "events": events,
         "recentEvents": recent_events or [],
         "overflowCount": 0,
@@ -2477,11 +2574,12 @@ def _empty_activity_batch():
     }
 
 
-def _encode_activity_cursor(last_row_id, last_activity_id):
+def _encode_activity_cursor(last_row_id, last_activity_id, polled_at=None):
     payload = json.dumps(
         {
             "lastRowId": max(_safe_int(last_row_id), 0),
             "lastActivityId": max(_safe_int(last_activity_id), 0),
+            "polledAt": max(_safe_int(polled_at), 0),
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -2520,6 +2618,7 @@ def _activity_rows(
     latest_row_id,
     latest_activity_id,
     limit,
+    window_ms=ACTIVITY_WINDOW_MS,
 ):
     summary = _activity_insert_summary(conn, settings, last_row_id, latest_row_id)
     new_count = summary["receivedCount"]
@@ -2561,11 +2660,11 @@ def _activity_rows(
             if new_count > ACTIVITY_SURGE_LIMIT
             else "burst" if new_count > ACTIVITY_NORMAL_LIMIT else "normal"
         ),
-        "windowMs": ACTIVITY_WINDOW_MS,
+        "windowMs": max(_safe_int(window_ms), 1),
         "triageUpdatedCount": updated_count,
         "sampledCount": sampled_count,
         "suppressedCount": max(new_count - sampled_count, 0),
-        "ratePerSecond": round(new_count / (ACTIVITY_WINDOW_MS / 1000), 1),
+        "ratePerSecond": round(new_count / (max(_safe_int(window_ms), 1) / 1000), 1),
     }
     return rows, max(new_count + updated_count - len(rows), 0), batch
 
@@ -2869,7 +2968,7 @@ def _get_stats(params):
         range_end_time,
         force=force_refresh,
     )
-    denoise = _read_denoise(denoise_files, workflow_stats.get("callCount", 0))
+    denoise = _read_denoise(denoise_files, workflow_stats.get("callCount") or 0)
     soc_unique_count = denoise["totalUnique"]
     soc_unique_series = denoise["seriesUnique"]
     timeline_labels = workflow_stats["timelineLabels"] or denoise.get("_timelineLabels", [])
@@ -2885,7 +2984,11 @@ def _get_stats(params):
         duplicate_count = workflow_stats["duplicateCount"]
         workflow_series_unique = workflow_stats["seriesUnique"]
     else:
-        processed_total = workflow_stats["callCount"]
+        # Legacy/unavailable data is kept only as an internal compatibility
+        # fallback. The quality contract tells the UI not to present it as an
+        # authoritative metric; unavailable fields themselves remain null in
+        # sourceStatus.workflowStats.
+        processed_total = max(_safe_int(workflow_stats.get("callCount")), 0)
         normalized_total = processed_total
         after_filter_total = processed_total
         unique_total = soc_unique_count
@@ -2908,7 +3011,7 @@ def _get_stats(params):
             "duplicateRate": reduction_rate,
             "dedupRate": _ratio(duplicate_count, after_filter_total),
             "uniqueRate": _ratio(min(unique_total, processed_total), processed_total),
-            "files": workflow_stats["callCount"],
+            "files": workflow_stats.get("callCount"),
             "sourceCounter": Counter(workflow_stats["sourceCounts"]),
             "seriesRaw": workflow_series_raw,
             "seriesUnique": workflow_series_unique,
@@ -2951,10 +3054,15 @@ def _get_stats(params):
             "workflowStats": workflow_stats,
             "metricQuality": {
                 "status": workflow_stats.get("dataQuality", "legacy"),
+                "dataAvailable": workflow_stats.get("dataAvailable", True),
+                "unavailableReason": workflow_stats.get("unavailableReason", ""),
                 "coverageComplete": workflow_stats.get("coverageComplete", False),
                 "coverageStartedAt": workflow_stats.get("coverageStartedAt", 0),
                 "sourceCoverageRate": workflow_stats.get("sourceCoverageRate", 0),
+                "sourceMetricsAvailable": workflow_stats.get("sourceMetricsAvailable", False),
                 "invalidExecutionCount": workflow_stats.get("invalidExecutionCount", 0),
+                "unprocessedInputCount": workflow_stats.get("unprocessedInputCount", 0),
+                "errorExecutionCount": workflow_stats.get("errorCount", 0),
                 "metricsAvailable": metrics_available,
             },
             "sampleMode": sample_mode,

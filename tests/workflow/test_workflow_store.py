@@ -160,8 +160,179 @@ async def test_workflow_store_rolls_up_denoise_metrics_idempotently() -> None:
     assert tuple(row[:6]) == (10, 10, 6, 2, 4, 4)
     assert row["source_counts"] == '{"tdp": 8, "skyeye": 2}'
     assert row["source_covered_count"] == 10
-    assert tuple(row[8:12]) == (1, 0, 0, 2)
+    assert tuple(row[8:12]) == (1, 0, 0, 3)
     assert contribution_count == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_replaces_legacy_counts_in_the_first_verified_bucket() -> None:
+    await WorkflowStore.init()
+    now_ms = WorkflowStore._now_ms()
+    bucket_start = now_ms - (now_ms % 60_000)
+    db = await WorkflowStore.raw_db()
+    await db.execute(
+        """
+        INSERT INTO workflow_metric_rollups
+        (workflow_id, bucket_start, raw_count, normalized_count,
+         after_filter_count, unique_count, filter_removed_count,
+         duplicate_count, source_counts, source_covered_count,
+         success_count, error_count, invalid_count, schema_version, updated_at)
+        VALUES (?, ?, 999, 999, 999, 999, 0, 0, ?, 999, 1, 0, 0, 2, ?)
+        """,
+        ("stream_alert_denoise", bucket_start, '{"tdp": 999}', now_ms),
+    )
+    await db.commit()
+
+    await WorkflowStore.complete_execution(
+        {
+            "id": "denoise-first-v3",
+            "workflowId": "stream_alert_denoise",
+            "status": "success",
+            "startedAt": now_ms,
+            "inputParams": {"alerts": [{"id": "a"}]},
+            "outputResults": {
+                "stats": {
+                    "metric_schema_version": 2,
+                    "raw_count": 1,
+                    "normalized_count": 1,
+                    "after_filter_count": 1,
+                    "after_dedup_count": 1,
+                    "normalize_type_counts": {"tdp": 1},
+                }
+            },
+        },
+        [],
+    )
+
+    async with db.execute(
+        "SELECT raw_count, source_counts, schema_version FROM workflow_metric_rollups "
+        "WHERE workflow_id = ? AND bucket_start = ?",
+        ("stream_alert_denoise", bucket_start),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert tuple(row) == (1, '{"tdp": 1}', 3)
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_preserves_input_volume_when_metrics_are_invalid_or_failed() -> None:
+    await WorkflowStore.init()
+    now_ms = WorkflowStore._now_ms()
+
+    await WorkflowStore.complete_execution(
+        {
+            "id": "denoise-invalid-output",
+            "workflowId": "stream_alert_denoise",
+            "status": "success",
+            "startedAt": now_ms,
+            "inputParams": {"alerts": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
+            "outputResults": {
+                "stats": {
+                    "metric_schema_version": 2,
+                    "raw_count": 0,
+                    "normalized_count": 0,
+                    "after_filter_count": 0,
+                    "after_dedup_count": 0,
+                }
+            },
+        },
+        [],
+    )
+    await WorkflowStore.complete_execution(
+        {
+            "id": "denoise-failed-input",
+            "workflowId": "stream_alert_denoise",
+            "status": "failed",
+            "startedAt": now_ms,
+            "inputParams": {"alerts": {"_type": "list", "count": 1200}},
+            "outputResults": {},
+        },
+        [],
+    )
+
+    db = await WorkflowStore.raw_db()
+    async with db.execute(
+        "SELECT raw_count, normalized_count, success_count, error_count, invalid_count "
+        "FROM workflow_metric_rollups WHERE workflow_id = ?",
+        ("stream_alert_denoise",),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert tuple(row) == (1203, 0, 1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_does_not_count_malformed_syslog_as_accepted_alert() -> None:
+    await WorkflowStore.init()
+    now_ms = WorkflowStore._now_ms()
+
+    await WorkflowStore.complete_execution(
+        {
+            "id": "denoise-malformed-syslog",
+            "workflowId": "stream_alert_denoise",
+            "status": "success",
+            "startedAt": now_ms,
+            "inputParams": {"syslog_message": {"message": "not-json"}},
+            "outputResults": {
+                "stats": {
+                    "metric_schema_version": 2,
+                    "raw_count": 0,
+                    "normalized_count": 0,
+                    "after_filter_count": 0,
+                    "after_dedup_count": 0,
+                }
+            },
+        },
+        [],
+    )
+
+    db = await WorkflowStore.raw_db()
+    async with db.execute(
+        "SELECT raw_count, invalid_count FROM workflow_metric_rollups WHERE workflow_id = ?",
+        ("stream_alert_denoise",),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert tuple(row) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_does_not_accept_unverified_zero_for_file_input() -> None:
+    await WorkflowStore.init()
+    now_ms = WorkflowStore._now_ms()
+
+    await WorkflowStore.complete_execution(
+        {
+            "id": "denoise-file-zero",
+            "workflowId": "stream_alert_denoise",
+            "status": "success",
+            "startedAt": now_ms,
+            "inputParams": {"alert_file": "/tmp/alerts.json"},
+            "outputResults": {
+                "stats": {
+                    "metric_schema_version": 2,
+                    "raw_count": 0,
+                    "normalized_count": 0,
+                    "after_filter_count": 0,
+                    "after_dedup_count": 0,
+                }
+            },
+        },
+        [],
+    )
+
+    db = await WorkflowStore.raw_db()
+    async with db.execute(
+        "SELECT raw_count, invalid_count FROM workflow_metric_rollups WHERE workflow_id = ?",
+        ("stream_alert_denoise",),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert tuple(row) == (0, 1)
 
 
 @pytest.mark.asyncio

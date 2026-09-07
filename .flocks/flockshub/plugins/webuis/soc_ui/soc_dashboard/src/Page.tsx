@@ -775,7 +775,6 @@ function refreshLabel(value) {
 }
 
 function mergeStats(raw) {
-  const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
   const sourceStatus = {
     ...EMPTY_STATS.sourceStatus,
     ...((raw || {}).sourceStatus || {}),
@@ -784,24 +783,52 @@ function mergeStats(raw) {
       ...((raw || {}).sourceStatus?.metricQuality || {}),
     },
   };
+  const metricQuality = sourceStatus.metricQuality || {};
+  const denoiseMetricsUnavailable = metricQuality.metricsAvailable === false;
+  const sourceMetricsUnavailable = denoiseMetricsUnavailable
+    || metricQuality.sourceMetricsAvailable === false;
+  const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
+  if (denoiseMetricsUnavailable) {
+    for (const key of [
+      'totalRaw', 'totalNormalized', 'afterFilter', 'totalUnique',
+      'filterRemoved', 'dedupRemoved', 'duplicates', 'duplicateRate',
+      'dedupRate', 'uniqueRate',
+    ]) denoise[key] = null;
+    if (metricQuality.dataAvailable === false) denoise.files = null;
+  }
+  const pipeline = { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) };
+  if (denoiseMetricsUnavailable) {
+    for (const key of ['raw', 'unique', 'reductionSaved', 'uniqueRate', 'coverageRate']) {
+      pipeline[key] = null;
+    }
+  }
+  const timeline = { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) };
+  if (denoiseMetricsUnavailable) {
+    timeline.denoiseRaw = [];
+    timeline.denoiseUnique = [];
+  }
+  const sources = Array.isArray((raw || {}).sources) ? raw.sources : [];
   return {
     ...EMPTY_STATS,
     ...(raw || {}),
     sourceStatus,
     denoise,
     triage: { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) },
-    pipeline: { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) },
+    pipeline,
     closedLoop: { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) },
     tokenUsage: { ...EMPTY_STATS.tokenUsage, ...((raw || {}).tokenUsage || {}) },
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
-    timeline: { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) },
-    sources: Array.isArray((raw || {}).sources) ? raw.sources : [],
+    timeline,
+    sources: sourceMetricsUnavailable
+      ? sources.map((item) => ({ ...item, value: null, rate: null, active: false }))
+      : sources,
   };
 }
 
 function fullNumber(value) {
-  const n = Number(value || 0);
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  const n = Number(value);
   return new Intl.NumberFormat('zh-CN').format(n);
 }
 
@@ -837,7 +864,8 @@ function workflowDenoiseActivity(callCount, delta, generatedAt, workflowEvent) {
 }
 
 function compactNumber(value) {
-  const n = Number(value || 0);
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  const n = Number(value);
   if (Math.abs(n) >= 100000000) return `${trim(n / 100000000)}亿`;
   if (Math.abs(n) >= 10000) return `${trim(n / 10000)}万`;
   return fullNumber(n);
@@ -851,7 +879,8 @@ function formatTokenVolume(value) {
 
 function AnimatedNumber({ value, format, tag = 'span', className, duration = 900 }) {
   const { useEffect, useRef, useState } = getReact();
-  const target = Number(value || 0);
+  const unavailable = value === null || value === undefined || !Number.isFinite(Number(value));
+  const target = unavailable ? 0 : Number(value);
   const current = useRef(0);
   const [display, setDisplay] = useState(0);
   const formatter = format || ((number) => compactNumber(Math.round(number)));
@@ -879,8 +908,8 @@ function AnimatedNumber({ value, format, tag = 'span', className, duration = 900
 
   return h(tag, {
     className: cx('animated-number', className),
-    title: formatter(target),
-  }, formatter(display));
+    title: unavailable ? '数据不可用' : formatter(target),
+  }, unavailable ? '--' : formatter(display));
 }
 
 function trim(value) {
@@ -888,7 +917,8 @@ function trim(value) {
 }
 
 function pct(value) {
-  return `${Math.round(Number(value || 0) * 1000) / 10}%`;
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  return `${Math.round(Number(value) * 1000) / 10}%`;
 }
 
 function ratio(part, total) {
@@ -980,7 +1010,9 @@ function SourceColumn({ stats }) {
   return h('div', { className: 'column left-col' }, [
     h(Panel, { key: 'sources', title: '多源告警接入', meta: `${stats.denoise.files || 0} 个降噪批次` }, [
       h('div', { className: 'source-list', key: 'list' }, stats.sources.map((item) => {
-        const width = `${Math.max(4, Math.round((item.rate || 0) * 100))}%`;
+        const width = item.value === null || item.value === undefined
+          ? '0%'
+          : `${Math.max(4, Math.round((item.rate || 0) * 100))}%`;
         return h('div', { className: 'source-row', key: item.key }, [
           h('div', { className: cx('source-node', item.active && 'active'), key: 'node' }),
           h('div', { className: 'source-main', key: 'main' }, [
@@ -1996,7 +2028,7 @@ function CommandMetrics({ stats }) {
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
-    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
+    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate === null ? null : stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
     h(TokenUsageMetric, { tokenUsage, key: 'tokens' }),
   ]);
 }
@@ -2524,12 +2556,14 @@ function CommandAiTaskPanel({ aiTasks }) {
       const stateLabel = processing ? '处理中' : '等待处理';
       const qualityDetail = task.dataQuality === 'invalid'
         ? ' · 指标格式异常'
+        : task.dataQuality === 'empty-input'
+          ? ' · 空输入任务'
         : task.dataQuality === 'missing'
           ? ' · 原始条数未知'
           : task.dataQuality === 'pending' && (task.counts?.raw === null || task.counts?.raw === undefined)
             ? ' · 原始条数待生成'
             : '';
-      const rawDetail = task.stage === 'denoise' && task.counts?.raw !== null && task.counts?.raw !== undefined
+      const rawDetail = task.stage === 'denoise' && !task.emptyInput && task.counts?.raw !== null && task.counts?.raw !== undefined
         ? ` · 原始 ${task.counts.raw} 条`
         : '';
       const detail = task.stage === 'triage'
@@ -3071,17 +3105,37 @@ export default function Page() {
     || displayActivity.batch?.triageUpdatedCount
   );
   const metricQuality = stats.sourceStatus?.metricQuality || {};
+  const metricIssues = [];
+  if (Number(metricQuality.invalidExecutionCount || 0) > 0) {
+    metricIssues.push(`${metricQuality.invalidExecutionCount} 次指标格式异常`);
+  }
+  if (Number(metricQuality.errorExecutionCount || 0) > 0) {
+    metricIssues.push(`${metricQuality.errorExecutionCount} 次执行失败`);
+  }
+  if (Number(metricQuality.unprocessedInputCount || 0) > 0) {
+    metricIssues.push(`${metricQuality.unprocessedInputCount} 条输入未完成归一化`);
+  }
+  const sourceCoverageRate = Number(metricQuality.sourceCoverageRate);
+  if (metricQuality.metricsAvailable && Number.isFinite(sourceCoverageRate) && sourceCoverageRate < 1) {
+    metricIssues.push(`来源覆盖 ${Math.round(sourceCoverageRate * 1000) / 10}%`);
+  }
   const metricQualityWarning = !stats.generatedAt
     ? ''
+    : metricQuality.dataAvailable === false || metricQuality.status === 'unavailable'
+      ? '降噪统计数据源不可用，相关数字已隐藏；系统正在重试'
+      : metricQuality.status === 'stale'
+        ? '降噪统计查询失败，当前显示上次缓存数据，可能已过期'
+      : metricQuality.status === 'partial' && !metricQuality.metricsAvailable
+        ? `降噪指标校验未通过，相关数字已隐藏${metricIssues.length ? `：${metricIssues.join('；')}` : ''}`
     : metricQuality.metricsAvailable
     ? metricQuality.status === 'partial'
-      ? `降噪指标为部分覆盖数据${metricQuality.coverageStartedAt ? `，完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}` : ''}`
-      : Number(metricQuality.invalidExecutionCount || 0) > 0
-        ? `${metricQuality.invalidExecutionCount} 次降噪执行的指标格式异常，未计入统计`
+      ? `降噪指标部分可用${metricIssues.length ? `：${metricIssues.join('；')}` : ''}${metricQuality.coverageStartedAt ? `；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}` : ''}`
+      : metricIssues.length
+        ? `降噪指标存在异常：${metricIssues.join('；')}`
         : ''
     : metricQuality.status === 'legacy-partial'
-      ? `降噪指标仍使用历史兼容口径；精确口径完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
-      : '降噪指标仍使用历史兼容口径；新指标链路产生数据后将自动切换';
+      ? `精确降噪指标尚未覆盖当前时间范围，相关数字已隐藏；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
+      : '精确降噪指标尚不可用，相关数字已隐藏；新指标链路产生数据后将自动显示';
 
   return h('div', {
     className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),

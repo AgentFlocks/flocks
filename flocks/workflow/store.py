@@ -38,6 +38,10 @@ _WORKFLOW_TABLE_PREFIXES = (
 )
 _WORKFLOW_PREFIXES = _WORKFLOW_KV_PREFIXES + _WORKFLOW_TABLE_PREFIXES
 _SOC_DENOISE_WORKFLOW_ID = "stream_alert_denoise"
+# Version 3 means the persisted contribution was validated against the
+# independently counted workflow input. Older v2 rollups may contain false
+# zero ingress values and must not be treated as authoritative by the UI.
+_SOC_METRIC_ROLLUP_SCHEMA_VERSION = 3
 _METRIC_RETENTION_MS = 35 * 24 * 60 * 60 * 1000
 # Idempotency keys only need to cover realistic completion retries. Keeping
 # this table bounded avoids growth proportional to high-volume syslog traffic.
@@ -376,6 +380,66 @@ class WorkflowStore:
         error_count = 0 if success else 1
         invalid_count = 0
 
+        def sequence_count(value: Any) -> Optional[int]:
+            if isinstance(value, (list, tuple)):
+                return len(value)
+            if isinstance(value, dict):
+                if value.get("_type") in {"list", "tuple", "set"}:
+                    count = cls._as_int(value.get("count"))
+                    return count if count is not None and count >= 0 else None
+                data = value.get("data")
+                if isinstance(data, (list, tuple)):
+                    return len(data)
+            if isinstance(value, str):
+                try:
+                    return sequence_count(json.loads(value))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return None
+            return None
+
+        def input_alert_count() -> Optional[int]:
+            inputs = exec_data.get("inputParams")
+            if not isinstance(inputs, dict):
+                return None
+
+            # Match the workflow's actual input priority. A syslog message is
+            # an alert only when its JSON payload can be decoded by the receive
+            # node; malformed/non-empty text must not be counted as accepted.
+            syslog_message = inputs.get("syslog_message") or inputs.get("syslog")
+            if isinstance(syslog_message, dict) and syslog_message.get("message"):
+                try:
+                    json.loads(str(syslog_message["message"]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+                else:
+                    return 1
+
+            known_empty = False
+            for key in ("raw_alerts", "alerts", "alert_list"):
+                marker = cls._as_int(inputs.get(f"_{key}_count"))
+                if marker is not None and marker >= 0:
+                    if marker > 0:
+                        return marker
+                    known_empty = True
+                count = sequence_count(inputs.get(key))
+                if count is not None:
+                    if count > 0:
+                        return count
+                    known_empty = True
+
+            # File inputs are intentionally unknown here: reading a user file
+            # while committing execution state would introduce I/O and TOCTOU
+            # races. Successful output metrics remain authoritative for them.
+            if inputs.get("alert_file"):
+                return None
+            return 0 if known_empty else None
+
+        input_count = input_alert_count()
+        input_params = exec_data.get("inputParams")
+        has_unverified_file_input = (
+            isinstance(input_params, dict) and bool(input_params.get("alert_file"))
+        )
+
         def metric_value(key: str) -> Optional[int]:
             value = stats.get(key)
             if isinstance(value, bool):
@@ -390,14 +454,21 @@ class WorkflowStore:
         normalized_count = metric_value("normalized_count")
         after_filter_count = metric_value("after_filter_count")
         unique_count = metric_value("after_dedup_count")
-        schema_version = metric_value("metric_schema_version") or 0
+        reported_schema_version = metric_value("metric_schema_version") or 0
         required = (raw_count, normalized_count, after_filter_count, unique_count)
         valid = success and all(value is not None for value in required)
         if valid and not (
             raw_count >= normalized_count >= after_filter_count >= unique_count >= 0
         ):
             valid = False
-        if valid and schema_version < 2:
+        if valid and input_count is not None and raw_count != input_count:
+            valid = False
+        if valid and raw_count == 0 and input_count is None and has_unverified_file_input:
+            # A configured file cannot be safely re-read during persistence.
+            # Treat a zero output as unverifiable instead of claiming the file
+            # contained no alerts (it may have failed to load or changed).
+            valid = False
+        if valid and reported_schema_version < 2:
             if raw_count == 1 and output.get("is_duplicate") is True:
                 unique_count = 0
             elif raw_count > 1:
@@ -405,7 +476,11 @@ class WorkflowStore:
         if success and not valid:
             invalid_count = 1
         if not valid:
-            raw_count = normalized_count = after_filter_count = unique_count = 0
+            # Preserve independently verifiable ingress volume even when a
+            # workflow fails or emits malformed/inconsistent stage metrics.
+            # Downstream stages remain zero because they were not verified.
+            raw_count = input_count or 0
+            normalized_count = after_filter_count = unique_count = 0
 
         filter_removed_count = max(normalized_count - after_filter_count, 0)
         duplicate_count = max(after_filter_count - unique_count, 0)
@@ -438,7 +513,7 @@ class WorkflowStore:
             "success_count": 1 if success else 0,
             "error_count": error_count,
             "invalid_count": invalid_count,
-            "schema_version": schema_version,
+            "schema_version": _SOC_METRIC_ROLLUP_SCHEMA_VERSION,
         }
 
     @classmethod
@@ -472,6 +547,18 @@ class WorkflowStore:
             VALUES (?, ?, ?)
             """,
             (contribution["workflow_id"], now_ms, now_ms),
+        )
+        # A v2 bucket may already contain pre-reconciliation counts from the
+        # same minute. Do not let ON CONFLICT upgrade that mixed bucket to v3;
+        # replace only that obsolete derived bucket before adding verified data.
+        await db.execute(
+            "DELETE FROM workflow_metric_rollups "
+            "WHERE workflow_id = ? AND bucket_start = ? AND schema_version < ?",
+            (
+                contribution["workflow_id"],
+                contribution["bucket_start"],
+                _SOC_METRIC_ROLLUP_SCHEMA_VERSION,
+            ),
         )
         existing = await db.execute(
             "SELECT source_counts FROM workflow_metric_rollups "

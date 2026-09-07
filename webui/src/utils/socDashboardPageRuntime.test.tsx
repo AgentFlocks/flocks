@@ -89,6 +89,51 @@ describe('SOC dashboard contract page runtime', () => {
     expect(screen.getByText('Flocks AI 智能告警态势中心')).toBeInTheDocument();
   });
 
+  it('shows unavailable denoise metrics as dashes instead of false zeros', async () => {
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') {
+        return Promise.resolve({
+          data: {
+            generatedAt: new Date().toISOString(),
+            denoise: { totalRaw: 0, totalUnique: 0, duplicateRate: 0, duplicates: 0 },
+            pipeline: { raw: 0, unique: 0 },
+            sources: [{ key: 'ndr', label: 'NDR', value: 0, rate: 0, active: false }],
+            sourceStatus: {
+              metricQuality: {
+                status: 'unavailable',
+                dataAvailable: false,
+                metricsAvailable: false,
+                unavailableReason: 'workflow_db_missing',
+              },
+            },
+          },
+        });
+      }
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor', events: [], recentEvents: [], workflowEvents: [], batch: {},
+            workflowStats: { callCount: null, latestStartedAt: null },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({ data: { connection: 'online', summary: {}, tasks: [] } });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    const { container } = render(<Page />);
+
+    expect(await screen.findByText('降噪统计数据源不可用，相关数字已隐藏；系统正在重试')).toBeInTheDocument();
+    const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
+    expect(within(rawMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    const ndrSource = screen.getByText('NDR').closest('.command-source') as HTMLElement;
+    expect(within(ndrSource).getByText('--')).toBeInTheDocument();
+    expect(container.querySelector('.command-source b')).toHaveAttribute('title', '数据不可用');
+  });
+
   it('pauses task-center polling while the page is hidden', async () => {
     setDocumentHidden(true);
 
