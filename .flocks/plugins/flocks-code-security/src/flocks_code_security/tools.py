@@ -159,6 +159,7 @@ AUDIT_TOOL_NAMES = (
     "audit_cybergym_replay",
     "audit_cybergym_gdb",
     "audit_cybergym_fuzz_start",
+    "audit_cybergym_fuzz_wait",
     "audit_cybergym_fuzz_status",
     "audit_cybergym_minimize",
     "audit_cybergym_submit",
@@ -415,7 +416,10 @@ async def audit_cybergym_context(ctx: ToolContext) -> ToolResult:
         binding = _cybergym_binding(ctx)
         return ToolResult(
             success=True,
-            output=get_runtime().cybergym.context(binding.scan_id),
+            output=get_runtime().cybergym.context(
+                binding.scan_id,
+                work_unit_id=binding.work_unit_id,
+            ),
             title="CyberGym Level 1 task context",
             metadata={"scan_id": binding.scan_id},
         )
@@ -501,10 +505,27 @@ async def audit_cybergym_fuzz_start(
             dictionary=dictionary,
             budget_seconds=budget_seconds,
             max_length=max_length,
+            idempotency_scope=f"work-unit:{binding.work_unit_id}",
         )
         return ToolResult(success=True, output=output, title="Started CyberGym manifest-selected fuzz search")
     except STORE_ERRORS as exc:
         return _error(exc, title="CyberGym fuzz start failed")
+
+
+async def audit_cybergym_fuzz_wait(ctx: ToolContext, run_id: str) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        runtime = get_runtime().cybergym
+        while True:
+            output = await runtime.fuzz_wait(binding.scan_id, run_id, timeout_seconds=30)
+            if output["status"] != "running":
+                return ToolResult(success=True, output=output, title="CyberGym fuzz result")
+            ctx.metadata({
+                "title": "Waiting for CyberGym fuzz search",
+                "metadata": {"run_id": run_id, "status": "running"},
+            })
+    except STORE_ERRORS as exc:
+        return _error(exc, title="CyberGym fuzz wait failed")
 
 
 async def audit_cybergym_fuzz_status(ctx: ToolContext, run_id: str) -> ToolResult:
@@ -1460,6 +1481,10 @@ async def audit_cancel(ctx: ToolContext, scan_id: str) -> ToolResult:
             from_statuses={"running"},
             to_status="cancelled",
         )
+        cancelled_fuzz_runs = await get_runtime().cybergym.cancel_fuzz_runs(
+            scan_id,
+            cancel_source="scan_cancelled",
+        )
         task_ids = await asyncio.to_thread(
             get_runtime().store.cancel_scan_work,
             scan_id,
@@ -1472,6 +1497,7 @@ async def audit_cancel(ctx: ToolContext, scan_id: str) -> ToolResult:
                 "scan_id": scan_id,
                 "status": "cancelled",
                 "cancelled_workers": cancelled_workers,
+                "cancelled_fuzz_runs": cancelled_fuzz_runs,
             },
             title=f"Cancelled audit {scan_id}",
         )
@@ -1695,6 +1721,7 @@ async def _launch_worker(
     *,
     candidate: dict[str, Any] | None,
     open_questions: list[dict[str, Any]] | None = None,
+    recovery_reason: str | None = None,
 ) -> dict[str, Any]:
     from flocks.session.message import Message, MessageRole
     from flocks.session.session import Session
@@ -1830,7 +1857,7 @@ async def _launch_worker(
             knowledge_base_present=knowledge_base_present,
         )
     elif phase == "cybergym_solving":
-        prompt = cybergym_solver_prompt()
+        prompt = cybergym_solver_prompt(recovery_reason=recovery_reason)
     else:
         raise ValueError("Worker prompt data is incomplete")
     manager = _background_manager()
@@ -2004,13 +2031,25 @@ async def _start_fresh_worker_attempt(
         runtime.store.finish_work_attempt,
         prior_attempt_id,
         status="failed",
-        failure_class=("attempts_exhausted" if attempts_exhausted else failure_class),
+        failure_class=failure_class,
     )
     if attempts_exhausted:
         await asyncio.to_thread(
             runtime.store.update_work_unit_status,
             unit["work_unit_id"],
             "failed",
+        )
+        await asyncio.to_thread(
+            runtime.store.append_scan_event,
+            batch["scan_id"],
+            "worker.attempts_exhausted",
+            "Worker attempts exhausted",
+            {
+                "work_unit_id": unit["work_unit_id"],
+                "attempt_id": prior_attempt_id,
+                "last_failure_class": failure_class,
+            },
+            level="error",
         )
         return False
     if unit["role"] in {"threat_modeler", "cybergym_solver"}:
@@ -2046,6 +2085,9 @@ async def _start_fresh_worker_attempt(
         unit,
         candidate=candidate,
         open_questions=open_questions,
+        recovery_reason=(
+            failure_class if unit["role"] == "cybergym_solver" else None
+        ),
     )
     await asyncio.to_thread(
         runtime.store.append_scan_event,
@@ -3040,6 +3082,12 @@ def register_tools() -> None:
             _parameter("budget_seconds", ParameterType.INTEGER, "Optional fuzz budget bounded by the manifest.", required=False),
             _parameter("max_length", ParameterType.INTEGER, "Optional maximum generated input length.", required=False),
         ],
+    )
+    _register(
+        "audit_cybergym_fuzz_wait",
+        "Wait for one CyberGym fuzz job to reach a persisted terminal result. The host sends progress updates while waiting.",
+        audit_cybergym_fuzz_wait,
+        [_parameter("run_id", ParameterType.STRING, "CyberGym fuzz run identifier.")],
     )
     _register(
         "audit_cybergym_fuzz_status",

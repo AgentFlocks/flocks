@@ -94,6 +94,16 @@ def test_cybergym_solver_prompt_requires_contract_aware_preflight() -> None:
     assert "required_suffix_hex" in prompt
     assert prompt.index("replay") < prompt.index("fuzz")
     assert "already includes its replay" in prompt
+    assert "execution_state" in prompt
+    assert "Never call fuzz status" in prompt
+
+
+def test_cybergym_solver_recovery_prompt_uses_persisted_checkpoint() -> None:
+    prompt = cybergym_solver_prompt(recovery_reason="solver_inactive")
+
+    assert "recovery attempt" in prompt
+    assert "solver_inactive" in prompt
+    assert "do not repeat the original bootstrap" in prompt
 
 
 def test_large_files_do_not_create_extra_baseline_workers() -> None:

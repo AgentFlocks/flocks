@@ -50,6 +50,8 @@ def scope_digest(
 
 def classify_execution_failure(error: str | None) -> str:
     message = str(error or "").casefold()
+    if "runner_tool_loop_guard_halt:" in message:
+        return "tool_loop_guard_halt"
     if "identity_capsule_mismatch" in message or "snapshot_mismatch" in message:
         return "identity_capsule_mismatch"
     if "session" in message and any(

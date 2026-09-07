@@ -564,6 +564,31 @@ async def test_existing_background_session_pins_agent_identity(
 
 
 @pytest.mark.asyncio
+async def test_background_event_progress_refreshes_inactivity_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.server.routes import event as event_routes
+
+    publish = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish)
+    task = BackgroundTask(
+        id="bg_progress",
+        status="running",
+        description="security worker",
+        prompt="",
+        agent="code-security-cybergym-solver",
+        last_activity_at=1,
+    )
+
+    callbacks = BackgroundManager()._build_activity_callbacks(task)
+    assert callbacks.event_publish_callback is not None
+    await callbacks.event_publish_callback("message.part.updated", {"part": {"status": "running"}})
+
+    assert task.last_activity_at is not None and task.last_activity_at > 1
+    publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_existing_background_session_rejects_capsule_identity_mismatch() -> None:
     manager = BackgroundManager()
 

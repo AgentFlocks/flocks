@@ -182,6 +182,9 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert "audit_knowledge_base" not in AGENT_TOOLS[prober.name]
     assert "audit_knowledge_base" in AGENT_TOOLS[investigator.name]
     assert "audit_submit_coverage" in AGENT_TOOLS[investigator.name]
+    cybergym_solver = agents["code-security-cybergym-solver"]
+    assert "audit_cybergym_fuzz_wait" in AGENT_TOOLS[cybergym_solver.name]
+    assert "audit_cybergym_fuzz_status" not in AGENT_TOOLS[cybergym_solver.name]
     assert yaml.safe_load(
         (AGENTS_ROOT / baseline.name / "agent.yaml").read_text(encoding="utf-8")
     )["steps"] == 200

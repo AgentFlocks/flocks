@@ -80,7 +80,7 @@ AGENT_TOOLS = {
         "audit_cybergym_replay",
         "audit_cybergym_gdb",
         "audit_cybergym_fuzz_start",
-        "audit_cybergym_fuzz_status",
+        "audit_cybergym_fuzz_wait",
         "audit_cybergym_minimize",
         "audit_cybergym_submit",
     ],

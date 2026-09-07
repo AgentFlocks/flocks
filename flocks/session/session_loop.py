@@ -2304,16 +2304,20 @@ class SessionLoop:
                 break
         
         # Return result
+        loop_guard_halt = bool(
+            loop_error and loop_error.startswith("runner_tool_loop_guard_halt:")
+        )
         return LoopResult(
-            action="error" if ctx.auto_failover and loop_error else "stop",
+            action="error" if (ctx.auto_failover and loop_error) or loop_guard_halt else "stop",
             last_message=last_message,
-            error=loop_error if ctx.auto_failover else None,
+            error=loop_error if (ctx.auto_failover or loop_guard_halt) else None,
             provider_id=ctx.provider_id,
             model_id=ctx.model_id,
             metadata={
                 "steps": ctx.step,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
+                **({"stop_reason": loop_error} if loop_error else {}),
                 **({"aborted": True} if ctx.should_abort() else {}),
             },
         )

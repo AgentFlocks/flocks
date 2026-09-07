@@ -1014,6 +1014,62 @@ def test_legacy_terminal_scan_uses_and_persists_its_last_update_time(tmp_path: P
     assert repaired["finished_at"] == repaired["updated_at"]
 
 
+def test_initialize_migrates_cybergym_runs_for_cancellation_and_idempotency(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-cybergym-legacy",
+        snapshot_id="snapshot_test",
+        mode="cybergym_level1",
+        ruleset_digest="rules",
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO cybergym_tasks "
+            "(scan_id, task_id, manifest_json, status, final_artifact_id, selected_poc_id, "
+            "local_validation, selection_reason, created_at, updated_at) "
+            "VALUES (?, 'legacy-task', '{}', 'active', NULL, NULL, NULL, NULL, ?, ?)",
+            (scan_id, "2026-09-07T00:00:00+00:00", "2026-09-07T00:00:00+00:00"),
+        )
+        connection.execute("ALTER TABLE cybergym_runs RENAME TO cybergym_runs_current")
+        connection.execute(
+            """
+            CREATE TABLE cybergym_runs (
+                run_id TEXT PRIMARY KEY,
+                scan_id TEXT NOT NULL REFERENCES cybergym_tasks(scan_id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN ('replay', 'gdb', 'fuzz', 'minimize')),
+                status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+                input_json TEXT NOT NULL,
+                result_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO cybergym_runs VALUES (?, ?, 'fuzz', 'running', '{}', NULL, ?, ?)",
+            ("legacy-fuzz", scan_id, "2026-09-07T00:00:00+00:00", "2026-09-07T00:00:00+00:00"),
+        )
+        connection.execute("DROP TABLE cybergym_runs_current")
+        connection.execute("PRAGMA user_version = 4")
+
+    store.initialize()
+    store.finish_cybergym_run(
+        "legacy-fuzz",
+        "cancelled",
+        {"status": "cancelled", "cancel_source": "scan_cancelled"},
+    )
+    migrated = store.get_cybergym_run(scan_id, "legacy-fuzz")
+
+    assert migrated is not None
+    assert migrated["status"] == "cancelled"
+    assert migrated["idempotency_key"] is None
+    assert migrated["owner_token"] is None
+    assert migrated["owner_lease_expires_at"] is None
+    assert migrated["container_name"] is None
+
+
 def test_background_task_completion_retrieves_failure() -> None:
     retrieved = False
 

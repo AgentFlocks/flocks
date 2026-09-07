@@ -519,11 +519,15 @@ class BackgroundManager:
         async def _on_text_delta(_text: str) -> None:
             _touch()
 
+        async def _publish_event(event: str, payload: Dict[str, Any]) -> None:
+            _touch()
+            await publish_event(event, payload)
+
         runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
         return LoopCallbacks(
             on_step_start=_on_step_start,
             runner_callbacks=runner_cbs,
-            event_publish_callback=publish_event,
+            event_publish_callback=_publish_event,
         )
 
     async def _run_session_with_watchdog(

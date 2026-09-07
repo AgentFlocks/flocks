@@ -1858,6 +1858,10 @@ class SessionRunner:
                     result = StepResult(
                         action="stop",
                         content=halt_message,
+                        error=(
+                            "runner_tool_loop_guard_halt:repeated_exact_tool_call:"
+                            f"{tool_loop_guard.get('tool_name') or 'tool'}"
+                        ),
                         usage=result.usage,
                     )
 

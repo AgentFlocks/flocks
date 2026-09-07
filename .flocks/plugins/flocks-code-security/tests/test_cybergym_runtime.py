@@ -367,6 +367,31 @@ def test_fuzzer_manifest_requires_structured_input_contract() -> None:
         CyberGymTargetManifest.from_dict(invalid_contract)
 
 
+def test_cybergym_context_exposes_a_bounded_execution_checkpoint(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    work_unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="cybergym_solving",
+        role="cybergym_solver",
+        paths=["."],
+    )
+    run = store.start_cybergym_fuzz_run(
+        scan_id,
+        {"seed_ids": ["seed"], "dictionary": [], "budget_seconds": 1, "max_length": None},
+        idempotency_key="checkpoint-fixture",
+        budget_limit=2,
+        container_name="cybergym-fuzz-checkpoint",
+    )
+
+    context = CyberGymRuntime(store).context(scan_id, work_unit_id=work_unit_id)
+
+    state = context["execution_state"]
+    assert state["checkpoint_version"] == 1
+    assert state["work_unit"]["work_unit_id"] == work_unit_id
+    assert state["next_required_action"] == "wait_for_fuzz"
+    assert [item["run_id"] for item in state["active_fuzz_jobs"]] == [run["run_id"]]
+
+
 @pytest.mark.asyncio
 async def test_runtime_persists_artifacts_before_execution_and_submits_once(tmp_path: Path) -> None:
     store, scan_id = _store(tmp_path)
@@ -470,15 +495,160 @@ async def test_clean_replayed_seed_can_fuzz_without_gdb_target_reachability(tmp_
     runtime = CyberGymRuntime(store, executor=executor)
     seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
     await runtime.replay(scan_id, seed["artifact_id"])
-    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
-    for _ in range(20):
-        status = runtime.fuzz_status(scan_id, started["run_id"])
-        if status["status"] != "running":
-            break
-        await asyncio.sleep(0)
+    started = await runtime.fuzz_start(
+        scan_id,
+        [seed["artifact_id"]],
+        idempotency_key="clean-seed-fuzz",
+    )
+    retried = await runtime.fuzz_start(
+        scan_id,
+        [seed["artifact_id"]],
+        idempotency_key="clean-seed-fuzz",
+    )
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
 
     assert status["status"] == "completed"
+    assert status["result"]["outcome"] == "no_crash_found"
+    assert retried["run_id"] == started["run_id"]
+    assert retried["reused"] is True
     assert store.cybergym_budget(scan_id)["fuzz"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fuzz_no_interesting_inputs_is_not_reported_as_a_crash(tmp_path: Path) -> None:
+    class _NoInterestingInputsExecutor(_FixtureExecutor):
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            if "/opt/fixture-fuzzer" in command:
+                return CommandResult(1, "", "no interesting inputs were found")
+            return CommandResult(0, "", "")
+
+    manifest = _manifest()
+    manifest["engine"] = "afl"
+    store, scan_id = _store(tmp_path, manifest)
+    runtime = CyberGymRuntime(store, executor=_NoInterestingInputsExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert status["status"] == "completed"
+    assert status["result"]["outcome"] == "no_crash_found"
+    assert status["result"]["crash_candidate_count"] == 0
+    assert status["result"]["termination_reason"] == "afl_no_interesting_inputs"
+
+
+@pytest.mark.asyncio
+async def test_fuzz_persisted_corpus_is_a_normal_no_crash_completion(tmp_path: Path) -> None:
+    class _CorpusExecutor(_FixtureExecutor):
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            if "/opt/fixture-fuzzer" in command:
+                mount = next(item for item in command if item.startswith("type=bind,src="))
+                scratch = Path(mount.split(",src=", 1)[1].split(",dst=", 1)[0])
+                (scratch / "corpus" / "generated").write_bytes(b"expanded")
+                return CommandResult(1, "", "engine stopped after expanding corpus")
+            return CommandResult(0, "", "")
+
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=_CorpusExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert status["status"] == "completed"
+    assert status["result"]["outcome"] == "no_crash_found"
+    assert status["result"]["termination_reason"] == "corpus_persisted"
+
+
+@pytest.mark.asyncio
+async def test_afl_seed_copies_are_not_counted_as_new_corpus(tmp_path: Path) -> None:
+    class _AflCopiesSeedExecutor(_FixtureExecutor):
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            if "afl-fuzz" in command:
+                mount = next(item for item in command if item.startswith("type=bind,src="))
+                scratch = Path(mount.split(",src=", 1)[1].split(",dst=", 1)[0])
+                queue = scratch / "findings" / "default" / "queue"
+                queue.mkdir(parents=True)
+                # AFL copies input seeds under generated queue filenames.
+                (queue / "id:000000,orig:seed-0").write_bytes(b"seed")
+                return CommandResult(1, "", "fuzzer stopped unexpectedly")
+            return CommandResult(0, "", "")
+
+    manifest = _manifest()
+    manifest["engine"] = "afl"
+    store, scan_id = _store(tmp_path, manifest)
+    runtime = CyberGymRuntime(store, executor=_AflCopiesSeedExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert status["status"] == "failed"
+    assert status["result"]["new_corpus_count"] == 0
+    assert status["result"]["termination_reason"] == "unexpected_engine_exit"
+
+
+@pytest.mark.asyncio
+async def test_fuzz_persists_container_cleanup_diagnostics(tmp_path: Path) -> None:
+    class _CleanupAwareExecutor(_FixtureExecutor):
+        async def remove_container(self, _container_name: str) -> dict[str, str]:
+            return {"status": "failed", "detail": "docker daemon was unavailable during cleanup"}
+
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=_CleanupAwareExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert status["status"] == "completed"
+    assert status["result"]["container_cleanup"] == {
+        "status": "failed",
+        "detail": "docker daemon was unavailable during cleanup",
+    }
+
+
+@pytest.mark.asyncio
+async def test_scan_cancellation_records_fuzz_cancel_source(tmp_path: Path) -> None:
+    class _BlockingFuzzExecutor(_FixtureExecutor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fuzz_started = asyncio.Event()
+
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            if "/opt/fixture-fuzzer" in command:
+                self.fuzz_started.set()
+                await asyncio.Event().wait()
+            return CommandResult(0, "", "")
+
+    store, scan_id = _store(tmp_path)
+    executor = _BlockingFuzzExecutor()
+    runtime = CyberGymRuntime(store, executor=executor)
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    await executor.fuzz_started.wait()
+
+    observer = CyberGymRuntime(store, executor=_FixtureExecutor())
+    observed = await observer.fuzz_wait(scan_id, started["run_id"], timeout_seconds=1)
+
+    assert observed["status"] == "running"
+    assert store.get_cybergym_run(scan_id, started["run_id"])["status"] == "running"
+
+    cancelled = await runtime.cancel_fuzz_runs(scan_id, cancel_source="scan_cancelled")
+    status = runtime.fuzz_status(scan_id, started["run_id"])
+
+    assert cancelled == 1
+    assert status["status"] == "cancelled"
+    assert status["result"]["cancel_source"] == "scan_cancelled"
 
 
 def test_no_artifact_is_terminal_and_does_not_consume_budget(tmp_path: Path) -> None:
@@ -606,6 +776,54 @@ async def test_docker_daemon_errors_are_marked_unavailable(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_cancelling_docker_execution_terminates_the_child_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.terminated = False
+            self.communicate_calls = 0
+
+        async def communicate(self):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                await asyncio.Event().wait()
+            return b"", b""
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+    process = _Process()
+    removed = _Process()
+    removed.returncode = 0
+    removed.communicate_calls = 1
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_create_process(*command, **_kwargs):
+        commands.append(command)
+        return process if command[1] == "run" else removed
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_process)
+    running = asyncio.create_task(
+        DockerCommandExecutor().run(
+            ["docker", "run", "--name", "fixture-fuzz", "fixture"],
+            timeout_seconds=60,
+        )
+    )
+    await asyncio.sleep(0)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert process.terminated is True
+    assert process.communicate_calls == 2
+    assert ("docker", "rm", "--force", "fixture-fuzz") in commands
+
+
+@pytest.mark.asyncio
 async def test_container_stderr_cannot_impersonate_docker_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Process:
         returncode = 139
@@ -622,6 +840,10 @@ async def test_container_stderr_cannot_impersonate_docker_daemon(monkeypatch: py
 
     assert result.unavailable is False
     assert _execution_status(result) == "crash"
+
+
+def test_ordinary_nonzero_exit_is_not_a_crash() -> None:
+    assert _execution_status(CommandResult(1, "", "invalid input")) == "non_crash_exit"
 
 
 @pytest.mark.asyncio
@@ -771,7 +993,7 @@ async def test_replay_writes_input_at_manifest_path_basename(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("vul_exit_code", "fix_exit_code", "expected_status", "expected_confirmed"),
     [
-        (77, 0, "accepted", True),
+        (139, 0, "accepted", True),
         (0, 0, "rejected", False),
         (1, 1, "rejected", False),
         (300, 0, "rejected", False),
@@ -875,7 +1097,7 @@ async def test_official_worker_protocol_bounds_large_outputs_for_persistence(
         {
             "task_id": "arvo:1065",
             "results": {
-                "vul": {"exit_code": 77, "output": "v" * 40_000},
+                "vul": {"exit_code": 139, "output": "v" * 40_000},
                 "fix": {"exit_code": 0, "output": "f" * 40_000},
             },
         }
@@ -930,7 +1152,7 @@ def run_container_binary(task_id, poc_path, mode, data_dir, *, docker_timeout, c
     assert poc_path.is_file()
     assert data_dir.is_dir()
     assert (docker_timeout, cmd_timeout) == (5, 5)
-    return (77 if mode == 'vul' else 0, mode.encode())
+    return (139 if mode == 'vul' else 0, mode.encode())
 """,
         encoding="utf-8",
     )
@@ -952,7 +1174,7 @@ def run_container_binary(task_id, poc_path, mode, data_dir, *, docker_timeout, c
     )
 
     assert result == {
-        "vul": {"exit_code": 77, "output": "vul"},
+        "vul": {"exit_code": 139, "output": "vul"},
         "fix": {"exit_code": 0, "output": "fix"},
     }
 
@@ -966,7 +1188,7 @@ def run_container_binary(task_id, poc_path, mode, data_dir, *, docker_timeout, c
 
     assert judge_result["status"] == "accepted"
     assert judge_result["dynamic_confirmed"] is True
-    assert judge_result["vul_exit_code"] == 77
+    assert judge_result["vul_exit_code"] == 139
     assert judge_result["fix_exit_code"] == 0
 
 

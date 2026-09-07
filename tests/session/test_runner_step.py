@@ -3171,6 +3171,7 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
         else:
             assert result.action == "stop"
             assert "Stopped the loop because `echo_tool` was called 3 times in a row" in result.content
+            assert result.error == "runner_tool_loop_guard_halt:repeated_exact_tool_call:echo_tool"
 
     assert update_mock.await_args_list[-2].kwargs["content"].startswith("Stopped the loop because `echo_tool`")
     assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"

@@ -670,7 +670,7 @@ async def test_transient_worker_failure_resumes_same_session_and_attempt(
         exhausted.output["workers"][0]["work_unit_id"]
     )
     assert [attempt["status"] for attempt in attempts] == ["failed", "failed"]
-    assert attempts[-1]["failure_class"] == "attempts_exhausted"
+    assert attempts[-1]["failure_class"] == "agent_exited_no_facts"
 
 
 @pytest.mark.asyncio

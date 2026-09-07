@@ -55,6 +55,10 @@ _OFFICIAL_COMMAND_TIMEOUT = 10
 _OFFICIAL_MODE_OUTPUT_JSON_BYTES = 24 * 1024
 _OFFICIAL_MODE_ERROR_JSON_BYTES = 2 * 1024
 _DEFAULT_CYBERGYM_DATA_DIR = "/home/cybergym/cybergym-server-data"
+_AFL_NO_FINDINGS_MARKERS = (
+    "no interesting inputs were found",
+    "no new paths found",
+)
 
 
 class CyberGymManifestError(ValueError):
@@ -424,9 +428,35 @@ class DockerCommandExecutor:
             communicate = process.communicate() if stdin_bytes is None else process.communicate(stdin_bytes)
             stdout, stderr = await asyncio.wait_for(communicate, timeout=timeout_seconds)
         except asyncio.TimeoutError:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
             stdout, stderr = await process.communicate()
+            await self.remove_container(_docker_run_container_name(command))
             return CommandResult(process.returncode, _decode_output(stdout), _decode_output(stderr), timed_out=True)
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                try:
+                    await process.communicate()
+                except ProcessLookupError:
+                    pass
+            except ProcessLookupError:
+                pass
+            await self.remove_container(_docker_run_container_name(command))
+            raise
         decoded_stderr = _decode_output(stderr)
         return CommandResult(
             process.returncode,
@@ -434,6 +464,45 @@ class DockerCommandExecutor:
             decoded_stderr,
             unavailable=_docker_daemon_unavailable(command, process.returncode, decoded_stderr),
         )
+
+    async def remove_container(self, container_name: str | None) -> dict[str, str]:
+        """Force-remove a named container and report whether cleanup actually converged."""
+        if container_name is None:
+            return {"status": "not_requested"}
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "rm",
+                "--force",
+                container_name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return {"status": "unavailable", "detail": "docker executable is unavailable"}
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return {"status": "failed", "detail": "docker cleanup process disappeared"}
+            try:
+                await process.communicate()
+            except ProcessLookupError:
+                pass
+            return {"status": "failed", "detail": "docker cleanup timed out"}
+        except ProcessLookupError:
+            return {"status": "failed", "detail": "docker cleanup process disappeared"}
+        detail = _decode_output(stderr) or _decode_output(stdout)
+        if process.returncode == 0:
+            return {"status": "removed"}
+        if "no such container" in detail.casefold():
+            # `docker run --rm` commonly reaches this state before the
+            # supervisor asks for explicit cleanup.  It is converged, not an
+            # error or a reason to reclassify a fuzz result.
+            return {"status": "not_found"}
+        return {"status": "failed", "detail": detail[:1_000] or "docker rm failed"}
 
 
 def _decode_output(value: bytes) -> str:
@@ -606,14 +675,17 @@ class OfficialCyberGymJudgeAdapter:
                 "vul": vul,
                 "fix": fix,
             }
-        vul_crashed = vul_exit_code not in {0, _OFFICIAL_TIMEOUT_EXIT_CODE}
+        # A non-zero application exit is not, by itself, a crash.  The
+        # official runner reports exit codes only, so require a signal-shaped
+        # code here; local replay can additionally accept sanitizer evidence.
+        vul_crashed = _exit_code_is_crash(vul_exit_code)
         fix_clean = fix_exit_code == 0
         dynamic_confirmed = vul_crashed and fix_clean
         return {
             "status": "accepted" if dynamic_confirmed else "rejected",
             "runner_task_id": runner_task_id,
             "dynamic_confirmed": dynamic_confirmed,
-            "criterion": "vul_exit_code not in {0, 300} and fix_exit_code == 0",
+            "criterion": "vul_exit_code is signal-shaped and fix_exit_code == 0",
             "vul_exit_code": vul_exit_code,
             "fix_exit_code": fix_exit_code,
             "vul_crashed": vul_crashed,
@@ -642,9 +714,15 @@ class CyberGymRuntime:
         )
         self.task_data_dir = configured_data_dir.expanduser().resolve()
         self._fuzz_tasks: dict[str, asyncio.Task[None]] = {}
+        self._fuzz_cancel_sources: dict[str, str] = {}
 
-    def context(self, scan_id: str) -> dict[str, Any]:
-        return self.store.cybergym_context(scan_id)
+    def context(
+        self,
+        scan_id: str,
+        *,
+        work_unit_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.store.cybergym_context(scan_id, work_unit_id=work_unit_id)
 
     def artifact_create(
         self,
@@ -873,6 +951,8 @@ class CyberGymRuntime:
         dictionary: list[str] | None = None,
         budget_seconds: int | None = None,
         max_length: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_scope: str | None = None,
     ) -> dict[str, Any]:
         manifest = self._manifest(scan_id)
         if not manifest.fuzzer_supported or manifest.fuzzer_target is None:
@@ -898,25 +978,129 @@ class CyberGymRuntime:
                 raise ValueError("A fuzz seed artifact is not available for this CyberGym task")
             seeds.append(artifact)
         self._assert_fuzz_preflight(scan_id, seed_ids)
-        self.store.consume_cybergym_budget(scan_id, "fuzz", manifest.limits.max_fuzz_runs)
-        run = self.store.start_cybergym_run(
+        normalized_dictionary = list(dictionary or [])
+        input_payload = {
+            "seed_ids": seed_ids,
+            "dictionary": normalized_dictionary,
+            "budget_seconds": seconds,
+            "max_length": max_length,
+        }
+        if idempotency_key is None:
+            idempotency_key = "fuzz-" + hashlib.sha256(
+                json.dumps(
+                    {"scope": idempotency_scope, "input": input_payload},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+        container_name = _fuzz_container_name(idempotency_key)
+        run = self.store.start_cybergym_fuzz_run(
             scan_id,
-            "fuzz",
-            {"seed_ids": seed_ids, "budget_seconds": seconds, "max_length": max_length},
+            input_payload,
+            idempotency_key=idempotency_key,
+            budget_limit=manifest.limits.max_fuzz_runs,
+            container_name=container_name,
         )
+        if run["reused"]:
+            return {"run_id": run["run_id"], "status": run["status"], "reused": True}
         task = asyncio.create_task(
-            self._run_fuzz(scan_id, run["run_id"], manifest, seeds, dictionary or [], seconds, max_length),
+            self._run_fuzz(
+                scan_id,
+                run["run_id"],
+                manifest,
+                seeds,
+                normalized_dictionary,
+                seconds,
+                max_length,
+                container_name,
+            ),
             name=f"cybergym-fuzz:{run['run_id']}",
         )
         self._fuzz_tasks[run["run_id"]] = task
-        task.add_done_callback(lambda _task: self._fuzz_tasks.pop(run["run_id"], None))
-        return {"run_id": run["run_id"], "status": "running"}
+
+        def _clear_local_fuzz_tasks(_task: asyncio.Task[None]) -> None:
+            self._fuzz_tasks.pop(run["run_id"], None)
+
+        task.add_done_callback(_clear_local_fuzz_tasks)
+        return {"run_id": run["run_id"], "status": "running", "reused": False}
 
     def fuzz_status(self, scan_id: str, run_id: str) -> dict[str, Any]:
         run = self.store.get_cybergym_run(scan_id, run_id)
         if run is None or run["kind"] != "fuzz":
             raise ValueError("Fuzz run is not available for this CyberGym task")
-        return run
+        return self._public_fuzz_run(run)
+
+    async def fuzz_wait(
+        self,
+        scan_id: str,
+        run_id: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Wait for a persisted fuzz job without allowing the caller to cancel it."""
+        if timeout_seconds is not None and (
+            not isinstance(timeout_seconds, int)
+            or isinstance(timeout_seconds, bool)
+            or not 1 <= timeout_seconds <= 60
+        ):
+            raise ValueError("CyberGym fuzz wait timeout must be between 1 and 60 seconds")
+        run = self.store.get_cybergym_run(scan_id, run_id)
+        if run is None or run["kind"] != "fuzz":
+            raise ValueError("Fuzz run is not available for this CyberGym task")
+        if run["status"] != "running":
+            return self._public_fuzz_run(run)
+        task = self._fuzz_tasks.get(run_id)
+        if task is None:
+            # A second process can observe a job that its original supervisor
+            # owns.  Do not turn a delayed SQLite write or event-loop stall
+            # into an artificial failure.  Scan-owner recovery deals with a
+            # genuinely interrupted parent process.
+            await asyncio.sleep(timeout_seconds or 1)
+            return self.fuzz_status(scan_id, run_id)
+        try:
+            if timeout_seconds is None:
+                await asyncio.shield(task)
+            else:
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        except TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+        return self.fuzz_status(scan_id, run_id)
+
+    async def cancel_fuzz_runs(self, scan_id: str, *, cancel_source: str) -> int:
+        """Cancel active fuzz runs for a scan and persist the cancellation source."""
+        if not isinstance(cancel_source, str) or not cancel_source:
+            raise ValueError("CyberGym fuzz cancellation source is invalid")
+        cancelled_count = 0
+        cancelled_tasks: list[asyncio.Task[None]] = []
+        for run in self.store.list_cybergym_runs(scan_id):
+            if run["kind"] != "fuzz" or run["status"] != "running":
+                continue
+            task = self._fuzz_tasks.get(run["run_id"])
+            if task is None:
+                try:
+                    self.store.finish_cybergym_run(
+                        run["run_id"],
+                        "cancelled",
+                        {
+                            "status": "cancelled",
+                            "failure_code": "cancelled",
+                            "cancel_source": cancel_source,
+                        },
+                    )
+                    cancelled_count += 1
+                except ValueError:
+                    pass
+                await self._record_fuzz_cleanup(run["run_id"], run.get("container_name"))
+                continue
+            if task.cancel():
+                self._fuzz_cancel_sources[run["run_id"]] = cancel_source
+                cancelled_tasks.append(task)
+        if cancelled_tasks:
+            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+        return cancelled_count + len(cancelled_tasks)
 
     def _assert_fuzz_preflight(
         self,
@@ -1134,6 +1318,7 @@ class CyberGymRuntime:
         dictionary: list[str],
         seconds: int,
         max_length: int | None,
+        container_name: str,
     ) -> None:
         try:
             with tempfile.TemporaryDirectory(prefix="cybergym-fuzz-") as temporary:
@@ -1155,7 +1340,7 @@ class CyberGymRuntime:
                 mount_root = str(PurePosixPath(manifest.input_path).parent)
                 container_corpus = f"{mount_root}/corpus"
                 container_findings = f"{mount_root}/findings"
-                command = self._container_command(manifest, scratch)
+                command = self._container_command(manifest, scratch, container_name=container_name)
                 if manifest.engine == "libfuzzer":
                     command.extend([
                         manifest.fuzzer_target or "",
@@ -1189,21 +1374,121 @@ class CyberGymRuntime:
                     findings,
                     seeds=seeds,
                 )
+            crash_candidate_count = sum(item["kind"] == "crash" for item in produced["artifacts"])
+            new_corpus_count = sum(item["kind"] == "corpus" for item in produced["artifacts"])
+            engine_status = _execution_status(result)
             payload = {
-                "status": _execution_status(result),
+                "status": "completed",
+                "execution_status": engine_status,
+                "crash_candidate_count": crash_candidate_count,
+                "new_corpus_count": new_corpus_count,
                 "exit_code": result.returncode,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "artifacts": produced["artifacts"],
                 "rejected_artifacts": produced["rejected"],
             }
-            self.store.finish_cybergym_run(run_id, "completed", payload)
-        except BaseException as exc:
-            self.store.finish_cybergym_run(
+            termination_reason = _fuzz_termination_reason(
+                manifest.engine,
+                result,
+                crash_candidate_count=crash_candidate_count,
+                new_corpus_count=new_corpus_count,
+            )
+            if result.unavailable or engine_status == "harness_error":
+                payload.update({
+                    "status": "failed",
+                    "failure_code": "runtime_unavailable" if result.unavailable else "harness_error",
+                    "termination_reason": "runtime_unavailable" if result.unavailable else "harness_error",
+                })
+                self._finish_fuzz_run(run_id, "failed", payload)
+            elif result.timed_out:
+                payload.update({
+                    "status": "failed",
+                    "failure_code": "execution_timeout",
+                    "termination_reason": "execution_timeout",
+                })
+                self._finish_fuzz_run(run_id, "failed", payload)
+            elif termination_reason is not None:
+                payload["outcome"] = (
+                    "crash_candidate_found" if crash_candidate_count else "no_crash_found"
+                )
+                payload["termination_reason"] = termination_reason
+                self._finish_fuzz_run(run_id, "completed", payload)
+            else:
+                payload.update({
+                    "status": "failed",
+                    "failure_code": "fuzzer_error",
+                    "termination_reason": "unexpected_engine_exit",
+                })
+                self._finish_fuzz_run(run_id, "failed", payload)
+        except asyncio.CancelledError:
+            self._finish_fuzz_run(
+                run_id,
+                "cancelled",
+                {
+                    "status": "cancelled",
+                    "failure_code": "cancelled",
+                    "cancel_source": self._fuzz_cancel_sources.get(run_id, "owner_cancelled"),
+                },
+            )
+            raise
+        except Exception as exc:
+            self._finish_fuzz_run(
                 run_id,
                 "failed",
                 {"status": "runtime_error", "error": type(exc).__name__, "detail": str(exc)[:1_000]},
             )
+        finally:
+            self._fuzz_cancel_sources.pop(run_id, None)
+            await self._record_fuzz_cleanup(run_id, container_name)
+
+    def _finish_fuzz_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
+        try:
+            self.store.finish_cybergym_run(run_id, status, result)
+        except ValueError:
+            current = self.store.get_cybergym_run_by_id(run_id)
+            if current is None or current["status"] == "running":
+                raise
+
+    async def _cleanup_fuzz_container(self, container_name: Any) -> dict[str, str]:
+        if not isinstance(container_name, str) or not container_name:
+            return {"status": "not_requested"}
+        cleanup = getattr(self.executor, "remove_container", None)
+        if not callable(cleanup):
+            return {"status": "not_supported"}
+        try:
+            result = cleanup(container_name)
+            if inspect.isawaitable(result):
+                result = await result
+        except (OSError, RuntimeError):
+            return {"status": "failed", "detail": "container cleanup raised an execution error"}
+        if isinstance(result, dict) and isinstance(result.get("status"), str):
+            status = result["status"]
+            output = {"status": status}
+            if isinstance(result.get("detail"), str):
+                output["detail"] = result["detail"][:1_000]
+            return output
+        # Older/custom executors historically returned None.  Preserve that
+        # compatibility, but make the absence of a verified cleanup explicit.
+        return {"status": "not_supported"}
+
+    async def _record_fuzz_cleanup(self, run_id: str, container_name: Any) -> None:
+        cleanup = await self._cleanup_fuzz_container(container_name)
+        try:
+            self.store.record_cybergym_fuzz_cleanup(run_id, cleanup)
+        except ValueError:
+            # The scan may have been finalized concurrently.  Do not convert a
+            # completed fuzz result into a runtime failure while recording
+            # secondary cleanup diagnostics.
+            return
+
+    @staticmethod
+    def _public_fuzz_run(run: dict[str, Any]) -> dict[str, Any]:
+        output = dict(run)
+        output.pop("owner_token", None)
+        output.pop("owner_lease_expires_at", None)
+        output.pop("container_name", None)
+        return output
 
     async def _execute_minimize(self, manifest: CyberGymTargetManifest, raw: bytes) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="cybergym-minimize-") as temporary:
@@ -1250,21 +1535,32 @@ class CyberGymRuntime:
     ) -> dict[str, list[dict[str, Any]]]:
         persisted: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
+        seed_digests = {
+            hashlib.sha256(seed["data"]).hexdigest()
+            for seed in seeds
+        }
+        poc_ids = sorted(
+            {
+                poc_id
+                for seed in seeds
+                for poc_id in [
+                    self.store.cybergym_artifact_poc_id(scan_id, seed["artifact_id"])
+                ]
+                if poc_id is not None
+            }
+        )
         for directory, kind in self._fuzz_output_directories(findings, corpus):
             for path in sorted(directory.rglob("*"), key=lambda item: str(item.relative_to(directory)))[:256]:
-                if not path.is_file() or path.is_symlink() or (kind == "corpus" and path.name.startswith("seed-")):
+                if not path.is_file() or path.is_symlink():
                     continue
                 raw = path.read_bytes()
-                poc_ids = sorted(
-                    {
-                        poc_id
-                        for seed in seeds
-                        for poc_id in [
-                            self.store.cybergym_artifact_poc_id(scan_id, seed["artifact_id"])
-                        ]
-                        if poc_id is not None
-                    }
-                )
+                # AFL copies initial inputs into `queue/` under generated
+                # names (for example `id:000000,orig:seed-0`).  Filename
+                # filtering therefore counts those copies as a discovery.
+                # A corpus item is new only when its bytes differ from every
+                # supplied seed; crash artifacts retain their own evidence.
+                if kind == "corpus" and hashlib.sha256(raw).hexdigest() in seed_digests:
+                    continue
                 provenance: dict[str, Any] = {
                     "run_id": run_id,
                     "operation": self._manifest(scan_id).engine,
@@ -1301,7 +1597,10 @@ class CyberGymRuntime:
         for path in findings.glob("*/queue"):
             if path.is_dir() and not path.is_symlink():
                 corpus_dirs.append(path)
-        if not crash_dirs:
+        # A queue is a recognizable AFL layout.  When it has no crashes
+        # directory, falling back to the parent `findings/` directory would
+        # classify every queued seed as a crash artifact.
+        if not crash_dirs and not corpus_dirs:
             crash_dirs = [findings]
         if not corpus_dirs:
             corpus_dirs = [corpus]
@@ -1309,13 +1608,22 @@ class CyberGymRuntime:
             (path, "corpus") for path in corpus_dirs
         ]
 
-    def _container_command(self, manifest: CyberGymTargetManifest, scratch: Path, *, gdb: bool = False) -> list[str]:
+    def _container_command(
+        self,
+        manifest: CyberGymTargetManifest,
+        scratch: Path,
+        *,
+        gdb: bool = False,
+        container_name: str | None = None,
+    ) -> list[str]:
         mount_root = str(PurePosixPath(manifest.input_path).parent)
         command = [
             "docker", "run", "--rm", "--network", "none", "--read-only",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--pids-limit", "128", "--memory", "1024m", "--cpus", "1.0",
         ]
+        if container_name is not None:
+            command.extend(["--name", container_name])
         command.extend(_docker_user_args())
         command.extend(["--mount", f"type=bind,src={scratch.resolve()},dst={mount_root}"])
         if gdb:
@@ -1424,7 +1732,54 @@ def _execution_status(result: CommandResult) -> str:
         return "clean"
     if result.returncode in {125, 126, 127, None}:
         return "harness_error"
-    return "crash"
+    return "crash" if _has_crash_evidence(result) else "non_crash_exit"
+
+
+def _has_crash_evidence(result: CommandResult) -> bool:
+    """Accept only a signal-like exit or sanitizer report as crash evidence.
+
+    A target may intentionally return a non-zero application code.  That is a
+    useful replay observation, but it must not be promoted to a crash PoC.
+    Docker normally returns 128 + signal for a process killed by a Unix signal;
+    direct subprocess executors may return the negative signal instead.
+    """
+    if _exit_code_is_crash(result.returncode):
+        return True
+    output = f"{result.stdout}\n{result.stderr}".casefold()
+    markers = (
+        "addresssanitizer",
+        "undefinedbehaviorsanitizer",
+        "memorysanitizer",
+        "threadsanitizer",
+        "runtime error:",
+        "deadly signal",
+    )
+    return any(marker in output for marker in markers)
+
+
+def _exit_code_is_crash(exit_code: int | None) -> bool:
+    return exit_code in {-11, -8, -7, -6, -4, 132, 134, 135, 136, 139}
+
+
+def _fuzz_termination_reason(
+    engine: str,
+    result: CommandResult,
+    *,
+    crash_candidate_count: int,
+    new_corpus_count: int,
+) -> str | None:
+    """Return a positive, persisted reason when fuzzing ended without an engine error."""
+    if crash_candidate_count:
+        return "crash_artifact_found"
+    if result.returncode == 0:
+        return "engine_completed"
+    if new_corpus_count:
+        return "corpus_persisted"
+    if engine == "afl":
+        output = f"{result.stdout}\n{result.stderr}".casefold()
+        if any(marker in output for marker in _AFL_NO_FINDINGS_MARKERS):
+            return "afl_no_interesting_inputs"
+    return None
 
 
 def _docker_user_args() -> list[str]:
@@ -1433,6 +1788,22 @@ def _docker_user_args() -> list[str]:
     if not callable(getuid) or not callable(getgid):
         return []
     return ["--user", f"{getuid()}:{getgid()}"]
+
+
+def _docker_run_container_name(command: list[str]) -> str | None:
+    if len(command) < 2 or command[0:2] != ["docker", "run"]:
+        return None
+    for index, value in enumerate(command[:-1]):
+        if value == "--name":
+            return command[index + 1]
+        if value.startswith("--name=") and len(value) > len("--name="):
+            return value.removeprefix("--name=")
+    return None
+
+
+def _fuzz_container_name(idempotency_key: str) -> str:
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
+    return f"cybergym-fuzz-{digest}"
 
 
 def _docker_daemon_unavailable(command: list[str], returncode: int | None, stderr: str) -> bool:

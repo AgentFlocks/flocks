@@ -77,7 +77,7 @@ DYNAMIC_EXECUTION_CATEGORIES = (
     "unsafe-deserialization",
 )
 # Bump this whenever initialize() adds or changes schema migrations.
-STORE_SCHEMA_VERSION = 4
+STORE_SCHEMA_VERSION = 7
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -801,7 +801,11 @@ class ScanStore:
                     run_id TEXT PRIMARY KEY,
                     scan_id TEXT NOT NULL REFERENCES cybergym_tasks(scan_id) ON DELETE CASCADE,
                     kind TEXT NOT NULL CHECK (kind IN ('replay', 'gdb', 'fuzz', 'minimize')),
-                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+                    idempotency_key TEXT,
+                    owner_token TEXT,
+                    owner_lease_expires_at TEXT,
+                    container_name TEXT,
                     input_json TEXT NOT NULL,
                     result_json TEXT,
                     created_at TEXT NOT NULL,
@@ -952,6 +956,64 @@ class ScanStore:
             }
             if "selected_poc_id" not in cybergym_task_columns:
                 connection.execute("ALTER TABLE cybergym_tasks ADD COLUMN selected_poc_id TEXT")
+            cybergym_run_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(cybergym_runs)").fetchall()
+            }
+            cybergym_run_schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cybergym_runs'"
+            ).fetchone()
+            needs_cybergym_run_rebuild = (
+                "idempotency_key" not in cybergym_run_columns
+                or "owner_token" not in cybergym_run_columns
+                or "owner_lease_expires_at" not in cybergym_run_columns
+                or "container_name" not in cybergym_run_columns
+                or cybergym_run_schema is None
+                or "cancelled" not in str(cybergym_run_schema["sql"] or "").casefold()
+            )
+            if needs_cybergym_run_rebuild:
+                connection.execute(
+                    """
+                    CREATE TABLE cybergym_runs_v6 (
+                        run_id TEXT PRIMARY KEY,
+                        scan_id TEXT NOT NULL REFERENCES cybergym_tasks(scan_id) ON DELETE CASCADE,
+                        kind TEXT NOT NULL CHECK (kind IN ('replay', 'gdb', 'fuzz', 'minimize')),
+                        status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+                        idempotency_key TEXT,
+                        owner_token TEXT,
+                        owner_lease_expires_at TEXT,
+                        container_name TEXT,
+                        input_json TEXT NOT NULL,
+                        result_json TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                idempotency_select = (
+                    "idempotency_key"
+                    if "idempotency_key" in cybergym_run_columns
+                    else "NULL"
+                )
+                owner_token_select = "owner_token" if "owner_token" in cybergym_run_columns else "NULL"
+                owner_lease_select = (
+                    "owner_lease_expires_at"
+                    if "owner_lease_expires_at" in cybergym_run_columns
+                    else "NULL"
+                )
+                container_name_select = (
+                    "container_name" if "container_name" in cybergym_run_columns else "NULL"
+                )
+                connection.execute(
+                    "INSERT INTO cybergym_runs_v6 "
+                    "(run_id, scan_id, kind, status, idempotency_key, owner_token, "
+                    "owner_lease_expires_at, container_name, input_json, result_json, created_at, updated_at) "
+                    "SELECT run_id, scan_id, kind, status, "
+                    f"{idempotency_select}, {owner_token_select}, {owner_lease_select}, "
+                    f"{container_name_select}, input_json, result_json, created_at, updated_at FROM cybergym_runs"
+                )
+                connection.execute("DROP TABLE cybergym_runs")
+                connection.execute("ALTER TABLE cybergym_runs_v6 RENAME TO cybergym_runs")
             legacy_bindings = connection.execute(
                 """
                 SELECT sb.session_id, sb.scan_id, sb.work_unit_id,
@@ -1066,6 +1128,16 @@ class ScanStore:
                 "ON work_attempts(work_unit_id) "
                 "WHERE status IN ('pending', 'running', 'recovering')"
             )
+            self._reconcile_duplicate_active_worker_batches(connection)
+            # The read-before-insert check in create_worker_batch is useful for
+            # diagnostics, but it is not a cross-process synchronization
+            # primitive.  Keep the invariant in SQLite as well so two runner
+            # processes cannot create the same active phase concurrently.
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS worker_batches_one_active_phase "
+                "ON worker_batches(scan_id, phase) "
+                "WHERE status IN ('pending', 'running')"
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS source_access_attempt_path_op "
                 "ON source_access(attempt_id, relative_path, operation)"
@@ -1093,6 +1165,11 @@ class ScanStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS cybergym_runs_scan_created "
                 "ON cybergym_runs(scan_id, created_at, run_id)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS cybergym_runs_idempotency "
+                "ON cybergym_runs(scan_id, kind, idempotency_key) "
+                "WHERE idempotency_key IS NOT NULL"
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS poc_bundles_scan_created "
@@ -1164,7 +1241,73 @@ class ScanStore:
             )
             connection.execute("DROP INDEX IF EXISTS verification_subject_once")
             connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
-        self._restrict_database_files()
+            self._restrict_database_files()
+
+    @staticmethod
+    def _reconcile_duplicate_active_worker_batches(connection: sqlite3.Connection) -> None:
+        """Make a pre-v7 duplicate batch state safe to constrain.
+
+        Older releases only checked phase exclusivity in application code, so a
+        database shared by two parents can contain duplicate active batches.
+        Keep the oldest batch as the established owner and terminalize later
+        duplicate units before creating the partial unique index.  This is a
+        migration repair, not normal scheduling behaviour.
+        """
+        duplicates = connection.execute(
+            "SELECT scan_id, phase FROM worker_batches "
+            "WHERE status IN ('pending', 'running') "
+            "GROUP BY scan_id, phase HAVING COUNT(*) > 1"
+        ).fetchall()
+        now = _now()
+        for duplicate in duplicates:
+            batches = connection.execute(
+                "SELECT batch_id FROM worker_batches WHERE scan_id = ? AND phase = ? "
+                "AND status IN ('pending', 'running') ORDER BY created_at, batch_id",
+                (duplicate["scan_id"], duplicate["phase"]),
+            ).fetchall()
+            for row in batches[1:]:
+                batch_id = row["batch_id"]
+                unit_rows = connection.execute(
+                    "SELECT work_unit_id FROM worker_batch_units WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchall()
+                unit_ids = [item["work_unit_id"] for item in unit_rows]
+                connection.execute(
+                    "UPDATE worker_batches SET status = 'failed', updated_at = ? "
+                    "WHERE batch_id = ? AND status IN ('pending', 'running')",
+                    (now, batch_id),
+                )
+                if unit_ids:
+                    placeholders = ", ".join("?" for _ in unit_ids)
+                    connection.execute(
+                        "UPDATE work_units SET status = 'failed', finished_at = COALESCE(finished_at, ?), "
+                        "updated_at = ? WHERE work_unit_id IN (" + placeholders + ") "
+                        "AND status IN ('pending', 'running')",
+                        (now, now, *unit_ids),
+                    )
+                    connection.execute(
+                        "UPDATE work_attempts SET status = 'failed', "
+                        "failure_class = COALESCE(failure_class, 'duplicate_active_batch_recovered'), "
+                        "finished_at = COALESCE(finished_at, ?), updated_at = ? "
+                        "WHERE work_unit_id IN (" + placeholders + ") "
+                        "AND status IN ('pending', 'running', 'recovering')",
+                        (now, now, *unit_ids),
+                    )
+                connection.execute(
+                    "INSERT INTO scan_events "
+                    "(scan_id, phase_run_id, event_type, level, title, payload_json, created_at) "
+                    "VALUES (?, NULL, 'worker.batch_recovered', 'warning', ?, ?, ?)",
+                    (
+                        duplicate["scan_id"],
+                        "Recovered duplicate active worker batch",
+                        json.dumps(
+                            {"batch_id": batch_id, "phase": duplicate["phase"]},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        now,
+                    ),
+                )
 
     def save_snapshot(
         self,
@@ -1505,6 +1648,11 @@ class ScanStore:
         now = _now()
         created_units: list[dict[str, Any]] = []
         with self._lock, self._connect() as connection:
+            # Serialize the phase-exclusivity check with the insert.  The
+            # partial unique index below is the final cross-process guard;
+            # this immediate transaction makes the error deterministic and
+            # avoids constructing a half batch before that guard fires.
+            connection.execute("BEGIN IMMEDIATE")
             scan = self._require_scan_status(connection, scan_id, {"running"})
             if phase == "probing" and not bool(scan["dynamic_enabled"]):
                 raise ValueError("Dynamic validation is not enabled for this scan")
@@ -3134,10 +3282,20 @@ class ScanStore:
                 )
         return output
 
-    def cybergym_context(self, scan_id: str) -> dict[str, Any]:
+    def cybergym_context(
+        self,
+        scan_id: str,
+        *,
+        work_unit_id: str | None = None,
+    ) -> dict[str, Any]:
         task = self.get_cybergym_task(scan_id)
         if task is None:
             raise ValueError("CyberGym task is not available for this scan")
+        work_unit: dict[str, Any] | None = None
+        if work_unit_id is not None:
+            work_unit = self.get_work_unit(work_unit_id)
+            if work_unit is None or work_unit["scan_id"] != scan_id:
+                raise ValueError("CyberGym execution context does not belong to this scan")
         poc_bundles = self.list_accepted_poc_bundles(scan_id)
         poc_by_candidate = {
             item["candidate_id"]: {
@@ -3187,6 +3345,48 @@ class ScanStore:
                 if row["candidate_id"] in poc_by_candidate:
                     candidate["generic_poc"] = poc_by_candidate[row["candidate_id"]]
                 candidates.append(candidate)
+        runs = self.list_cybergym_runs(scan_id)
+        active_fuzz_jobs = [
+            {"run_id": run["run_id"], "updated_at": run["updated_at"]}
+            for run in runs
+            if run["kind"] == "fuzz" and run["status"] == "running"
+        ]
+        recent_runs = []
+        for run in runs[-16:]:
+            result = run.get("result") if isinstance(run.get("result"), dict) else {}
+            recent_runs.append(
+                {
+                    "run_id": run["run_id"],
+                    "kind": run["kind"],
+                    "status": run["status"],
+                    "updated_at": run["updated_at"],
+                    "summary": {
+                        key: result[key]
+                        for key in (
+                            "status",
+                            "outcome",
+                            "execution_status",
+                            "termination_reason",
+                            "failure_code",
+                            "crash_candidate_count",
+                            "new_corpus_count",
+                            "container_cleanup",
+                        )
+                        if key in result
+                    },
+                }
+            )
+        artifact_count = len(self.list_cybergym_artifacts(scan_id))
+        if task["status"] != "active":
+            next_required_action = "terminal"
+        elif active_fuzz_jobs:
+            next_required_action = "wait_for_fuzz"
+        elif artifact_count == 0:
+            next_required_action = "create_or_import_seed"
+        elif not any(run["kind"] == "replay" for run in runs):
+            next_required_action = "replay_seed"
+        else:
+            next_required_action = "evaluate_artifacts_or_submit"
         return {
             "task": {
                 key: value
@@ -3198,6 +3398,21 @@ class ScanStore:
             "artifacts": self.list_cybergym_artifacts(scan_id),
             "submission": self.get_cybergym_submission(scan_id),
             "budget": self.cybergym_budget(scan_id),
+            "execution_state": {
+                "checkpoint_version": 1,
+                "work_unit": (
+                    {
+                        "work_unit_id": work_unit["work_unit_id"],
+                        "phase": work_unit["phase"],
+                        "status": work_unit["status"],
+                    }
+                    if work_unit is not None
+                    else None
+                ),
+                "active_fuzz_jobs": active_fuzz_jobs,
+                "recent_runs": recent_runs,
+                "next_required_action": next_required_action,
+            },
         }
 
     def create_cybergym_artifact(
@@ -3348,8 +3563,86 @@ class ScanStore:
             )
         return {"run_id": run_id, "scan_id": scan_id, "kind": kind, "status": "running"}
 
+    def start_cybergym_fuzz_run(
+        self,
+        scan_id: str,
+        input_payload: dict[str, Any],
+        *,
+        idempotency_key: str,
+        budget_limit: int,
+        container_name: str,
+    ) -> dict[str, Any]:
+        """Atomically reuse or create one budgeted fuzz run for a solver request."""
+        if not isinstance(input_payload, dict):
+            raise ValueError("CyberGym fuzz input is invalid")
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key
+            or len(idempotency_key) > 128
+        ):
+            raise ValueError("CyberGym fuzz idempotency key is invalid")
+        if not isinstance(budget_limit, int) or isinstance(budget_limit, bool) or budget_limit < 1:
+            raise ValueError("CyberGym fuzz budget limit is invalid")
+        if not isinstance(container_name, str) or not container_name or len(container_name) > 128:
+            raise ValueError("CyberGym fuzz container name is invalid")
+        encoded_input = json.dumps(input_payload, ensure_ascii=False, sort_keys=True)
+        run_id = f"cybergym_run_{uuid.uuid4().hex}"
+        now = _now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None or task["status"] != "active":
+                raise ValueError("CyberGym task is not active")
+            existing = connection.execute(
+                "SELECT * FROM cybergym_runs WHERE scan_id = ? AND kind = 'fuzz' "
+                "AND idempotency_key = ?",
+                (scan_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                if existing["input_json"] != encoded_input:
+                    raise ValueError("CyberGym fuzz idempotency key was reused with different input")
+                output = self._decode_cybergym_run(existing)
+                output["reused"] = True
+                return output
+            connection.execute(
+                "INSERT INTO cybergym_budget (scan_id, kind, used) VALUES (?, 'fuzz', 0) "
+                "ON CONFLICT(scan_id, kind) DO NOTHING",
+                (scan_id,),
+            )
+            budget = connection.execute(
+                "UPDATE cybergym_budget SET used = used + 1 WHERE scan_id = ? "
+                "AND kind = 'fuzz' AND used < ?",
+                (scan_id, budget_limit),
+            )
+            if budget.rowcount != 1:
+                raise ValueError("CyberGym fuzz budget is exhausted")
+            connection.execute(
+                "INSERT INTO cybergym_runs "
+                "(run_id, scan_id, kind, status, idempotency_key, owner_token, "
+                "owner_lease_expires_at, container_name, input_json, result_json, created_at, updated_at) "
+                "VALUES (?, ?, 'fuzz', 'running', ?, NULL, NULL, ?, ?, NULL, ?, ?)",
+                (
+                    run_id,
+                    scan_id,
+                    idempotency_key,
+                    container_name,
+                    encoded_input,
+                    now,
+                    now,
+                ),
+            )
+        return {
+            "run_id": run_id,
+            "scan_id": scan_id,
+            "kind": "fuzz",
+            "status": "running",
+            "reused": False,
+        }
+
     def finish_cybergym_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
-        if status not in {"completed", "failed"} or not isinstance(result, dict):
+        if status not in {"completed", "failed", "cancelled"} or not isinstance(result, dict):
             raise ValueError("CyberGym run terminal result is invalid")
         encoded = json.dumps(result, ensure_ascii=False, sort_keys=True)
         if len(encoded.encode("utf-8")) > 128 * 1024:
@@ -3363,10 +3656,53 @@ class ScanStore:
             if cursor.rowcount != 1:
                 raise ValueError("CyberGym run is not active")
 
+    def record_cybergym_fuzz_cleanup(self, run_id: str, cleanup: dict[str, Any]) -> None:
+        """Attach verified container-cleanup diagnostics to a terminal fuzz run.
+
+        Cleanup is operational evidence, not a second outcome dimension: a
+        cancelled fuzz job remains cancelled even when Docker removal needs a
+        later reaper.  Persisting the distinction prevents an orphaned
+        container from being silently treated as successfully cleaned up.
+        """
+        status = cleanup.get("status") if isinstance(cleanup, dict) else None
+        if status not in {"removed", "not_found", "not_requested", "not_supported", "unavailable", "failed"}:
+            raise ValueError("CyberGym fuzz cleanup status is invalid")
+        detail = cleanup.get("detail")
+        if detail is not None and (not isinstance(detail, str) or len(detail) > 1_000):
+            raise ValueError("CyberGym fuzz cleanup detail is invalid")
+        recorded = {"status": status}
+        if isinstance(detail, str) and detail:
+            recorded["detail"] = detail
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT status, result_json FROM cybergym_runs WHERE run_id = ? AND kind = 'fuzz'",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("CyberGym fuzz run is not available")
+            if row["status"] == "running":
+                raise ValueError("CyberGym fuzz run is still active")
+            result = json.loads(row["result_json"]) if row["result_json"] else {}
+            result["container_cleanup"] = recorded
+            encoded = json.dumps(result, ensure_ascii=False, sort_keys=True)
+            if len(encoded.encode("utf-8")) > 128 * 1024:
+                raise ValueError("CyberGym run result is too large")
+            connection.execute(
+                "UPDATE cybergym_runs SET result_json = ?, updated_at = ? WHERE run_id = ?",
+                (encoded, _now(), run_id),
+            )
+
     def get_cybergym_run(self, scan_id: str, run_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM cybergym_runs WHERE scan_id = ? AND run_id = ?", (scan_id, run_id)
+            ).fetchone()
+        return self._decode_cybergym_run(row) if row is not None else None
+
+    def get_cybergym_run_by_id(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM cybergym_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
         return self._decode_cybergym_run(row) if row is not None else None
 
