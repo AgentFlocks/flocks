@@ -350,6 +350,7 @@ export default function HubPage() {
         useCases: useCaseFilter || undefined,
         tags: tagFilter || undefined,
         state: stateFilter || undefined,
+        prioritizeInstalled: true,
         offset: (page - 1) * pageSize,
         limit: pageSize,
       });
@@ -391,6 +392,7 @@ export default function HubPage() {
         useCases: useCaseFilter || undefined,
         tags: tagFilter || undefined,
         state: stateFilter || undefined,
+        prioritizeInstalled: true,
       });
       if (!isCurrentRequest()) return;
       setTreeItems(Array.isArray(res.data) ? res.data : []);
