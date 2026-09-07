@@ -41,6 +41,10 @@ from flocks_code_security.models import (
     SnapshotOmission,
     SnapshotRef,
 )
+from flocks_code_security.poc import (
+    POC_FILE_ENCODINGS,
+    decode_poc_bytes,
+)
 
 
 THREAT_MODEL_REQUIRED_LIST_FIELDS = (
@@ -73,8 +77,24 @@ DYNAMIC_EXECUTION_CATEGORIES = (
     "unsafe-deserialization",
 )
 # Bump this whenever initialize() adds or changes schema migrations.
-STORE_SCHEMA_VERSION = 3
+STORE_SCHEMA_VERSION = 4
 SQLITE_BUSY_TIMEOUT_MS = 120_000
+
+
+def _ranges_cover(
+    ranges: Iterable[tuple[int | None, int | None]],
+    start_line: int,
+    end_line: int,
+) -> bool:
+    """Return whether sorted source-read intervals cover one evidence range."""
+    covered_through = start_line - 1
+    for start, end in ranges:
+        if start is None or end is None or start > covered_through + 1:
+            break
+        covered_through = max(covered_through, end)
+        if covered_through >= end_line:
+            return True
+    return False
 
 
 @contextmanager
@@ -755,6 +775,7 @@ class ScanStore:
                         status IN ('active', 'submitting', 'submitted', 'failed_no_artifact')
                     ),
                     final_artifact_id TEXT,
+                    selected_poc_id TEXT REFERENCES poc_bundles(poc_id),
                     local_validation TEXT CHECK (
                         local_validation IN ('verified', 'unverified', 'failed_no_artifact')
                     ),
@@ -925,6 +946,12 @@ class ScanStore:
                 connection.execute(
                     "ALTER TABLE source_access ADD COLUMN attempt_id TEXT"
                 )
+            cybergym_task_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(cybergym_tasks)").fetchall()
+            }
+            if "selected_poc_id" not in cybergym_task_columns:
+                connection.execute("ALTER TABLE cybergym_tasks ADD COLUMN selected_poc_id TEXT")
             legacy_bindings = connection.execute(
                 """
                 SELECT sb.session_id, sb.scan_id, sb.work_unit_id,
@@ -1687,16 +1714,13 @@ class ScanStore:
                         ).fetchone()
                         if eligible is None:
                             raise ValueError("PoC generation requires a confirmed candidate without a prior bundle")
-                        evidence_paths = {
-                            row["relative_path"]
-                            for row in connection.execute(
-                                "SELECT relative_path FROM evidence WHERE candidate_id = ?",
-                                (subject_id,),
-                            ).fetchall()
-                        }
-                        if not evidence_paths or set(paths) != evidence_paths:
+                        evidence_paths = connection.execute(
+                            "SELECT 1 FROM evidence WHERE candidate_id = ? LIMIT 1",
+                            (subject_id,),
+                        ).fetchone()
+                        if evidence_paths is None or paths != ["."]:
                             raise ValueError(
-                                "PoC-generation scope must exactly match the candidate evidence files"
+                                "PoC-generation scope must provide repository context for the candidate"
                             )
                 work_unit_id = f"unit_{uuid.uuid4().hex}"
                 connection.execute(
@@ -2573,18 +2597,10 @@ class ScanStore:
                 or PurePosixPath(path).is_absolute()
                 or ".." in PurePosixPath(path).parts
                 or not isinstance(data, str)
-                or encoding not in {"utf8", "hex", "base64"}
+                or encoding not in POC_FILE_ENCODINGS
             ):
                 raise ValueError("PoC files require safe relative path, encoding, and data")
-            try:
-                if encoding == "utf8":
-                    raw = data.encode("utf-8")
-                elif encoding == "hex":
-                    raw = bytes.fromhex(data)
-                else:
-                    raw = base64.b64decode(data.encode("ascii"), validate=True)
-            except (ValueError, UnicodeEncodeError, BinasciiError) as exc:
-                raise ValueError("PoC file data does not match its encoding") from exc
+            raw = decode_poc_bytes(data, encoding)
             if not raw or len(raw) > MAX_POC_FILE_BYTES:
                 raise ValueError("PoC file data must be non-empty and <= 128 KiB")
             if path in file_paths:
@@ -2627,6 +2643,7 @@ class ScanStore:
                 "content_type",
                 "target_language",
                 "build_system",
+                "input_kind",
             }
             if not set(delivery) <= allowed_delivery_keys:
                 raise ValueError("PoC delivery metadata contains unsupported execution fields")
@@ -2686,18 +2703,18 @@ class ScanStore:
                 for row in evidence_rows
             }
             for evidence in evidence_rows:
-                access = connection.execute(
-                    "SELECT 1 FROM source_access WHERE attempt_id = ? AND operation = 'read' "
-                    "AND relative_path = ? AND blob_digest = ? AND start_line <= ? AND end_line >= ?",
-                    (
-                        binding.attempt_id,
-                        evidence["relative_path"],
-                        evidence["blob_digest"],
-                        evidence["start_line"],
-                        evidence["end_line"],
-                    ),
-                ).fetchone()
-                if access is None:
+                accesses = connection.execute(
+                    "SELECT start_line, end_line FROM source_access "
+                    "WHERE attempt_id = ? AND operation = 'read' "
+                    "AND relative_path = ? AND blob_digest = ? "
+                    "ORDER BY start_line, end_line",
+                    (binding.attempt_id, evidence["relative_path"], evidence["blob_digest"]),
+                ).fetchall()
+                if not _ranges_cover(
+                    [(row["start_line"], row["end_line"]) for row in accesses],
+                    evidence["start_line"],
+                    evidence["end_line"],
+                ):
                     raise ValueError(
                         "PoC generator must read every candidate evidence range before submitting"
                     )
@@ -2713,21 +2730,6 @@ class ScanStore:
                 )
                 if key not in evidence_keys:
                     raise ValueError("PoC source_refs must match candidate evidence exactly")
-                access = connection.execute(
-                    "SELECT 1 FROM source_access WHERE attempt_id = ? AND operation = 'read' "
-                    "AND relative_path = ? AND blob_digest = ? AND start_line <= ? AND end_line >= ?",
-                    (
-                        binding.attempt_id,
-                        ref["relative_path"],
-                        ref["blob_digest"],
-                        ref["start_line"],
-                        ref["end_line"],
-                    ),
-                ).fetchone()
-                if access is None:
-                    raise ValueError(
-                        f"PoC generator must read evidence range {ref['relative_path']}:{ref['start_line']}-{ref['end_line']}"
-                    )
                 normalized_refs.append(
                     {
                         "relative_path": ref["relative_path"],
@@ -2736,6 +2738,19 @@ class ScanStore:
                         "end_line": ref["end_line"],
                     }
                 )
+            submitted_ref_keys = {
+                (
+                    ref["relative_path"],
+                    ref["blob_digest"],
+                    ref["start_line"],
+                    ref["end_line"],
+                )
+                for ref in normalized_refs
+            }
+            if len(submitted_ref_keys) != len(normalized_refs):
+                raise ValueError("PoC source_refs must not contain duplicates")
+            if submitted_ref_keys != evidence_keys:
+                raise ValueError("PoC source_refs must include every candidate evidence range exactly once")
             payload = {
                 "schema_version": 1,
                 "candidate_id": candidate_id,
@@ -3016,8 +3031,8 @@ class ScanStore:
             try:
                 connection.execute(
                     "INSERT INTO cybergym_tasks (scan_id, task_id, manifest_json, status, "
-                    "final_artifact_id, local_validation, selection_reason, created_at, updated_at) "
-                    "VALUES (?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)",
+                    "final_artifact_id, selected_poc_id, local_validation, selection_reason, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'active', NULL, NULL, NULL, NULL, ?, ?)",
                     (
                         scan_id,
                         normalized["task_id"],
@@ -3063,6 +3078,61 @@ class ScanStore:
                 "SELECT * FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
             ).fetchone()
         return self._decode_cybergym_task(row) if row is not None else None
+
+    def set_cybergym_selected_poc(self, scan_id: str, poc_id: str) -> None:
+        """Bind one accepted generic PoC to this dynamic task exactly once."""
+        with self._lock, self._connect() as connection:
+            task = connection.execute(
+                "SELECT status, selected_poc_id FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None or task["status"] != "active":
+                raise ValueError("CyberGym task is not accepting PoC selection")
+            owner = connection.execute(
+                "SELECT candidate_id FROM poc_bundles WHERE scan_id = ? AND poc_id = ? AND status = 'generated'",
+                (scan_id, poc_id),
+            ).fetchone()
+            if owner is None:
+                raise ValueError("Selected PoC is not a generated bundle for this scan")
+            if task["selected_poc_id"] not in {None, poc_id}:
+                raise ValueError("CyberGym task is already bound to another generic PoC")
+            connection.execute(
+                "UPDATE cybergym_tasks SET selected_poc_id = ?, updated_at = ? WHERE scan_id = ?",
+                (poc_id, _now(), scan_id),
+            )
+
+    def get_cybergym_selected_poc(self, scan_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT selected_poc_id FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+        return None if row is None else row["selected_poc_id"]
+
+    def list_accepted_poc_contexts(self, scan_id: str) -> list[dict[str, Any]]:
+        """Return accepted PoCs with only the finding fields needed for task binding."""
+        bundles = self.list_accepted_poc_bundles(scan_id)
+        if not bundles:
+            return []
+        with self._connect() as connection:
+            output: list[dict[str, Any]] = []
+            for bundle in bundles:
+                candidate = connection.execute(
+                    "SELECT payload_json FROM candidates WHERE scan_id = ? AND candidate_id = ?",
+                    (scan_id, bundle["candidate_id"]),
+                ).fetchone()
+                evidence = connection.execute(
+                    "SELECT relative_path FROM evidence WHERE candidate_id = ? ORDER BY ordinal, rowid",
+                    (bundle["candidate_id"],),
+                ).fetchall()
+                if candidate is None:
+                    continue
+                output.append(
+                    {
+                        **bundle,
+                        "candidate": json.loads(candidate["payload_json"]),
+                        "evidence_paths": [row["relative_path"] for row in evidence],
+                    }
+                )
+        return output
 
     def cybergym_context(self, scan_id: str) -> dict[str, Any]:
         task = self.get_cybergym_task(scan_id)
@@ -3153,23 +3223,38 @@ class ScanStore:
         now = _now()
         with self._lock, self._connect() as connection:
             task = connection.execute(
-                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+                "SELECT status, selected_poc_id FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
             ).fetchone()
             if task is None or task["status"] != "active":
                 raise ValueError("CyberGym task is not accepting new artifacts")
             if parent_id is not None:
                 parent = connection.execute(
-                    "SELECT 1 FROM cybergym_artifacts WHERE artifact_id = ? AND scan_id = ?",
+                    "SELECT provenance_json FROM cybergym_artifacts WHERE artifact_id = ? AND scan_id = ?",
                     (parent_id, scan_id),
                 ).fetchone()
                 if parent is None:
                     raise ValueError("CyberGym artifact parent is not in this task")
+                parent_poc_id = json.loads(parent["provenance_json"]).get("poc_id")
+                if parent_poc_id is not None:
+                    provenance = {**provenance, "poc_id": parent_poc_id}
+                    encoded_provenance = json.dumps(provenance, ensure_ascii=False, sort_keys=True)
+                    if len(encoded_provenance.encode("utf-8")) > 16 * 1024:
+                        raise ValueError("CyberGym artifact provenance is too large")
+            selected_poc_id = task["selected_poc_id"]
+            requested_poc_id = provenance.get("poc_id")
+            if selected_poc_id is not None and requested_poc_id != selected_poc_id:
+                raise ValueError("CyberGym artifacts must retain the selected generic PoC provenance")
             existing = connection.execute(
                 "SELECT * FROM cybergym_artifacts WHERE scan_id = ? AND sha256 = ? "
                 "AND kind = ? AND parent_id IS ?",
                 (scan_id, digest, kind, parent_id),
             ).fetchone()
             if existing is not None:
+                existing_provenance = json.loads(existing["provenance_json"])
+                existing_poc_id = existing_provenance.get("poc_id")
+                requested_poc_id = provenance.get("poc_id")
+                if existing_poc_id != requested_poc_id:
+                    raise ValueError("Identical CyberGym artifacts cannot belong to different generic PoCs")
                 return self._decode_cybergym_artifact(existing)
             connection.execute(
                 "INSERT INTO cybergym_artifacts (artifact_id, scan_id, kind, sha256, "
@@ -3183,15 +3268,6 @@ class ScanStore:
         if row is None:  # pragma: no cover - defensive persistence boundary
             raise ValueError("CyberGym artifact was not persisted")
         return self._decode_cybergym_artifact(row)
-
-    def has_cybergym_imported_poc(self, scan_id: str) -> bool:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM cybergym_artifacts WHERE scan_id = ? "
-                "AND json_extract(provenance_json, '$.operation') = 'generic_poc_import' LIMIT 1",
-                (scan_id,),
-            ).fetchone()
-        return row is not None
 
     def get_cybergym_artifact(
         self,
@@ -3311,12 +3387,15 @@ class ScanStore:
         return [self._decode_cybergym_run(row) for row in rows]
 
     def cybergym_artifact_has_stable_crash(self, scan_id: str, artifact_id: str) -> bool:
-        for run in self.list_cybergym_runs(scan_id):
-            if run["kind"] != "replay" or run["status"] != "completed":
-                continue
-            if run["input"].get("artifact_id") == artifact_id and (run["result"] or {}).get("crash") is True:
-                return True
-        return False
+        crashes = sum(
+            1
+            for run in self.list_cybergym_runs(scan_id)
+            if run["kind"] == "replay"
+            and run["status"] == "completed"
+            and run["input"].get("artifact_id") == artifact_id
+            and (run["result"] or {}).get("crash") is True
+        )
+        return crashes >= 2
 
     def cybergym_artifact_evidence(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
         replay: list[dict[str, Any]] = []
@@ -3331,7 +3410,7 @@ class ScanStore:
         return {
             "replay": replay,
             "gdb": gdb,
-            "stable_crash": any(item.get("crash") is True for item in replay),
+            "stable_crash": sum(item.get("crash") is True for item in replay) >= 2,
             "vulnerable_branch_reached": any(item.get("vulnerable_branch_reached") is True for item in gdb),
             "target_reached": any(item.get("target_reached") is True for item in gdb),
         }
@@ -3944,16 +4023,6 @@ class ScanStore:
                     LEFT JOIN poc_bundles p ON p.candidate_id = c.candidate_id
                     WHERE c.scan_id = ? AND v.verdict = 'confirmed'
                       AND p.candidate_id IS NULL
-                      AND EXISTS (
-                        SELECT 1 FROM adjudications a, json_each(a.accepted_candidate_ids_json) accepted
-                        WHERE a.scan_id = c.scan_id AND a.action = 'finalize'
-                          AND a.adjudication_round = (
-                            SELECT MAX(latest.adjudication_round)
-                            FROM adjudications latest
-                            WHERE latest.scan_id = c.scan_id AND latest.action = 'finalize'
-                          )
-                          AND accepted.value = c.candidate_id
-                      )
                       AND EXISTS (
                         SELECT 1 FROM adjudications a, json_each(a.accepted_candidate_ids_json) accepted
                         WHERE a.scan_id = c.scan_id AND a.action = 'finalize'
@@ -5870,6 +5939,11 @@ class ScanStore:
                     "SELECT COUNT(*) FROM poc_validations WHERE scan_id = ? AND status = 'verified'",
                     (scan_id,),
                 ).fetchone()[0],
+                "cybergym_imported_pocs": connection.execute(
+                    "SELECT COUNT(*) FROM cybergym_artifacts WHERE scan_id = ? "
+                    "AND json_extract(provenance_json, '$.operation') = 'generic_poc_import'",
+                    (scan_id,),
+                ).fetchone()[0],
                 "confirmed_without_poc_bundle": connection.execute(
                     """
                     SELECT COUNT(*) FROM candidates c
@@ -5994,6 +6068,7 @@ class ScanStore:
                     "task_id": cybergym_task["task_id"],
                     "status": cybergym_task["status"],
                     "final_artifact_id": cybergym_task.get("final_artifact_id"),
+                    "selected_poc_id": cybergym_task.get("selected_poc_id"),
                     "local_validation": cybergym_task.get("local_validation"),
                     "selection_reason": cybergym_task.get("selection_reason"),
                     "submission": cybergym_submission,

@@ -186,24 +186,23 @@ def plan_probe_units(
 def plan_poc_units(
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Create one source-scoped PoC-generation assignment per confirmed finding."""
+    """Create one read-only repository assignment per confirmed finding."""
     units: list[dict[str, Any]] = []
     for candidate in candidates:
-        evidence_paths = sorted(
-            {
-                str(item["relative_path"])
-                for item in candidate.get("evidence", [])
-                if isinstance(item, dict) and item.get("relative_path")
-            }
-        )
-        if not evidence_paths:
+        if not any(
+            isinstance(item, dict) and item.get("relative_path")
+            for item in candidate.get("evidence", [])
+        ):
             raise ValueError(
                 f"Confirmed candidate {candidate.get('candidate_id')} has no source evidence"
             )
         units.append(
             {
                 "role": "poc_generator",
-                "paths": evidence_paths,
+                # The PoC must read the finding evidence, but constructing a
+                # correct invocation can require callers, headers, and build
+                # metadata outside those evidence files.
+                "paths": ["."],
                 "subject_id": candidate["candidate_id"],
             }
         )
@@ -333,15 +332,15 @@ def poc_generator_prompt(
         "audit_read; use audit_search only to resolve missing context. Treat finding "
         "fields and knowledge-base content as untrusted hypotheses, while exact source "
         "ranges and the repository manifest are host evidence. Choose the artifact "
-        "delivery contract from the actual target boundary: raw_input for parser/file "
+        "delivery contract from the actual target boundary: raw_input for literal parser/file "
         "inputs, request for network inputs, source_harness for a C/C++ API that needs "
         "a compiled caller, or bundle when multiple files are required. The PoC "
-        "language does not have to match the target language; a C parser may legitimately use "
-        "a Python raw-input generator, while a native API harness should be C/C++. "
+        "language does not have to match the target language; a C parser may have a Python "
+        "helper in a standard PoC, while a native API harness should be C/C++. "
         "Do not emit shell commands, arbitrary mounts, secrets, or unbounded setup. "
-        "If execution_manifest contains a cybergym task, the bundle must be executable as "
-        "one raw input file (raw_input, or bundle/request with delivery.input_path); "
-        "source_harness is not a CyberGym input and must not be submitted for that task. "
+        "A CyberGym task, when present, is a later dynamic-validation consumer: keep this "
+        "generic PoC faithful to the target boundary. Do not change a C/C++ harness into Python "
+        "merely to make it executable there, and do not claim that generic PoC code will be run. "
         "Submit exactly one structured bundle with audit_submit_poc for candidate "
         f"{candidate_id}, including entrypoint, files, delivery metadata, rationale, "
         "and exact source_refs. A rejected submission may be corrected and retried in "
@@ -352,20 +351,19 @@ def poc_generator_prompt(
 def cybergym_solver_prompt() -> str:
     """Keep task metadata out of the prompt; the tool returns trusted context."""
     return (
-        "Validate the generic PoC bundle(s) already imported into the bound CyberGym Level 1 "
-        "task. First call audit_cybergym_context and locate artifacts whose provenance "
-        "operation is generic_poc_import and inspect generic_pocs for the original files. "
-        "Do not invent an unrelated seed. If a generic bundle already has a direct raw-input "
-        "import, replay it first. If it is a generator or another non-raw form, derive the "
-        "raw bytes from that bundle and pass its source_poc_id when creating the seed. Honor "
-        "input_contract.required_prefix_hex and "
-        "input_contract.required_suffix_hex exactly when translating a "
-        "candidate into raw input. replay each imported seed before fuzzing. If a "
-        "refinement is needed, create it through audit_cybergym_artifact_create with "
+        "Validate the one generic PoC selected by the host for this CyberGym Level 1 task. "
+        "First call audit_cybergym_context. If a generic_poc_import seed exists, replay it first. "
+        "If the selected generic PoC is not a literal raw input, translate its documented target "
+        "boundary into one raw bootstrap seed using the selected_poc_id; do not execute its source "
+        "files or invent an unrelated root. Honor the complete input_contract (min_bytes, max_bytes, "
+        "alignment, encoding, required_prefix_hex, and required_suffix_hex) for every raw artifact. "
+        "Replay the bootstrap seed before "
+        "fuzzing. If a refinement is needed, create it through audit_cybergym_artifact_create with "
         "parent_artifact_id set to the consumed seed, then replay it before any search. If a seed "
         "crashes, minimize it instead of using fuzzing to rediscover the same crash; the "
         "minimize result already includes its replay. If it is clean, use GDB when "
-        "available to diagnose reachability and refine the seed. Use only the "
+        "available to diagnose reachability and refine the seed. Use the manifest-selected fuzz engine "
+        "and transport only. Use only the "
         "restricted CyberGym tools; do not run a shell, "
         "choose a container, executable, argv, mount, or fixed-side oracle. Submit "
         "exactly one persisted artifact with audit_cybergym_submit. If local replay "

@@ -19,6 +19,7 @@ from flocks_code_security.cybergym_runtime import (
     _run_official_worker,
 )
 from flocks_code_security.models import SnapshotRef
+from flocks_code_security.poc import resolve_cybergym_input
 from flocks_code_security.runtime import build_runtime
 from flocks_code_security.store import ScanStore
 
@@ -101,6 +102,32 @@ class _FixtureExecutor:
         return CommandResult(1, "", "AddressSanitizer")
 
 
+def test_cybergym_input_requires_declared_literal_bytes() -> None:
+    bundle = {
+        "artifact_type": "raw_input",
+        "entrypoint": "seed.bin",
+        "files": [{"path": "seed.bin", "encoding": "hex", "data": "73656564"}],
+        "delivery": {"input_kind": "literal"},
+    }
+
+    assert resolve_cybergym_input(bundle) == (b"seed", "seed.bin")
+    del bundle["delivery"]
+    with pytest.raises(ValueError, match="input_kind=literal"):
+        resolve_cybergym_input(bundle)
+
+
+def test_cybergym_input_rejects_an_unmatched_declared_file() -> None:
+    bundle = {
+        "artifact_type": "raw_input",
+        "entrypoint": "seed.bin",
+        "files": [{"path": "seed.bin", "encoding": "utf8", "data": "seed"}],
+        "delivery": {"input_kind": "literal", "input_path": "other.bin"},
+    }
+
+    with pytest.raises(ValueError, match="identify exactly one"):
+        resolve_cybergym_input(bundle)
+
+
 def test_manifest_rejects_root_mount_and_persists_only_valid_tasks(tmp_path: Path) -> None:
     invalid = _manifest()
     invalid["input_path"] = "/input"
@@ -119,7 +146,14 @@ def test_manifest_input_contract_is_enforced_and_persisted_with_seed_provenance(
     manifest["input_contract"] = {"required_suffix_hex": "01 00 00 00"}
 
     parsed = CyberGymTargetManifest.from_dict(manifest)
-    assert parsed.public_dict()["input_contract"] == {"required_prefix_hex": "", "required_suffix_hex": "01000000"}
+    assert parsed.public_dict()["input_contract"] == {
+        "required_prefix_hex": "",
+        "required_suffix_hex": "01000000",
+        "min_bytes": 0,
+        "max_bytes": None,
+        "alignment": 1,
+        "encoding": "raw",
+    }
 
     store, scan_id = _store(tmp_path, manifest)
     runtime = CyberGymRuntime(store)
@@ -134,7 +168,7 @@ def test_manifest_input_contract_is_enforced_and_persisted_with_seed_provenance(
     )
 
     assert seed["provenance"] == {
-        "input_contract": {"required_prefix_hex": "", "required_suffix_hex": "01000000"},
+        "input_contract": parsed.public_dict()["input_contract"],
         "operation": "fixture",
     }
 
@@ -157,6 +191,7 @@ async def test_cybergym_consumes_generic_poc_and_records_validated_artifact(tmp_
         "artifact_type": "raw_input",
         "entrypoint": "fixture.bin",
         "files": [{"path": "fixture.bin", "encoding": "hex", "data": "73656564"}],
+        "delivery": {"input_kind": "literal"},
         "source_refs": [],
         "rationale": "fixture",
     }
@@ -183,7 +218,10 @@ async def test_cybergym_consumes_generic_poc_and_records_validated_artifact(tmp_
             (scan_id, json.dumps([candidate_id]), "2026-09-07T00:00:00+00:00"),
         )
 
-    runtime = CyberGymRuntime(store, executor=_FixtureExecutor())
+    async def accept(_manifest, _raw, _artifact):
+        return {"status": "accepted"}
+
+    runtime = CyberGymRuntime(store, executor=_FixtureExecutor(), submitter=accept)
     imported = runtime.seed_from_poc_bundles(scan_id)
     assert imported["imported_seed_count"] == 1
     seed_id = imported["imported"][0]["artifact_id"]
@@ -191,7 +229,7 @@ async def test_cybergym_consumes_generic_poc_and_records_validated_artifact(tmp_
     assert seed is not None and seed["data"] == b"seed"
     assert seed["provenance"]["poc_id"] == poc_id
 
-    with pytest.raises(ValueError, match="derived from an imported generic PoC"):
+    with pytest.raises(ValueError, match="bootstrap root"):
         runtime.artifact_create(scan_id, kind="seed", raw=b"unrelated")
     refined = runtime.artifact_create(
         scan_id,
@@ -201,15 +239,16 @@ async def test_cybergym_consumes_generic_poc_and_records_validated_artifact(tmp_
         provenance={"operation": "fixture_refinement"},
     )
     assert refined["provenance"]["operation"] == "fixture_refinement"
-    generated = runtime.artifact_create(
-        scan_id,
-        kind="seed",
-        raw=b"generated",
-        source_poc_id=poc_id,
-        provenance={"operation": "agent_materialization"},
-    )
-    assert generated["provenance"]["poc_id"] == poc_id
+    with pytest.raises(ValueError, match="bootstrap root"):
+        runtime.artifact_create(
+            scan_id,
+            kind="seed",
+            raw=b"generated",
+            source_poc_id=poc_id,
+            provenance={"operation": "agent_materialization"},
+        )
 
+    await runtime.replay(scan_id, seed_id)
     await runtime.replay(scan_id, seed_id)
     await runtime.submit(
         scan_id,
@@ -223,6 +262,97 @@ async def test_cybergym_consumes_generic_poc_and_records_validated_artifact(tmp_
     assert validations[0]["candidate_id"] == candidate_id
     assert validations[0]["status"] == "verified"
     assert validations[0]["artifact_id"] == seed_id
+
+
+def test_failed_poc_import_cannot_unlock_an_unrelated_seed(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    unit_id = store.create_work_unit(
+        scan_id=scan_id,
+        phase="poc_generation",
+        role="poc_generator",
+        paths=["harness.c"],
+        status="completed",
+    )
+    candidate_id = "candidate_harness"
+    poc_id = "poc_harness"
+    now = "2026-09-07T00:00:00+00:00"
+    bundle = {
+        "artifact_type": "source_harness",
+        "entrypoint": "harness.c",
+        "files": [{"path": "harness.c", "encoding": "utf8", "data": "int main(void) {}"}],
+    }
+    with store._lock, store._connect() as connection:
+        connection.execute(
+            "INSERT INTO candidates (candidate_id, scan_id, work_unit_id, role, payload_json, created_at) "
+            "VALUES (?, ?, ?, 'baseline', '{}', ?)",
+            (candidate_id, scan_id, unit_id, now),
+        )
+        connection.execute(
+            "INSERT INTO poc_bundles VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)",
+            (poc_id, scan_id, candidate_id, unit_id, json.dumps(bundle), now, now),
+        )
+        connection.execute(
+            "INSERT INTO adjudications VALUES (?, 1, 'finalize', ?, '[]', NULL, NULL, ?)",
+            (scan_id, json.dumps([candidate_id]), now),
+        )
+
+    runtime = CyberGymRuntime(store)
+    imported = runtime.seed_from_poc_bundles(scan_id)
+
+    assert imported["imported_seed_count"] == 0
+    assert imported["rejected"][0]["poc_id"] == poc_id
+    with pytest.raises(ValueError, match="bootstrap root"):
+        runtime.artifact_create(scan_id, kind="seed", raw=b"unrelated")
+    bootstrap = runtime.artifact_create(
+        scan_id,
+        kind="seed",
+        raw=b"adapted",
+        source_poc_id=poc_id,
+        provenance={"operation": "solver_seed_adaptation"},
+    )
+    assert bootstrap["provenance"]["poc_id"] == poc_id
+
+
+def test_cybergym_requires_a_binding_to_select_from_multiple_accepted_pocs(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    now = "2026-09-07T00:00:00+00:00"
+    candidate_ids = ["candidate_one", "candidate_two"]
+    unit_ids = [
+        store.create_work_unit(
+            scan_id=scan_id,
+            phase="poc_generation",
+            role="poc_generator",
+            paths=["seed.bin"],
+            status="completed",
+        )
+        for _candidate_id in candidate_ids
+    ]
+    with store._lock, store._connect() as connection:
+        for index, (candidate_id, unit_id) in enumerate(zip(candidate_ids, unit_ids, strict=True), start=1):
+            bundle = {
+                "artifact_type": "raw_input",
+                "entrypoint": "seed.bin",
+                "files": [{"path": "seed.bin", "encoding": "utf8", "data": f"seed-{index}"}],
+                "delivery": {"input_kind": "literal"},
+            }
+            connection.execute(
+                "INSERT INTO candidates (candidate_id, scan_id, work_unit_id, role, payload_json, created_at) "
+                "VALUES (?, ?, ?, 'baseline', '{}', ?)",
+                (candidate_id, scan_id, unit_id, now),
+            )
+            connection.execute(
+                "INSERT INTO poc_bundles VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)",
+                (f"poc_{index}", scan_id, candidate_id, unit_id, json.dumps(bundle), now, now),
+            )
+        connection.execute(
+            "INSERT INTO adjudications VALUES (?, 1, 'finalize', ?, '[]', NULL, NULL, ?)",
+            (scan_id, json.dumps(candidate_ids), now),
+        )
+
+    result = CyberGymRuntime(store).seed_from_poc_bundles(scan_id)
+
+    assert result["selected_bundle_count"] == 0
+    assert result["selection_reason"] == "multiple accepted generic PoCs require finding_binding"
 
 
 def test_fuzzer_manifest_requires_structured_input_contract() -> None:
@@ -284,6 +414,7 @@ async def test_runtime_persists_artifacts_before_execution_and_submits_once(tmp_
 
     minimized = await runtime.minimize(scan_id, crash["artifact_id"])
     assert minimized["replay"]["crash"] is True
+    await runtime.replay(scan_id, minimized["minimized_artifact_id"])
     selection = runtime.select_final_artifact(scan_id)
     assert selection is not None
     assert selection["local_validation"] == "verified"

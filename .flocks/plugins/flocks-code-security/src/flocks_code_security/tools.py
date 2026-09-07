@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import sqlite3
@@ -59,6 +58,7 @@ from flocks_code_security.orchestration import (
 )
 from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
+from flocks_code_security.poc import decode_poc_bytes
 
 
 ROLE_AGENTS = {
@@ -378,7 +378,12 @@ async def audit_prepare(
                 "scan_id": scan_id,
                 "scan_mode": mode,
                 "status": "running",
-                "dynamic_enabled": bool(dynamic_enabled),
+                "dynamic_enabled": bool(dynamic_enabled or mode == "cybergym_level1"),
+                "dynamic_validator": (
+                    "cybergym"
+                    if mode == "cybergym_level1"
+                    else "docker_probe" if dynamic_enabled else None
+                ),
                 "poc_enabled": bool(poc_enabled or mode == "cybergym_level1"),
                 "coverage_policy": coverage_policy,
                 "verification_votes": verification_votes,
@@ -399,19 +404,10 @@ async def audit_prepare(
 def _decode_cybergym_artifact_input(data: str, encoding: str) -> bytes:
     if not isinstance(data, str) or len(data) > 8 * 1024 * 1024:
         raise ValueError("CyberGym artifact data must be a bounded string")
-    if encoding == "utf8":
-        return data.encode("utf-8")
-    if encoding == "hex":
-        try:
-            return bytes.fromhex(data)
-        except ValueError as exc:
-            raise ValueError("CyberGym hex artifact data is invalid") from exc
-    if encoding == "base64":
-        try:
-            return base64.b64decode(data.encode("ascii"), validate=True)
-        except (UnicodeEncodeError, ValueError) as exc:
-            raise ValueError("CyberGym base64 artifact data is invalid") from exc
-    raise ValueError("CyberGym artifact encoding must be utf8, hex, or base64")
+    try:
+        return decode_poc_bytes(data, encoding)
+    except ValueError as exc:
+        raise ValueError("CyberGym artifact encoding or data is invalid") from exc
 
 
 async def audit_cybergym_context(ctx: ToolContext) -> ToolResult:
@@ -506,7 +502,7 @@ async def audit_cybergym_fuzz_start(
             budget_seconds=budget_seconds,
             max_length=max_length,
         )
-        return ToolResult(success=True, output=output, title="Started CyberGym libFuzzer search")
+        return ToolResult(success=True, output=output, title="Started CyberGym manifest-selected fuzz search")
     except STORE_ERRORS as exc:
         return _error(exc, title="CyberGym fuzz start failed")
 
@@ -515,7 +511,7 @@ async def audit_cybergym_fuzz_status(ctx: ToolContext, run_id: str) -> ToolResul
     try:
         binding = _cybergym_binding(ctx)
         output = get_runtime().cybergym.fuzz_status(binding.scan_id, run_id)
-        return ToolResult(success=True, output=output, title="CyberGym libFuzzer status")
+        return ToolResult(success=True, output=output, title="CyberGym fuzz status")
     except STORE_ERRORS as exc:
         return _error(exc, title="CyberGym fuzz status failed")
 
@@ -2993,14 +2989,14 @@ def register_tools() -> None:
     }
     _register(
         "audit_cybergym_context",
-        "Read the bound CyberGym Level 1 manifest, accepted candidates, consumed generic PoCs, artifact inventory, and budgets without fixed-side data.",
+        "Read the bound CyberGym Level 1 manifest, selected generic PoC, artifact inventory, and budgets without fixed-side data.",
         audit_cybergym_context,
         [],
     )
     _register(
         "audit_cybergym_artifact_create",
-        "Persist one raw input seed before CyberGym execution. Seeds imported from a generic PoC "
-        "are the input contract; refined seeds must provide their parent artifact.",
+        "Persist one raw input seed before CyberGym execution. The selected generic PoC permits "
+        "one bootstrap seed; refined seeds must provide their parent artifact.",
         audit_cybergym_artifact_create,
         [
             _parameter("data", ParameterType.STRING, "Raw input encoded using encoding."),
@@ -3036,24 +3032,24 @@ def register_tools() -> None:
     )
     _register(
         "audit_cybergym_fuzz_start",
-        "Start a manifest-locked libFuzzer job from persisted seed artifacts after vulnerable replay preflight.",
+        "Start the manifest-locked fuzz engine from persisted seed artifacts after vulnerable replay preflight.",
         audit_cybergym_fuzz_start,
         [
             _parameter("seed_artifact_ids", ParameterType.ARRAY, "One to 32 persisted seed artifact IDs.", json_schema={"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": {"type": "string", "minLength": 1}}),
-            _parameter("dictionary", ParameterType.ARRAY, "Optional bounded libFuzzer dictionary tokens.", required=False, json_schema={"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}}),
+            _parameter("dictionary", ParameterType.ARRAY, "Optional bounded dictionary tokens for the manifest-selected engine.", required=False, json_schema={"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}}),
             _parameter("budget_seconds", ParameterType.INTEGER, "Optional fuzz budget bounded by the manifest.", required=False),
             _parameter("max_length", ParameterType.INTEGER, "Optional maximum generated input length.", required=False),
         ],
     )
     _register(
         "audit_cybergym_fuzz_status",
-        "Read one CyberGym libFuzzer job and its persisted corpus or crash artifacts.",
+        "Read one CyberGym fuzz job and its persisted corpus or crash artifacts.",
         audit_cybergym_fuzz_status,
         [_parameter("run_id", ParameterType.STRING, "CyberGym fuzz run identifier.")],
     )
     _register(
         "audit_cybergym_minimize",
-        "Minimize a persisted crash via the manifest-locked libFuzzer target, then replay it.",
+        "Minimize a persisted crash via the manifest-locked fuzz engine, then replay it.",
         audit_cybergym_minimize,
         [_parameter("artifact_id", ParameterType.STRING, "Persisted crash artifact identifier.")],
     )

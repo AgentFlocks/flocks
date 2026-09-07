@@ -708,7 +708,10 @@ class AuditService:
 
             recorder = _ProgressRecorder(
                 scan_id,
-                dynamic_enabled=normalized.dynamic_enabled,
+                dynamic_enabled=(
+                    normalized.dynamic_enabled
+                    or normalized.scan_mode == "cybergym_level1"
+                ),
                 downstream=progress,
             )
             recorder("scan.prepared", prepared)
@@ -839,6 +842,11 @@ class AuditService:
             verified_artifacts=integrity_artifacts,
             report_data=report_data,
         )
+        dynamic_validator = (
+            "cybergym"
+            if scan["mode"] == "cybergym_level1"
+            else "docker_probe" if scan["dynamic_enabled"] else None
+        )
         public_scan = {
             "scan_id": scan_id,
             "lifecycle_status": _public_lifecycle(str(scan["status"])),
@@ -847,7 +855,8 @@ class AuditService:
             "integrity_errors": status.get("integrity_errors", []),
             "coverage_status": coverage_summary["completeness"],
             "scan_mode": scan["mode"],
-            "dynamic_enabled": bool(scan["dynamic_enabled"]),
+            "dynamic_enabled": dynamic_validator is not None,
+            "dynamic_validator": dynamic_validator,
             "poc_enabled": bool(scan.get("poc_enabled", 0)),
             "coverage_policy": scan["coverage_policy"],
             "verification_votes": scan["verification_vote_count"],
@@ -874,6 +883,9 @@ class AuditService:
                 "validation_count": int(status.get("counts", {}).get("poc_validations", 0)),
                 "verified_count": int(
                     status.get("counts", {}).get("verified_poc_validations", 0)
+                ),
+                "consumed_count": int(
+                    status.get("counts", {}).get("cybergym_imported_pocs", 0)
                 ),
                 "remaining_confirmed": int(
                     status.get("counts", {}).get("confirmed_without_poc_bundle", 0)
@@ -969,11 +981,16 @@ class AuditService:
             item["finished_at"] = _effective_finished_at(item)
             item["lifecycle_status"] = _public_lifecycle(item.pop("status"))
             item["current_phase"] = _public_phase(item.get("current_phase"))
+            item["dynamic_validator"] = (
+                "cybergym"
+                if item.get("mode") == "cybergym_level1"
+                else "docker_probe" if item["dynamic_enabled"] else None
+            )
+            item["dynamic_enabled"] = item["dynamic_validator"] is not None
             metric = _final_finding_metric(
                 lifecycle_status=item["lifecycle_status"],
                 integrity_status="pending",
-                dynamic_enabled=bool(item["dynamic_enabled"])
-                or item.get("mode") == "cybergym_level1",
+                dynamic_enabled=bool(item["dynamic_enabled"]),
                 finding_summary={},
                 dynamic_summary={},
             )
@@ -990,14 +1007,12 @@ class AuditService:
                     )
                     dynamic_summary = self._dynamic_summary(
                         status,
-                        enabled=bool(item["dynamic_enabled"])
-                        or item.get("mode") == "cybergym_level1",
+                        enabled=bool(item["dynamic_enabled"]),
                     )
                 metric = _final_finding_metric(
                     lifecycle_status=item["lifecycle_status"],
                     integrity_status=integrity_status,
-                    dynamic_enabled=bool(item["dynamic_enabled"])
-                    or item.get("mode") == "cybergym_level1",
+                    dynamic_enabled=bool(item["dynamic_enabled"]),
                     finding_summary=finding_summary,
                     dynamic_summary=dynamic_summary,
                 )
@@ -1722,7 +1737,7 @@ class AuditService:
                 "completed": 1 if lifecycle == "completed" else 0,
                 "inconclusive": 0,
                 "not_runnable": 1 if lifecycle == "not_runnable" else 0,
-                "poc_consumed": int(counts.get("poc_bundles", 0)),
+                "poc_consumed": int(counts.get("cybergym_imported_pocs", 0)),
                 "poc_verified": int(counts.get("verified_poc_validations", 0)),
             }
         scan_id = str(status.get("scan_id") or "")
@@ -2011,7 +2026,11 @@ class AuditService:
             "threat_model": data["threat_model"] is not None,
             "candidate_index": bool(data["candidates"]),
             "verification_index": bool(data["verifications"]),
-            "dynamic_validation": bool(data["dynamic_runs"]) or bool(scan["dynamic_enabled"]),
+            "dynamic_validation": (
+                bool(data["dynamic_runs"])
+                or bool(scan["dynamic_enabled"])
+                or scan["mode"] == "cybergym_level1"
+            ),
             "poc_generation": bool(data.get("poc_bundles")) or bool(scan.get("poc_enabled")),
             "adjudication": bool(data["adjudications"]),
             "coverage": bool(data["coverage"]),

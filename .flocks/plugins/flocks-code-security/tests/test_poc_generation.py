@@ -4,10 +4,10 @@ from pathlib import Path
 
 from flocks_code_security.models import SnapshotRef
 from flocks_code_security.orchestration import plan_poc_units, poc_generator_prompt
-from flocks_code_security.store import ScanStore
+from flocks_code_security.store import ScanStore, _ranges_cover
 
 
-def test_poc_planning_is_candidate_bound_and_source_scoped() -> None:
+def test_poc_planning_is_candidate_bound_and_has_repository_context() -> None:
     candidates = [
         {
             "candidate_id": "candidate_1",
@@ -22,7 +22,7 @@ def test_poc_planning_is_candidate_bound_and_source_scoped() -> None:
     assert plan_poc_units(candidates) == [
         {
             "role": "poc_generator",
-            "paths": ["include/parser.h", "src/parser.c"],
+            "paths": ["."],
             "subject_id": "candidate_1",
         }
     ]
@@ -40,6 +40,12 @@ def test_poc_prompt_preserves_target_language_delivery_distinction() -> None:
     assert "audit_knowledge_base" in prompt
     assert "PoC language does not have to match the target language" in prompt
     assert "source_harness" in prompt
+    assert "later dynamic-validation consumer" in prompt
+
+
+def test_poc_evidence_read_ranges_may_be_covered_in_chunks() -> None:
+    assert _ranges_cover([(1, 400), (401, 500)], 1, 500)
+    assert not _ranges_cover([(1, 400), (402, 500)], 1, 500)
 
 
 def test_store_poc_flag_and_empty_generation_queue(tmp_path: Path) -> None:

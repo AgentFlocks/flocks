@@ -719,7 +719,7 @@ def test_dynamic_summary_exposes_cybergym_as_the_validator() -> None:
         {
             "scan_id": "scan_cybergym",
             "status": "completed",
-            "counts": {"poc_bundles": 2, "verified_poc_validations": 1},
+            "counts": {"cybergym_imported_pocs": 1, "verified_poc_validations": 1},
             "cybergym": {"status": "submitted"},
         },
         enabled=True,
@@ -733,7 +733,7 @@ def test_dynamic_summary_exposes_cybergym_as_the_validator() -> None:
         "completed": 1,
         "inconclusive": 0,
         "not_runnable": 0,
-        "poc_consumed": 2,
+        "poc_consumed": 1,
         "poc_verified": 1,
     }
 

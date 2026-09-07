@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import base64
 import hashlib
 import json
 import os
@@ -33,6 +32,7 @@ from flocks_code_security.contract import (
 )
 from flocks_code_security.coverage import public_open_question
 from flocks_code_security.paths import output_dir
+from flocks_code_security.poc import decode_poc_bytes
 from flocks_code_security.snapshot import DEFAULT_EXCLUDES, TargetSnapshotService
 from flocks_code_security.store import ScanStore
 
@@ -259,6 +259,7 @@ class ReportWriter:
                     "taskId": task["task_id"],
                     "status": task["status"],
                     "finalArtifactId": task.get("final_artifact_id"),
+                    "selectedPocId": task.get("selected_poc_id"),
                     "localValidation": task.get("local_validation"),
                     "selectionReason": task.get("selection_reason"),
                     "submission": submission,
@@ -277,6 +278,22 @@ class ReportWriter:
                         key: value for key, value in artifact.items() if key != "data"
                     }
                 supplemental_contents["cybergym-level1.json"] = canonical_json_bytes(cybergym_document)
+                dynamic_document = {
+                    "documentType": "flocks-code-security.dynamic-validation",
+                    "schemaVersion": "1.0",
+                    "scanId": scan_id,
+                    "dynamicEnabled": True,
+                    "validator": "cybergym",
+                    "task": {
+                        "taskId": task["task_id"],
+                        "status": task["status"],
+                        "finalArtifactId": task.get("final_artifact_id"),
+                        "selectedPocId": task.get("selected_poc_id"),
+                        "localValidation": task.get("local_validation"),
+                    },
+                    "pocValidations": data.get("poc_validations", []),
+                }
+                supplemental_contents["dynamic-validation.json"] = canonical_json_bytes(dynamic_document)
             poc_document: dict[str, Any] | None = None
             if scan.get("poc_enabled"):
                 poc_entries: list[dict[str, Any]] = []
@@ -285,15 +302,10 @@ class ReportWriter:
                     candidate_prefix = f"poc/generated/{record['candidate_id']}"
                     persisted_files: list[dict[str, Any]] = []
                     for item in bundle.get("files", []):
-                        encoding = item.get("encoding", "utf8")
-                        if encoding == "utf8":
-                            raw = item["data"].encode("utf-8")
-                        elif encoding == "hex":
-                            raw = bytes.fromhex(item["data"])
-                        elif encoding == "base64":
-                            raw = base64.b64decode(item["data"].encode("ascii"), validate=True)
-                        else:
-                            raise ValueError("Persisted PoC contains an unsupported file encoding")
+                        try:
+                            raw = decode_poc_bytes(item.get("data"), item.get("encoding", "utf8"))
+                        except ValueError as exc:
+                            raise ValueError("Persisted PoC contains an unsupported file encoding") from exc
                         path = f"{candidate_prefix}/{item['path']}"
                         supplemental_contents[path] = raw
                         persisted_files.append(
@@ -689,6 +701,50 @@ class ReportWriter:
                     else "Dynamic validation was unavailable or inconclusive."
                 ]
         poc_validation = selected.get("poc_validation")
+        cybergym_task = self.store.get_cybergym_task(scan_id)
+        selected_poc_id = (
+            selected.get("poc_bundle", {}).get("poc_id")
+            if isinstance(selected.get("poc_bundle"), dict)
+            else None
+        )
+        if (
+            poc_validation is None
+            and cybergym_task is not None
+            and selected_poc_id == cybergym_task.get("selected_poc_id")
+        ):
+            validation = {
+                "method": "independent-static-review+cybergym",
+                "staticConclusion": "confirmed",
+                "dynamicConclusion": "inconclusive",
+                "summary": verification["rationale"],
+                "evidenceRefs": evidence_refs,
+                "counterevidence": verification["counter_evidence"],
+                "limitations": [
+                    "CyberGym selected this PoC but did not retain a final artifact for official validation."
+                ],
+            }
+        if poc_validation is not None and poc_validation["validator"] == "cybergym":
+            status = poc_validation["status"]
+            conclusion = {
+                "verified": "reproduced",
+                "failed": "not_reproduced",
+            }.get(status, "inconclusive")
+            validation = {
+                "method": "independent-static-review+cybergym",
+                "staticConclusion": "confirmed",
+                "dynamicConclusion": conclusion,
+                "summary": verification["rationale"],
+                "evidenceRefs": evidence_refs,
+                "counterevidence": verification["counter_evidence"],
+            }
+            if isinstance(poc_validation.get("artifact_id"), str):
+                validation["pocRef"] = f"poc/cybergym/{poc_validation['artifact_id']}.bin"
+            if conclusion != "reproduced":
+                validation["limitations"] = [
+                    "CyberGym's official judge rejected the retained artifact."
+                    if conclusion == "not_reproduced"
+                    else "CyberGym execution or official validation was unavailable or inconclusive."
+                ]
         if poc_validation is not None:
             validation["pocValidation"] = {
                 "validator": poc_validation["validator"],
@@ -1117,8 +1173,8 @@ class ReportWriter:
                 "vulnerable-side runner; fixed-side behavior was not exposed to the solver."
             )
             validation_mode = (
-                "Static source verification plus generic PoC consumption, constrained vulnerable "
-                "replay, batch GDB, and libFuzzer evidence"
+                "Static source verification plus selected generic PoC adaptation, constrained vulnerable "
+                "replay, batch GDB, and manifest-selected fuzzing evidence"
             )
         if poc_generation is not None and cybergym is None:
             runtime_status = (

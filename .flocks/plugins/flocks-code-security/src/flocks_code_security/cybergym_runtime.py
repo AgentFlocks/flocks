@@ -8,8 +8,6 @@ solver session starts.
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import hashlib
 import inspect
 import json
@@ -21,13 +19,28 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Protocol
 
+from flocks_code_security.poc import resolve_cybergym_input
+
 
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
 _CONTAINER_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{0,1023}$")
 _BREAKPOINT_RE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_:<>~]*|[A-Za-z0-9._/-]+:[1-9][0-9]*)$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
 _OFFICIAL_TASK_SUBID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ARTIFACT_KINDS = {"seed", "corpus", "crash", "minimized", "dictionary"}
+_RAW_INPUT_ARTIFACT_KINDS = _ARTIFACT_KINDS - {"dictionary"}
+_FUZZ_ENGINES = {"none", "libfuzzer", "afl"}
+_INPUT_TRANSPORTS = {"file", "stdin"}
+_ALLOWED_ENVIRONMENT_NAMES = {
+    "AFL_FUZZER_ARGS",
+    "ASAN_OPTIONS",
+    "FUZZER_ARGS",
+    "LD_LIBRARY_PATH",
+    "MSAN_OPTIONS",
+    "SANITIZER",
+    "UBSAN_OPTIONS",
+}
 _MAX_OUTPUT_BYTES = 64 * 1024
 _DOCKER_UNAVAILABLE_MARKERS = (
     "cannot connect to the docker daemon",
@@ -42,56 +55,6 @@ _OFFICIAL_COMMAND_TIMEOUT = 10
 _OFFICIAL_MODE_OUTPUT_JSON_BYTES = 24 * 1024
 _OFFICIAL_MODE_ERROR_JSON_BYTES = 2 * 1024
 _DEFAULT_CYBERGYM_DATA_DIR = "/home/cybergym/cybergym-server-data"
-
-
-def _poc_bundle_input(bundle: Any) -> tuple[bytes, str]:
-    """Resolve one generic bundle file into the raw input CyberGym consumes."""
-    if not isinstance(bundle, dict):
-        raise ValueError("Generic PoC bundle is invalid")
-    artifact_type = bundle.get("artifact_type")
-    if artifact_type == "source_harness":
-        raise ValueError("CyberGym cannot execute a source_harness bundle; generate raw_input instead")
-    if artifact_type not in {"raw_input", "request", "bundle"}:
-        raise ValueError("Generic PoC artifact_type is not executable by CyberGym")
-    files = bundle.get("files")
-    if not isinstance(files, list) or not files:
-        raise ValueError("Generic PoC bundle has no files")
-    delivery = bundle.get("delivery")
-    selector = delivery.get("input_path") if isinstance(delivery, dict) else None
-    if not isinstance(selector, str) or not selector.strip():
-        selector = bundle.get("entrypoint")
-    matches = [
-        item
-        for item in files
-        if isinstance(item, dict)
-        and isinstance(item.get("path"), str)
-        and (not selector or item["path"] == selector)
-    ]
-    if len(matches) != 1:
-        if len(files) == 1 and isinstance(files[0], dict):
-            matches = [files[0]]
-        else:
-            raise ValueError("Generic PoC must identify exactly one CyberGym input file")
-    item = matches[0]
-    path = item.get("path")
-    data = item.get("data")
-    encoding = item.get("encoding", "utf8")
-    if not isinstance(path, str) or not path or not isinstance(data, str):
-        raise ValueError("Generic PoC input file is invalid")
-    try:
-        if encoding == "utf8":
-            raw = data.encode("utf-8")
-        elif encoding == "hex":
-            raw = bytes.fromhex(data)
-        elif encoding == "base64":
-            raw = base64.b64decode(data.encode("ascii"), validate=True)
-        else:
-            raise ValueError("Generic PoC input file encoding is unsupported")
-    except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
-        raise ValueError("Generic PoC input file data is invalid") from exc
-    if not raw:
-        raise ValueError("Generic PoC input file must be non-empty")
-    return raw, path
 
 
 class CyberGymManifestError(ValueError):
@@ -139,6 +102,10 @@ class CyberGymInputContract:
 
     required_prefix_hex: str = ""
     required_suffix_hex: str = ""
+    min_bytes: int = 0
+    max_bytes: int | None = None
+    alignment: int = 1
+    encoding: str = "raw"
 
     @classmethod
     def from_dict(cls, value: Any) -> "CyberGymInputContract":
@@ -148,8 +115,8 @@ class CyberGymInputContract:
         unknown = sorted(set(value) - allowed)
         if unknown:
             raise CyberGymManifestError(f"input_contract contains unknown fields: {', '.join(unknown)}")
-        normalized: dict[str, str] = {}
-        for name in allowed:
+        normalized: dict[str, Any] = {}
+        for name in ("required_prefix_hex", "required_suffix_hex"):
             raw = value.get(name, "")
             if not isinstance(raw, str) or len(raw) > 4_096:
                 raise CyberGymManifestError(f"input_contract {name} must be a hex string of at most 4096 characters")
@@ -157,16 +124,92 @@ class CyberGymInputContract:
                 normalized[name] = bytes.fromhex(raw).hex()
             except ValueError as exc:
                 raise CyberGymManifestError(f"input_contract {name} must be valid hexadecimal") from exc
+        min_bytes = value.get("min_bytes", 0)
+        max_bytes = value.get("max_bytes")
+        alignment = value.get("alignment", 1)
+        encoding = value.get("encoding", "raw")
+        if not isinstance(min_bytes, int) or isinstance(min_bytes, bool) or min_bytes < 0:
+            raise CyberGymManifestError("input_contract min_bytes must be a non-negative integer")
+        if max_bytes is not None and (
+            not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < min_bytes
+        ):
+            raise CyberGymManifestError("input_contract max_bytes must be null or an integer >= min_bytes")
+        if not isinstance(alignment, int) or isinstance(alignment, bool) or not 1 <= alignment <= 4_096:
+            raise CyberGymManifestError("input_contract alignment must be an integer from 1 to 4096")
+        if encoding not in {"raw", "utf-32le"}:
+            raise CyberGymManifestError("input_contract encoding must be raw or utf-32le")
+        normalized.update(
+            min_bytes=min_bytes,
+            max_bytes=max_bytes,
+            alignment=alignment,
+            encoding=encoding,
+        )
         return cls(**normalized)
 
-    def public_dict(self) -> dict[str, str]:
+    def public_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def validate_seed(self, raw: bytes) -> None:
+    def validate_input(self, raw: bytes, *, artifact_limit: int, allow_empty: bool) -> None:
+        if not raw and not allow_empty:
+            raise ValueError("The trusted manifest does not allow empty input")
+        if len(raw) > artifact_limit:
+            raise ValueError("Artifact exceeds the trusted manifest size limit")
+        if len(raw) < self.min_bytes or (self.max_bytes is not None and len(raw) > self.max_bytes):
+            raise ValueError("Input does not satisfy the trusted input_contract byte bounds")
+        if len(raw) % self.alignment:
+            raise ValueError("Input does not satisfy the trusted input_contract alignment")
+        if self.encoding == "utf-32le" and len(raw) % 4:
+            raise ValueError("Input does not satisfy utf-32le alignment")
         prefix = bytes.fromhex(self.required_prefix_hex)
         suffix = bytes.fromhex(self.required_suffix_hex)
         if len(raw) < len(prefix) + len(suffix) or not raw.startswith(prefix) or not raw.endswith(suffix):
-            raise ValueError("Seed does not satisfy the trusted input_contract")
+            raise ValueError("Input does not satisfy the trusted input_contract")
+
+
+@dataclass(frozen=True)
+class CyberGymFindingBinding:
+    """Trusted selector that chooses one generic PoC for one dynamic task."""
+
+    rule_id: str | None = None
+    required_paths: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "CyberGymFindingBinding":
+        if not isinstance(value, dict):
+            raise CyberGymManifestError("finding_binding must be an object")
+        if set(value) - {"rule_id", "required_paths"}:
+            raise CyberGymManifestError("finding_binding contains unknown fields")
+        rule_id = value.get("rule_id")
+        paths = value.get("required_paths", [])
+        if rule_id is not None and (
+            not isinstance(rule_id, str) or not rule_id.strip() or len(rule_id) > 256
+        ):
+            raise CyberGymManifestError("finding_binding rule_id must be a bounded non-empty string")
+        if not isinstance(paths, list) or len(paths) > 32:
+            raise CyberGymManifestError("finding_binding required_paths must be an array of at most 32 paths")
+        normalized_paths: list[str] = []
+        for path in paths:
+            parsed = PurePosixPath(path) if isinstance(path, str) else None
+            if (
+                not isinstance(path, str)
+                or not path
+                or len(path) > 512
+                or parsed is None
+                or parsed.is_absolute()
+                or ".." in parsed.parts
+                or parsed.as_posix() != path
+                or "\\" in path
+            ):
+                raise CyberGymManifestError("finding_binding required_paths must contain safe relative paths")
+            normalized_paths.append(path)
+        if not rule_id and not normalized_paths:
+            raise CyberGymManifestError("finding_binding must select by rule_id or required_paths")
+        if len(set(normalized_paths)) != len(normalized_paths):
+            raise CyberGymManifestError("finding_binding required_paths must be unique")
+        return cls(rule_id=rule_id, required_paths=tuple(normalized_paths))
+
+    def public_dict(self) -> dict[str, Any]:
+        return {"rule_id": self.rule_id, "required_paths": list(self.required_paths)}
 
 
 @dataclass(frozen=True)
@@ -181,6 +224,10 @@ class CyberGymTargetManifest:
     allow_empty_input: bool
     fuzzer_supported: bool
     fuzzer_target: str | None
+    engine: str
+    transport: str
+    environment: dict[str, str]
+    finding_binding: CyberGymFindingBinding | None
     gdb_supported: bool
     limits: CyberGymLimits
 
@@ -191,12 +238,15 @@ class CyberGymTargetManifest:
         allowed = {
             "task_id", "task_kind", "vulnerable_runner", "target_binary", "argv_template",
             "input_path", "input_contract", "allow_empty_input", "fuzzer_supported", "fuzzer_target",
-            "gdb_supported", "limits",
+            "gdb_supported", "limits", "engine", "transport", "environment", "finding_binding",
         }
         unknown = sorted(set(value) - allowed)
         if unknown:
             raise CyberGymManifestError(f"cybergym manifest contains unknown fields: {', '.join(unknown)}")
-        required = allowed - {"input_contract", "allow_empty_input", "fuzzer_target"}
+        required = allowed - {
+            "input_contract", "allow_empty_input", "fuzzer_target", "engine", "transport",
+            "environment", "finding_binding",
+        }
         missing = sorted(name for name in required if name not in value)
         if missing:
             raise CyberGymManifestError(f"cybergym manifest is missing: {', '.join(missing)}")
@@ -215,8 +265,15 @@ class CyberGymTargetManifest:
         if not isinstance(argv, list) or len(argv) > 64 or not all(isinstance(item, str) for item in argv):
             raise CyberGymManifestError("argv_template must be an array of at most 64 strings")
         argv_template = tuple(_bounded_string(item, "argv_template item", 4096) for item in argv)
-        if sum(item.count("{input}") for item in argv_template) != 1:
-            raise CyberGymManifestError("argv_template must contain exactly one {input} placeholder")
+        transport = value.get("transport", "file")
+        if transport not in _INPUT_TRANSPORTS:
+            raise CyberGymManifestError("transport must be file or stdin")
+        input_placeholder_count = sum(item.count("{input}") for item in argv_template)
+        expected_placeholders = 1 if transport == "file" else 0
+        if input_placeholder_count != expected_placeholders:
+            raise CyberGymManifestError(
+                "file transport requires exactly one {input} placeholder; stdin transport requires none"
+            )
         if any("{" in item.replace("{input}", "") or "}" in item.replace("{input}", "") for item in argv_template):
             raise CyberGymManifestError("argv_template only supports the {input} placeholder")
         for boolean in ("fuzzer_supported", "gdb_supported"):
@@ -231,13 +288,40 @@ class CyberGymTargetManifest:
             else None
         )
         fuzzer_target = value.get("fuzzer_target")
+        engine = value.get("engine", "libfuzzer" if value["fuzzer_supported"] else "none")
+        if engine not in _FUZZ_ENGINES:
+            raise CyberGymManifestError("engine must be none, libfuzzer, or afl")
         if value["fuzzer_supported"]:
             fuzzer_target = _container_path(fuzzer_target, "fuzzer_target")
-        elif fuzzer_target is not None:
-            raise CyberGymManifestError("fuzzer_target requires fuzzer_supported=true")
+            if engine == "none":
+                raise CyberGymManifestError("fuzzer_supported requires a fuzz engine")
+        elif fuzzer_target is not None or engine != "none":
+            raise CyberGymManifestError("fuzzer_target and engine require fuzzer_supported=true")
         allow_empty = value.get("allow_empty_input", False)
         if not isinstance(allow_empty, bool):
             raise CyberGymManifestError("allow_empty_input must be a boolean")
+        raw_environment = value.get("environment", {})
+        if not isinstance(raw_environment, dict) or len(raw_environment) > len(_ALLOWED_ENVIRONMENT_NAMES):
+            raise CyberGymManifestError("environment must be a bounded object")
+        environment: dict[str, str] = {}
+        for name, env_value in raw_environment.items():
+            if (
+                not isinstance(name, str)
+                or not _ENV_NAME_RE.fullmatch(name)
+                or name not in _ALLOWED_ENVIRONMENT_NAMES
+                or not isinstance(env_value, str)
+                or not env_value
+                or len(env_value) > 1_024
+                or "\0" in env_value
+            ):
+                raise CyberGymManifestError("environment contains an unsupported or invalid variable")
+            environment[name] = env_value
+        binding_value = value.get("finding_binding")
+        finding_binding = (
+            CyberGymFindingBinding.from_dict(binding_value)
+            if binding_value is not None
+            else None
+        )
         return cls(
             task_id=task_id,
             task_kind=task_kind,
@@ -249,6 +333,10 @@ class CyberGymTargetManifest:
             allow_empty_input=allow_empty,
             fuzzer_supported=value["fuzzer_supported"],
             fuzzer_target=fuzzer_target,
+            engine=engine,
+            transport=transport,
+            environment=environment,
+            finding_binding=finding_binding,
             gdb_supported=value["gdb_supported"],
             limits=CyberGymLimits.from_dict(value["limits"]),
         )
@@ -256,6 +344,9 @@ class CyberGymTargetManifest:
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["argv_template"] = list(self.argv_template)
+        value["finding_binding"] = (
+            self.finding_binding.public_dict() if self.finding_binding is not None else None
+        )
         return value
 
     @property
@@ -303,21 +394,35 @@ class CommandResult:
 
 
 class CommandExecutor(Protocol):
-    async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult: ...
+    async def run(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: int,
+        stdin_bytes: bytes | None = None,
+    ) -> CommandResult: ...
 
 
 class DockerCommandExecutor:
-    async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+    async def run(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: int,
+        stdin_bytes: bytes | None = None,
+    ) -> CommandResult:
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
+                stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError:
             return CommandResult(None, "", "docker executable is unavailable", unavailable=True)
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+            communicate = process.communicate() if stdin_bytes is None else process.communicate(stdin_bytes)
+            stdout, stderr = await asyncio.wait_for(communicate, timeout=timeout_seconds)
         except asyncio.TimeoutError:
             process.kill()
             stdout, stderr = await process.communicate()
@@ -557,28 +662,39 @@ class CyberGymRuntime:
         artifact_provenance = provenance or {}
         if not isinstance(artifact_provenance, dict):
             raise ValueError("CyberGym artifact provenance must be an object")
+        selected_poc_id = self.store.get_cybergym_selected_poc(scan_id)
         if source_poc_id is not None:
             if not isinstance(source_poc_id, str) or not source_poc_id or len(source_poc_id) > 256:
                 raise ValueError("source_poc_id must be a bounded non-empty identifier")
             self.store.assert_accepted_poc_bundle(scan_id, source_poc_id)
+            if selected_poc_id is None or source_poc_id != selected_poc_id:
+                raise ValueError("source_poc_id must match the CyberGym task's selected generic PoC")
             artifact_provenance = {**artifact_provenance, "poc_id": source_poc_id}
-        if (
-            kind == "seed"
-            and parent_id is None
-            and source_poc_id is None
-            and artifact_provenance.get("operation") != "generic_poc_import"
-            and self.store.has_cybergym_imported_poc(scan_id)
-        ):
-            raise ValueError(
-                "New CyberGym seeds must be derived from an imported generic PoC; "
-                "set parent_artifact_id to the consumed seed"
-            )
+        if parent_id is None and selected_poc_id is not None:
+            operation = artifact_provenance.get("operation")
+            is_generic_import = operation == "generic_poc_import" and artifact_provenance.get("poc_id") == selected_poc_id
+            existing_roots = [
+                item["parent_id"] is None
+                and item.get("provenance", {}).get("poc_id") == selected_poc_id
+                for item in self.store.list_cybergym_artifacts(scan_id)
+            ]
+            has_existing_root = any(existing_roots)
+            if (is_generic_import and has_existing_root) or (
+                not is_generic_import and (source_poc_id != selected_poc_id or has_existing_root)
+            ):
+                raise ValueError(
+                    "CyberGym permits one selected-PoC bootstrap root; later artifacts must have a parent"
+                )
         if not raw and not manifest.allow_empty_input:
             raise ValueError("The trusted manifest does not allow empty input")
         if len(raw) > manifest.limits.max_artifact_bytes:
             raise ValueError("Artifact exceeds the trusted manifest size limit")
-        if kind == "seed" and manifest.input_contract is not None:
-            manifest.input_contract.validate_seed(raw)
+        if kind in _RAW_INPUT_ARTIFACT_KINDS and manifest.input_contract is not None:
+            manifest.input_contract.validate_input(
+                raw,
+                artifact_limit=manifest.limits.max_artifact_bytes,
+                allow_empty=manifest.allow_empty_input,
+            )
             artifact_provenance = {
                 **artifact_provenance,
                 "input_contract": manifest.input_contract.public_dict(),
@@ -599,57 +715,116 @@ class CyberGymRuntime:
         must be derived from this imported artifact and can therefore be refined
         by replay, GDB, fuzzing, or minimization.
         """
-        records = self.store.list_accepted_poc_bundles(scan_id)
+        manifest = self._manifest(scan_id)
+        records = self.store.list_accepted_poc_contexts(scan_id)
+        selected, selection_reason = self._select_poc_bundle(records, manifest)
         imported: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
-        for record in records:
-            bundle = record.get("bundle")
-            try:
-                raw, source_path = _poc_bundle_input(bundle)
-                artifact = self.artifact_create(
-                    scan_id,
-                    kind="seed",
-                    raw=raw,
-                    provenance={
-                        "operation": "generic_poc_import",
-                        "poc_id": record["poc_id"],
-                        "candidate_id": record["candidate_id"],
-                        "source_path": source_path,
-                        "artifact_type": bundle["artifact_type"],
-                    },
-                )
-            except (TypeError, ValueError, KeyError) as exc:
-                rejected.append(
-                    {
-                        "poc_id": record["poc_id"],
-                        "candidate_id": record["candidate_id"],
-                        "reason": str(exc)[:1_000],
-                    }
-                )
-                self.store.record_poc_validation(
-                    scan_id,
-                    poc_id=record["poc_id"],
-                    candidate_id=record["candidate_id"],
-                    validator="cybergym",
-                    status="failed",
-                    artifact_id=None,
-                    evidence={"stage": "adaptation", "reason": str(exc)[:1_000]},
-                )
-                continue
-            imported.append(
+        if selected is None:
+            return {
+                "accepted_bundle_count": len(records),
+                "selected_bundle_count": 0,
+                "selected_poc_id": None,
+                "selection_reason": selection_reason,
+                "requires_seed_adaptation": False,
+                "imported_seed_count": 0,
+                "imported": imported,
+                "rejected": rejected,
+            }
+        self.store.set_cybergym_selected_poc(scan_id, selected["poc_id"])
+        try:
+            raw, source_path = resolve_cybergym_input(selected["bundle"])
+        except (TypeError, ValueError, KeyError) as exc:
+            rejected.append(
                 {
-                    "poc_id": record["poc_id"],
-                    "candidate_id": record["candidate_id"],
-                    "artifact_id": artifact["artifact_id"],
-                    "source_path": source_path,
+                    "poc_id": selected["poc_id"],
+                    "candidate_id": selected["candidate_id"],
+                    "reason": str(exc)[:1_000],
                 }
             )
+            return {
+                "accepted_bundle_count": len(records),
+                "selected_bundle_count": 1,
+                "selected_poc_id": selected["poc_id"],
+                "selection_reason": selection_reason,
+                "requires_seed_adaptation": True,
+                "imported_seed_count": 0,
+                "imported": imported,
+                "rejected": rejected,
+            }
+        try:
+            artifact = self.artifact_create(
+                scan_id,
+                kind="seed",
+                raw=raw,
+                provenance={
+                    "operation": "generic_poc_import",
+                    "poc_id": selected["poc_id"],
+                    "candidate_id": selected["candidate_id"],
+                    "source_path": source_path,
+                    "artifact_type": selected["bundle"]["artifact_type"],
+                },
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            rejected.append(
+                {
+                    "poc_id": selected["poc_id"],
+                    "candidate_id": selected["candidate_id"],
+                    "reason": str(exc)[:1_000],
+                }
+            )
+            return {
+                "accepted_bundle_count": len(records),
+                "selected_bundle_count": 1,
+                "selected_poc_id": selected["poc_id"],
+                "selection_reason": selection_reason,
+                "requires_seed_adaptation": True,
+                "imported_seed_count": 0,
+                "imported": imported,
+                "rejected": rejected,
+            }
+        imported.append(
+            {
+                "poc_id": selected["poc_id"],
+                "candidate_id": selected["candidate_id"],
+                "artifact_id": artifact["artifact_id"],
+                "source_path": source_path,
+            }
+        )
         return {
             "accepted_bundle_count": len(records),
-            "imported_seed_count": len(imported),
+            "selected_bundle_count": 1,
+            "selected_poc_id": selected["poc_id"],
+            "selection_reason": selection_reason,
+            "requires_seed_adaptation": False,
+            "imported_seed_count": 1,
             "imported": imported,
             "rejected": rejected,
         }
+
+    @staticmethod
+    def _select_poc_bundle(
+        records: list[dict[str, Any]],
+        manifest: CyberGymTargetManifest,
+    ) -> tuple[dict[str, Any] | None, str]:
+        binding = manifest.finding_binding
+        if binding is None:
+            if len(records) == 1:
+                return records[0], "only accepted generic PoC"
+            if not records:
+                return None, "no accepted generic PoC"
+            return None, "multiple accepted generic PoCs require finding_binding"
+        matches = [
+            record
+            for record in records
+            if (binding.rule_id is None or record["candidate"].get("rule_id") == binding.rule_id)
+            and set(binding.required_paths).issubset(set(record["evidence_paths"]))
+        ]
+        if len(matches) == 1:
+            return matches[0], "trusted finding_binding matched one generic PoC"
+        if not matches:
+            return None, "finding_binding matched no accepted generic PoC"
+        return None, "finding_binding matched multiple accepted generic PoCs"
 
     async def replay(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
         manifest = self._manifest(scan_id)
@@ -778,7 +953,7 @@ class CyberGymRuntime:
                     kind="minimized",
                     raw=minimized_data,
                     parent_id=artifact_id,
-                    provenance={"run_id": run["run_id"], "operation": "libfuzzer_minimize"},
+                    provenance={"run_id": run["run_id"], "operation": f"{manifest.engine}_minimize"},
                 )
                 minimized_id = minimized["artifact_id"]
                 replay = await self.replay(scan_id, minimized_id)
@@ -854,7 +1029,7 @@ class CyberGymRuntime:
                 poc_id=poc_id,
                 candidate_id=candidate_id,
                 validator="cybergym",
-                status=local_validation,
+                status=_poc_validation_status(local_validation, official_result),
                 artifact_id=artifact_id,
                 evidence={"local": evidence, "official": official_result},
             )
@@ -880,7 +1055,14 @@ class CyberGymRuntime:
             input_file.chmod(0o600)
             command = self._container_command(manifest, scratch)
             command.extend([manifest.target_binary, *self._argv(manifest)])
-            result = await self.executor.run(command, timeout_seconds=manifest.limits.replay_seconds)
+            if manifest.transport == "stdin":
+                result = await self.executor.run(
+                    command,
+                    timeout_seconds=manifest.limits.replay_seconds,
+                    stdin_bytes=raw,
+                )
+            else:
+                result = await self.executor.run(command, timeout_seconds=manifest.limits.replay_seconds)
         status = _execution_status(result)
         return {
             "status": status,
@@ -904,7 +1086,7 @@ class CyberGymRuntime:
             command.extend(["gdb", "-q", "-nx", "-batch", "-ex", "set pagination off"])
             for breakpoint in breakpoints:
                 command.extend(["-ex", f"break {breakpoint['location']}"])
-            command.extend(["-ex", "run"])
+            command.extend(["-ex", self._gdb_run_command(manifest)])
             for variable in variables:
                 command.extend(["-ex", f"print {variable}"])
             command.extend(["-ex", "bt 20", "--args", manifest.target_binary, *self._argv(manifest)])
@@ -974,16 +1156,31 @@ class CyberGymRuntime:
                 container_corpus = f"{mount_root}/corpus"
                 container_findings = f"{mount_root}/findings"
                 command = self._container_command(manifest, scratch)
-                command.extend([
-                    manifest.fuzzer_target or "",
-                    container_corpus,
-                    f"-artifact_prefix={container_findings}/",
-                    f"-max_total_time={seconds}",
-                ])
-                if max_length is not None:
-                    command.append(f"-max_len={max_length}")
-                if dictionary_path is not None:
-                    command.append(f"-dict={mount_root}/dictionary")
+                if manifest.engine == "libfuzzer":
+                    command.extend([
+                        manifest.fuzzer_target or "",
+                        container_corpus,
+                        f"-artifact_prefix={container_findings}/",
+                        f"-max_total_time={seconds}",
+                    ])
+                    if max_length is not None:
+                        command.append(f"-max_len={max_length}")
+                    if dictionary_path is not None:
+                        command.append(f"-dict={mount_root}/dictionary")
+                elif manifest.engine == "afl":
+                    command.extend([
+                        "afl-fuzz", "-i", container_corpus, "-o", container_findings,
+                        "-V", str(seconds),
+                    ])
+                    if max_length is not None:
+                        command.extend(["-G", str(max_length)])
+                    if dictionary_path is not None:
+                        command.extend(["-x", f"{mount_root}/dictionary"])
+                    command.extend(["--", manifest.fuzzer_target or ""])
+                    if manifest.transport == "file":
+                        command.append("@@")
+                else:  # pragma: no cover - rejected by manifest validation
+                    raise ValueError("Fuzzing is disabled by the trusted manifest")
                 result = await self.executor.run(command, timeout_seconds=seconds + 15)
                 produced = self._persist_fuzz_outputs(
                     scan_id,
@@ -997,7 +1194,8 @@ class CyberGymRuntime:
                 "exit_code": result.returncode,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
-                "artifacts": produced,
+                "artifacts": produced["artifacts"],
+                "rejected_artifacts": produced["rejected"],
             }
             self.store.finish_cybergym_run(run_id, "completed", payload)
         except BaseException as exc:
@@ -1015,12 +1213,22 @@ class CyberGymRuntime:
             crash.write_bytes(raw)
             mount_root = str(PurePosixPath(manifest.input_path).parent)
             command = self._container_command(manifest, scratch)
-            command.extend([
-                manifest.fuzzer_target or "",
-                f"-minimize_crash=1",
-                f"-exact_artifact_path={mount_root}/minimized",
-                f"{mount_root}/crash",
-            ])
+            if manifest.engine == "libfuzzer":
+                command.extend([
+                    manifest.fuzzer_target or "",
+                    "-minimize_crash=1",
+                    f"-exact_artifact_path={mount_root}/minimized",
+                    f"{mount_root}/crash",
+                ])
+            elif manifest.engine == "afl":
+                command.extend([
+                    "afl-tmin", "-i", f"{mount_root}/crash", "-o", f"{mount_root}/minimized",
+                    "--", manifest.fuzzer_target or "",
+                ])
+                if manifest.transport == "file":
+                    command.append("@@")
+            else:  # pragma: no cover - guarded by minimize
+                raise ValueError("Fuzzing is disabled by the trusted manifest")
             result = await self.executor.run(command, timeout_seconds=manifest.limits.fuzz_seconds)
             minimized_data = minimized.read_bytes() if minimized.is_file() else None
         return {
@@ -1039,10 +1247,11 @@ class CyberGymRuntime:
         findings: Path,
         *,
         seeds: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, list[dict[str, Any]]]:
         persisted: list[dict[str, Any]] = []
-        for directory, kind in ((findings, "crash"), (corpus, "corpus")):
-            for path in sorted(directory.iterdir(), key=lambda item: item.name)[:256]:
+        rejected: list[dict[str, Any]] = []
+        for directory, kind in self._fuzz_output_directories(findings, corpus):
+            for path in sorted(directory.rglob("*"), key=lambda item: str(item.relative_to(directory)))[:256]:
                 if not path.is_file() or path.is_symlink() or (kind == "corpus" and path.name.startswith("seed-")):
                     continue
                 raw = path.read_bytes()
@@ -1058,21 +1267,47 @@ class CyberGymRuntime:
                 )
                 provenance: dict[str, Any] = {
                     "run_id": run_id,
-                    "operation": "libfuzzer",
-                    "source_name": path.name,
+                    "operation": self._manifest(scan_id).engine,
+                    "source_name": str(path.relative_to(directory)),
                 }
                 if len(poc_ids) == 1:
                     provenance["poc_id"] = poc_ids[0]
                 elif poc_ids:
                     provenance["poc_ids"] = poc_ids
-                artifact = self.artifact_create(
-                    scan_id,
-                    kind=kind,
-                    raw=raw,
-                    provenance=provenance,
-                )
+                try:
+                    artifact = self.artifact_create(
+                        scan_id,
+                        kind=kind,
+                        raw=raw,
+                        parent_id=seeds[0]["artifact_id"],
+                        provenance=provenance,
+                    )
+                except ValueError as exc:
+                    rejected.append(
+                        {"kind": kind, "source_name": provenance["source_name"], "reason": str(exc)}
+                    )
+                    continue
                 persisted.append(_public_artifact(artifact))
-        return persisted
+        return {"artifacts": persisted, "rejected": rejected}
+
+    @staticmethod
+    def _fuzz_output_directories(findings: Path, corpus: Path) -> list[tuple[Path, str]]:
+        """Normalize libFuzzer and AFL output layouts without trusting filenames."""
+        crash_dirs = []
+        for path in findings.glob("*/crashes"):
+            if path.is_dir() and not path.is_symlink():
+                crash_dirs.append(path)
+        corpus_dirs = []
+        for path in findings.glob("*/queue"):
+            if path.is_dir() and not path.is_symlink():
+                corpus_dirs.append(path)
+        if not crash_dirs:
+            crash_dirs = [findings]
+        if not corpus_dirs:
+            corpus_dirs = [corpus]
+        return [(path, "crash") for path in crash_dirs] + [
+            (path, "corpus") for path in corpus_dirs
+        ]
 
     def _container_command(self, manifest: CyberGymTargetManifest, scratch: Path, *, gdb: bool = False) -> list[str]:
         mount_root = str(PurePosixPath(manifest.input_path).parent)
@@ -1086,8 +1321,11 @@ class CyberGymRuntime:
         if gdb:
             command.extend(["--cap-add", "SYS_PTRACE", "--security-opt", "seccomp=unconfined"])
         task_mounts = self._task_data_mounts(manifest)
+        for name, value in sorted(manifest.environment.items()):
+            command.extend(["--env", f"{name}={value}"])
         if any(destination == "/out-libs" for _source, destination in task_mounts):
-            command.extend(["--env", "LD_LIBRARY_PATH=/out-libs"])
+            if "LD_LIBRARY_PATH" not in manifest.environment:
+                command.extend(["--env", "LD_LIBRARY_PATH=/out-libs"])
         for source, destination in task_mounts:
             command.extend([
                 "--mount",
@@ -1136,6 +1374,10 @@ class CyberGymRuntime:
     def _argv(manifest: CyberGymTargetManifest) -> list[str]:
         return [item.replace("{input}", manifest.input_path) for item in manifest.argv_template]
 
+    @staticmethod
+    def _gdb_run_command(manifest: CyberGymTargetManifest) -> str:
+        return "run" if manifest.transport == "file" else f"run < {manifest.input_path}"
+
 
 def _validate_gdb_intent(intent: Any) -> tuple[list[dict[str, str]], list[str]]:
     if not isinstance(intent, dict) or set(intent) - {"breakpoints", "variables"}:
@@ -1159,6 +1401,18 @@ def _validate_gdb_intent(intent: Any) -> tuple[list[dict[str, str]], list[str]]:
     if not isinstance(raw_variables, list) or len(raw_variables) > 8 or not all(isinstance(item, str) and _IDENTIFIER_RE.fullmatch(item) for item in raw_variables):
         raise ValueError("GDB variables must be at most eight plain identifiers")
     return breakpoints, list(raw_variables)
+
+
+def _poc_validation_status(local_validation: str, official_result: dict[str, Any]) -> str:
+    """Combine local and official facts without allowing a rejected judge result to pass."""
+    status = official_result.get("status")
+    if status == "rejected":
+        return "failed"
+    if status == "accepted":
+        return "verified" if local_validation == "verified" and official_result.get("dynamic_confirmed", True) else "unverified"
+    if status in {"not_configured", "unavailable"}:
+        return "unverified"
+    return "failed"
 
 
 def _execution_status(result: CommandResult) -> str:

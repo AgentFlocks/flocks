@@ -19,12 +19,11 @@ Choose the structured delivery contract from the target boundary:
 - \`source_harness\` for a C/C++ or other native API that needs a compiled caller;
 - \`bundle\` when multiple files are required.
 
-The PoC language does not have to match the target language. A C parser can use a
-Python generator that emits bytes, while a native C API should use a C/C++ harness.
-When the execution manifest contains a CyberGym task, prefer a single bounded
-`raw_input`/`request` file. If the generic PoC is a generator or source harness,
-the dynamic validator will materialize raw bytes from its bundle before replay;
-do not claim that the source file itself is a CyberGym raw seed.
+The PoC language must fit the actual target boundary. A C parser can have a Python
+helper in a standard PoC, while a native C API should use a C/C++ harness. When the
+execution manifest contains a CyberGym task, it is only a later dynamic-validation
+consumer: keep this generic PoC faithful to the source boundary. CyberGym never
+executes generic PoC code, so do not claim it will run a generator script or harness.
 Do not include shell commands, arbitrary mounts, secrets, external-network setup,
 or claims of runtime reproduction. Submit exactly one \`audit_submit_poc\` bundle
 with a clear entrypoint, bounded files, exact evidence \`source_refs\`, and a concise

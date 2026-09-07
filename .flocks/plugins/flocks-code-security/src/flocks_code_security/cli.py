@@ -642,6 +642,12 @@ class AuditOrchestrator:
         scope = _start_phase_observation(scan_observation, "dynamic_validation")
         parent = scan_observation if scope is None else scope.observation
         try:
+            _emit(
+                self.progress,
+                "dynamic.started",
+                {"scan_id": scan_id, "validator": "cybergym"},
+                observation_parent=parent,
+            )
             runtime = get_runtime().cybergym
             import_seeds = getattr(runtime, "seed_from_poc_bundles", None)
             if callable(import_seeds):
@@ -652,6 +658,21 @@ class AuditOrchestrator:
                     imported,
                     observation_parent=parent,
                 )
+                if imported["selected_bundle_count"] == 0:
+                    runtime.mark_failed_no_artifact(scan_id)
+                    status = _require_success(await audit_status(self.ctx, scan_id))
+                    _emit(self.progress, "scan.status", status, observation_parent=parent)
+                    _emit(
+                        self.progress,
+                        "dynamic.completed",
+                        {"scan_id": scan_id, "status": "not_runnable", "validator": "cybergym"},
+                        observation_parent=parent,
+                    )
+                    _end_observation(
+                        scope,
+                        output={"status": "completed", "reason": imported["selection_reason"]},
+                    )
+                    return status
             batch, status = await _run_phase(
                 self.ctx,
                 scan_id,
@@ -677,13 +698,25 @@ class AuditOrchestrator:
                 _emit(self.progress, "scan.status", status, observation_parent=parent)
             elif task["status"] not in {"submitted", "failed_no_artifact"}:
                 raise RuntimeError(f"CyberGym task is not finalizable: {task['status']}")
+            _emit(
+                self.progress,
+                "dynamic.completed",
+                {"scan_id": scan_id, "counts": status.get("counts", {}), "validator": "cybergym"},
+                observation_parent=parent,
+            )
             _end_observation(scope, output={"status": "completed", "counts": status.get("counts", {})})
             return status
         except BaseException as exc:
+            _emit(
+                self.progress,
+                "dynamic.cancelled" if isinstance(exc, asyncio.CancelledError) else "dynamic.failed",
+                {"scan_id": scan_id, "validator": "cybergym", "error_type": type(exc).__name__},
+                observation_parent=parent,
+            )
             _end_observation(
                 scope,
-                output={"status": "failed", "error_type": type(exc).__name__},
-                level="ERROR",
+                output={"status": "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", "error_type": type(exc).__name__},
+                level="WARNING" if isinstance(exc, asyncio.CancelledError) else "ERROR",
                 status_message=type(exc).__name__,
             )
             raise
