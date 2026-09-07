@@ -399,6 +399,26 @@ describe('Layout onboarding entry', () => {
     expect(screen.queryByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder')).not.toBeInTheDocument();
   });
 
+  it('allows member users to open onboarding from the home entry', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-2',
+        username: 'member',
+        role: 'member',
+        status: 'active',
+        must_reset_password: false,
+      },
+      logout: vi.fn(),
+    });
+
+    renderHomeWithLayout();
+    await user.click(screen.getByRole('button', { name: 'getStarted' }));
+
+    expect(await screen.findByText('onboarding.bootstrap.modelPageTitle')).toBeInTheDocument();
+  });
+
   it('auto-opens onboarding from backend status even when the old dismissed flag exists', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     onboardingAPI.getStatus.mockResolvedValue({

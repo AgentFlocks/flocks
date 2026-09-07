@@ -56,18 +56,20 @@ def test_provider_global_configuration_credentials_and_tests_require_admin():
     assert [response.status_code for response in responses] == [403] * len(responses)
 
 
-def test_onboarding_configuration_requires_admin():
+def test_onboarding_configuration_allows_members():
     from flocks.server.routes.onboarding import router
 
     client = _user_client(router, prefix="/api/onboarding", role="member")
     payload = {
         "region": "cn",
-        "use_threatbook_model": True,
-        "threatbook_api_key": "secret",
+        "use_threatbook_model": False,
     }
 
-    assert client.post("/api/onboarding/validate", json=payload).status_code == 403
-    assert client.post("/api/onboarding/apply", json=payload).status_code == 403
+    validate_response = client.post("/api/onboarding/validate", json=payload)
+    apply_response = client.post("/api/onboarding/apply", json=payload)
+
+    assert validate_response.status_code == 200
+    assert apply_response.status_code == 400
 
 
 def test_mcp_credential_and_threatbook_configuration_require_admin():

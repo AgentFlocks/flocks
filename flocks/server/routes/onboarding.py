@@ -11,7 +11,7 @@ import copy
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from flocks.config.config import Config
@@ -36,7 +36,6 @@ from flocks.server.routes.mcp import (
     set_mcp_credentials,
     test_mcp_connection,
 )
-from flocks.server.auth import require_admin
 from flocks.server.routes.provider import (
     APIServiceUpdateRequest,
     ProviderCredentialRequest,
@@ -878,7 +877,6 @@ async def get_onboarding_status() -> OnboardingStatusResponse:
 @serialized_config_mutation
 async def validate_onboarding(
     request: OnboardingValidateRequest,
-    _admin: object = Depends(require_admin),
 ) -> OnboardingValidateResponse:
     return await _validate_onboarding_request(request)
 
@@ -892,7 +890,6 @@ async def validate_onboarding(
 @serialized_config_mutation
 async def apply_onboarding(
     request: OnboardingValidateRequest,
-    _admin: object = Depends(require_admin),
 ) -> OnboardingApplyResponse:
     return await _apply_onboarding(request)
 
