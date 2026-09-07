@@ -251,6 +251,8 @@ class PriceConfig(BaseModel):
     cost_rounding_places: Optional[int] = Field(None, ge=0)
     price_tiers: Optional[List[PriceTierConfig]] = None
     price_version: Optional[str] = None
+    # A console response without a tier field is not evidence of flat pricing.
+    price_tiers_known: bool = True
 
 
 class ModelCapabilitiesV2(BaseModel):

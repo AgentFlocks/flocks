@@ -421,6 +421,35 @@ class ConfigWriter:
         })
         return True
 
+    @classmethod
+    def merge_router_catalog(
+        cls, provider_id: str, snapshot: Dict[str, Any], *, starting_model_ids: set[str],
+    ) -> int:
+        """Publish a validated snapshot and new model names in one config write.
+
+        Read after all upstream calls have finished so edits made during the
+        batch survive. Prices stay separate from legacy user overrides.
+        """
+        data = cls._read_raw()
+        provider = data.get("provider", {}).get(provider_id)
+        if not isinstance(provider, dict):
+            raise ValueError("Provider no longer configured")
+        models = provider.setdefault("models", {})
+        options = provider.setdefault("options", {})
+        previous = options.get("router_catalog") or {}
+        managed_ids = set(previous.get("managed_model_ids", []))
+        added = 0
+        for model_id, model in snapshot["models"].items():
+            if model_id not in models and model_id not in starting_model_ids:
+                models[model_id] = {"name": model["name"]}
+                managed_ids.add(model_id)
+                added += 1
+        options["router_catalog"] = {
+            **snapshot, "managed_model_ids": sorted(managed_ids),
+        }
+        cls._write_raw(data)
+        return added
+
     # ------------------------------------------------------------------
     # Model settings (model_settings section)
     # ------------------------------------------------------------------

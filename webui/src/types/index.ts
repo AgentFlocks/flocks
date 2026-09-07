@@ -521,6 +521,7 @@ export interface PriceConfigV2 {
   currency: string;
   price_tiers?: PriceTierV2[] | null;
   price_version?: string | null;
+  price_tiers_known?: boolean;
 }
 
 export interface ParameterRuleV2 {

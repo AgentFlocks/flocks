@@ -13,10 +13,12 @@ type PricingPerMillion = {
   currency: string;
   price_tiers?: PricingTierPerMillion[] | null;
   price_version?: string | null;
+  price_tiers_known?: boolean;
 };
 
 export function isPricingFree(pricing: PricingPerMillion): boolean {
-  return pricing.input === 0
+  return pricing.price_tiers_known !== false
+    && pricing.input === 0
     && pricing.output === 0
     && (pricing.cache_read ?? 0) === 0
     && (pricing.cache_write ?? 0) === 0

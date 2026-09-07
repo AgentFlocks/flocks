@@ -142,6 +142,25 @@ export const providerAPI = {
       modelId ? { model_id: modelId } : {}
     ),
 
+  batchTestSync: (id: string, signal?: AbortSignal) =>
+    client.post<{
+      supported: boolean;
+      synced: boolean;
+      fallback_to_test?: boolean;
+      message?: string;
+      error_code?: string;
+      synced_at?: string;
+      model_count?: number;
+      added_count?: number;
+      missing_price_tiers?: string[];
+      results?: Array<{
+        model_id: string;
+        success: boolean;
+        latency_ms?: number;
+        error?: string;
+      }>;
+    }>(`/api/provider/${id}/batch-test-sync`, {}, { timeout: 240000, signal }),
+
   // API service status (connectivity)
   listApiServices: (options?: { force?: boolean }) =>
     listApiServicesCached(options),

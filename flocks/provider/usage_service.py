@@ -140,10 +140,10 @@ def resolve_usage_pricing(
         and getattr(provider, "_uses_router_key", lambda: False)()
     )
     if uses_router_pricing:
-        router_pricing = get_provider_pricing_profile(
-            provider_id,
-            "router",
-            model_id,
+        resolver = getattr(provider, "get_router_pricing", None)
+        router_pricing = (
+            resolver(model_id) if callable(resolver)
+            else get_provider_pricing_profile(provider_id, "router", model_id)
         )
         if router_pricing is not None:
             return router_pricing
@@ -189,6 +189,7 @@ def resolve_usage_pricing(
             ),
             price_tiers=getattr(pricing, "price_tiers", None),
             price_version=getattr(pricing, "price_version", None),
+            price_tiers_known=getattr(pricing, "price_tiers_known", True),
         )
 
     if isinstance(pricing, dict):
@@ -204,6 +205,7 @@ def resolve_usage_pricing(
             cost_rounding_places=pricing.get("cost_rounding_places"),
             price_tiers=pricing.get("price_tiers"),
             price_version=pricing.get("price_version"),
+            price_tiers_known=pricing.get("price_tiers_known", True),
         )
 
     return None

@@ -161,6 +161,16 @@ export default function ModelPage() {
   selectedProviderRef.current = selectedProvider;
   const providerLoadSeqRef = useRef(0);
   const handleSelectProviderRef = useRef<(p: EnrichedProvider) => Promise<void>>(null!);
+  const pageMountedRef = useRef(true);
+
+  useEffect(() => {
+    pageMountedRef.current = true;
+    return () => {
+      pageMountedRef.current = false;
+      providerLoadSeqRef.current += 1;
+      if (sseRefetchTimer.current) clearTimeout(sseRefetchTimer.current);
+    };
+  }, []);
 
   useSSE({
     url: '/api/event',
@@ -423,6 +433,38 @@ export default function ModelPage() {
     refetch();
   }, [selectedProvider, refetch]);
 
+  const handleModelsSynced = useCallback(async (providerId: string) => {
+    const requestSeq = ++providerLoadSeqRef.current;
+    const [providersData, modelsResponse, routingResponse] = await Promise.all([
+      refetch(),
+      modelV2API.listDefinitions({ provider: providerId }),
+      modelV2API.listDefinitions({ enabled_only: true }),
+    ]);
+    const refreshedModels = modelsResponse.data.models || [];
+    const enabledEntries = await Promise.all(refreshedModels.map(async (model) => {
+      const response = await modelSettingsAPI.get(providerId, model.id);
+      return [`${providerId}/${model.id}`, response.data.enabled !== false] as const;
+    }));
+    if (!pageMountedRef.current) return;
+    const refreshedProvider = providersData.providers.find(provider => provider.id === providerId);
+    if (!refreshedProvider) throw new Error('Provider list could not be refreshed');
+    setAvailableRoutingModels(routingResponse.data.models || []);
+    window.dispatchEvent(new Event(MODEL_CHANGED_EVENT));
+    if (providerLoadSeqRef.current !== requestSeq || selectedProviderRef.current?.id !== providerId) return;
+
+    setProviderModels(refreshedModels);
+    setModelEnabledMap(previous => ({ ...previous, ...Object.fromEntries(enabledEntries) }));
+    setSelectedProvider(refreshedProvider);
+    selectedProviderRef.current = refreshedProvider;
+    setSelectedModelForDetail(previous => {
+      if (previous?.provider.id !== providerId) return previous;
+      const refreshedModel = refreshedModels.find(model => model.id === previous.model.id);
+      return refreshedModel
+        ? { provider: refreshedProvider, model: refreshedModel }
+        : null;
+    });
+  }, [refetch]);
+
   const handleDeleteModel = async (modelId: string) => {
     if (!selectedProvider) return;
 
@@ -454,7 +496,7 @@ export default function ModelPage() {
 
   // ==================== Render ====================
 
-  if (loading) {
+  if (loading && providers.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <LoadingSpinner delayMs={180} />
@@ -577,6 +619,7 @@ export default function ModelPage() {
               onToggleModel={handleToggleModel}
               onDeleteModel={handleDeleteModel}
               onOpenModelDetail={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
+              onModelsSynced={handleModelsSynced}
               onConnectionStatusChange={(status) => {
                 setConnectionStatus(prev => ({ ...prev, [selectedProvider.id]: status }));
                 saveConnectionCache(selectedProvider.id, status);
@@ -881,7 +924,7 @@ type ModelTestStatus = {
 function ProviderDetail({
   provider, models, loadingModels,
   modelEnabledMap, connStatus, onToggleModel, onDeleteModel,
-  onOpenModelDetail, onConnectionStatusChange,
+  onOpenModelDetail, onConnectionStatusChange, onModelsSynced,
 }: {
   provider: EnrichedProvider;
   models: ModelDefinitionV2[];
@@ -892,21 +935,41 @@ function ProviderDetail({
   onDeleteModel?: (modelId: string) => void;
   onOpenModelDetail?: (model: ModelDefinitionV2) => void;
   onConnectionStatusChange?: (status: 'connected' | 'failed') => void;
+  onModelsSynced?: (providerId: string) => Promise<void>;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
   const [modelTestStatus, setModelTestStatus] = useState<Record<string, ModelTestStatus>>({});
   const [batchTesting, setBatchTesting] = useState(false);
+  const [syncTesting, setSyncTesting] = useState(false);
 
   const batchResultsRef = useRef<Record<string, ModelTestStatus>>({});
+  const mountedRef = useRef(true);
+  const testGenerationRef = useRef(0);
+  const batchInFlightRef = useRef(false);
+  const batchAbortRef = useRef<AbortController | null>(null);
+  const canSyncModels = provider.id === 'threatbook-cn-llm' && provider.configured;
 
-  const handleTestSingleModel = async (modelId: string): Promise<ModelTestStatus> => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      testGenerationRef.current += 1;
+      batchAbortRef.current?.abort();
+    };
+  }, []);
+
+  const handleTestSingleModel = async (
+    modelId: string,
+    generation = testGenerationRef.current,
+  ): Promise<ModelTestStatus> => {
     setModelTestStatus(prev => ({ ...prev, [modelId]: { status: 'testing' } }));
     try {
       const res = await providerAPI.testCredentials(provider.id, modelId);
       const result: ModelTestStatus = res.data.success
         ? { status: 'success', latency: res.data.latency_ms, message: res.data.answer }
         : { status: 'failed', message: res.data.error || res.data.message || t('status.connectionFailed') };
+      if (!mountedRef.current || generation !== testGenerationRef.current) return result;
       setModelTestStatus(prev => ({ ...prev, [modelId]: result }));
       batchResultsRef.current[modelId] = result;
       if (result.status === 'success' && connStatus !== 'connected' && onConnectionStatusChange) {
@@ -915,6 +978,7 @@ function ProviderDetail({
       return result;
     } catch (err: any) {
       const result: ModelTestStatus = { status: 'failed', message: err.response?.data?.detail || err.message };
+      if (!mountedRef.current || generation !== testGenerationRef.current) return result;
       setModelTestStatus(prev => ({ ...prev, [modelId]: result }));
       batchResultsRef.current[modelId] = result;
       return result;
@@ -922,43 +986,122 @@ function ProviderDetail({
   };
 
   const handleBatchTest = async () => {
+    if (batchInFlightRef.current) return;
     const enabledModels = models.filter(m => {
       const key = `${provider.id}/${m.id}`;
       return modelEnabledMap[key] !== false;
     });
-    if (enabledModels.length === 0) {
+    if (enabledModels.length === 0 && !canSyncModels) {
       toast.warning(t('form.noModelsToTest'));
       return;
     }
+    const generation = ++testGenerationRef.current;
+    const isCurrent = () => mountedRef.current && generation === testGenerationRef.current;
+    batchInFlightRef.current = true;
     setBatchTesting(true);
     batchResultsRef.current = {};
     const initial: Record<string, ModelTestStatus> = {};
     enabledModels.forEach(m => { initial[m.id] = { status: 'testing' }; });
     setModelTestStatus(prev => ({ ...prev, ...initial }));
+    let priceSyncSkipped = false;
 
-    const CONCURRENCY = 3;
-    let idx = 0;
-    const run = async () => {
-      while (idx < enabledModels.length) {
-        const m = enabledModels[idx++];
-        await handleTestSingleModel(m.id);
+    try {
+      if (canSyncModels) {
+        setSyncTesting(true);
+        batchAbortRef.current = new AbortController();
+        const response = await providerAPI.batchTestSync(provider.id, batchAbortRef.current.signal);
+        if (!isCurrent()) return;
+        setSyncTesting(false);
+        if (response.data.supported && !response.data.synced) {
+          if (!response.data.fallback_to_test) {
+            setModelTestStatus({});
+            toast.error(t('form.modelSyncFailed'), t('form.modelSyncUnchanged'));
+            return;
+          }
+          // An unavailable price source must not block normal batch tests or
+          // expose its authentication/implementation details to the user.
+          priceSyncSkipped = true;
+        }
+        if (response.data.supported && response.data.synced) {
+          const data = response.data;
+          const results: Record<string, ModelTestStatus> = {};
+          (data.results || []).forEach(result => {
+            // Existing disabled models remain excluded from test badges and totals.
+            if (modelEnabledMap[`${provider.id}/${result.model_id}`] === false) return;
+            results[result.model_id] = result.success
+              ? { status: 'success', latency: result.latency_ms }
+              : { status: 'failed', message: result.error || t('status.connectionFailed') };
+          });
+          batchResultsRef.current = results;
+          setModelTestStatus(results);
+          const succeeded = Object.values(results).filter(result => result.status === 'success').length;
+          const failed = Object.values(results).filter(result => result.status === 'failed').length;
+          if (succeeded + failed > 0) {
+            onConnectionStatusChange?.(succeeded > 0 ? 'connected' : 'failed');
+          }
+          try {
+            await onModelsSynced?.(provider.id);
+          } catch {
+            if (isCurrent()) toast.warning(t('form.modelSyncRefreshFailed'));
+            return;
+          }
+          if (!isCurrent()) return;
+          const summary = t('form.modelSyncSummary', {
+            count: data.model_count ?? Object.keys(results).length,
+            added: data.added_count ?? 0,
+            success: succeeded,
+            failed,
+          });
+          if (data.missing_price_tiers?.length) {
+            toast.warning(t('form.modelSyncPartial'), `${summary} ${t('form.modelSyncMissingTiers', { count: data.missing_price_tiers.length })}`);
+          } else if (failed > 0) toast.warning(t('form.modelSyncDone'), summary);
+          else toast.success(t('form.modelSyncDone'), summary);
+          return;
+        }
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, enabledModels.length) }, () => run()));
-    setBatchTesting(false);
 
-    const results = batchResultsRef.current;
-    const succeeded = enabledModels.filter(m => results[m.id]?.status === 'success');
-    const failed = enabledModels.filter(m => results[m.id]?.status === 'failed');
-    const summary = t('form.batchTestSummary', { success: succeeded.length, failed: failed.length });
-    if (failed.length === 0) {
-      toast.success(t('form.batchTestDone'), summary);
-    } else {
-      toast.error(t('form.batchTestDone'), summary);
-    }
+      if (enabledModels.length === 0) {
+        toast.warning(t('form.noModelsToTest'), priceSyncSkipped ? t('form.modelPricesUnchanged') : undefined);
+        return;
+      }
+      const CONCURRENCY = 3;
+      let idx = 0;
+      const run = async () => {
+        while (isCurrent() && idx < enabledModels.length) {
+          const model = enabledModels[idx++];
+          await handleTestSingleModel(model.id, generation);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, enabledModels.length) }, () => run()));
+      if (!isCurrent()) return;
 
-    if (onConnectionStatusChange) {
-      onConnectionStatusChange(succeeded.length > 0 ? 'connected' : 'failed');
+      const results = batchResultsRef.current;
+      const succeeded = enabledModels.filter(m => results[m.id]?.status === 'success');
+      const failed = enabledModels.filter(m => results[m.id]?.status === 'failed');
+      const summary = [
+        t('form.batchTestSummary', { success: succeeded.length, failed: failed.length }),
+        priceSyncSkipped ? t('form.modelPricesUnchanged') : '',
+      ].filter(Boolean).join(' · ');
+      if (failed.length === 0) {
+        toast.success(t('form.batchTestDone'), summary);
+      } else {
+        toast.error(t('form.batchTestDone'), summary);
+      }
+
+      onConnectionStatusChange?.(succeeded.length > 0 ? 'connected' : 'failed');
+    } catch {
+      if (!isCurrent()) return;
+      setModelTestStatus(previous => Object.fromEntries(
+        Object.entries(previous).filter(([, result]) => result.status !== 'testing'),
+      ));
+      toast.error(t('form.modelSyncUnconfirmed'), t('form.modelSyncRequestFailed'));
+    } finally {
+      batchInFlightRef.current = false;
+      batchAbortRef.current = null;
+      if (isCurrent()) {
+        setBatchTesting(false);
+        setSyncTesting(false);
+      }
     }
   };
 
@@ -986,12 +1129,12 @@ function ProviderDetail({
               </span>
             )}
             <button
-              onClick={handleBatchTest}
-              disabled={batchTesting || loadingModels || models.length === 0}
+              onClick={() => void handleBatchTest()}
+              disabled={batchTesting || loadingModels || (models.length === 0 && !canSyncModels)}
               className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
             >
               {batchTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <TestTube className="w-3 h-3" />}
-              {batchTesting ? t('detail.testing') : t('detail.batchTest')}
+              {syncTesting ? t('detail.syncTesting') : batchTesting ? t('detail.testing') : t('detail.batchTest')}
             </button>
           </div>
         </div>
@@ -1018,7 +1161,7 @@ function ProviderDetail({
                   enabled={enabled}
                   testStatus={modelTestStatus[model.id]}
                   onOpenDetail={onOpenModelDetail ? () => onOpenModelDetail(model) : undefined}
-                  onTestModel={() => handleTestSingleModel(model.id)}
+                  onTestModel={() => { if (!batchInFlightRef.current) void handleTestSingleModel(model.id); }}
                   onToggle={() => onToggleModel(provider.id, model.id, !enabled)}
                   onDelete={onDeleteModel ? () => onDeleteModel(model.id) : undefined}
                 />
@@ -1103,6 +1246,9 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           )}
           {pricing && isPricingFree(pricing) && (
             <span className="text-[11px] text-green-600 font-medium shrink-0">{t('status.free')}</span>
+          )}
+          {pricing?.price_tiers_known === false && (
+            <span className="text-[11px] text-amber-700" title={t('form.portalTierHint')}>{t('form.priceTiersUnknown')}</span>
           )}
           {enabled && (
             <span className="flex items-center gap-0.5 shrink-0">
@@ -2993,9 +3139,12 @@ function ModelDetailSheet({
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
               {isManagedRouterPricing && model.pricing ? (
-                <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900">
-                  <span>{formatPricingPerMillion(model.pricing)}</span>
-                  <span className="text-xs text-gray-500">v{model.pricing.price_version}</span>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{formatPricingPerMillion(model.pricing)}</span>
+                    <span className="text-xs text-gray-500">v{model.pricing.price_version}</span>
+                  </div>
+                  {model.pricing.price_tiers_known === false && <p className="mt-2 text-xs text-amber-700">{t('form.portalTierHint')}</p>}
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

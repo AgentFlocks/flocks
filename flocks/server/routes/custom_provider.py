@@ -296,10 +296,10 @@ async def create_model(provider_id: str, body: CreateModelReq):
     )
     has_router_profile = (
         uses_router_pricing
-        and get_provider_pricing_profile(
-            provider_id,
-            "router",
-            body.model_id,
+        and (
+            runtime_provider.get_router_pricing(body.model_id)
+            if callable(getattr(runtime_provider, "get_router_pricing", None))
+            else get_provider_pricing_profile(provider_id, "router", body.model_id)
         ) is not None
     )
     preserve_pricing = (

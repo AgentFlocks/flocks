@@ -8,6 +8,7 @@ temperature, tool_call, limit, etc.
 
 import asyncio
 import json
+import os
 import re
 import threading
 import time
@@ -53,6 +54,7 @@ _api_service_summary_metadata_cache: Dict[str, tuple[tuple[Any, ...], Optional[D
 _provider_initialization_lock = asyncio.Lock()
 _provider_initialization_task: asyncio.Task[None] | None = None
 _dynamic_provider_load_tasks: set[asyncio.Task[None]] = set()
+_router_catalog_sync_lock = asyncio.Lock()
 
 
 async def _run_provider_initialization() -> None:
@@ -2301,6 +2303,123 @@ async def set_service_credentials(
     except Exception as e:
         log.error("service.credentials.set.error", {"provider_id": provider_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _router_sync_identity() -> tuple:
+    """Capture only credential/routing inputs; never expose this value."""
+    from flocks.provider.credential import get_api_key
+
+    raw = ConfigWriter.get_provider_raw("threatbook-cn-llm")
+    options = (raw or {}).get("options", {})
+    references = [options.get(key) for key in ("apiKey", "api_key", "baseURL", "base_url")]
+    resolved_references = Config.replace_secret_refs(Config.replace_env_vars(json.dumps(references)))
+    return (
+        raw is not None,
+        get_api_key("threatbook-cn-llm"),
+        tuple(references),
+        os.getenv("THREATBOOK_CN_LLM_API_KEY"),
+        os.getenv("THREATBOOK_CN_LLM_BASE_URL"),
+        os.getenv("FLOCKS_PORTAL_SESSION_TOKEN"),
+        resolved_references,
+    )
+
+
+@router.post("/{provider_id}/batch-test-sync", response_model=Dict[str, Any])
+async def batch_test_and_sync_models(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
+    """Attempt server-authorized price sync without interactive credentials."""
+    if provider_id != "threatbook-cn-llm":
+        return {"supported": False, "synced": False}
+
+    import httpx
+
+    from flocks.provider.router_catalog import RouterCatalogError
+    from flocks.provider.router_sync import fetch_and_test_router_catalog
+
+    await _ensure_provider_initialized()
+    await Provider.apply_config(await Config.get(), provider_id=provider_id)
+    provider = Provider.get(provider_id)
+    api_key = provider._effective_api_key() if provider else None
+    if not isinstance(api_key, str) or not api_key.startswith("fr_"):
+        return {"supported": False, "synced": False}
+    if _router_catalog_sync_lock.locked():
+        return {
+            "supported": True, "synced": False, "error_code": "SYNC_BUSY",
+            "message": "模型同步正在进行，请稍后再试。",
+        }
+
+    async with _router_catalog_sync_lock:
+        try:
+            identity = _router_sync_identity()
+            if not identity[0]:
+                raise RouterCatalogError("PROVIDER_REMOVED", "Provider 配置不存在。")
+            config = getattr(provider, "_config", None)
+            base_url = getattr(config, "base_url", None) or provider._base_url
+            starting_model_ids = set((ConfigWriter.get_provider_raw(provider_id) or {}).get("models", {}))
+            settings = ConfigWriter.get_all_model_settings()
+            disabled_ids = {
+                key.removeprefix(f"{provider_id}/")
+                for key, setting in settings.items()
+                if key.startswith(f"{provider_id}/") and setting.get("enabled") is False
+            }
+            snapshot, results = await fetch_and_test_router_catalog(
+                api_key, base_url, disabled_ids,
+            )
+            if _router_sync_identity() != identity:
+                raise RouterCatalogError(
+                    "CREDENTIAL_CHANGED",
+                    "测试期间 Key 或 Base URL 已变更，请重新同步；本次结果未保存。",
+                )
+            # No await between the final identity check and the fresh config
+            # read/merge/write. Other model edits and disabled/default settings
+            # are preserved; removed upstream models are never blindly deleted.
+            added_count = ConfigWriter.merge_router_catalog(
+                provider_id, snapshot, starting_model_ids=starting_model_ids,
+            )
+            await Provider.apply_config(await Config.get(), provider_id=provider_id)
+            log.info("provider.router_catalog.synced", {
+                "model_count": len(snapshot["models"]),
+                "added_count": added_count,
+                "tested_count": len(results),
+            })
+            return {
+                "supported": True,
+                "synced": True,
+                "synced_at": snapshot["synced_at"],
+                "model_count": len(snapshot["models"]),
+                "added_count": added_count,
+                "results": results,
+                "missing_price_tiers": [
+                    model_id for model_id, model in snapshot["models"].items()
+                    if not model["pricing"].get("price_tiers_known", True)
+                ],
+            }
+        except RouterCatalogError as exc:
+            # Catalog errors happen before model probes. Let the caller run
+            # normal batch tests; never turn auth details into a user prompt.
+            fallback_to_test = exc.code not in {"CREDENTIAL_CHANGED", "PROVIDER_REMOVED"}
+            return {
+                "supported": True, "synced": False,
+                "error_code": exc.code,
+                "fallback_to_test": fallback_to_test,
+                "message": "价格未更新，继续使用现有价格。" if fallback_to_test else exc.message,
+            }
+        except httpx.HTTPError:
+            # Probe HTTP errors are handled per model, so this is a catalog
+            # fetch failure before tests started.
+            return {
+                "supported": True, "synced": False, "fallback_to_test": True,
+                "error_code": "CATALOG_UNAVAILABLE",
+                "message": "价格未更新，继续使用现有价格。",
+            }
+        except TimeoutError:
+            return {
+                "supported": True, "synced": False,
+                "error_code": "SYNC_UNAVAILABLE",
+                "message": "模型同步请求失败或超时，已有配置已保留。",
+            }
 
 
 class TestCredentialRequest(BaseModel):
