@@ -99,7 +99,7 @@ def _download(
 def _material_rows(content: bytes) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     identities: set[str] = set()
-    for line_number, line in enumerate(content.decode("utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(content.decode("utf-8").split("\n"), start=1):
         if not line.strip():
             continue
         value = json.loads(line)

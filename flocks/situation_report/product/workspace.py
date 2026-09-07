@@ -378,7 +378,9 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
     material_ids = [
         _material_id(value)
         for value in (
-            json.loads(line) for line in materials_path.read_text(encoding="utf-8").splitlines() if line.strip()
+            json.loads(line)
+            for line in materials_path.read_text(encoding="utf-8").split("\n")
+            if line.strip()
         )
     ]
     h1_lines = [line for line in report.splitlines() if line.startswith("# ")]

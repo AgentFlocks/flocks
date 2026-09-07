@@ -223,7 +223,7 @@ async def test_mock_material_detail_matches_backend_contract_and_synchronizer(
             "source_id": "contract-material-001",
             "report": {
                 "title": "契约素材一",
-                "summary_content": "来自详情接口的完整摘要",
+                "summary_content": "来自详情接口的完整摘要\u0085第二段",
                 "iocs": [{"ioc": "example.test", "indicators_type": "domain"}],
             },
         },

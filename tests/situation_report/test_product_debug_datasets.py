@@ -17,6 +17,7 @@ def _write_dataset(
     root: Path,
     *,
     detail_source_id: str = "source-1",
+    detail_body: str = "完整正文",
 ) -> Path:
     directory = root / "D01"
     directory.mkdir(parents=True)
@@ -38,7 +39,7 @@ def _write_dataset(
             {
                 "source_type": "DARKWEB",
                 "source_id": detail_source_id,
-                "darkweb": {"title": "素材一", "body": "完整正文"},
+                "darkweb": {"title": "素材一", "body": detail_body},
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -101,6 +102,18 @@ def test_frozen_dataset_rejects_detail_outside_selected_materials(
 
     with pytest.raises(DebugDatasetError, match="outside the selected set"):
         load_debug_dataset("D01")
+
+
+def test_frozen_dataset_keeps_unicode_line_controls_inside_json_strings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "datasets"
+    _write_dataset(root, detail_body="第一段\u0085第二段")
+    monkeypatch.setenv("SITUATION_REPORT_DEBUG_DATASET_ROOT", str(root))
+
+    dataset = load_debug_dataset("D01")
+    assert dataset.manifest.material_detail_count == 1
 
 
 def test_frozen_dataset_listing_is_empty_when_root_is_not_configured(

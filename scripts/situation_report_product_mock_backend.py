@@ -80,7 +80,7 @@ def _validate_content(resource: ResourceName, content: bytes) -> None:
             raise ValueError(f"{resource} snapshot must be non-empty Markdown")
         return
     identities: set[str] = set()
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, line in enumerate(text.split("\n"), start=1):
         if not line.strip():
             continue
         try:
@@ -110,7 +110,7 @@ def _material_detail_rows(content: bytes) -> list[dict[str, Any]]:
         raise ValueError("material details must be UTF-8 JSONL") from exc
     rows: list[dict[str, Any]] = []
     identities: set[str] = set()
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, line in enumerate(text.split("\n"), start=1):
         if not line.strip():
             continue
         try:
@@ -251,7 +251,7 @@ class MockStateStore:
     def _selected_material_ids(self, session_id: str) -> set[str]:
         path = self.current_path(session_id, "materials")
         identities: set[str] = set()
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in path.read_text(encoding="utf-8").split("\n"):
             if not line.strip():
                 continue
             value = json.loads(line)

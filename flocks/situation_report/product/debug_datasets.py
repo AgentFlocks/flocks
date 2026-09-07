@@ -98,7 +98,10 @@ def _dataset_file(directory: Path, name: str) -> Path:
 def _parse_materials(content: bytes) -> tuple[set[str], dict[str, int]]:
     rows: set[str] = set()
     counts: dict[str, int] = {}
-    for line in content.decode("utf-8").splitlines():
+    # JSONL records are delimited by LF. ``splitlines()`` also treats Unicode
+    # controls such as U+0085 as separators, even when they occur inside a
+    # valid JSON string returned by the backend.
+    for line in content.decode("utf-8").split("\n"):
         if not line.strip():
             continue
         value = json.loads(line)
@@ -111,7 +114,7 @@ def _parse_materials(content: bytes) -> tuple[set[str], dict[str, int]]:
 
 def _parse_details(content: bytes) -> set[str]:
     identities: set[str] = set()
-    for line_number, line in enumerate(content.decode("utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(content.decode("utf-8").split("\n"), start=1):
         if not line.strip():
             continue
         try:
