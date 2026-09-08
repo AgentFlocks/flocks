@@ -1520,8 +1520,9 @@ def test_template_prohibited_literals_are_dynamic_and_case_insensitive() -> None
 def test_declared_group_counts_are_checked_without_fixed_section_names() -> None:
     report = (
         "## Custom Events\n\n"
-        "### Data incidents (2 events)\n\n"
+        "### Data incidents (3 events)\n\n"
         "**1. First incident**\n\n"
+        "2. **Second incident**\n\n"
         "### 暗网线索（1 起）\n\n"
         "- **标题**：第一条\n"
         "- **标题**：第二条\n"
@@ -1529,9 +1530,9 @@ def test_declared_group_counts_are_checked_without_fixed_section_names() -> None
     assert _declared_group_count_issues(report) == [
         {
             "code": "declared_group_count",
-            "heading": "Data incidents (2 events)",
-            "expected": 2,
-            "actual": 1,
+            "heading": "Data incidents (3 events)",
+            "expected": 3,
+            "actual": 2,
             "detail": (
                 "The count declared by this report subheading does not match its listed records"
             ),

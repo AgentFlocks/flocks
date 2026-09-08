@@ -546,6 +546,7 @@ def _declared_group_count_issues(report: str) -> list[dict[str, Any]]:
     item_patterns = (
         re.compile(r"^\s*[-*]\s+\*\*标题\*\*[：:]"),
         re.compile(r"^\s*\d+[.、]\s+\*\*标题(?:\*\*)?[：:]"),
+        re.compile(r"^\s*\d+[.、]\s+\*\*.+\*\*"),
         re.compile(r"^\s*\*\*\d+[.、]\s+.+\*\*"),
     )
     for index, line in enumerate(lines):
