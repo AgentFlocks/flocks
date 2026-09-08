@@ -1,5 +1,5 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import {
@@ -8,9 +8,13 @@ import {
 } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
+import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
-import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
+import {
+  buildWebUIContractWorkspacePageList,
+  buildWebUIContractWorkspaceSections,
+} from '@/utils/webuiContractWorkspaceSections';
 
 export default function WebUIContractWorkspaceHost() {
   const { workspaceId, pageId } = useParams<{ workspaceId: string; pageId?: string }>();
@@ -20,6 +24,12 @@ export default function WebUIContractWorkspaceHost() {
   const [error, setError] = useState<string | null>(null);
   const showLoading = useDelayedVisible(loading ? 180 : 0);
   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
+  const workspacePageOrders = useWorkspacePageOrders();
+  // Keep the fetcher stable: a new `t` identity must not trigger a refetch loop.
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
 
   const fetchWorkspaces = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -29,11 +39,11 @@ export default function WebUIContractWorkspaceHost() {
       setWorkspaces(Array.isArray(response.data) ? response.data : []);
     } catch (err: unknown) {
       setWorkspaces([]);
-      setError(err instanceof Error ? err.message : t('workspace.loadFailed'));
+      setError(err instanceof Error ? err.message : tRef.current('workspace.loadFailed'));
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [t]);
+  }, []);
 
   useEffect(() => {
     void fetchWorkspaces();
@@ -53,13 +63,16 @@ export default function WebUIContractWorkspaceHost() {
     () => workspaces.find((item) => item.id === workspaceId),
     [workspaceId, workspaces],
   );
-  const pages = useMemo(
-    () => [...(workspace?.pages ?? [])].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title)),
-    [workspace?.pages],
-  );
   const sections = useMemo(
     () => (workspace ? buildWebUIContractWorkspaceSections(workspace, i18n.language) : []),
     [i18n.language, workspace],
+  );
+  // Same sequence as the sidebar menu: section order, then the user's drag order.
+  const pages = useMemo(
+    () => (workspace
+      ? workspacePageOrders.apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language))
+      : []),
+    [i18n.language, workspace, workspacePageOrders],
   );
   const currentPage = pages.find((page) => page.id === pageId);
   const currentSection = currentPage
@@ -121,11 +134,11 @@ export default function WebUIContractWorkspaceHost() {
   }
 
   if (!pageId) {
-    return (
-      <div className="flex h-full items-center justify-center bg-zinc-50 text-sm text-zinc-500 dark:bg-zinc-950 dark:text-zinc-400">
-        {t('workspace.selectPage')}
-      </div>
-    );
+    // Opening the workspace itself lands on its default page instead of an empty frame.
+    const defaultPage = pages.find((page) => page.id === workspace.defaultPageId)
+      ?? pages.find((page) => page.buildStatus === 'ready')
+      ?? pages[0];
+    return <Navigate to={`${workspace.route}/${defaultPage.id}`} replace />;
   }
 
   if (!currentPage) {
