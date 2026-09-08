@@ -1549,6 +1549,46 @@ def test_declared_group_counts_are_checked_without_fixed_section_names() -> None
     ]
 
 
+def test_declared_group_counts_accept_event_rows_in_semantic_markdown_table() -> None:
+    report = (
+        "## 事件详情\n\n"
+        "### 数据泄露（2 起）\n\n"
+        "| 受害组织 | 标称规模 |\n"
+        "|---|---|\n"
+        "| 甲机构 | 10 万条 |\n"
+        "| 乙机构 | 20 万条 |\n\n"
+        "| 标题 | 摘要 | 日期 |\n"
+        "|---|---|---|\n"
+        "| 甲事件 | 摘要甲 | 2026-09-01 |\n"
+        "| 乙事件 | 摘要乙 | 2026-09-02 |\n"
+    )
+
+    assert _declared_group_count_issues(report) == []
+
+
+def test_declared_group_counts_reject_wrong_event_table_row_count() -> None:
+    report = (
+        "## Events\n\n"
+        "### Incidents (2 events)\n\n"
+        "| Title | Summary |\n"
+        "|:---|---:|\n"
+        "| Only incident | One row |\n"
+    )
+
+    assert _declared_group_count_issues(report) == [
+        {
+            "code": "declared_group_count",
+            "heading": "Incidents (2 events)",
+            "expected": 2,
+            "actual": 1,
+            "detail": (
+                "The count declared by this report subheading does not match its "
+                "listed records"
+            ),
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_backend_resource_calls_require_configured_service_token(
     product_session: SessionInfo,

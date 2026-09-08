@@ -549,6 +549,41 @@ def _declared_group_count_issues(report: str) -> list[dict[str, Any]]:
         re.compile(r"^\s*\d+[.、]\s+\*\*.+\*\*"),
         re.compile(r"^\s*\*\*\d+[.、]\s+.+\*\*"),
     )
+
+    def event_table_counts(block: list[str]) -> list[int]:
+        """Return record counts for Markdown tables with a semantic title column."""
+
+        counts: list[int] = []
+        row_index = 0
+        title_headers = {"标题", "事件标题", "title", "event", "event title"}
+        while row_index + 1 < len(block):
+            header = block[row_index].strip()
+            separator = block[row_index + 1].strip()
+            if "|" not in header or "|" not in separator:
+                row_index += 1
+                continue
+            header_cells = [
+                re.sub(r"[*_`]", "", cell).strip().casefold()
+                for cell in header.strip("|").split("|")
+            ]
+            separator_cells = [cell.strip() for cell in separator.strip("|").split("|")]
+            is_separator = bool(separator_cells) and all(
+                re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells
+            )
+            if not is_separator or not any(cell in title_headers for cell in header_cells):
+                row_index += 1
+                continue
+            data_count = 0
+            row_index += 2
+            while row_index < len(block):
+                candidate = block[row_index].strip()
+                if not candidate or "|" not in candidate:
+                    break
+                data_count += 1
+                row_index += 1
+            counts.append(data_count)
+        return counts
+
     for index, line in enumerate(lines):
         match = heading_pattern.match(line)
         if match is None:
@@ -557,11 +592,14 @@ def _declared_group_count_issues(report: str) -> list[dict[str, Any]]:
         end = index + 1
         while end < len(lines) and not re.match(r"^#{2,3}\s+", lines[end]):
             end += 1
-        actual = sum(
+        block = lines[index + 1 : end]
+        list_count = sum(
             1
-            for candidate in lines[index + 1 : end]
+            for candidate in block
             if any(pattern.match(candidate) for pattern in item_patterns)
         )
+        table_counts = event_table_counts(block)
+        actual = max([list_count, *table_counts], default=0)
         if actual != expected:
             issues.append(
                 {
