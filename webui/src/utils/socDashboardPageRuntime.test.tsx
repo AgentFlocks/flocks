@@ -50,6 +50,15 @@ describe('SOC dashboard contract page runtime', () => {
           },
         });
       }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 0 },
+            tasks: [],
+          },
+        });
+      }
       if (path === '/task-center') {
         return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
       }
@@ -73,10 +82,121 @@ describe('SOC dashboard contract page runtime', () => {
     await waitFor(() => {
       expect(pageGetMock).toHaveBeenCalledWith('/stats', expect.anything());
       expect(pageGetMock).toHaveBeenCalledWith('/activity', expect.anything());
+      expect(pageGetMock).toHaveBeenCalledWith('/ai-tasks', expect.anything());
       expect(pageGetMock).toHaveBeenCalledWith('/task-center', expect.anything());
     });
 
     expect(screen.getByText('Flocks AI 智能告警态势中心')).toBeInTheDocument();
+  });
+
+  it('shows unavailable denoise metrics as dashes instead of false zeros', async () => {
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') {
+        return Promise.resolve({
+          data: {
+            generatedAt: new Date().toISOString(),
+            denoise: { totalRaw: 0, totalUnique: 0, duplicateRate: 0, duplicates: 0 },
+            pipeline: { raw: 0, unique: 0 },
+            sources: [{ key: 'ndr', label: 'NDR', value: 0, rate: 0, active: false }],
+            sourceStatus: {
+              metricQuality: {
+                status: 'unavailable',
+                dataAvailable: false,
+                metricsAvailable: false,
+                unavailableReason: 'workflow_db_missing',
+              },
+            },
+          },
+        });
+      }
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor', events: [], recentEvents: [], workflowEvents: [], batch: {},
+            workflowStats: { callCount: null, latestStartedAt: null },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({ data: { connection: 'online', summary: {}, tasks: [] } });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    const { container } = render(<Page />);
+
+    expect(await screen.findByText('降噪统计数据源不可用，相关数字已隐藏；系统正在重试')).toBeInTheDocument();
+    const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
+    expect(within(rawMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    const ndrSource = screen.getByText('NDR').closest('.command-source') as HTMLElement;
+    expect(within(ndrSource).getByText('--')).toBeInTheDocument();
+    expect(container.querySelector('.command-source b')).toHaveAttribute('title', '数据不可用');
+  });
+
+  it('shows unavailable SOC triage metrics as dashes instead of false zeros', async () => {
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') {
+        return Promise.resolve({
+          data: {
+            generatedAt: new Date().toISOString(),
+            denoise: { totalRaw: 10, totalUnique: 4, duplicateRate: 0.6, duplicates: 6 },
+            triage: {
+              totalRecords: 0,
+              attackTotal: 0,
+              attackSuccess: 0,
+              benign: 0,
+              unknown: 0,
+            },
+            pipeline: { attackRate: 0, successRate: 0 },
+            closedLoop: { autoClosed: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
+            severityLevels: [],
+            sourceStatus: {
+              metricQuality: { status: 'complete', metricsAvailable: true },
+              triageQuality: {
+                status: 'unavailable',
+                dataAvailable: false,
+                metricsAvailable: false,
+                unavailableReason: 'soc_db_missing',
+              },
+            },
+          },
+        });
+      }
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor', events: [], recentEvents: [], workflowEvents: [], batch: {},
+            workflowStats: { callCount: 1, latestStartedAt: Date.now() },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({ data: { connection: 'online', summary: {}, tasks: [] } });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    render(<Page />);
+
+    expect(await screen.findByText('SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试')).toBeInTheDocument();
+    const eventMetric = screen.getByText('安全事件量').closest('.command-metric') as HTMLElement;
+    expect(within(eventMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    const criticalSeverity = screen.getByText('严重').closest('.severity-node') as HTMLElement;
+    expect(within(criticalSeverity).getByText('--')).toHaveAttribute('title', '数据不可用');
+    expect(screen.queryByText('SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试')).toBeInTheDocument();
+  });
+
+  it('renders unknown metrics as dashes on the loading frame', () => {
+    pageGetMock.mockImplementation(() => new Promise(() => {}));
+
+    render(<Page />);
+
+    const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
+    const eventMetric = screen.getByText('安全事件量').closest('.command-metric') as HTMLElement;
+    expect(within(rawMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    expect(within(eventMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
   });
 
   it('pauses task-center polling while the page is hidden', async () => {
@@ -166,6 +286,15 @@ describe('SOC dashboard contract page runtime', () => {
       if (path === '/task-center') {
         return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
       }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 0 },
+            tasks: [],
+          },
+        });
+      }
       return Promise.reject(new Error(`unexpected path: ${path}`));
     });
 
@@ -191,6 +320,15 @@ describe('SOC dashboard contract page runtime', () => {
             batch: {},
             workflowStats: { callCount: 0, latestStartedAt: 0 },
             tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [] },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 0 },
+            tasks: [],
           },
         });
       }
@@ -278,6 +416,86 @@ describe('SOC dashboard contract page runtime', () => {
     const workflowStats = container.querySelector('.task-center-stats.workflow-stats') as HTMLElement;
     expect(within(workflowStats).getByText('调用')).toBeInTheDocument();
     expect(within(workflowStats).getByText('今日调用')).toBeInTheDocument();
+  });
+
+  it('uses authoritative workflow task status instead of activity playback state', async () => {
+    const now = Date.now();
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') return Promise.resolve({ data: {} });
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor',
+            events: [],
+            recentEvents: [],
+            workflowEvents: [
+              {
+                eventId: 'workflow-execution:completed-history',
+                stage: 'denoise',
+                status: 'completed',
+                occurredAt: new Date(now).toISOString(),
+                triggerSource: 'workflow_execution',
+                workflowId: 'stream_alert_denoise',
+                alert: { id: 'history', threatName: '不应进入任务栏' },
+                result: { isDuplicate: false, rawCount: 0 },
+              },
+            ],
+            batch: {},
+            workflowStats: { callCount: 0, latestStartedAt: 0 },
+            tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [] },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 2, running: 1, waiting: 1, stale: 0 },
+            tasks: [
+              {
+                taskId: 'workflow-execution:running-1',
+                workflowId: 'stream_alert_triage',
+                executionId: 'running-1',
+                stage: 'triage',
+                status: 'running',
+                startedAt: now,
+                title: 'SSRF盲打探测攻击结果未知',
+                counts: { raw: null },
+                dataQuality: 'pending',
+                progress: { mode: 'steps', current: 2, total: 3, percent: 0.6667, label: '第 2/3 步' },
+              },
+              {
+                taskId: 'workflow-execution:queued-1',
+                workflowId: 'stream_alert_denoise',
+                executionId: 'queued-1',
+                stage: 'denoise',
+                status: 'queued',
+                startedAt: now - 1000,
+                title: '降噪批次',
+                counts: { raw: 0 },
+                dataQuality: 'complete',
+                rawCountSource: 'workflow_output',
+                emptyInput: false,
+                progress: { mode: 'waiting', percent: null, label: '等待调度' },
+              },
+            ],
+          },
+        });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    render(<Page />);
+
+    expect(await screen.findByText('正在处理 1 个，等待 1 个')).toBeInTheDocument();
+    expect(screen.getByText('SSRF盲打探测攻击结果未知')).toBeInTheDocument();
+    expect(screen.getByText('降噪批次')).toBeInTheDocument();
+    expect(screen.getByText(/原始条数待校验/)).toBeInTheDocument();
+    expect(screen.queryByText(/原始 0 条/)).not.toBeInTheDocument();
+    expect(screen.getByText('第 2/3 步')).toBeInTheDocument();
+    expect(screen.queryByText('不应进入任务栏')).not.toBeInTheDocument();
+    expect(screen.queryByText('降噪处理完成')).not.toBeInTheDocument();
   });
 
   it('uses dashboard mock rows with the same workflow execution field shape as real task-center data', async () => {
