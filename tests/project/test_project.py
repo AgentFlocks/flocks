@@ -148,10 +148,10 @@ async def test_create_project_ignores_missing_unrelated_registered_worktree(proj
 
     assert created.worktree == str(available.resolve())
     projects = await Project.list(owner_id="user-1")
-    assert [(project.name, project.path_status) for project in projects] == [
-        ("Missing", "missing"),
-        ("Available", "available"),
-    ]
+    assert {project.name: project.path_status for project in projects} == {
+        "Missing": "missing",
+        "Available": "available",
+    }
 
 
 @pytest.mark.asyncio
