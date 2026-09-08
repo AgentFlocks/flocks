@@ -302,6 +302,12 @@ class Project:
         return os.path.normcase(str(Path(worktree).expanduser().resolve(strict=True)))
 
     @staticmethod
+    def _registered_worktree_identity(worktree: str) -> str:
+        """Normalize a stored path without requiring its directory to still exist."""
+
+        return os.path.normcase(str(Path(worktree).expanduser().resolve(strict=False)))
+
+    @staticmethod
     def _directory_context(directory: str) -> Tuple[Path, Path, Optional[str]]:
         path = Path(directory).expanduser().resolve()
         worktree = path
@@ -529,7 +535,7 @@ class Project:
                 for entry in registry.projects:
                     if entry.removed_at is not None:
                         continue
-                    if cls._normalized_worktree(entry.worktree) == normalized_worktree:
+                    if cls._registered_worktree_identity(entry.worktree) == normalized_worktree:
                         raise ProjectPathConflictError(cls._entry_to_info(entry))
 
                 normalized_name = (name or Path(normalized_worktree).name).strip()
@@ -550,7 +556,7 @@ class Project:
                         entry
                         for entry in registry.projects
                         if entry.removed_at is not None
-                        and cls._normalized_worktree(entry.worktree) == normalized_worktree
+                        and cls._registered_worktree_identity(entry.worktree) == normalized_worktree
                     ),
                     None,
                 )
@@ -836,7 +842,7 @@ class Project:
                 for other in registry.projects:
                     if other.id == entry.id or other.removed_at is not None:
                         continue
-                    if cls._normalized_worktree(other.worktree) == normalized_worktree:
+                    if cls._registered_worktree_identity(other.worktree) == normalized_worktree:
                         raise ProjectPathConflictError(cls._entry_to_info(other))
                     if other.name.strip().casefold() == entry.name.strip().casefold():
                         raise ProjectNameConflictError(

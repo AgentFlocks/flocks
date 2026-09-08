@@ -133,6 +133,41 @@ async def test_create_project_creates_a_missing_worktree(project_root):
 
 
 @pytest.mark.asyncio
+async def test_create_project_ignores_missing_unrelated_registered_worktree(project_root):
+    missing = project_root / "missing"
+    missing.mkdir()
+    await Project.create(owner_id="user-1", name="Missing", worktree=str(missing))
+    missing.rmdir()
+
+    available = project_root / "available"
+    created = await Project.create(
+        owner_id="user-1",
+        name="Available",
+        worktree=str(available),
+    )
+
+    assert created.worktree == str(available.resolve())
+    projects = await Project.list(owner_id="user-1")
+    assert [(project.name, project.path_status) for project in projects] == [
+        ("Missing", "missing"),
+        ("Available", "available"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_project_still_rejects_missing_registered_worktree_path(project_root):
+    worktree = project_root / "missing"
+    worktree.mkdir()
+    existing = await Project.create(owner_id="user-1", name="Missing", worktree=str(worktree))
+    worktree.rmdir()
+
+    with pytest.raises(ProjectPathConflictError) as exc_info:
+        await Project.create(owner_id="user-1", name="Duplicate", worktree=str(worktree))
+
+    assert exc_info.value.project.id == existing.id
+
+
+@pytest.mark.asyncio
 async def test_create_project_does_not_create_outside_allowed_roots(project_root, monkeypatch):
     allowed_root = project_root / "allowed"
     allowed_root.mkdir()
