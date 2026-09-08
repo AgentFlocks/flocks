@@ -42,6 +42,8 @@ def test_poc_prompt_preserves_target_language_delivery_distinction() -> None:
     assert "PoC language does not have to match the target language" in prompt
     assert "source_harness" in prompt
     assert "later dynamic-validation consumer" in prompt
+    assert "length/count fields" in prompt
+    assert "not guessed offsets" in prompt
 
 
 def test_worker_launcher_imports_the_poc_prompt_builder() -> None:

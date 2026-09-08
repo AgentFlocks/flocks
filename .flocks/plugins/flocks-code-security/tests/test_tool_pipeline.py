@@ -452,6 +452,46 @@ def test_manifest_does_not_claim_non_runnable_probes_executed() -> None:
     assert scope["validationMode"].endswith("(no target execution)")
 
 
+def test_manifest_does_not_claim_failed_cybergym_validation_reproduced() -> None:
+    manifest = reporting_module.ReportWriter._manifest(
+        scan={
+            "scan_id": "scan_cybergym",
+            "dynamic_enabled": True,
+            "created_at": "2026-09-08T00:00:00+00:00",
+        },
+        snapshot=SimpleNamespace(
+            target_kind="directory_snapshot",
+            repository_identity="repo",
+            display_name="snapshot",
+            source_revision=None,
+            tree_digest="a" * 64,
+            file_count=3,
+            copy_source=True,
+        ),
+        threat_model={},
+        coverage={
+            "includePaths": ["."],
+            "excludePaths": [],
+            "limitations": [],
+            "deferred": [],
+        },
+        dynamic_runs=[],
+        completed_at="2026-09-08T00:10:00+00:00",
+        artifacts=[],
+        cybergym={
+            "taskId": "1468",
+            "status": "failed_no_artifact",
+            "finalArtifactId": None,
+            "localValidation": "failed_no_artifact",
+            "selectionReason": "no_verified_crash",
+        },
+    )
+
+    scope = manifest["scan"]["scope"]
+    assert "did not retain a locally verified crash artifact" in scope["runtimeStatus"]
+    assert "no vulnerable-side crash was reproduced" in scope["validationMode"]
+
+
 def test_manifest_and_markdown_record_guided_audit_without_raw_content() -> None:
     knowledge_base = {
         "display_name": "description.txt",

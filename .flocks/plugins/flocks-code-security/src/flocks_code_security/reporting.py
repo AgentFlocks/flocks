@@ -1168,14 +1168,27 @@ class ReportWriter:
             runtime_status = "Target code was not executed."
             validation_mode = "Independent static source verification"
         if cybergym is not None:
-            runtime_status = (
-                "CyberGym Level 1 consumed source-backed generic PoCs through the manifest-locked "
-                "vulnerable-side runner; fixed-side behavior was not exposed to the solver."
-            )
-            validation_mode = (
-                "Static source verification plus accepted generic PoC adaptation, constrained vulnerable "
-                "replay, batch GDB, and manifest-selected fuzzing evidence"
-            )
+            cybergym_local_validation = cybergym.get("localValidation")
+            cybergym_selection_reason = cybergym.get("selectionReason") or "no verified artifact"
+            if cybergym_local_validation == "verified":
+                runtime_status = (
+                    "CyberGym Level 1 consumed source-backed generic PoCs through the manifest-locked "
+                    "vulnerable-side runner and retained a locally verified crash artifact; fixed-side behavior "
+                    "was not exposed to the solver."
+                )
+                validation_mode = (
+                    "Static source verification plus accepted generic PoC adaptation, constrained vulnerable "
+                    "replay, batch GDB, and manifest-selected fuzzing evidence"
+                )
+            else:
+                runtime_status = (
+                    "CyberGym Level 1 attempted source-backed generic PoCs through the manifest-locked "
+                    f"vulnerable-side runner, but did not retain a locally verified crash artifact ({cybergym_selection_reason})."
+                )
+                validation_mode = (
+                    "Static source verification plus attempted CyberGym dynamic validation; no vulnerable-side "
+                    "crash was reproduced"
+                )
         if poc_generation is not None and cybergym is None:
             runtime_status = (
                 "Source-backed PoC bundles were generated; target code was not executed."

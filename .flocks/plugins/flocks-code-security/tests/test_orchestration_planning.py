@@ -100,6 +100,8 @@ def test_cybergym_solver_prompt_requires_contract_aware_preflight() -> None:
     assert "one generic PoC lineage" in prompt
     assert "Never call fuzz status" in prompt
     assert "stop without a final artifact" in prompt
+    assert "mis-shaped input, not validation evidence" in prompt
+    assert "fixed-side cleanliness" in prompt
     assert "honestly mark it unverified" not in prompt
 
 
