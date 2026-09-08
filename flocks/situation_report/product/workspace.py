@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,6 +35,18 @@ def _material_id(value: dict[str, Any]) -> str:
     if not isinstance(source_id, str) or not source_id.strip():
         raise ProductWorkspaceError("Material has an invalid source_id")
     return f"{source_type}:{source_id.strip()}"
+
+
+def _timestamp_iso_utc(value: Any) -> str | None:
+    """Expose backend millisecond timestamps in a form models need not calculate."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        converted = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return converted.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def file_sha256(path: Path) -> str:
@@ -168,7 +181,17 @@ async def read_material_page(
                 value = json.loads(line)
                 if not isinstance(value, dict):
                     raise ProductWorkspaceError("Material snapshot contains a non-object record")
-                value = {**value, "material_id": _material_id(value)}
+                value = {
+                    **value,
+                    "material_id": _material_id(value),
+                    "published_at_iso_utc": _timestamp_iso_utc(value.get("published_at")),
+                    "content_updated_at_iso_utc": _timestamp_iso_utc(
+                        value.get("content_updated_at")
+                    ),
+                    "source_updated_at_iso_utc": _timestamp_iso_utc(
+                        value.get("source_updated_at")
+                    ),
+                }
                 rows.append(value)
     selected = rows[offset : offset + limit]
     return {
@@ -470,14 +493,12 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         "Material snapshot",
     )
     template = template_path.read_text(encoding="utf-8")
-    material_ids = [
-        _material_id(value)
-        for value in (
-            json.loads(line)
-            for line in materials_path.read_text(encoding="utf-8").split("\n")
-            if line.strip()
-        )
+    material_rows = [
+        json.loads(line)
+        for line in materials_path.read_text(encoding="utf-8").split("\n")
+        if line.strip()
     ]
+    material_ids = [_material_id(value) for value in material_rows]
     h1_lines = [line for line in report.splitlines() if line.startswith("# ")]
     report_h2 = [line[3:].strip() for line in report.splitlines() if line.startswith("## ")]
     heading_issue = _heading_sequence_issue(_template_h2(template), report_h2)
@@ -504,6 +525,21 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         if invalid:
             invalid_evidence_sections[material_id] = invalid
     leaked_material_ids = [material_id for material_id in material_ids if material_id in report]
+    leaked_source_ids = [
+        str(value["source_id"])
+        for value in material_rows
+        if _material_id(value) not in report and str(value["source_id"]) in report
+    ]
+    leaked_source_domains = sorted(
+        {
+            str(darkweb["source_domain"])
+            for value in material_rows
+            if isinstance((darkweb := value.get("darkweb")), dict)
+            and isinstance(darkweb.get("source_domain"), str)
+            and darkweb["source_domain"]
+            and darkweb["source_domain"] in report
+        }
+    )
     internal_markers = (
         "generation_context_",
         f"work/{generation_id}/report.md",
@@ -536,6 +572,25 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
                 "code": "internal_material_id",
                 "materialIDs": leaked_material_ids,
                 "detail": "Internal material IDs must not appear in the report body",
+            }
+        )
+    if leaked_source_ids:
+        issues.append(
+            {
+                "code": "internal_source_id",
+                "sourceIDs": leaked_source_ids,
+                "detail": "Backend source IDs must not appear in the report body",
+            }
+        )
+    if leaked_source_domains:
+        issues.append(
+            {
+                "code": "backend_source_domain",
+                "domains": leaked_source_domains,
+                "detail": (
+                    "Backend source-site domains are not original-source links and must not "
+                    "appear in the report body"
+                ),
             }
         )
     if leaked_internal_markers:

@@ -66,7 +66,8 @@ async def situation_product_context_read(ctx: ToolContext, generation_id: str) -
     name="situation_product_material_read",
     description=(
         "Read one verified page of the immutable material snapshot for this report generation. "
-        "Continue until hasMore=false before drafting."
+        "Continue until hasMore=false before drafting. Numeric backend timestamps also include "
+        "normalized *_iso_utc fields; use those normalized values in the report."
     ),
     category=ToolCategory.SYSTEM,
     parameters=[

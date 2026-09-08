@@ -345,9 +345,18 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     assert context["templateContract"]["authority"] == "session_template_snapshot"
     assert context["templateContract"]["requiredH2"] == ["摘要", "重点事件", "建议"]
     assert first_page["total"] == 2
-    expected_materials = [
-        {**json.loads(line), "material_id": _material_id(json.loads(line))} for line in materials.splitlines()
-    ]
+    expected_materials = []
+    for line in materials.splitlines():
+        value = json.loads(line)
+        expected_materials.append(
+            {
+                **value,
+                "material_id": _material_id(value),
+                "published_at_iso_utc": "2026-08-21T02:40:00Z",
+                "content_updated_at_iso_utc": "2026-08-21T02:40:00Z",
+                "source_updated_at_iso_utc": "2026-08-21T02:40:00Z",
+            }
+        )
     assert first_page["materials"] == expected_materials
 
     request_count = len(requests)
@@ -585,7 +594,10 @@ async def test_custom_template_controls_headings_and_material_ids_stay_internal(
     ]
     assert "态势总览" not in context["templateContract"]["requiredH2"]
 
-    wrong_report = "## 态势总览\n内容\n\n## 行动建议\n内容"
+    wrong_report = (
+        "## 态势总览\n内容\n\n## 行动建议\n内容"
+        "\n\n不应披露的后端源标识：contract-report-v1"
+    )
     first_write = await write_candidate_report(
         session_id=product_session.id,
         generation_id=generation_id,
@@ -602,6 +614,11 @@ async def test_custom_template_controls_headings_and_material_ids_stay_internal(
         "Executive Context",
         "Decision Matrix",
     ]
+    assert first_validation["issues"][1] == {
+        "code": "internal_source_id",
+        "sourceIDs": ["contract-report-v1"],
+        "detail": "Backend source IDs must not appear in the report body",
+    }
 
     material_id = next(iter(_evidence_map(template, materials)))
     correct_report = _valid_report(template, materials)
