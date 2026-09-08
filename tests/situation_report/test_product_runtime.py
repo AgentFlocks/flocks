@@ -32,6 +32,7 @@ from flocks.situation_report.product.policy import ReportPolicyDecision
 from flocks.situation_report.product.session_state import load_session_state
 from flocks.situation_report.product.workspace import (
     ProductWorkspaceError,
+    _declared_group_count_issues,
     _template_h2,
     _template_prohibited_literals,
     read_generation_context,
@@ -1514,6 +1515,37 @@ async def test_generate_accepts_empty_material_download(
 def test_template_prohibited_literals_are_dynamic_and_case_insensitive() -> None:
     template = "禁止「内部编号 / 调试路径」；正文禁止 Tier/TIER。"
     assert _template_prohibited_literals(template) == ["内部编号", "调试路径", "Tier"]
+
+
+def test_declared_group_counts_are_checked_without_fixed_section_names() -> None:
+    report = (
+        "## Custom Events\n\n"
+        "### Data incidents (2 events)\n\n"
+        "**1. First incident**\n\n"
+        "### 暗网线索（1 起）\n\n"
+        "- **标题**：第一条\n"
+        "- **标题**：第二条\n"
+    )
+    assert _declared_group_count_issues(report) == [
+        {
+            "code": "declared_group_count",
+            "heading": "Data incidents (2 events)",
+            "expected": 2,
+            "actual": 1,
+            "detail": (
+                "The count declared by this report subheading does not match its listed records"
+            ),
+        },
+        {
+            "code": "declared_group_count",
+            "heading": "暗网线索（1 起）",
+            "expected": 1,
+            "actual": 2,
+            "detail": (
+                "The count declared by this report subheading does not match its listed records"
+            ),
+        },
+    ]
 
 
 @pytest.mark.asyncio

@@ -534,6 +534,49 @@ def _heading_sequence_issue(expected: list[str], actual: list[str]) -> dict[str,
     return issue
 
 
+def _declared_group_count_issues(report: str) -> list[dict[str, Any]]:
+    """Check list counts explicitly declared by report subheadings."""
+
+    lines = report.splitlines()
+    issues: list[dict[str, Any]] = []
+    heading_pattern = re.compile(
+        r"^###\s+(.+?)[（(]\s*(\d+)\s*(?:起|条|项|个|events?|items?|records?)\s*[）)]\s*$",
+        flags=re.IGNORECASE,
+    )
+    item_patterns = (
+        re.compile(r"^\s*[-*]\s+\*\*标题\*\*[：:]"),
+        re.compile(r"^\s*\d+[.、]\s+\*\*标题(?:\*\*)?[：:]"),
+        re.compile(r"^\s*\*\*\d+[.、]\s+.+\*\*"),
+    )
+    for index, line in enumerate(lines):
+        match = heading_pattern.match(line)
+        if match is None:
+            continue
+        expected = int(match.group(2))
+        end = index + 1
+        while end < len(lines) and not re.match(r"^#{2,3}\s+", lines[end]):
+            end += 1
+        actual = sum(
+            1
+            for candidate in lines[index + 1 : end]
+            if any(pattern.match(candidate) for pattern in item_patterns)
+        )
+        if actual != expected:
+            issues.append(
+                {
+                    "code": "declared_group_count",
+                    "heading": line[4:].strip(),
+                    "expected": expected,
+                    "actual": actual,
+                    "detail": (
+                        "The count declared by this report subheading does not match its "
+                        "listed records"
+                    ),
+                }
+            )
+    return issues
+
+
 async def validate_candidate_report(*, session_id: str, generation_id: str) -> dict[str, Any]:
     workspace_dir, _, _ = await _resolve_run(session_id, generation_id)
     candidate_path = workspace_dir / "work" / generation_id / "report.md"
@@ -622,6 +665,7 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         )
     if heading_issue:
         issues.append(heading_issue)
+    issues.extend(_declared_group_count_issues(report))
     if missing_evidence or unknown_evidence or invalid_evidence_sections:
         evidence_issue: dict[str, Any] = {"code": "evidence_map"}
         if missing_evidence:
