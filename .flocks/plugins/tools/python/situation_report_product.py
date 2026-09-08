@@ -44,7 +44,7 @@ async def _run(operation: Callable[..., Awaitable[dict[str, Any]]], **kwargs: An
         "Returns the immutable template, operation, language, report title, material count, "
         "and the current base report only for modify."
     ),
-    category=ToolCategory.CUSTOM,
+    category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
             name="generation_id",
@@ -68,7 +68,7 @@ async def situation_product_context_read(ctx: ToolContext, generation_id: str) -
         "Read one verified page of the immutable material snapshot for this report generation. "
         "Continue until hasMore=false before drafting."
     ),
-    category=ToolCategory.CUSTOM,
+    category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
             name="generation_id",
@@ -114,7 +114,7 @@ async def situation_product_material_read(
         "Use only to resolve a specific ambiguity or factual conflict; ordinary authoring must use "
         "the immutable material snapshot. The first result is cached for this generation."
     ),
-    category=ToolCategory.CUSTOM,
+    category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
             name="generation_id",
@@ -158,7 +158,7 @@ async def situation_product_source_read(
         "Store report-to-material traceability in evidence_map, never in the report body. It cannot "
         "update current output. A repair must supply the SHA-256 returned by the prior write."
     ),
-    category=ToolCategory.CUSTOM,
+    category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
             name="generation_id",
@@ -223,7 +223,7 @@ async def situation_product_report_write(
         "evidence map, Markdown structure, and internal identifier/path leakage policy. At most "
         "three validation attempts."
     ),
-    category=ToolCategory.CUSTOM,
+    category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
             name="generation_id",

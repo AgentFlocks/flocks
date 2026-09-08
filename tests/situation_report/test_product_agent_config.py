@@ -8,6 +8,7 @@ import yaml
 from flocks.agent.agent_factory import scan_and_load
 from flocks.skill.skill import Skill
 from flocks.situation_report.product.orchestrator import ALLOWED_PRODUCT_MODELS
+from flocks.tool.registry import ToolCategory, ToolRegistry
 
 
 @pytest.mark.asyncio
@@ -48,6 +49,10 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
         "situation_draft_write",
         "situation_material_read",
     }.isdisjoint(allowed)
+    for tool_name in allowed - {"skill_load"}:
+        tool = ToolRegistry.get(tool_name)
+        assert tool is not None
+        assert tool.info.category == ToolCategory.SYSTEM
 
     skill = await Skill.get("situation-report-product")
     assert skill is not None and skill.source == "project"
