@@ -155,7 +155,8 @@ async def situation_product_source_read(
     name="situation_product_report_write",
     description=(
         "Write the complete candidate Markdown for this generation into the restricted work area. "
-        "It cannot update current output. A repair must supply the SHA-256 returned by the prior write."
+        "Store report-to-material traceability in evidence_map, never in the report body. It cannot "
+        "update current output. A repair must supply the SHA-256 returned by the prior write."
     ),
     category=ToolCategory.CUSTOM,
     parameters=[
@@ -172,6 +173,24 @@ async def situation_product_source_read(
             required=True,
         ),
         ToolParameter(
+            name="evidence_map",
+            type=ParameterType.OBJECT,
+            description=(
+                "Internal mapping from every exact material_id to one or more exact report H2 "
+                "headings where that material informed facts, statistics, or analysis. These IDs "
+                "are stored outside the Markdown report."
+            ),
+            required=True,
+            json_schema={
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+            },
+        ),
+        ToolParameter(
             name="expected_sha256",
             type=ParameterType.STRING,
             description="Prior candidate SHA-256 when repairing an existing candidate.",
@@ -184,6 +203,7 @@ async def situation_product_report_write(
     ctx: ToolContext,
     generation_id: str,
     content: str,
+    evidence_map: dict[str, list[str]],
     expected_sha256: str = "",
 ) -> ToolResult:
     return await _run(
@@ -191,6 +211,7 @@ async def situation_product_report_write(
         session_id=ctx.session_id,
         generation_id=generation_id,
         content=content,
+        evidence_map=evidence_map,
         expected_sha256=expected_sha256,
     )
 
@@ -198,8 +219,9 @@ async def situation_product_report_write(
 @ToolRegistry.register_function(
     name="situation_product_report_validate",
     description=(
-        "Validate the current candidate against the immutable template, material evidence IDs, "
-        "Markdown structure, and internal-path leakage policy. At most three validation attempts."
+        "Validate the current candidate against the immutable template heading contract, internal "
+        "evidence map, Markdown structure, and internal identifier/path leakage policy. At most "
+        "three validation attempts."
     ),
     category=ToolCategory.CUSTOM,
     parameters=[

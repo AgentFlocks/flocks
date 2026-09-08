@@ -53,12 +53,20 @@ def _build_agent_recovery_event(
     """Return a bounded internal continuation when the Agent stopped too early."""
 
     candidate_path = workspace_dir / "work" / generation_id / "report.md"
+    evidence_path = workspace_dir / "work" / generation_id / "evidence.json"
     validation_path = workspace_dir / "runs" / generation_id / "validation.json"
     instruction: Optional[str] = None
     if not candidate_path.is_file():
         instruction = (
             "The candidate report has not been written. Continue the required Skill steps now: "
             "write the complete candidate with situation_product_report_write, then validate it."
+        )
+    elif not evidence_path.is_file():
+        current_sha = file_sha256(candidate_path)
+        instruction = (
+            "The candidate report exists but its internal evidence map is missing. Rewrite the "
+            "same complete candidate with situation_product_report_write, supplying a complete "
+            f"evidence_map and expected_sha256={current_sha}, then validate it."
         )
     elif not validation_path.is_file():
         instruction = (
@@ -69,15 +77,22 @@ def _build_agent_recovery_event(
         validation = read_json(validation_path)
         status = validation.get("status")
         validated_sha = str(validation.get("candidateSHA256") or "")
+        validated_evidence_sha = str(validation.get("evidenceSHA256") or "")
         current_sha = file_sha256(candidate_path)
+        current_evidence_sha = file_sha256(evidence_path)
         attempt = int(validation.get("attempt") or 0)
-        if status == "passed" and validated_sha == current_sha:
+        if (
+            status == "passed"
+            and validated_sha == current_sha
+            and validated_evidence_sha == current_evidence_sha
+        ):
             return None
         if attempt >= 3:
             return None
-        if validated_sha != current_sha:
+        if validated_sha != current_sha or validated_evidence_sha != current_evidence_sha:
             instruction = (
-                "The candidate changed after its last validation. Do not rewrite it again yet; "
+                "The candidate report or evidence map changed after its last validation. Do not "
+                "rewrite it again yet; "
                 "call situation_product_report_validate for the current candidate now."
             )
         else:

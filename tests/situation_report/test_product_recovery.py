@@ -37,6 +37,8 @@ def test_recovery_event_requires_immediate_sha_guarded_repair(tmp_path: Path) ->
     candidate = tmp_path / "work" / generation_id / "report.md"
     candidate.parent.mkdir(parents=True)
     candidate.write_text("# report\n", encoding="utf-8")
+    evidence = tmp_path / "work" / generation_id / "evidence.json"
+    evidence.write_text("{}", encoding="utf-8")
     candidate_sha = orchestrator.file_sha256(candidate)
     _write_json(
         tmp_path / "runs" / generation_id / "validation.json",
@@ -44,7 +46,8 @@ def test_recovery_event_requires_immediate_sha_guarded_repair(tmp_path: Path) ->
             "status": "needs_revision",
             "attempt": 1,
             "candidateSHA256": candidate_sha,
-            "issues": [{"code": "material_evidence", "missing": ["material-1"]}],
+            "evidenceSHA256": orchestrator.file_sha256(evidence),
+            "issues": [{"code": "evidence_map", "missing": ["material-1"]}],
         },
     )
 
@@ -77,6 +80,8 @@ async def test_agent_runner_continues_after_needs_revision(tmp_path: Path, monke
         candidate = tmp_path / "work" / generation_id / "report.md"
         candidate.parent.mkdir(parents=True, exist_ok=True)
         candidate.write_text("# report\n", encoding="utf-8")
+        evidence = tmp_path / "work" / generation_id / "evidence.json"
+        evidence.write_text("{}", encoding="utf-8")
         candidate_sha = orchestrator.file_sha256(candidate)
         status = "needs_revision" if len(calls) == 1 else "passed"
         _write_json(
@@ -85,6 +90,7 @@ async def test_agent_runner_continues_after_needs_revision(tmp_path: Path, monke
                 "status": status,
                 "attempt": len(calls),
                 "candidateSHA256": candidate_sha,
+                "evidenceSHA256": orchestrator.file_sha256(evidence),
                 "issues": [] if status == "passed" else [{"code": "missing"}],
             },
         )
@@ -109,3 +115,21 @@ async def test_agent_runner_continues_after_needs_revision(tmp_path: Path, monke
     assert calls[1].text.startswith("[SITUATION_REPORT_PRODUCT_RECOVERY_V1]")
     assert calls[1].synthetic is True
     recovery_status.assert_awaited_once_with(1)
+
+
+def test_recovery_rewrites_candidate_when_evidence_map_is_missing(tmp_path: Path) -> None:
+    generation_id = "gen_missing_evidence"
+    candidate = tmp_path / "work" / generation_id / "report.md"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("## report\n", encoding="utf-8")
+
+    recovered = orchestrator._build_agent_recovery_event(
+        event=_event(generation_id),
+        workspace_dir=tmp_path,
+        generation_id=generation_id,
+        recovery_turn=1,
+    )
+
+    assert recovered is not None
+    assert "internal evidence map is missing" in recovered.text
+    assert f"expected_sha256={orchestrator.file_sha256(candidate)}" in recovered.text

@@ -107,19 +107,33 @@ async def read_generation_context(*, session_id: str, generation_id: str) -> dic
     context = _load_generation_context(workspace_dir, generation_id)
     template_info = context.get("template")
     template_path = _verified_context_file(workspace_dir, template_info, "Template snapshot")
+    template = template_path.read_text(encoding="utf-8")
+    required_headings = _template_h2(template)
     result = {
         "generationID": generation_id,
         "operation": request.get("operation"),
         "userInstruction": context.get("userInstruction"),
         "language": context.get("language"),
-        "template": template_path.read_text(encoding="utf-8"),
+        "template": template,
+        "templateContract": {
+            "authority": "session_template_snapshot",
+            "requiredH2": required_headings,
+            "headingOrder": "template_order",
+            "instruction": (
+                "The complete template field is the authoritative specification for report "
+                "structure, section content, formatting, counts, empty states, style, and "
+                "prohibited expressions. Do not substitute rules from a built-in or previously "
+                "seen template."
+            ),
+        },
         "materialCount": (context.get("materials") or {}).get("recordCount"),
         "baseReportAvailable": bool(context.get("baseReport")),
         "validationPolicy": {
             "reportTitleAllowed": False,
             "h1Count": 0,
             "preserveTemplateH2": True,
-            "citeEveryMaterialID": True,
+            "materialIDInReportAllowed": False,
+            "evidenceMode": "internal_sidecar",
             "maxValidationAttempts": 3,
         },
     }
@@ -327,39 +341,120 @@ async def write_candidate_report(
     session_id: str,
     generation_id: str,
     content: str,
+    evidence_map: dict[str, list[str]],
     expected_sha256: str = "",
 ) -> dict[str, Any]:
     encoded = content.strip().encode("utf-8")
     if not encoded or len(encoded) > 10 * 1024 * 1024:
         raise ProductWorkspaceError("Candidate report must be non-empty and at most 10 MiB")
     workspace_dir, _, _ = await _resolve_run(session_id, generation_id)
+    context = _load_generation_context(workspace_dir, generation_id)
+    materials_path = _verified_context_file(
+        workspace_dir,
+        context.get("materials"),
+        "Material snapshot",
+    )
+    declared_material_ids = {
+        _material_id(json.loads(line))
+        for line in materials_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+    if not isinstance(evidence_map, dict):
+        raise ProductWorkspaceError("evidence_map must be an object")
+    normalized_evidence: dict[str, list[str]] = {}
+    for material_id, sections in evidence_map.items():
+        if material_id not in declared_material_ids:
+            raise ProductWorkspaceError(
+                f"evidence_map contains an undeclared material_id: {material_id}"
+            )
+        if not isinstance(sections, list) or not sections:
+            raise ProductWorkspaceError(
+                f"evidence_map sections must be a non-empty list for {material_id}"
+            )
+        normalized_sections: list[str] = []
+        for section in sections:
+            if not isinstance(section, str) or not section.strip():
+                raise ProductWorkspaceError(
+                    f"evidence_map contains an invalid section for {material_id}"
+                )
+            normalized = section.strip()
+            if len(normalized) > 200:
+                raise ProductWorkspaceError("evidence_map section names are too long")
+            if normalized not in normalized_sections:
+                normalized_sections.append(normalized)
+        normalized_evidence[material_id] = normalized_sections
     path = workspace_dir / "work" / generation_id / "report.md"
+    evidence_path = workspace_dir / "work" / generation_id / "evidence.json"
     async with async_file_lock(workspace_dir / ".locks" / "write.lock"):
         if path.exists():
             current_hash = file_sha256(path)
             if not expected_sha256 or current_hash != expected_sha256:
                 raise ProductWorkspaceError("Candidate report changed; expected_sha256 is required")
         atomic_write_bytes(path, encoded + b"\n")
+        atomic_write_json(
+            evidence_path,
+            {
+                "schemaVersion": 1,
+                "generationID": generation_id,
+                "materials": normalized_evidence,
+            },
+        )
     return {
         "generationID": generation_id,
         "path": f"work/{generation_id}/report.md",
         "sizeBytes": path.stat().st_size,
         "sha256": file_sha256(path),
+        "evidenceSHA256": file_sha256(evidence_path),
     }
 
 
 def _template_h2(template: str) -> list[str]:
     structured = re.findall(r"^\d+\.\s+\*\*([^*]+)\*\*", template, flags=re.MULTILINE)
     if structured:
-        return [re.sub(r"（.*$", "", heading).strip() for heading in structured]
+        return [
+            re.sub(
+                r"\s*[（(](?:必有|可空|可选|required|optional)[）)]\s*$",
+                "",
+                heading,
+                flags=re.IGNORECASE,
+            ).strip()
+            for heading in structured
+        ]
     return [line[3:].strip() for line in template.splitlines() if line.startswith("## ")]
+
+
+def _heading_sequence_issue(expected: list[str], actual: list[str]) -> dict[str, Any] | None:
+    """Describe report H2 drift without assuming any particular report template."""
+
+    missing = [heading for heading in expected if heading not in actual]
+    unexpected = [heading for heading in actual if heading not in expected]
+    expected_present = [heading for heading in expected if heading in actual]
+    actual_expected = [heading for heading in actual if heading in expected]
+    out_of_order = expected_present != actual_expected
+    if not missing and not unexpected and not out_of_order:
+        return None
+    issue: dict[str, Any] = {
+        "code": "template_headings",
+        "expected": expected,
+        "actual": actual,
+    }
+    if missing:
+        issue["missing"] = missing
+    if unexpected:
+        issue["unexpected"] = unexpected
+    if out_of_order:
+        issue["outOfOrder"] = True
+    return issue
 
 
 async def validate_candidate_report(*, session_id: str, generation_id: str) -> dict[str, Any]:
     workspace_dir, _, _ = await _resolve_run(session_id, generation_id)
     candidate_path = workspace_dir / "work" / generation_id / "report.md"
+    evidence_path = workspace_dir / "work" / generation_id / "evidence.json"
     if not candidate_path.is_file():
         raise ProductWorkspaceError("Candidate report was not written")
+    if not evidence_path.is_file():
+        raise ProductWorkspaceError("Candidate evidence map was not written")
     report = candidate_path.read_text(encoding="utf-8")
     context = _load_generation_context(workspace_dir, generation_id)
     template_info = context.get("template") or {}
@@ -385,10 +480,30 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
     ]
     h1_lines = [line for line in report.splitlines() if line.startswith("# ")]
     report_h2 = [line[3:].strip() for line in report.splitlines() if line.startswith("## ")]
-    missing_headings = [
-        heading for heading in _template_h2(template) if not any(heading in actual for actual in report_h2)
+    heading_issue = _heading_sequence_issue(_template_h2(template), report_h2)
+    evidence = read_json(evidence_path)
+    evidence_materials = evidence.get("materials")
+    if not isinstance(evidence_materials, dict):
+        raise ProductWorkspaceError("Candidate evidence map is invalid")
+    missing_evidence = [
+        material_id for material_id in material_ids if material_id not in evidence_materials
     ]
-    missing_material_ids = [material_id for material_id in material_ids if material_id and material_id not in report]
+    unknown_evidence = [
+        material_id for material_id in evidence_materials if material_id not in material_ids
+    ]
+    invalid_evidence_sections: dict[str, list[str]] = {}
+    for material_id, sections in evidence_materials.items():
+        if not isinstance(sections, list) or not sections:
+            invalid_evidence_sections[material_id] = []
+            continue
+        invalid = [
+            section
+            for section in sections
+            if not isinstance(section, str) or section not in report_h2
+        ]
+        if invalid:
+            invalid_evidence_sections[material_id] = invalid
+    leaked_material_ids = [material_id for material_id in material_ids if material_id in report]
     internal_markers = (
         "generation_context_",
         f"work/{generation_id}/report.md",
@@ -404,10 +519,25 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
                 "detail": "Report-level H1 headings are not allowed",
             }
         )
-    if missing_headings:
-        issues.append({"code": "template_headings", "missing": missing_headings})
-    if missing_material_ids:
-        issues.append({"code": "material_evidence", "missing": missing_material_ids})
+    if heading_issue:
+        issues.append(heading_issue)
+    if missing_evidence or unknown_evidence or invalid_evidence_sections:
+        evidence_issue: dict[str, Any] = {"code": "evidence_map"}
+        if missing_evidence:
+            evidence_issue["missing"] = missing_evidence
+        if unknown_evidence:
+            evidence_issue["unknown"] = unknown_evidence
+        if invalid_evidence_sections:
+            evidence_issue["invalidSections"] = invalid_evidence_sections
+        issues.append(evidence_issue)
+    if leaked_material_ids:
+        issues.append(
+            {
+                "code": "internal_material_id",
+                "materialIDs": leaked_material_ids,
+                "detail": "Internal material IDs must not appear in the report body",
+            }
+        )
     if leaked_internal_markers:
         issues.append({"code": "internal_path_leakage", "markers": leaked_internal_markers})
     if re.search(r"^```(?:markdown|md)?\s*$", report, flags=re.MULTILINE):
@@ -426,6 +556,7 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         "status": "passed" if not issues else "needs_revision",
         "attempt": attempt,
         "candidateSHA256": file_sha256(candidate_path),
+        "evidenceSHA256": file_sha256(evidence_path),
         "issues": issues,
         "validatedAt": utc_now(),
     }

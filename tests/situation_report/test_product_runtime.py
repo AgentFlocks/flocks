@@ -220,11 +220,21 @@ def _material_id(value: dict) -> str:
 
 
 def _valid_report(template: bytes, materials: bytes) -> str:
-    material_ids = [_material_id(json.loads(line)) for line in materials.decode("utf-8").splitlines() if line.strip()]
-    lines = ["全部已校验素材：" + "、".join(material_ids)]
+    del materials
+    lines: list[str] = []
     for heading in _template_h2(template.decode("utf-8")):
         lines.extend([f"## {heading}", "本节根据已校验素材生成。"])
     return "\n".join(lines)
+
+
+def _evidence_map(template: bytes, materials: bytes) -> dict[str, list[str]]:
+    headings = _template_h2(template.decode("utf-8"))
+    assert headings
+    return {
+        _material_id(json.loads(line)): [headings[0]]
+        for line in materials.decode("utf-8").splitlines()
+        if line.strip()
+    }
 
 
 @pytest.fixture
@@ -330,6 +340,10 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     assert "reportTitle" not in context
     assert context["validationPolicy"]["reportTitleAllowed"] is False
     assert context["validationPolicy"]["h1Count"] == 0
+    assert context["validationPolicy"]["materialIDInReportAllowed"] is False
+    assert context["validationPolicy"]["evidenceMode"] == "internal_sidecar"
+    assert context["templateContract"]["authority"] == "session_template_snapshot"
+    assert context["templateContract"]["requiredH2"] == ["摘要", "重点事件", "建议"]
     assert first_page["total"] == 2
     expected_materials = [
         {**json.loads(line), "material_id": _material_id(json.loads(line))} for line in materials.splitlines()
@@ -418,6 +432,7 @@ async def test_generate_uses_original_session_id_and_backend_latest(
         session_id=product_session.id,
         generation_id="gen-001",
         content="# 不应出现在报告正文中的标题\n\n" + report,
+        evidence_map=_evidence_map(template, materials),
     )
     titled_validation = await validate_candidate_report(
         session_id=product_session.id,
@@ -434,6 +449,7 @@ async def test_generate_uses_original_session_id_and_backend_latest(
         session_id=product_session.id,
         generation_id="gen-001",
         content=report,
+        evidence_map=_evidence_map(template, materials),
         expected_sha256=titled_write["sha256"],
     )
     assert (
@@ -449,8 +465,13 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     output = root / published["output"]["path"]
     assert output.is_file()
     published_report = output.read_text(encoding="utf-8")
-    assert published_report.startswith("全部已校验素材：")
+    assert published_report.startswith("## 摘要")
     assert not any(line.startswith("# ") for line in published_report.splitlines())
+    published_evidence = output.with_name("evidence.json")
+    assert published_evidence.is_file()
+    assert json.loads(published_evidence.read_text(encoding="utf-8"))["materials"] == (
+        _evidence_map(template, materials)
+    )
 
 
 @pytest.mark.asyncio
@@ -491,6 +512,7 @@ async def test_validator_only_rejects_the_actual_internal_candidate_path(
         session_id=product_session.id,
         generation_id=generation_id,
         content=valid_with_network_url,
+        evidence_map=_evidence_map(template, materials),
     )
     first_validation = await validate_candidate_report(
         session_id=product_session.id,
@@ -503,6 +525,7 @@ async def test_validator_only_rejects_the_actual_internal_candidate_path(
         session_id=product_session.id,
         generation_id=generation_id,
         content=valid_with_network_url + f"\n内部路径：{leaked_path}\n",
+        evidence_map=_evidence_map(template, materials),
         expected_sha256=initial_write["sha256"],
     )
     second_validation = await validate_candidate_report(
@@ -513,6 +536,107 @@ async def test_validator_only_rejects_the_actual_internal_candidate_path(
     assert second_validation["issues"] == [
         {"code": "internal_path_leakage", "markers": [leaked_path]}
     ]
+
+
+@pytest.mark.asyncio
+async def test_custom_template_controls_headings_and_material_ids_stay_internal(
+    product_session: SessionInfo,
+    real_inputs: tuple[bytes, bytes, bytes],
+):
+    _, materials, _ = real_inputs
+    template = (
+        "# User supplied specification\n\n"
+        "## Executive Context\n\n"
+        "Write the current evidence context.\n\n"
+        "## Decision Matrix\n\n"
+        "Provide the decision matrix.\n"
+    ).encode("utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/state/latest"):
+            return _state_response(
+                request,
+                report=_missing(),
+                template=_changed(version=7, content=template, url="/custom-template"),
+                materials=_changed(version=3, content=materials, url="/custom-materials"),
+            )
+        if request.url.path.endswith("/template/download"):
+            return _download_response(request, resource="template", version=7, content=template)
+        if request.url.path.endswith("/materials/download"):
+            return _download_response(request, resource="materials", version=3, content=materials)
+        return httpx.Response(404)
+
+    sync = BackendReportSynchronizer(
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    generation_id = "gen-custom-template"
+    await initialize_report_action(
+        session_id=product_session.id,
+        prompt=_prompt("generate", generation_id),
+        synchronizer=sync,
+    )
+    context = await read_generation_context(
+        session_id=product_session.id,
+        generation_id=generation_id,
+    )
+    assert context["templateContract"]["requiredH2"] == [
+        "Executive Context",
+        "Decision Matrix",
+    ]
+    assert "态势总览" not in context["templateContract"]["requiredH2"]
+
+    wrong_report = "## 态势总览\n内容\n\n## 行动建议\n内容"
+    first_write = await write_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+        content=wrong_report,
+        evidence_map={material_id: ["态势总览"] for material_id in _evidence_map(template, materials)},
+    )
+    first_validation = await validate_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+    )
+    assert first_validation["status"] == "needs_revision"
+    assert first_validation["issues"][0]["code"] == "template_headings"
+    assert first_validation["issues"][0]["expected"] == [
+        "Executive Context",
+        "Decision Matrix",
+    ]
+
+    material_id = next(iter(_evidence_map(template, materials)))
+    correct_report = _valid_report(template, materials)
+    second_write = await write_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+        content=f"{correct_report}\n\n内部引用：{material_id}",
+        evidence_map=_evidence_map(template, materials),
+        expected_sha256=first_write["sha256"],
+    )
+    second_validation = await validate_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+    )
+    assert second_validation["issues"] == [
+        {
+            "code": "internal_material_id",
+            "materialIDs": [material_id],
+            "detail": "Internal material IDs must not appear in the report body",
+        }
+    ]
+
+    await write_candidate_report(
+        session_id=product_session.id,
+        generation_id=generation_id,
+        content=correct_report,
+        evidence_map=_evidence_map(template, materials),
+        expected_sha256=second_write["sha256"],
+    )
+    assert (
+        await validate_candidate_report(
+            session_id=product_session.id,
+            generation_id=generation_id,
+        )
+    )["status"] == "passed"
 
 
 @pytest.mark.asyncio
@@ -611,6 +735,7 @@ async def test_generate_allows_new_attempt_until_initial_report_is_published(
         session_id=product_session.id,
         generation_id="gen-retry-002",
         content=_valid_report(template, materials),
+        evidence_map=_evidence_map(template, materials),
     )
     validation = await validate_candidate_report(
         session_id=product_session.id,
@@ -704,6 +829,7 @@ async def test_a1_orchestrator_runs_preflight_publish_and_event_end_to_end(
             session_id=session_id,
             generation_id="gen-e2e",
             content=_valid_report(template, materials),
+            evidence_map=_evidence_map(template, materials),
         )
         validation = await validate_candidate_report(
             session_id=session_id,

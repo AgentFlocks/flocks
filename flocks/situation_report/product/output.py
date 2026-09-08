@@ -51,10 +51,16 @@ async def publish_validated_candidate(
             raise ReportPublicationError("Candidate report or validation result is missing")
         validation = read_json(validation_path)
         candidate_info = file_info(candidate)
+        candidate_evidence = workspace_dir / "work" / generation_id / "evidence.json"
+        if not candidate_evidence.is_file():
+            raise ReportPublicationError("Candidate evidence map is missing")
+        evidence_info = file_info(candidate_evidence)
         if validation.get("status") != "passed":
             raise ReportPublicationError("Candidate report validation did not pass")
         if validation.get("candidateSHA256") != candidate_info["sha256"]:
             raise ReportPublicationError("Candidate changed after validation")
+        if validation.get("evidenceSHA256") != evidence_info["sha256"]:
+            raise ReportPublicationError("Candidate evidence map changed after validation")
 
         request = read_json(run_dir / "request.json")
         state = load_session_state(session_id)
@@ -81,11 +87,19 @@ async def publish_validated_candidate(
 
         version_dir = workspace_dir / "output" / "versions" / version
         immutable_report = version_dir / "report.md"
+        immutable_evidence = version_dir / "evidence.json"
         if immutable_report.exists():
             if file_info(immutable_report) != candidate_info:
                 raise ReportPublicationError("Immutable output version already contains different bytes")
         else:
             atomic_write_bytes(immutable_report, candidate.read_bytes())
+        if immutable_evidence.exists():
+            if file_info(immutable_evidence) != evidence_info:
+                raise ReportPublicationError(
+                    "Immutable output version already contains different evidence"
+                )
+        else:
+            atomic_write_bytes(immutable_evidence, candidate_evidence.read_bytes())
         context = read_json(run_dir / "preprocessing" / "generation_context_001.json")
         context_template = context.get("template") or {}
         context_materials = context.get("materials") or {}
@@ -107,6 +121,11 @@ async def publish_validated_candidate(
                 "path": f"output/versions/{version}/report.md",
                 "format": "markdown",
                 **candidate_info,
+            },
+            "internalEvidence": {
+                "path": f"output/versions/{version}/evidence.json",
+                "format": "json",
+                **evidence_info,
             },
             "publishedAt": utc_now(),
         }

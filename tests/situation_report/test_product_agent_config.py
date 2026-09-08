@@ -57,3 +57,7 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
     assert "Stop after three validation attempts" in content
     assert "never expand every material by default" in content
     assert "selected-material detail" in content
+    assert "authoritative writing specification" in content
+    assert "never print it in report Markdown" in content
+    assert "evidence_map" in content
+    assert "Keep every tool-returned" not in content
