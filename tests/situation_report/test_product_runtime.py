@@ -33,6 +33,7 @@ from flocks.situation_report.product.session_state import load_session_state
 from flocks.situation_report.product.workspace import (
     ProductWorkspaceError,
     _template_h2,
+    _template_prohibited_literals,
     read_generation_context,
     read_material_detail,
     read_material_page,
@@ -344,13 +345,18 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     assert context["validationPolicy"]["evidenceMode"] == "internal_sidecar"
     assert context["templateContract"]["authority"] == "session_template_snapshot"
     assert context["templateContract"]["requiredH2"] == ["摘要", "重点事件", "建议"]
+    assert context["templateContract"]["prohibitedLiterals"] == []
     assert first_page["total"] == 2
     expected_materials = []
     for line in materials.splitlines():
         value = json.loads(line)
         expected_materials.append(
             {
-                **value,
+                **{
+                    key: field_value
+                    for key, field_value in value.items()
+                    if key not in {"matched_factors", "pirs_id", "saved", "tier"}
+                },
                 "material_id": _material_id(value),
                 "published_at_iso_utc": "2026-08-21T02:40:00Z",
                 "content_updated_at_iso_utc": "2026-08-21T02:40:00Z",
@@ -358,6 +364,16 @@ async def test_generate_uses_original_session_id_and_backend_latest(
             }
         )
     assert first_page["materials"] == expected_materials
+    assert first_page["deterministicCounts"] == {
+        "totalMaterials": 2,
+        "bySourceType": {"REPORT": 1, "VULN": 1},
+    }
+    assert first_page["fieldSemantics"]["omittedSelectionMetadata"] == [
+        "matched_factors",
+        "pirs_id",
+        "saved",
+        "tier",
+    ]
 
     request_count = len(requests)
     replay = await initialize_report_action(
@@ -558,7 +574,8 @@ async def test_custom_template_controls_headings_and_material_ids_stay_internal(
         "## Executive Context\n\n"
         "Write the current evidence context.\n\n"
         "## Decision Matrix\n\n"
-        "Provide the decision matrix.\n"
+        "Provide the decision matrix.\n\n"
+        "正文禁止 Tier/TIER。\n"
     ).encode("utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -592,11 +609,12 @@ async def test_custom_template_controls_headings_and_material_ids_stay_internal(
         "Executive Context",
         "Decision Matrix",
     ]
+    assert context["templateContract"]["prohibitedLiterals"] == ["Tier"]
     assert "态势总览" not in context["templateContract"]["requiredH2"]
 
     wrong_report = (
         "## 态势总览\n内容\n\n## 行动建议\n内容"
-        "\n\n不应披露的后端源标识：contract-report-v1"
+        "\n\n不应披露的后端源标识：contract-report-v1\n严重度：TIER1"
     )
     first_write = await write_candidate_report(
         session_id=product_session.id,
@@ -618,6 +636,11 @@ async def test_custom_template_controls_headings_and_material_ids_stay_internal(
         "code": "internal_source_id",
         "sourceIDs": ["contract-report-v1"],
         "detail": "Backend source IDs must not appear in the report body",
+    }
+    assert first_validation["issues"][2] == {
+        "code": "template_prohibited_expression",
+        "expressions": ["Tier"],
+        "detail": "The current Session template explicitly prohibits these expressions",
     }
 
     material_id = next(iter(_evidence_map(template, materials)))
@@ -1467,8 +1490,30 @@ async def test_generate_accepts_empty_material_download(
         "total": 0,
         "hasMore": False,
         "nextOffset": 0,
+        "deterministicCounts": {"totalMaterials": 0, "bySourceType": {}},
+        "fieldSemantics": {
+            "authoritativeEventFacts": [
+                "title",
+                "summary",
+                "report",
+                "vulnerability",
+                "darkweb",
+                "telegram",
+                "detail returned by situation_product_source_read",
+            ],
+            "omittedSelectionMetadata": ["matched_factors", "pirs_id", "saved", "tier"],
+            "rule": (
+                "Selection metadata explains why a record was selected or ranked; it is not "
+                "evidence that a matched entity is the victim, actor, or subject of the event."
+            ),
+        },
         "materials": [],
     }
+
+
+def test_template_prohibited_literals_are_dynamic_and_case_insensitive() -> None:
+    template = "禁止「内部编号 / 调试路径」；正文禁止 Tier/TIER。"
+    assert _template_prohibited_literals(template) == ["内部编号", "调试路径", "Tier"]
 
 
 @pytest.mark.asyncio

@@ -65,4 +65,6 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
     assert "authoritative writing specification" in content
     assert "never print it in report Markdown" in content
     assert "evidence_map" in content
+    assert "Selection and ranking metadata is not event evidence" in content
+    assert "deterministicCounts" in content
     assert "Keep every tool-returned" not in content

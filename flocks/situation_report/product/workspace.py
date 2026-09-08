@@ -27,6 +27,14 @@ class ProductWorkspaceError(RuntimeError):
     """A production Agent attempted an invalid or stale workspace operation."""
 
 
+_SELECTION_ONLY_MATERIAL_FIELDS = frozenset({
+    "matched_factors",
+    "pirs_id",
+    "saved",
+    "tier",
+})
+
+
 def _material_id(value: dict[str, Any]) -> str:
     source_type = value.get("source_type")
     source_id = value.get("source_id")
@@ -132,6 +140,7 @@ async def read_generation_context(*, session_id: str, generation_id: str) -> dic
             "authority": "session_template_snapshot",
             "requiredH2": required_headings,
             "headingOrder": "template_order",
+            "prohibitedLiterals": _template_prohibited_literals(template),
             "instruction": (
                 "The complete template field is the authoritative specification for report "
                 "structure, section content, formatting, counts, empty states, style, and "
@@ -182,7 +191,11 @@ async def read_material_page(
                 if not isinstance(value, dict):
                     raise ProductWorkspaceError("Material snapshot contains a non-object record")
                 value = {
-                    **value,
+                    **{
+                        key: field_value
+                        for key, field_value in value.items()
+                        if key not in _SELECTION_ONLY_MATERIAL_FIELDS
+                    },
                     "material_id": _material_id(value),
                     "published_at_iso_utc": _timestamp_iso_utc(value.get("published_at")),
                     "content_updated_at_iso_utc": _timestamp_iso_utc(
@@ -194,12 +207,36 @@ async def read_material_page(
                 }
                 rows.append(value)
     selected = rows[offset : offset + limit]
+    source_type_counts: dict[str, int] = {}
+    for row in rows:
+        source_type = str(row["source_type"])
+        source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
     return {
         "offset": offset,
         "limit": limit,
         "total": len(rows),
         "hasMore": offset + len(selected) < len(rows),
         "nextOffset": offset + len(selected),
+        "deterministicCounts": {
+            "totalMaterials": len(rows),
+            "bySourceType": source_type_counts,
+        },
+        "fieldSemantics": {
+            "authoritativeEventFacts": [
+                "title",
+                "summary",
+                "report",
+                "vulnerability",
+                "darkweb",
+                "telegram",
+                "detail returned by situation_product_source_read",
+            ],
+            "omittedSelectionMetadata": sorted(_SELECTION_ONLY_MATERIAL_FIELDS),
+            "rule": (
+                "Selection metadata explains why a record was selected or ranked; it is not "
+                "evidence that a matched entity is the victim, actor, or subject of the event."
+            ),
+        },
         "materials": selected,
     }
 
@@ -446,6 +483,33 @@ def _template_h2(template: str) -> list[str]:
     return [line[3:].strip() for line in template.splitlines() if line.startswith("## ")]
 
 
+def _template_prohibited_literals(template: str) -> list[str]:
+    """Extract explicit literal bans without assuming a particular report template."""
+
+    groups = re.findall(r"禁止[「『“]([^」』”]+)[」』”]", template)
+    groups.extend(
+        match.group(1)
+        for match in re.finditer(
+            r"(?:正文|报告正文)禁止\s+([^\n；。]+)",
+            template,
+            flags=re.IGNORECASE,
+        )
+    )
+    literals: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in re.split(r"\s*(?:/|、|,|，|\|)\s*", group):
+            normalized = value.strip().strip("`'\" ")
+            if not normalized:
+                continue
+            identity = normalized.casefold()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            literals.append(normalized)
+    return literals
+
+
 def _heading_sequence_issue(expected: list[str], actual: list[str]) -> dict[str, Any] | None:
     """Describe report H2 drift without assuming any particular report template."""
 
@@ -493,6 +557,7 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         "Material snapshot",
     )
     template = template_path.read_text(encoding="utf-8")
+    prohibited_literals = _template_prohibited_literals(template)
     material_rows = [
         json.loads(line)
         for line in materials_path.read_text(encoding="utf-8").split("\n")
@@ -597,6 +662,19 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         issues.append({"code": "internal_path_leakage", "markers": leaked_internal_markers})
     if re.search(r"^```(?:markdown|md)?\s*$", report, flags=re.MULTILINE):
         issues.append({"code": "markdown_fence", "detail": "Do not wrap the complete report in a fence"})
+    prohibited_matches = [
+        literal
+        for literal in prohibited_literals
+        if re.search(re.escape(literal), report, flags=re.IGNORECASE)
+    ]
+    if prohibited_matches:
+        issues.append(
+            {
+                "code": "template_prohibited_expression",
+                "expressions": prohibited_matches,
+                "detail": "The current Session template explicitly prohibits these expressions",
+            }
+        )
 
     validation_path = workspace_dir / "runs" / generation_id / "validation.json"
     previous_attempts = 0

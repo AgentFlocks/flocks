@@ -25,6 +25,9 @@ Treat tool results as the only authoritative business input. Never infer a works
 - Treat `material_id` (`source_type:source_id`) as an internal identity. Use it only as an `evidence_map` key or an exact input to `situation_product_source_read`; never print it in report Markdown.
 - If the template calls for provenance and a material explicitly provides a safe original-source URL, a report item may show at most one such URL. Do not turn `source_id`, source-site domains, Telegram handles, seller identities, or inferred URLs into citations. When no original-source URL is supplied, omit the link.
 - Use the returned localized title, summary, and source-specific fields for ordinary authoring.
+- Use `deterministicCounts` as the baseline for total-material and source-type counts. Cross-check report totals, group subtotals, and narrative counts before writing.
+- Selection and ranking metadata is not event evidence. A matched configuration entity does not become a victim, actor, or event subject unless the title, summary, source-specific facts, or requested detail says so.
+- Preserve one-to-one actor attribution. Do not collectively attribute several events to a list of actors unless every stated relationship is supported by the corresponding material.
 - Use the tool-returned `*_iso_utc` fields for dates. Never calculate a calendar date from a numeric millisecond timestamp yourself.
 - Decide that a template section is empty only after checking every material for facts applicable to that section. Do not classify an author, seller, forum account, or channel sender as a threat group from that identity field alone; require the title, summary, or authoritative detail to identify it as such. Conversely, do not leave a template-requested threat-group section empty when a material explicitly identifies a group.
 - Treat a filename mentioned only in a title or text as evidence text, not as an available attachment. Populate an attachment inventory only from an explicit attachment object or field.
@@ -32,6 +35,7 @@ Treat tool results as the only authoritative business input. Never infer a works
 - Treat the returned selected-material detail as authoritative for that material while retaining all uncertainty qualifiers. If a required detail is unavailable or still conflicts, stop with the conflict unresolved. Do not invent or choose a convenient fact.
 - Never expand qualifiers such as “疑似、声称、关联” into confirmed attribution.
 - Deterministic counts come from the verified material set; do not fabricate trend baselines.
+- Before writing, privately cross-check every named organization, actor, event, source-type count, and group subtotal against the material that supports it. Do not output this check.
 - Do not infer template-specific requirements from this Skill. Section taxonomy, IOC eligibility and grouping, Top-N limits, tables, lengths, empty-state text, and recommendation structure come from the current template only.
 
 ## Boundaries
