@@ -797,6 +797,44 @@ def test_dynamic_summary_exposes_cybergym_as_the_validator() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected_status", "expected_inconclusive", "expected_not_runnable"),
+    [
+        ("no_crash_found", "inconclusive", 1, 0),
+        ("fuzzer_uninstrumented", "not_runnable", 0, 1),
+    ],
+)
+def test_dynamic_summary_preserves_cybergym_no_artifact_reason(
+    reason: str,
+    expected_status: str,
+    expected_inconclusive: int,
+    expected_not_runnable: int,
+) -> None:
+    service = object.__new__(AuditService)
+    summary = service._dynamic_summary(
+        {
+            "scan_id": "scan_cybergym",
+            "status": "completed",
+            "counts": {"cybergym_imported_pocs": 1, "verified_poc_validations": 0},
+            "cybergym": {"status": "failed_no_artifact", "selection_reason": reason},
+        },
+        enabled=True,
+        report_data={"dynamic_runs": []},
+    )
+
+    assert summary == {
+        "status": expected_status,
+        "validator": "cybergym",
+        "ready": 0,
+        "completed": 0,
+        "inconclusive": expected_inconclusive,
+        "not_runnable": expected_not_runnable,
+        "poc_consumed": 1,
+        "poc_verified": 0,
+        "failure_reason": reason,
+    }
+
+
 @pytest.mark.asyncio
 async def test_scan_listing_exposes_the_final_finding_metric() -> None:
     service = object.__new__(AuditService)

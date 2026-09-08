@@ -3511,7 +3511,7 @@ class ScanStore:
             "task": {
                 key: value
                 for key, value in task.items()
-                if key not in {"final_artifact_id", "selection_reason"}
+                if key != "final_artifact_id"
             },
             "candidates": candidates,
             "generic_pocs": generic_pocs,
@@ -3662,23 +3662,51 @@ class ScanStore:
         values.update({row["kind"]: int(row["used"]) for row in rows})
         return values
 
-    def start_cybergym_run(self, scan_id: str, kind: str, input_payload: dict[str, Any]) -> dict[str, Any]:
+    def start_cybergym_run(
+        self,
+        scan_id: str,
+        kind: str,
+        input_payload: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         if kind not in {"replay", "gdb", "fuzz", "minimize"} or not isinstance(input_payload, dict):
             raise ValueError("CyberGym run is invalid")
+        if idempotency_key is not None:
+            if kind != "fuzz":
+                raise ValueError("CyberGym idempotency is only supported for fuzz runs")
+            if not idempotency_key or len(idempotency_key) > 128:
+                raise ValueError("CyberGym fuzz idempotency key is invalid")
+        encoded_input = json.dumps(input_payload, ensure_ascii=False, sort_keys=True)
         run_id = f"cybergym_run_{uuid.uuid4().hex}"
         now = _now()
         with self._lock, self._connect() as connection:
+            if idempotency_key is not None:
+                connection.execute("BEGIN IMMEDIATE")
             task = connection.execute(
                 "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
             ).fetchone()
             if task is None or task["status"] != "active":
                 raise ValueError("CyberGym task is not active")
+            if idempotency_key is not None:
+                existing = connection.execute(
+                    "SELECT * FROM cybergym_runs WHERE scan_id = ? AND kind = 'fuzz' "
+                    "AND idempotency_key = ?",
+                    (scan_id, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["input_json"] != encoded_input:
+                        raise ValueError("CyberGym fuzz idempotency key was reused with different input")
+                    output = self._decode_cybergym_run(existing)
+                    output["reused"] = True
+                    return output
             connection.execute(
-                "INSERT INTO cybergym_runs (run_id, scan_id, kind, status, input_json, result_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'running', ?, NULL, ?, ?)",
-                (run_id, scan_id, kind, json.dumps(input_payload, ensure_ascii=False, sort_keys=True), now, now),
+                "INSERT INTO cybergym_runs "
+                "(run_id, scan_id, kind, status, idempotency_key, input_json, result_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'running', ?, ?, NULL, ?, ?)",
+                (run_id, scan_id, kind, idempotency_key, encoded_input, now, now),
             )
-        return {"run_id": run_id, "scan_id": scan_id, "kind": kind, "status": "running"}
+        return {"run_id": run_id, "scan_id": scan_id, "kind": kind, "status": "running", "reused": False}
 
     def start_cybergym_fuzz_run(
         self,
@@ -3757,6 +3785,41 @@ class ScanStore:
             "status": "running",
             "reused": False,
         }
+
+    def get_cybergym_fuzz_run_by_idempotency(
+        self,
+        scan_id: str,
+        input_payload: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(input_payload, dict):
+            raise ValueError("CyberGym fuzz input is invalid")
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key
+            or len(idempotency_key) > 128
+        ):
+            raise ValueError("CyberGym fuzz idempotency key is invalid")
+        encoded_input = json.dumps(input_payload, ensure_ascii=False, sort_keys=True)
+        with self._connect() as connection:
+            task = connection.execute(
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if task is None or task["status"] != "active":
+                raise ValueError("CyberGym task is not active")
+            row = connection.execute(
+                "SELECT * FROM cybergym_runs WHERE scan_id = ? AND kind = 'fuzz' "
+                "AND idempotency_key = ?",
+                (scan_id, idempotency_key),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["input_json"] != encoded_input:
+            raise ValueError("CyberGym fuzz idempotency key was reused with different input")
+        output = self._decode_cybergym_run(row)
+        output["reused"] = True
+        return output
 
     def finish_cybergym_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
         if status not in {"completed", "failed", "cancelled"} or not isinstance(result, dict):

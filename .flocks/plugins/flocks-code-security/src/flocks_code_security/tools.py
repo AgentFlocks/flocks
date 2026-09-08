@@ -509,7 +509,12 @@ async def audit_cybergym_fuzz_start(
             max_length=max_length,
             idempotency_scope=f"work-unit:{binding.work_unit_id}",
         )
-        return ToolResult(success=True, output=output, title="Started CyberGym manifest-selected fuzz search")
+        title = (
+            "CyberGym fuzz preflight failed"
+            if output.get("status") == "failed"
+            else "Started CyberGym manifest-selected fuzz search"
+        )
+        return ToolResult(success=True, output=output, title=title)
     except STORE_ERRORS as exc:
         return _error(exc, title="CyberGym fuzz start failed")
 

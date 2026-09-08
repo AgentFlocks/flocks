@@ -107,6 +107,15 @@ def _emit(
         pass
 
 
+def _cybergym_no_artifact_reason(runtime: Any, scan_id: str) -> str:
+    reason = getattr(runtime, "no_artifact_failure_reason", None)
+    if callable(reason):
+        value = reason(scan_id)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "no_verified_crash"
+
+
 def _start_phase_observation(parent: Any, phase: str) -> Any:
     if parent is None:
         return None
@@ -705,7 +714,7 @@ class AuditOrchestrator:
                 if selected is None or selected["local_validation"] != "verified":
                     runtime.mark_failed_no_artifact(
                         scan_id,
-                        selection_reason="no_verified_crash",
+                        selection_reason=_cybergym_no_artifact_reason(runtime, scan_id),
                     )
                 else:
                     await runtime.submit(

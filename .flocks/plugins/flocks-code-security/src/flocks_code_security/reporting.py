@@ -53,6 +53,16 @@ SARIF_LEVELS = {
 LEGACY_UNSEALED_REPORT_ARTIFACTS = frozenset(
     {"report.md", "report.sarif", "threat-model.json"}
 )
+CYBERGYM_NOT_RUNNABLE_REASONS = {
+    "fuzzer_uninstrumented",
+    "fuzzer_unavailable",
+    "runtime_unavailable",
+    "harness_error",
+    "execution_timeout",
+    "fuzzer_error",
+    "runtime_error",
+    "cancelled",
+}
 
 
 class ReportWriter:
@@ -1181,14 +1191,25 @@ class ReportWriter:
                     "replay, batch GDB, and manifest-selected fuzzing evidence"
                 )
             else:
-                runtime_status = (
-                    "CyberGym Level 1 attempted source-backed generic PoCs through the manifest-locked "
-                    f"vulnerable-side runner, but did not retain a locally verified crash artifact ({cybergym_selection_reason})."
-                )
-                validation_mode = (
-                    "Static source verification plus attempted CyberGym dynamic validation; no vulnerable-side "
-                    "crash was reproduced"
-                )
+                if cybergym_selection_reason in CYBERGYM_NOT_RUNNABLE_REASONS:
+                    runtime_status = (
+                        "CyberGym Level 1 attempted source-backed generic PoCs through the manifest-locked "
+                        "vulnerable-side runner, but the configured dynamic path was not runnable "
+                        f"({cybergym_selection_reason})."
+                    )
+                    validation_mode = (
+                        "Static source verification plus attempted CyberGym dynamic validation; fuzzer/runtime "
+                        "availability failed before a crash verdict"
+                    )
+                else:
+                    runtime_status = (
+                        "CyberGym Level 1 attempted source-backed generic PoCs through the manifest-locked "
+                        f"vulnerable-side runner, but did not retain a locally verified crash artifact ({cybergym_selection_reason})."
+                    )
+                    validation_mode = (
+                        "Static source verification plus attempted CyberGym dynamic validation; no vulnerable-side "
+                        "crash was reproduced"
+                    )
         if poc_generation is not None and cybergym is None:
             runtime_status = (
                 "Source-backed PoC bundles were generated; target code was not executed."

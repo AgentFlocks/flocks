@@ -114,6 +114,11 @@ async def test_cybergym_solver_fallback_finalizes_completed_worker_without_submi
             return None
 
         @staticmethod
+        def no_artifact_failure_reason(_scan_id: str):
+            calls.append(("no_artifact_failure_reason", None))
+            return "no_crash_found"
+
+        @staticmethod
         def mark_failed_no_artifact(_scan_id: str, *, selection_reason: str = "no generated artifact"):
             calls.append(("mark_failed_no_artifact", selection_reason))
             return {"status": "failed_no_artifact"}
@@ -132,7 +137,8 @@ async def test_cybergym_solver_fallback_finalizes_completed_worker_without_submi
     assert result["cybergym"]["status"] == "failed_no_artifact"
     assert calls == [
         ("select", None),
-        ("mark_failed_no_artifact", "no_verified_crash"),
+        ("no_artifact_failure_reason", None),
+        ("mark_failed_no_artifact", "no_crash_found"),
     ]
 
 

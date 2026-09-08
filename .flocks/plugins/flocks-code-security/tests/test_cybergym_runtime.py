@@ -146,6 +146,8 @@ class _FixtureExecutor:
             (scratch / "minimized").write_bytes(b"min")
             return CommandResult(1, "minimized", "")
         if "/opt/fixture-fuzzer" in command:
+            if "-runs=0" in command:
+                return CommandResult(0, "INFO: Loaded 1 modules (8 inline 8-bit counters): 8", "")
             findings = scratch / "findings"
             findings.mkdir(exist_ok=True)
             (findings / "crash-1").write_bytes(b"crash")
@@ -664,8 +666,14 @@ async def test_fuzz_requires_vulnerable_replay_preflight(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_clean_replayed_seed_can_fuzz_without_gdb_target_reachability(tmp_path: Path) -> None:
     class _CleanExecutor(_FixtureExecutor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.preflight_count = 0
+
         async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
             self.commands.append(command)
+            if "/opt/fixture-fuzzer" in command and "-runs=0" in command:
+                self.preflight_count += 1
             return CommandResult(0, "", "")
 
     store, scan_id = _store(tmp_path)
@@ -690,6 +698,7 @@ async def test_clean_replayed_seed_can_fuzz_without_gdb_target_reachability(tmp_
     assert retried["run_id"] == started["run_id"]
     assert retried["reused"] is True
     assert store.cybergym_budget(scan_id)["fuzz"] == 1
+    assert executor.preflight_count == 1
 
 
 @pytest.mark.asyncio
@@ -727,16 +736,57 @@ async def test_fuzz_zero_guards_is_reported_as_uninstrumented(tmp_path: Path) ->
             return CommandResult(0, "", "")
 
     store, scan_id = _store(tmp_path)
-    runtime = CyberGymRuntime(store, executor=_ZeroGuardExecutor())
+    executor = _ZeroGuardExecutor()
+    runtime = CyberGymRuntime(store, executor=executor)
     seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
     await runtime.replay(scan_id, seed["artifact_id"])
 
     started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
     status = await runtime.fuzz_wait(scan_id, started["run_id"])
 
+    assert started["status"] == "failed"
     assert status["status"] == "failed"
+    assert status["result"]["preflight"] is True
     assert status["result"]["failure_code"] == "fuzzer_uninstrumented"
     assert status["result"]["termination_reason"] == "fuzzer_uninstrumented"
+    assert store.cybergym_budget(scan_id)["fuzz"] == 0
+    assert "-runs=0" in executor.commands[-1]
+
+
+@pytest.mark.asyncio
+async def test_fuzz_preflight_non_crash_exit_fails_before_budget(tmp_path: Path) -> None:
+    class _BadFuzzerExecutor(_FixtureExecutor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.preflight_count = 0
+
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            if "/opt/fixture-fuzzer" in command and "-runs=0" in command:
+                self.preflight_count += 1
+                return CommandResult(2, "", "unsupported fuzzer option")
+            if "/opt/fixture-fuzzer" in command:
+                raise AssertionError("formal fuzz run should not start after a failed preflight")
+            return CommandResult(0, "", "")
+
+    store, scan_id = _store(tmp_path)
+    executor = _BadFuzzerExecutor()
+    runtime = CyberGymRuntime(store, executor=executor)
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]], idempotency_key="bad-fuzzer")
+    retried = await runtime.fuzz_start(scan_id, [seed["artifact_id"]], idempotency_key="bad-fuzzer")
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert started["status"] == "failed"
+    assert status["status"] == "failed"
+    assert status["result"]["preflight"] is True
+    assert status["result"]["failure_code"] == "fuzzer_error"
+    assert retried["run_id"] == started["run_id"]
+    assert retried["reused"] is True
+    assert executor.preflight_count == 1
+    assert store.cybergym_budget(scan_id)["fuzz"] == 0
 
 
 @pytest.mark.asyncio
@@ -767,7 +817,7 @@ async def test_fuzz_persisted_corpus_is_a_normal_no_crash_completion(tmp_path: P
     class _CorpusExecutor(_FixtureExecutor):
         async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
             self.commands.append(command)
-            if "/opt/fixture-fuzzer" in command:
+            if "/opt/fixture-fuzzer" in command and "-runs=0" not in command:
                 mount = next(item for item in command if item.startswith("type=bind,src="))
                 scratch = Path(mount.split(",src=", 1)[1].split(",dst=", 1)[0])
                 (scratch / "corpus" / "generated").write_bytes(b"expanded")
@@ -847,7 +897,7 @@ async def test_scan_cancellation_records_fuzz_cancel_source(tmp_path: Path) -> N
 
         async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
             self.commands.append(command)
-            if "/opt/fixture-fuzzer" in command:
+            if "/opt/fixture-fuzzer" in command and "-runs=0" not in command:
                 self.fuzz_started.set()
                 await asyncio.Event().wait()
             return CommandResult(0, "", "")
@@ -893,6 +943,33 @@ def test_no_artifact_is_terminal_and_does_not_consume_budget(tmp_path: Path) -> 
         "fuzz": 0,
         "minimize": 0,
     }
+    assert task["selection_reason"] == "runtime_error"
+
+
+def test_no_artifact_finalization_uses_specific_fuzz_failure_reason(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store)
+
+    run = store.start_cybergym_run(
+        scan_id,
+        "fuzz",
+        {"seed_ids": ["seed"], "preflight": True},
+    )
+    store.finish_cybergym_run(
+        run["run_id"],
+        "failed",
+        {
+            "status": "failed",
+            "preflight": True,
+            "failure_code": "fuzzer_uninstrumented",
+            "termination_reason": "fuzzer_uninstrumented",
+        },
+    )
+
+    task = runtime.mark_failed_no_artifact(scan_id)
+
+    assert task["status"] == "failed_no_artifact"
+    assert task["selection_reason"] == "fuzzer_uninstrumented"
 
 
 def test_no_artifact_finalization_rejects_a_verified_artifact(tmp_path: Path) -> None:

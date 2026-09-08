@@ -57,6 +57,7 @@ _OFFICIAL_MODE_ERROR_JSON_BYTES = 2 * 1024
 _RUN_OUTPUT_JSON_BYTES = 16 * 1024
 _FUZZ_RESULT_ARTIFACT_LIMIT = 64
 _FUZZ_RESULT_REJECTION_LIMIT = 64
+_FUZZ_PREFLIGHT_SECONDS = 10
 _DEFAULT_CYBERGYM_DATA_DIR = "/home/cybergym/cybergym-server-data"
 _AFL_NO_FINDINGS_MARKERS = (
     "no interesting inputs were found",
@@ -69,6 +70,22 @@ _FUZZ_UNINSTRUMENTED_MARKERS = (
     "loaded 0 pc tables",
     "no coverage instrumentation",
 )
+_NO_ARTIFACT_REASON_PRIORITY = (
+    "fuzzer_uninstrumented",
+    "fuzzer_unavailable",
+    "runtime_unavailable",
+    "harness_error",
+    "execution_timeout",
+    "fuzzer_error",
+    "runtime_error",
+    "cancelled",
+    "no_crash_found",
+)
+_NO_CRASH_TERMINATION_REASONS = {
+    "engine_completed",
+    "corpus_persisted",
+    "afl_no_interesting_inputs",
+}
 
 
 class CyberGymManifestError(ValueError):
@@ -1112,7 +1129,6 @@ class CyberGymRuntime:
         if len(known_poc_ids) > 1 or (known_poc_ids and None in seed_poc_ids):
             raise ValueError("fuzz_start requires seed artifacts from one generic PoC lineage")
         poc_id = next(iter(known_poc_ids), None)
-        self._assert_fuzz_preflight(scan_id, seed_ids)
         normalized_dictionary = list(dictionary or [])
         input_payload = {
             "seed_ids": seed_ids,
@@ -1131,6 +1147,37 @@ class CyberGymRuntime:
                 ).encode("utf-8")
             ).hexdigest()
         container_name = _fuzz_container_name(idempotency_key)
+        existing = self.store.get_cybergym_fuzz_run_by_idempotency(
+            scan_id,
+            input_payload,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return {"run_id": existing["run_id"], "status": existing["status"], "reused": True}
+        self._assert_fuzz_preflight(scan_id, seed_ids)
+        preflight = await self._execute_fuzz_preflight(
+            manifest,
+            seeds,
+            normalized_dictionary,
+            max_length,
+            container_name=f"{container_name}-preflight",
+        )
+        if preflight.get("status") == "failed":
+            run = self.store.start_cybergym_run(
+                scan_id,
+                "fuzz",
+                input_payload,
+                idempotency_key=idempotency_key,
+            )
+            if run["reused"]:
+                return {"run_id": run["run_id"], "status": run["status"], "reused": True}
+            self.store.finish_cybergym_run(run["run_id"], "failed", preflight)
+            return {
+                "run_id": run["run_id"],
+                "status": "failed",
+                "reused": False,
+                "preflight": preflight,
+            }
         run = self.store.start_cybergym_fuzz_run(
             scan_id,
             input_payload,
@@ -1360,12 +1407,17 @@ class CyberGymRuntime:
     def select_final_artifact(self, scan_id: str) -> dict[str, Any] | None:
         return self.store.select_cybergym_final_artifact(scan_id)
 
+    def no_artifact_failure_reason(self, scan_id: str) -> str:
+        return _cybergym_no_artifact_failure_reason(self.store.list_cybergym_runs(scan_id))
+
     def mark_failed_no_artifact(
         self,
         scan_id: str,
         *,
-        selection_reason: str = "no generated artifact",
+        selection_reason: str | None = None,
     ) -> dict[str, Any]:
+        if selection_reason is None:
+            selection_reason = self.no_artifact_failure_reason(scan_id)
         return self.store.mark_cybergym_failed_no_artifact(
             scan_id,
             selection_reason=selection_reason,
@@ -1452,6 +1504,57 @@ class CyberGymRuntime:
             **_bounded_command_output(result),
         }
 
+    async def _execute_fuzz_preflight(
+        self,
+        manifest: CyberGymTargetManifest,
+        seeds: list[dict[str, Any]],
+        dictionary: list[str],
+        max_length: int | None,
+        *,
+        container_name: str,
+    ) -> dict[str, Any]:
+        if manifest.engine != "libfuzzer":
+            return {"status": "skipped", "reason": "engine_preflight_not_available", "engine": manifest.engine}
+        with tempfile.TemporaryDirectory(prefix="cybergym-fuzz-preflight-") as temporary:
+            scratch = Path(temporary)
+            corpus = scratch / "corpus"
+            corpus.mkdir(mode=0o700)
+            for index, seed in enumerate(seeds):
+                (corpus / f"seed-{index}").write_bytes(seed["data"])
+            dictionary_path: Path | None = None
+            if dictionary:
+                dictionary_path = scratch / "dictionary"
+                self._write_fuzz_dictionary(dictionary_path, dictionary)
+            mount_root = str(PurePosixPath(manifest.input_path).parent)
+            command = self._container_command(manifest, scratch, container_name=container_name)
+            command.extend([
+                manifest.fuzzer_target or "",
+                str(PurePosixPath(mount_root) / "corpus"),
+                "-runs=0",
+            ])
+            if max_length is not None:
+                command.append(f"-max_len={max_length}")
+            if dictionary_path is not None:
+                command.append(f"-dict={mount_root}/dictionary")
+            result = await self.executor.run(command, timeout_seconds=_FUZZ_PREFLIGHT_SECONDS)
+        execution_status = _execution_status(result)
+        payload = {
+            "status": "completed",
+            "preflight": True,
+            "engine": manifest.engine,
+            "execution_status": execution_status,
+            "exit_code": result.returncode,
+            **_bounded_command_output(result),
+        }
+        failure_code = _fuzz_preflight_failure_code(result, execution_status)
+        if failure_code is not None:
+            payload.update({
+                "status": "failed",
+                "failure_code": failure_code,
+                "termination_reason": failure_code,
+            })
+        return payload
+
     async def _run_fuzz(
         self,
         scan_id: str,
@@ -1475,11 +1578,7 @@ class CyberGymRuntime:
                 dictionary_path: Path | None = None
                 if dictionary:
                     dictionary_path = scratch / "dictionary"
-                    dictionary_contents = "\n".join(
-                        '"' + item.replace('"', '\\"') + '"'
-                        for item in dictionary
-                    )
-                    dictionary_path.write_text(dictionary_contents + "\n", encoding="utf-8")
+                    self._write_fuzz_dictionary(dictionary_path, dictionary)
                 mount_root = str(PurePosixPath(manifest.input_path).parent)
                 container_corpus = f"{mount_root}/corpus"
                 container_findings = f"{mount_root}/findings"
@@ -1544,10 +1643,17 @@ class CyberGymRuntime:
                 new_corpus_count=new_corpus_count,
             )
             if result.unavailable or engine_status == "harness_error":
+                failure_code = (
+                    "runtime_unavailable"
+                    if result.unavailable
+                    else "fuzzer_unavailable"
+                    if result.returncode in {126, 127}
+                    else "harness_error"
+                )
                 payload.update({
                     "status": "failed",
-                    "failure_code": "runtime_unavailable" if result.unavailable else "harness_error",
-                    "termination_reason": "runtime_unavailable" if result.unavailable else "harness_error",
+                    "failure_code": failure_code,
+                    "termination_reason": failure_code,
                 })
                 self._finish_fuzz_run(run_id, "failed", payload)
             elif _fuzz_uninstrumented(result):
@@ -1762,6 +1868,14 @@ class CyberGymRuntime:
             (path, "corpus") for path in corpus_dirs
         ]
 
+    @staticmethod
+    def _write_fuzz_dictionary(path: Path, dictionary: list[str]) -> None:
+        dictionary_contents = "\n".join(
+            '"' + item.replace('"', '\\"') + '"'
+            for item in dictionary
+        )
+        path.write_text(dictionary_contents + "\n", encoding="utf-8")
+
     def _container_command(
         self,
         manifest: CyberGymTargetManifest,
@@ -1934,6 +2048,45 @@ def _fuzz_termination_reason(
         if any(marker in output for marker in _AFL_NO_FINDINGS_MARKERS):
             return "afl_no_interesting_inputs"
     return None
+
+
+def _fuzz_preflight_failure_code(result: CommandResult, execution_status: str) -> str | None:
+    if result.unavailable or execution_status == "runtime_unavailable":
+        return "runtime_unavailable"
+    if _fuzz_uninstrumented(result):
+        return "fuzzer_uninstrumented"
+    if execution_status == "harness_error":
+        return "fuzzer_unavailable" if result.returncode in {126, 127} else "harness_error"
+    if result.timed_out:
+        return "execution_timeout"
+    if execution_status == "non_crash_exit":
+        return "fuzzer_error"
+    return None
+
+
+def _cybergym_no_artifact_failure_reason(runs: list[dict[str, Any]]) -> str:
+    observed: set[str] = set()
+    for run in runs:
+        result = run.get("result")
+        if not isinstance(result, dict):
+            continue
+        failure_code = result.get("failure_code")
+        if isinstance(failure_code, str) and failure_code:
+            observed.add(failure_code)
+        if run.get("kind") == "fuzz":
+            if result.get("outcome") == "no_crash_found":
+                observed.add("no_crash_found")
+            termination_reason = result.get("termination_reason")
+            if termination_reason in _NO_CRASH_TERMINATION_REASONS:
+                observed.add("no_crash_found")
+        if result.get("status") == "runtime_error":
+            observed.add("runtime_error")
+        if run.get("status") == "cancelled":
+            observed.add("cancelled")
+    for reason in _NO_ARTIFACT_REASON_PRIORITY:
+        if reason in observed:
+            return reason
+    return "no_verified_crash"
 
 
 def _docker_user_args() -> list[str]:

@@ -44,6 +44,17 @@ MAX_PROJECTED_EVENT_BYTES = 60 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 PUBLIC_SCAN_STATUSES = {"running", *TERMINAL_SCAN_STATUSES}
+CYBERGYM_INCONCLUSIVE_FAILURE_REASONS = {"no_crash_found", "no_verified_crash"}
+CYBERGYM_NOT_RUNNABLE_FAILURE_REASONS = {
+    "fuzzer_uninstrumented",
+    "fuzzer_unavailable",
+    "runtime_unavailable",
+    "harness_error",
+    "execution_timeout",
+    "fuzzer_error",
+    "runtime_error",
+    "cancelled",
+}
 PUBLIC_PHASES = {
     "probing": "dynamic_validation",
     "cybergym_solving": "dynamic_validation",
@@ -1728,22 +1739,31 @@ class AuditService:
             }
         cybergym = status.get("cybergym")
         if isinstance(cybergym, dict):
+            reason = cybergym.get("selection_reason")
             lifecycle = {
                 "active": "running",
                 "submitting": "running",
                 "submitted": "completed",
                 "failed_no_artifact": "not_runnable",
             }.get(cybergym.get("status"), "waiting_for_static_confirmation")
-            return {
+            if cybergym.get("status") == "failed_no_artifact":
+                if reason in CYBERGYM_INCONCLUSIVE_FAILURE_REASONS:
+                    lifecycle = "inconclusive"
+                elif reason in CYBERGYM_NOT_RUNNABLE_FAILURE_REASONS:
+                    lifecycle = "not_runnable"
+            summary = {
                 "status": lifecycle,
                 "validator": "cybergym",
                 "ready": 0,
                 "completed": 1 if lifecycle == "completed" else 0,
-                "inconclusive": 0,
+                "inconclusive": 1 if lifecycle == "inconclusive" else 0,
                 "not_runnable": 1 if lifecycle == "not_runnable" else 0,
                 "poc_consumed": int(counts.get("cybergym_imported_pocs", 0)),
                 "poc_verified": int(counts.get("verified_poc_validations", 0)),
             }
+            if isinstance(reason, str) and reason:
+                summary["failure_reason"] = reason
+            return summary
         scan_id = str(status.get("scan_id") or "")
         if report_data is not None:
             data = report_data
