@@ -28,7 +28,7 @@ class CreateScanRequest(BaseModel):
     model: str | None = None
     include_paths: list[str] = Field(default_factory=lambda: ["."], alias="includePaths")
     exclude_patterns: list[str] = Field(default_factory=list, alias="excludePatterns")
-    max_file_bytes: int = Field(1_048_576, alias="maxFileBytes", ge=1, le=50 * 1024 * 1024)
+    max_file_bytes: int | None = Field(None, alias="maxFileBytes", ge=1)
     copy_source: bool = Field(True, alias="copySource")
     dynamic_enabled: bool = Field(False, alias="dynamicEnabled")
     poc_enabled: bool = Field(False, alias="pocEnabled")

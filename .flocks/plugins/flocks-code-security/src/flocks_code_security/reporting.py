@@ -1173,7 +1173,7 @@ class ReportWriter:
                 "vulnerable-side runner; fixed-side behavior was not exposed to the solver."
             )
             validation_mode = (
-                "Static source verification plus selected generic PoC adaptation, constrained vulnerable "
+                "Static source verification plus accepted generic PoC adaptation, constrained vulnerable "
                 "replay, batch GDB, and manifest-selected fuzzing evidence"
             )
         if poc_generation is not None and cybergym is None:

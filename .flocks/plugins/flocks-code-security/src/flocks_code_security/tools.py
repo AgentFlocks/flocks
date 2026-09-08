@@ -60,6 +60,7 @@ from flocks_code_security.orchestration import (
 from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
 from flocks_code_security.poc import decode_poc_bytes
+from flocks_code_security.store import WorkerCapacityUnavailable
 
 
 ROLE_AGENTS = {
@@ -314,7 +315,7 @@ async def audit_prepare(
     target_path: str,
     include_paths: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
-    max_file_bytes: int = 1_048_576,
+    max_file_bytes: int | None = None,
     copy_source: bool = True,
     mode: str = "standard",
     dynamic_enabled: bool = False,
@@ -1522,6 +1523,7 @@ async def audit_run_workers(
     runtime = get_runtime()
     try:
         binding = _coordinator_binding(ctx, scan_id)
+        candidates_by_id: dict[str, dict[str, Any]]
         if phase == "threat_modeling":
             units = plan_threat_model_units()
             candidates_by_id = {}
@@ -1540,7 +1542,7 @@ async def audit_run_workers(
                 manifest,
                 include_paths=snapshot.include_paths,
             )
-            candidates_by_id: dict[str, dict[str, Any]] = {}
+            candidates_by_id = {}
         elif phase == "investigation":
             manifest = await asyncio.to_thread(
                 runtime.manifests.get_or_build,
@@ -1623,31 +1625,50 @@ async def audit_run_workers(
         launch_failures = 0
         LAUNCHING_BATCH_IDS.add(batch["batch_id"])
         try:
-            for unit in batch["units"]:
-                candidate = candidates_by_id.get(unit.get("subject_id"))
-                try:
-                    await _launch_worker(
-                        ctx,
-                        scan_id,
-                        binding.snapshot_id,
-                        phase,
-                        unit,
-                        candidate=candidate,
-                        open_questions=unit.get("open_questions"),
-                    )
-                    launched += 1
-                except Exception:
-                    launch_failures += 1
-                    current_unit = await asyncio.to_thread(
-                        runtime.store.get_work_unit,
-                        unit["work_unit_id"],
-                    )
-                    if current_unit and current_unit["status"] in {"pending", "running"}:
-                        await asyncio.to_thread(
-                            runtime.store.update_work_unit_status,
-                            unit["work_unit_id"],
-                            "failed",
+            pending_units = list(batch["units"])
+            while pending_units:
+                deferred_units: list[dict[str, Any]] = []
+                for unit in pending_units:
+                    candidate = candidates_by_id.get(unit.get("subject_id"))
+                    try:
+                        await _launch_worker(
+                            ctx,
+                            scan_id,
+                            binding.snapshot_id,
+                            phase,
+                            unit,
+                            candidate=candidate,
+                            open_questions=unit.get("open_questions"),
                         )
+                        launched += 1
+                    except WorkerCapacityUnavailable:
+                        deferred_units.append(unit)
+                    except Exception:
+                        launch_failures += 1
+                        current_unit = await asyncio.to_thread(
+                            runtime.store.get_work_unit,
+                            unit["work_unit_id"],
+                        )
+                        if current_unit and current_unit["status"] in {"pending", "running"}:
+                            await asyncio.to_thread(
+                                runtime.store.update_work_unit_status,
+                                unit["work_unit_id"],
+                                "failed",
+                            )
+                if deferred_units:
+                    await _refresh_worker_batch(batch["batch_id"], ctx=ctx)
+                    ctx.metadata(
+                        {
+                            "title": "Waiting for global audit worker capacity",
+                            "metadata": {
+                                "scan_id": scan_id,
+                                "batch_id": batch["batch_id"],
+                                "waiting_workers": len(deferred_units),
+                            },
+                        }
+                    )
+                    await asyncio.sleep(1)
+                pending_units = deferred_units
         finally:
             LAUNCHING_BATCH_IDS.discard(batch["batch_id"])
         current_batch = await asyncio.to_thread(
@@ -1776,46 +1797,9 @@ async def _launch_worker(
             root_trace_name="code-security.scan",
             trace_context=trace_context,
         )
-    child = await Session.create(
-        project_id=parent.project_id,
-        directory=parent.directory,
-        title=f"Code security {phase} worker",
-        parent_id=parent.id,
-        agent=agent_name,
-        category="task",
-        metadata={"langfuse": langfuse_metadata},
-        **child_kwargs,
-    )
     knowledge_base_present = (
         await asyncio.to_thread(runtime.store.get_knowledge_base_metadata, scan_id)
         is not None
-    )
-    callable_tools = await get_session_callable_tools(child.id)
-    attempt = await asyncio.to_thread(
-        runtime.store.create_work_attempt,
-        work_unit_id=unit["work_unit_id"],
-        session_id=child.id,
-        agent_name=agent_name,
-        provider_id=provider_id,
-        model_id=model_id,
-        toolset_digest_value=toolset_digest(callable_tools),
-    )
-    attempt_binding = await asyncio.to_thread(
-        runtime.store.require_binding,
-        child.id,
-        {unit["role"]},
-    )
-    await asyncio.to_thread(
-        runtime.store.verify_execution_capsule,
-        attempt_binding,
-        agent_name=(
-            child.agent
-            if isinstance(getattr(child, "agent", None), str)
-            else agent_name
-        ),
-        provider_id=provider_id,
-        model_id=model_id,
-        toolset_digest_value=toolset_digest(callable_tools),
     )
     if phase == "threat_modeling":
         prompt = threat_model_prompt(
@@ -1861,6 +1845,68 @@ async def _launch_worker(
         prompt = cybergym_solver_prompt(recovery_reason=recovery_reason)
     else:
         raise ValueError("Worker prompt data is incomplete")
+    await asyncio.to_thread(
+        runtime.store.reserve_worker_capacity,
+        unit["work_unit_id"],
+    )
+    try:
+        child = await Session.create(
+            project_id=parent.project_id,
+            directory=parent.directory,
+            title=f"Code security {phase} worker",
+            parent_id=parent.id,
+            agent=agent_name,
+            category="task",
+            metadata={"langfuse": langfuse_metadata},
+            **child_kwargs,
+        )
+    except BaseException:
+        await asyncio.to_thread(
+            runtime.store.release_worker_capacity,
+            unit["work_unit_id"],
+        )
+        raise
+    attempt: dict[str, Any] | None = None
+    try:
+        callable_tools = await get_session_callable_tools(child.id)
+        attempt = await asyncio.to_thread(
+            runtime.store.create_work_attempt,
+            work_unit_id=unit["work_unit_id"],
+            session_id=child.id,
+            agent_name=agent_name,
+            provider_id=provider_id,
+            model_id=model_id,
+            toolset_digest_value=toolset_digest(callable_tools),
+        )
+        attempt_binding = await asyncio.to_thread(
+            runtime.store.require_binding,
+            child.id,
+            {unit["role"]},
+        )
+        await asyncio.to_thread(
+            runtime.store.verify_execution_capsule,
+            attempt_binding,
+            agent_name=(child.agent if isinstance(getattr(child, "agent", None), str) else agent_name),
+            provider_id=provider_id,
+            model_id=model_id,
+            toolset_digest_value=toolset_digest(callable_tools),
+        )
+    except BaseException:
+        if attempt is None:
+            await asyncio.to_thread(
+                runtime.store.release_worker_capacity,
+                unit["work_unit_id"],
+            )
+        else:
+            await asyncio.to_thread(
+                runtime.store.finish_work_attempt,
+                attempt["attempt_id"],
+                status="failed",
+                failure_class="launch_failure",
+                work_unit_status="failed",
+            )
+        raise
+    assert attempt is not None
     manager = _background_manager()
     try:
         await Message.create(
@@ -2965,7 +3011,7 @@ def register_tools() -> None:
             _parameter("target_path", ParameterType.STRING, "Absolute local target directory to snapshot."),
             _parameter("include_paths", ParameterType.ARRAY, "Optional relative files or directories to include.", required=False, json_schema=string_array),
             _parameter("exclude_patterns", ParameterType.ARRAY, "Optional relative glob patterns to exclude.", required=False, json_schema=string_array),
-            _parameter("max_file_bytes", ParameterType.INTEGER, "Maximum bytes included per file.", required=False, default=1_048_576),
+            _parameter("max_file_bytes", ParameterType.INTEGER, "Optional per-file byte cap. Omit to include all regular files within the total snapshot limit.", required=False),
             _parameter(
                 "copy_source",
                 ParameterType.BOOLEAN,
@@ -3032,14 +3078,14 @@ def register_tools() -> None:
     }
     _register(
         "audit_cybergym_context",
-        "Read the bound CyberGym Level 1 manifest, selected generic PoC, artifact inventory, and budgets without fixed-side data.",
+        "Read the bound CyberGym Level 1 manifest, accepted generic PoCs, PoC states, artifact inventory, and budgets without fixed-side data.",
         audit_cybergym_context,
         [],
     )
     _register(
         "audit_cybergym_artifact_create",
-        "Persist one raw input seed before CyberGym execution. The selected generic PoC permits "
-        "one bootstrap seed; refined seeds must provide their parent artifact.",
+        "Persist one raw input seed before CyberGym execution. A generic PoC permits one bootstrap "
+        "seed via source_poc_id; refined seeds must provide their parent artifact.",
         audit_cybergym_artifact_create,
         [
             _parameter("data", ParameterType.STRING, "Raw input encoded using encoding."),
@@ -3053,7 +3099,7 @@ def register_tools() -> None:
             _parameter(
                 "source_poc_id",
                 ParameterType.STRING,
-                "Accepted generic PoC that supplied this initial seed when no imported raw seed exists.",
+                "Accepted generic PoC that supplied this initial bootstrap seed.",
                 required=False,
             ),
         ],
@@ -3075,10 +3121,10 @@ def register_tools() -> None:
     )
     _register(
         "audit_cybergym_fuzz_start",
-        "Start the manifest-locked fuzz engine from persisted seed artifacts after vulnerable replay preflight.",
+        "Start the manifest-locked fuzz engine from one generic PoC lineage after vulnerable replay preflight.",
         audit_cybergym_fuzz_start,
         [
-            _parameter("seed_artifact_ids", ParameterType.ARRAY, "One to 32 persisted seed artifact IDs.", json_schema={"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": {"type": "string", "minLength": 1}}),
+            _parameter("seed_artifact_ids", ParameterType.ARRAY, "One to 32 persisted seed artifact IDs from the same PoC lineage.", json_schema={"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": {"type": "string", "minLength": 1}}),
             _parameter("dictionary", ParameterType.ARRAY, "Optional bounded dictionary tokens for the manifest-selected engine.", required=False, json_schema={"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}}),
             _parameter("budget_seconds", ParameterType.INTEGER, "Optional fuzz budget bounded by the manifest.", required=False),
             _parameter("max_length", ParameterType.INTEGER, "Optional maximum generated input length.", required=False),

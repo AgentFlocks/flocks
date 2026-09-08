@@ -22,7 +22,12 @@ from flocks_code_security.service import (
     _ProgressRecorder,
     _effective_finished_at,
 )
-from flocks_code_security.store import ScanStore, process_identity
+from flocks_code_security.store import (
+    MAX_GLOBAL_ACTIVE_WORKERS,
+    ScanStore,
+    WorkerCapacityUnavailable,
+    process_identity,
+)
 
 
 def _store(tmp_path: Path) -> ScanStore:
@@ -237,6 +242,60 @@ def test_report_data_includes_public_work_attempt_model_identity(
             "resume_count": 0,
         }
     ]
+
+
+def test_worker_capacity_is_shared_between_store_instances(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    peer = ScanStore(store.database_path)
+    peer.initialize()
+    scan_id = store.create_scan(
+        parent_session_id="session-1",
+        snapshot_id="snapshot_test",
+        mode="standard",
+        ruleset_digest="rules",
+    )
+    work_unit_ids = [
+        store.create_work_unit(
+            scan_id=scan_id,
+            phase="baseline",
+            role="baseline",
+            paths=[f"src/{index}.py"],
+        )
+        for index in range(MAX_GLOBAL_ACTIVE_WORKERS + 1)
+    ]
+
+    attempts = [
+        (store if index % 2 == 0 else peer).create_work_attempt(
+            work_unit_id=work_unit_id,
+            session_id=f"worker-{index}",
+            agent_name="code-security-baseline",
+        )
+        for index, work_unit_id in enumerate(work_unit_ids[:-1])
+    ]
+
+    assert store.active_worker_count() == MAX_GLOBAL_ACTIVE_WORKERS
+    assert peer.active_worker_count() == MAX_GLOBAL_ACTIVE_WORKERS
+    with pytest.raises(WorkerCapacityUnavailable, match="capacity"):
+        peer.create_work_attempt(
+            work_unit_id=work_unit_ids[-1],
+            session_id="worker-over-capacity",
+            agent_name="code-security-baseline",
+        )
+
+    store.finish_work_attempt(
+        attempts[0]["attempt_id"],
+        status="failed",
+        work_unit_status="failed",
+    )
+    peer.create_work_attempt(
+        work_unit_id=work_unit_ids[-1],
+        session_id="worker-after-release",
+        agent_name="code-security-baseline",
+    )
+    assert store.active_worker_count() == MAX_GLOBAL_ACTIVE_WORKERS
+
+    assert store.mark_scan_terminal(scan_id, "failed") is True
+    assert peer.active_worker_count() == 0
 
 
 def test_dynamic_probe_queue_prioritizes_execution_candidates(tmp_path: Path) -> None:

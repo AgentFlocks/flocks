@@ -86,7 +86,7 @@ async def code_security_audit(
     model: str | None = None,
     include_paths: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
-    max_file_bytes: int = 1_048_576,
+    max_file_bytes: int | None = None,
     copy_source: bool = True,
     dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
@@ -275,7 +275,10 @@ def register_public_tool() -> None:
                     json_schema=string_array,
                 ),
                 _parameter(
-                    "max_file_bytes", ParameterType.INTEGER, "Maximum bytes included per file.", default=1_048_576
+                    "max_file_bytes",
+                    ParameterType.INTEGER,
+                    "Optional per-file byte cap. Omit to include all regular files within the total snapshot limit.",
+                    required=False,
                 ),
                 _parameter(
                     "copy_source",

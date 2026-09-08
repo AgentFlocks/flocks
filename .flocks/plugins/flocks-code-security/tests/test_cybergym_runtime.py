@@ -81,6 +81,47 @@ def _store(tmp_path: Path, manifest: dict | None = None) -> tuple[ScanStore, str
     return store, scan_id
 
 
+def _insert_accepted_raw_pocs(
+    store: ScanStore,
+    scan_id: str,
+    pocs: list[tuple[str, str, str]],
+) -> None:
+    now = "2026-09-07T00:00:00+00:00"
+    rows = []
+    for poc_id, candidate_id, data in pocs:
+        unit_id = store.create_work_unit(
+            scan_id=scan_id,
+            phase="poc_generation",
+            role="poc_generator",
+            paths=["seed.bin"],
+            status="completed",
+        )
+        rows.append((poc_id, candidate_id, data, unit_id))
+    with store._lock, store._connect() as connection:
+        accepted_candidate_ids = []
+        for index, (poc_id, candidate_id, data, unit_id) in enumerate(rows, start=1):
+            bundle = {
+                "artifact_type": "raw_input",
+                "entrypoint": "seed.bin",
+                "files": [{"path": "seed.bin", "encoding": "utf8", "data": data}],
+                "delivery": {"input_kind": "literal"},
+            }
+            connection.execute(
+                "INSERT INTO candidates (candidate_id, scan_id, work_unit_id, role, payload_json, created_at) "
+                "VALUES (?, ?, ?, 'baseline', ?, ?)",
+                (candidate_id, scan_id, unit_id, json.dumps({"rule_id": f"rule-{index}"}), now),
+            )
+            connection.execute(
+                "INSERT INTO poc_bundles VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)",
+                (poc_id, scan_id, candidate_id, unit_id, json.dumps(bundle), now, now),
+            )
+            accepted_candidate_ids.append(candidate_id)
+        connection.execute(
+            "INSERT INTO adjudications VALUES (?, 1, 'finalize', ?, '[]', NULL, NULL, ?)",
+            (scan_id, json.dumps(accepted_candidate_ids), now),
+        )
+
+
 class _FixtureExecutor:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
@@ -228,9 +269,19 @@ async def test_cybergym_consumes_generic_poc_and_records_validated_artifact(tmp_
     seed = store.get_cybergym_artifact(scan_id, seed_id, include_data=True)
     assert seed is not None and seed["data"] == b"seed"
     assert seed["provenance"]["poc_id"] == poc_id
+    reimported = runtime.seed_from_poc_bundles(scan_id)
+    assert reimported["imported"][0]["artifact_id"] == seed_id
 
     with pytest.raises(ValueError, match="bootstrap root"):
         runtime.artifact_create(scan_id, kind="seed", raw=b"unrelated")
+    with pytest.raises(ValueError, match="bootstrap root"):
+        runtime.artifact_create(
+            scan_id,
+            kind="seed",
+            raw=b"different",
+            source_poc_id=poc_id,
+            provenance={"operation": "generic_poc_import"},
+        )
     refined = runtime.artifact_create(
         scan_id,
         kind="seed",
@@ -313,7 +364,7 @@ def test_failed_poc_import_cannot_unlock_an_unrelated_seed(tmp_path: Path) -> No
     assert bootstrap["provenance"]["poc_id"] == poc_id
 
 
-def test_cybergym_requires_a_binding_to_select_from_multiple_accepted_pocs(tmp_path: Path) -> None:
+def test_cybergym_imports_multiple_accepted_pocs_without_binding(tmp_path: Path) -> None:
     store, scan_id = _store(tmp_path)
     now = "2026-09-07T00:00:00+00:00"
     candidate_ids = ["candidate_one", "candidate_two"]
@@ -351,8 +402,125 @@ def test_cybergym_requires_a_binding_to_select_from_multiple_accepted_pocs(tmp_p
 
     result = CyberGymRuntime(store).seed_from_poc_bundles(scan_id)
 
-    assert result["selected_bundle_count"] == 0
-    assert result["selection_reason"] == "multiple accepted generic PoCs require finding_binding"
+    assert result["accepted_bundle_count"] == 2
+    assert result["imported_seed_count"] == 2
+    assert result["priority_poc_ids"] == []
+    assert result["selection_reason"] == "all accepted generic PoCs are available to the solver"
+    assert {item["poc_id"] for item in result["imported"]} == {"poc_1", "poc_2"}
+    assert store.get_cybergym_selected_poc(scan_id) is None
+
+
+def test_cybergym_context_exposes_all_poc_metadata_after_import(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest["finding_binding"] = {"rule_id": "selected-rule"}
+    store, scan_id = _store(tmp_path, manifest)
+    now = "2026-09-07T00:00:00+00:00"
+    candidate_ids = ["candidate_selected", "candidate_other"]
+    rules = ["selected-rule", "other-rule"]
+    unit_ids = [
+        store.create_work_unit(
+            scan_id=scan_id,
+            phase="poc_generation",
+            role="poc_generator",
+            paths=["seed.bin"],
+            status="completed",
+        )
+        for _candidate_id in candidate_ids
+    ]
+    with store._lock, store._connect() as connection:
+        for index, (candidate_id, rule_id, unit_id) in enumerate(
+            zip(candidate_ids, rules, unit_ids, strict=True),
+            start=1,
+        ):
+            bundle = {
+                "artifact_type": "raw_input",
+                "entrypoint": "seed.bin",
+                "files": [
+                    {
+                        "path": "seed.bin",
+                        "encoding": "utf8",
+                        "data": f"seed-{index}",
+                    }
+                ],
+                "delivery": {"input_kind": "literal"},
+            }
+            connection.execute(
+                "INSERT INTO candidates (candidate_id, scan_id, work_unit_id, role, payload_json, created_at) "
+                "VALUES (?, ?, ?, 'baseline', ?, ?)",
+                (candidate_id, scan_id, unit_id, json.dumps({"rule_id": rule_id}), now),
+            )
+            connection.execute(
+                "INSERT INTO poc_bundles VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)",
+                (f"poc_{index}", scan_id, candidate_id, unit_id, json.dumps(bundle), now, now),
+            )
+        connection.execute(
+            "INSERT INTO adjudications VALUES (?, 1, 'finalize', ?, '[]', NULL, NULL, ?)",
+            (scan_id, json.dumps(candidate_ids), now),
+        )
+
+    runtime = CyberGymRuntime(store)
+    imported = runtime.seed_from_poc_bundles(scan_id)
+    context = runtime.context(scan_id)
+
+    assert imported["priority_poc_ids"] == ["poc_1"]
+    assert [item["poc_id"] for item in context["generic_pocs"]] == ["poc_1", "poc_2"]
+    assert all(item["files"] == [{"path": "seed.bin", "encoding": "utf8"}] for item in context["generic_pocs"])
+    assert [item["candidate_id"] for item in context["candidates"]] == candidate_ids
+    assert [item["poc_id"] for item in context["poc_states"]] == ["poc_1", "poc_2"]
+    assert [item["binding_priority"] for item in context["poc_states"]] == [True, False]
+    assert store.get_cybergym_selected_poc(scan_id) is None
+
+
+@pytest.mark.asyncio
+async def test_fuzz_rejects_mixed_generic_poc_lineages(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    _insert_accepted_raw_pocs(
+        store,
+        scan_id,
+        [
+            ("poc_1", "candidate_1", "seed-1"),
+            ("poc_2", "candidate_2", "seed-2"),
+        ],
+    )
+    runtime = CyberGymRuntime(store, executor=_FixtureExecutor())
+    imported = runtime.seed_from_poc_bundles(scan_id)
+    seed_ids = [item["artifact_id"] for item in imported["imported"]]
+    for seed_id in seed_ids:
+        await runtime.replay(scan_id, seed_id)
+
+    with pytest.raises(ValueError, match="one generic PoC lineage"):
+        await runtime.fuzz_start(scan_id, seed_ids)
+
+    started = await runtime.fuzz_start(scan_id, [seed_ids[0]], idempotency_key="single-lineage")
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert status["status"] == "completed"
+    assert store.get_cybergym_run(scan_id, started["run_id"])["input"]["poc_id"] == "poc_1"
+
+
+@pytest.mark.asyncio
+async def test_submit_records_final_selected_poc_lineage(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    _insert_accepted_raw_pocs(
+        store,
+        scan_id,
+        [("poc_1", "candidate_1", "seed")],
+    )
+    runtime = CyberGymRuntime(store, executor=_FixtureExecutor())
+    imported = runtime.seed_from_poc_bundles(scan_id)
+    artifact_id = imported["imported"][0]["artifact_id"]
+
+    await runtime.replay(scan_id, artifact_id)
+    await runtime.replay(scan_id, artifact_id)
+    submission = await runtime.submit(
+        scan_id,
+        artifact_id,
+        local_validation="verified",
+        selection_reason="stable vulnerable-side crash replay",
+    )
+
+    assert submission["artifact_id"] == artifact_id
+    assert store.get_cybergym_selected_poc(scan_id) == "poc_1"
 
 
 def test_fuzzer_manifest_requires_structured_input_contract() -> None:
@@ -386,9 +554,9 @@ def test_cybergym_context_exposes_a_bounded_execution_checkpoint(tmp_path: Path)
     context = CyberGymRuntime(store).context(scan_id, work_unit_id=work_unit_id)
 
     state = context["execution_state"]
-    assert state["checkpoint_version"] == 1
+    assert state["checkpoint_version"] == 2
     assert state["work_unit"]["work_unit_id"] == work_unit_id
-    assert state["next_required_action"] == "wait_for_fuzz"
+    assert "wait_for_fuzz" in state["available_actions"]
     assert [item["run_id"] for item in state["active_fuzz_jobs"]] == [run["run_id"]]
 
 

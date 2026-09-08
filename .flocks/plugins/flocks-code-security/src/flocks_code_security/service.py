@@ -128,7 +128,7 @@ class StartScanRequest:
     model: str | None = None
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
-    max_file_bytes: int = 1_048_576
+    max_file_bytes: int | None = None
     copy_source: bool = True
     dynamic_enabled: bool = False
     poc_enabled: bool = False
@@ -621,10 +621,14 @@ class AuditService:
                 "incompatible_parameters",
                 "cybergym_manifest requires scan_mode=cybergym_level1",
             )
-        if normalized.max_file_bytes < 1 or normalized.max_file_bytes > 50 * 1024 * 1024:
+        if normalized.max_file_bytes is not None and (
+            not isinstance(normalized.max_file_bytes, int)
+            or isinstance(normalized.max_file_bytes, bool)
+            or normalized.max_file_bytes < 1
+        ):
             raise AuditServiceError(
                 "invalid_parameter",
-                "max_file_bytes must be between 1 byte and 50 MiB",
+                "max_file_bytes must be a positive integer when provided",
             )
         if normalized.model and len(normalized.model) > 256:
             raise AuditServiceError("invalid_parameter", "model may contain at most 256 characters")

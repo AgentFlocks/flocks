@@ -57,6 +57,7 @@ MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
 MAX_POC_BUNDLE_BYTES = 512 * 1024
 MAX_POC_FILE_BYTES = 128 * 1024
+MAX_GLOBAL_ACTIVE_WORKERS = 10
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 WORKER_ROLE_AGENTS = {
     "threat_modeler": "code-security-threat-modeler",
@@ -77,8 +78,12 @@ DYNAMIC_EXECUTION_CATEGORIES = (
     "unsafe-deserialization",
 )
 # Bump this whenever initialize() adds or changes schema migrations.
-STORE_SCHEMA_VERSION = 7
+STORE_SCHEMA_VERSION = 8
 SQLITE_BUSY_TIMEOUT_MS = 120_000
+
+
+class WorkerCapacityUnavailable(RuntimeError):
+    """The process-shared code-audit worker budget is currently full."""
 
 
 def _ranges_cover(
@@ -556,6 +561,10 @@ class ScanStore:
                     started_at TEXT,
                     finished_at TEXT,
                     UNIQUE(work_unit_id, ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS worker_capacity_leases (
+                    work_unit_id TEXT PRIMARY KEY REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    acquired_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS worker_batches (
                     batch_id TEXT PRIMARY KEY,
@@ -1109,6 +1118,16 @@ class ScanStore:
                     (attempt_id, legacy["session_id"]),
                 )
             self._migrate_legacy_coverage(connection)
+            connection.execute(
+                "INSERT OR IGNORE INTO worker_capacity_leases (work_unit_id, acquired_at) "
+                "SELECT DISTINCT wa.work_unit_id, ? FROM work_attempts wa "
+                "JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id "
+                "JOIN scans s ON s.scan_id = wu.scan_id "
+                "WHERE wa.status IN ('pending', 'running', 'recovering') "
+                "AND wu.status IN ('pending', 'running') "
+                "AND s.status IN ('running', 'reducing', 'cancelling')",
+                (_now(),),
+            )
             connection.execute(
                 "DELETE FROM coverage_attestations WHERE EXISTS ("
                 "SELECT 1 FROM coverage_attestations newer "
@@ -2014,6 +2033,7 @@ class ScanStore:
         now = _now()
         attempt_id = f"attempt_{uuid.uuid4().hex}"
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT wu.*, s.snapshot_id AS scan_snapshot_id,
@@ -2042,6 +2062,7 @@ class ScanStore:
             ).fetchone()
             if active is not None:
                 raise ValueError("Work unit is already bound to an active attempt")
+            self._reserve_worker_capacity(connection, work_unit_id, now)
             ordinal = int(
                 connection.execute(
                     "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM work_attempts "
@@ -2129,6 +2150,77 @@ class ScanStore:
         if attempt is None:
             raise ValueError("Work attempt was not persisted")
         return attempt
+
+    @staticmethod
+    def _reserve_worker_capacity(
+        connection: sqlite3.Connection,
+        work_unit_id: str,
+        acquired_at: str,
+    ) -> bool:
+        connection.execute(
+            "DELETE FROM worker_capacity_leases WHERE work_unit_id IN ("
+            "SELECT leases.work_unit_id FROM worker_capacity_leases leases "
+            "JOIN work_units wu ON wu.work_unit_id = leases.work_unit_id "
+            "JOIN scans s ON s.scan_id = wu.scan_id "
+            "WHERE wu.status NOT IN ('pending', 'running') "
+            "OR s.status NOT IN ('running', 'reducing', 'cancelling')"
+            ")"
+        )
+        existing = connection.execute(
+            "SELECT 1 FROM worker_capacity_leases WHERE work_unit_id = ?",
+            (work_unit_id,),
+        ).fetchone()
+        if existing is not None:
+            return False
+        active = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM worker_capacity_leases leases "
+                "JOIN work_units wu ON wu.work_unit_id = leases.work_unit_id "
+                "JOIN scans s ON s.scan_id = wu.scan_id "
+                "WHERE wu.status IN ('pending', 'running') "
+                "AND s.status IN ('running', 'reducing', 'cancelling')"
+            ).fetchone()[0]
+        )
+        if active >= MAX_GLOBAL_ACTIVE_WORKERS:
+            raise WorkerCapacityUnavailable(f"Global code-audit worker capacity is {MAX_GLOBAL_ACTIVE_WORKERS}")
+        connection.execute(
+            "INSERT INTO worker_capacity_leases (work_unit_id, acquired_at) VALUES (?, ?)",
+            (work_unit_id, acquired_at),
+        )
+        return True
+
+    def reserve_worker_capacity(self, work_unit_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT wu.status AS work_status, s.status AS scan_status "
+                "FROM work_units wu JOIN scans s ON s.scan_id = wu.scan_id "
+                "WHERE wu.work_unit_id = ?",
+                (work_unit_id,),
+            ).fetchone()
+            if row is None or row["work_status"] not in {"pending", "running"} or row["scan_status"] != "running":
+                raise ValueError("Worker capacity requires an active work unit")
+            if not self._reserve_worker_capacity(connection, work_unit_id, _now()):
+                raise ValueError("Work unit already owns worker capacity")
+
+    def release_worker_capacity(self, work_unit_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM worker_capacity_leases WHERE work_unit_id = ?",
+                (work_unit_id,),
+            )
+
+    def active_worker_count(self) -> int:
+        with self._connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM worker_capacity_leases leases "
+                    "JOIN work_units wu ON wu.work_unit_id = leases.work_unit_id "
+                    "JOIN scans s ON s.scan_id = wu.scan_id "
+                    "WHERE wu.status IN ('pending', 'running') "
+                    "AND s.status IN ('running', 'reducing', 'cancelling')"
+                ).fetchone()[0]
+            )
 
     def get_work_attempt(self, attempt_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -2254,6 +2346,10 @@ class ScanStore:
                 raise ValueError("Work attempt not found")
             if row["status"] in {"completed", "failed", "cancelled"}:
                 if row["status"] == status:
+                    connection.execute(
+                        "DELETE FROM worker_capacity_leases WHERE work_unit_id = ?",
+                        (row["work_unit_id"],),
+                    )
                     return
                 raise ValueError("Work attempt is already terminal")
             cursor = connection.execute(
@@ -2270,6 +2366,10 @@ class ScanStore:
                     "WHERE work_unit_id = ? AND status IN ('pending', 'running')",
                     (work_unit_status, now, now, row["work_unit_id"]),
                 )
+            connection.execute(
+                "DELETE FROM worker_capacity_leases WHERE work_unit_id = ?",
+                (row["work_unit_id"],),
+            )
 
     def update_worker_batch_status(self, batch_id: str, status: str) -> None:
         if status not in {"pending", "running", "completed", "partial", "failed", "cancelled"}:
@@ -3228,7 +3328,7 @@ class ScanStore:
         return self._decode_cybergym_task(row) if row is not None else None
 
     def set_cybergym_selected_poc(self, scan_id: str, poc_id: str) -> None:
-        """Bind one accepted generic PoC to this dynamic task exactly once."""
+        """Record the generic PoC that produced the final submitted artifact."""
         with self._lock, self._connect() as connection:
             task = connection.execute(
                 "SELECT status, selected_poc_id FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
@@ -3297,9 +3397,16 @@ class ScanStore:
             if work_unit is None or work_unit["scan_id"] != scan_id:
                 raise ValueError("CyberGym execution context does not belong to this scan")
         poc_bundles = self.list_accepted_poc_bundles(scan_id)
-        poc_by_candidate = {
-            item["candidate_id"]: {
+        artifacts = self.list_cybergym_artifacts(scan_id)
+        imported_poc_ids = {
+            item.get("provenance", {}).get("poc_id")
+            for item in artifacts
+            if item.get("provenance", {}).get("operation") == "generic_poc_import"
+        }
+        generic_pocs = [
+            {
                 "poc_id": item["poc_id"],
+                "candidate_id": item["candidate_id"],
                 "artifact_type": item["bundle"].get("artifact_type"),
                 "entrypoint": item["bundle"].get("entrypoint"),
                 "delivery": item["bundle"].get("delivery"),
@@ -3307,14 +3414,17 @@ class ScanStore:
                     {
                         "path": file.get("path"),
                         "encoding": file.get("encoding", "utf8"),
-                        "data": file.get("data"),
+                        **({"data": file.get("data")} if item["poc_id"] not in imported_poc_ids else {}),
                     }
                     for file in item["bundle"].get("files", [])
                     if isinstance(file, dict)
                 ],
             }
             for item in poc_bundles
-        }
+        ]
+        pocs_by_candidate: dict[str, list[dict[str, Any]]] = {}
+        for poc in generic_pocs:
+            pocs_by_candidate.setdefault(poc["candidate_id"], []).append(poc)
         with self._connect() as connection:
             adjudication = connection.execute(
                 "SELECT accepted_candidate_ids_json FROM adjudications "
@@ -3342,18 +3452,26 @@ class ScanStore:
                     "candidate": json.loads(row["payload_json"]),
                     "evidence": [dict(item) for item in evidence_rows],
                 }
-                if row["candidate_id"] in poc_by_candidate:
-                    candidate["generic_poc"] = poc_by_candidate[row["candidate_id"]]
+                candidate_pocs = pocs_by_candidate.get(row["candidate_id"], [])
+                if candidate_pocs:
+                    candidate["generic_pocs"] = candidate_pocs
+                    if len(candidate_pocs) == 1:
+                        candidate["generic_poc"] = candidate_pocs[0]
                 candidates.append(candidate)
         runs = self.list_cybergym_runs(scan_id)
         active_fuzz_jobs = [
-            {"run_id": run["run_id"], "updated_at": run["updated_at"]}
+            {
+                "run_id": run["run_id"],
+                "poc_id": run["input"].get("poc_id"),
+                "updated_at": run["updated_at"],
+            }
             for run in runs
             if run["kind"] == "fuzz" and run["status"] == "running"
         ]
-        recent_runs = []
+        recent_runs: list[dict[str, Any]] = []
         for run in runs[-16:]:
-            result = run.get("result") if isinstance(run.get("result"), dict) else {}
+            raw_result = run.get("result")
+            result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
             recent_runs.append(
                 {
                     "run_id": run["run_id"],
@@ -3376,17 +3494,19 @@ class ScanStore:
                     },
                 }
             )
-        artifact_count = len(self.list_cybergym_artifacts(scan_id))
-        if task["status"] != "active":
-            next_required_action = "terminal"
-        elif active_fuzz_jobs:
-            next_required_action = "wait_for_fuzz"
-        elif artifact_count == 0:
-            next_required_action = "create_or_import_seed"
-        elif not any(run["kind"] == "replay" for run in runs):
-            next_required_action = "replay_seed"
-        else:
-            next_required_action = "evaluate_artifacts_or_submit"
+        artifact_count = len(artifacts)
+        available_actions = (
+            ["terminal"]
+            if task["status"] != "active"
+            else [
+                "inspect_poc_states",
+                *(["wait_for_fuzz"] if active_fuzz_jobs else []),
+                *(["create_or_import_seed"] if artifact_count == 0 else []),
+                "replay_or_refine",
+                "gdb_or_fuzz",
+                "submit",
+            ]
+        )
         return {
             "task": {
                 key: value
@@ -3394,12 +3514,12 @@ class ScanStore:
                 if key not in {"final_artifact_id", "selection_reason"}
             },
             "candidates": candidates,
-            "generic_pocs": list(poc_by_candidate.values()),
-            "artifacts": self.list_cybergym_artifacts(scan_id),
+            "generic_pocs": generic_pocs,
+            "artifacts": artifacts,
             "submission": self.get_cybergym_submission(scan_id),
             "budget": self.cybergym_budget(scan_id),
             "execution_state": {
-                "checkpoint_version": 1,
+                "checkpoint_version": 2,
                 "work_unit": (
                     {
                         "work_unit_id": work_unit["work_unit_id"],
@@ -3411,7 +3531,7 @@ class ScanStore:
                 ),
                 "active_fuzz_jobs": active_fuzz_jobs,
                 "recent_runs": recent_runs,
-                "next_required_action": next_required_action,
+                "available_actions": available_actions,
             },
         }
 
@@ -3438,7 +3558,7 @@ class ScanStore:
         now = _now()
         with self._lock, self._connect() as connection:
             task = connection.execute(
-                "SELECT status, selected_poc_id FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
+                "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
             ).fetchone()
             if task is None or task["status"] != "active":
                 raise ValueError("CyberGym task is not accepting new artifacts")
@@ -3455,22 +3575,19 @@ class ScanStore:
                     encoded_provenance = json.dumps(provenance, ensure_ascii=False, sort_keys=True)
                     if len(encoded_provenance.encode("utf-8")) > 16 * 1024:
                         raise ValueError("CyberGym artifact provenance is too large")
-            selected_poc_id = task["selected_poc_id"]
             requested_poc_id = provenance.get("poc_id")
-            if selected_poc_id is not None and requested_poc_id != selected_poc_id:
-                raise ValueError("CyberGym artifacts must retain the selected generic PoC provenance")
-            existing = connection.execute(
+            existing_rows = connection.execute(
                 "SELECT * FROM cybergym_artifacts WHERE scan_id = ? AND sha256 = ? "
                 "AND kind = ? AND parent_id IS ?",
                 (scan_id, digest, kind, parent_id),
-            ).fetchone()
-            if existing is not None:
+            ).fetchall()
+            for existing in existing_rows:
                 existing_provenance = json.loads(existing["provenance_json"])
                 existing_poc_id = existing_provenance.get("poc_id")
-                requested_poc_id = provenance.get("poc_id")
-                if existing_poc_id != requested_poc_id:
+                if existing_poc_id != requested_poc_id and parent_id is not None:
                     raise ValueError("Identical CyberGym artifacts cannot belong to different generic PoCs")
-                return self._decode_cybergym_artifact(existing)
+                if existing_poc_id == requested_poc_id:
+                    return self._decode_cybergym_artifact(existing)
             connection.execute(
                 "INSERT INTO cybergym_artifacts (artifact_id, scan_id, kind, sha256, "
                 "size_bytes, raw_bytes, parent_id, provenance_json, created_at) "
@@ -3767,8 +3884,9 @@ class ScanStore:
                 score += 25
             if artifact["kind"] in {"crash", "minimized"}:
                 score += 10
-            ranked.append(((score, artifact["created_at"], artifact["artifact_id"]), artifact, evidence))
-        _score, artifact, evidence = max(ranked, key=lambda item: item[0])
+            poc_id = self.cybergym_artifact_poc_id(scan_id, artifact["artifact_id"]) or ""
+            ranked.append(((-score, poc_id, artifact["artifact_id"]), artifact, evidence))
+        _score, artifact, evidence = min(ranked, key=lambda item: item[0])
         if evidence["stable_crash"]:
             validation, reason = "verified", "stable vulnerable-side crash replay"
         elif evidence["vulnerable_branch_reached"]:
@@ -3776,7 +3894,7 @@ class ScanStore:
         elif evidence["target_reached"]:
             validation, reason = "unverified", "strongest retained artifact reached target function"
         else:
-            validation, reason = "unverified", "most recent retained raw input artifact"
+            validation, reason = "unverified", "retained raw input artifact"
         return {"artifact": artifact, "local_validation": validation, "selection_reason": reason, "evidence": evidence}
 
     def reserve_cybergym_submission(
@@ -3787,6 +3905,7 @@ class ScanStore:
         local_validation: str,
         selection_reason: str,
         evidence: dict[str, Any],
+        selected_poc_id: str | None = None,
     ) -> dict[str, Any]:
         now = _now()
         submission_id = f"cybergym_submission_{uuid.uuid4().hex}"
@@ -3802,6 +3921,13 @@ class ScanStore:
             ).fetchone()
             if artifact is None:
                 raise ValueError("CyberGym submission artifact is not in this task")
+            if selected_poc_id is not None:
+                owner = connection.execute(
+                    "SELECT 1 FROM poc_bundles WHERE scan_id = ? AND poc_id = ? AND status = 'generated'",
+                    (scan_id, selected_poc_id),
+                ).fetchone()
+                if owner is None:
+                    raise ValueError("Selected PoC is not a generated bundle for this scan")
             connection.execute(
                 "INSERT INTO cybergym_submissions (scan_id, submission_id, artifact_id, local_validation, "
                 "selection_reason, evidence_json, official_result_json, status, created_at, completed_at) "
@@ -3813,8 +3939,8 @@ class ScanStore:
             )
             connection.execute(
                 "UPDATE cybergym_tasks SET status = 'submitting', final_artifact_id = ?, "
-                "local_validation = ?, selection_reason = ?, updated_at = ? WHERE scan_id = ?",
-                (artifact_id, local_validation, selection_reason, now, scan_id),
+                "selected_poc_id = ?, local_validation = ?, selection_reason = ?, updated_at = ? WHERE scan_id = ?",
+                (artifact_id, selected_poc_id, local_validation, selection_reason, now, scan_id),
             )
         submission = self.get_cybergym_submission(scan_id)
         if submission is None:  # pragma: no cover - defensive persistence boundary
@@ -3913,6 +4039,12 @@ class ScanStore:
                 "UPDATE worker_batches SET status = 'cancelled', updated_at = ? "
                 "WHERE scan_id = ? AND status IN ('pending', 'running')",
                 (now, scan_id),
+            )
+            connection.execute(
+                "DELETE FROM worker_capacity_leases WHERE work_unit_id IN ("
+                "SELECT work_unit_id FROM work_units WHERE scan_id = ?"
+                ")",
+                (scan_id,),
             )
         return [row["background_task_id"] for row in task_rows]
 
@@ -4477,6 +4609,10 @@ class ScanStore:
                     "AND status IN ('pending', 'running', 'recovering')",
                     (status, now, now, work_unit_id),
                 )
+                connection.execute(
+                    "DELETE FROM worker_capacity_leases WHERE work_unit_id = ?",
+                    (work_unit_id,),
+                )
 
     def get_scan(self, scan_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -4608,6 +4744,12 @@ class ScanStore:
                 (status, failure_code, failure_summary, now, now, scan_id),
             )
             if cursor.rowcount == 1:
+                connection.execute(
+                    "DELETE FROM worker_capacity_leases WHERE work_unit_id IN ("
+                    "SELECT work_unit_id FROM work_units WHERE scan_id = ?"
+                    ")",
+                    (scan_id,),
+                )
                 return True
             existing = connection.execute(
                 "SELECT status FROM scans WHERE scan_id = ?",
@@ -4647,6 +4789,13 @@ class ScanStore:
                     f"WHERE scan_id IN ({placeholders}) "
                     "AND status IN ('running', 'reducing', 'cancelling')",
                     (now, now, *scan_ids),
+                )
+                connection.execute(
+                    "DELETE FROM worker_capacity_leases WHERE work_unit_id IN ("
+                    "SELECT work_unit_id FROM work_units "
+                    f"WHERE scan_id IN ({placeholders})"
+                    ")",
+                    tuple(scan_ids),
                 )
         return scan_ids
 

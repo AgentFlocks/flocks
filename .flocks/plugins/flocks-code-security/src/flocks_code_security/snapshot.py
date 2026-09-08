@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
 import hashlib
 import json
@@ -80,6 +81,43 @@ class _GitSnapshotState:
     paths: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _ReadFileResult:
+    blob_digest: str
+    size_bytes: int
+    line_count: int
+    is_binary: bool
+
+
+class _DecodedLineCounter:
+    _BREAKS = {"\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"}
+
+    def __init__(self) -> None:
+        self._break_count = 0
+        self._has_text = False
+        self._ends_with_break = False
+        self._previous_was_cr = False
+
+    def feed(self, text: str) -> None:
+        for character in text:
+            self._has_text = True
+            if character == "\n" and self._previous_was_cr:
+                self._previous_was_cr = False
+                self._ends_with_break = True
+                continue
+            self._previous_was_cr = False
+            if character in self._BREAKS:
+                self._break_count += 1
+                self._ends_with_break = True
+                self._previous_was_cr = character == "\r"
+            else:
+                self._ends_with_break = False
+
+    @property
+    def value(self) -> int:
+        return self._break_count + int(self._has_text and not self._ends_with_break)
+
+
 def normalize_relative_path(value: str, *, allow_root: bool = False) -> str:
     raw = "" if value is None else str(value)
     if os.name == "nt":
@@ -130,7 +168,7 @@ class TargetSnapshotService:
         *,
         include_paths: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
-        max_file_bytes: int = 1_048_576,
+        max_file_bytes: int | None = None,
         copy_source: bool = True,
     ) -> SnapshotRef:
         raw_target = Path(target_path).expanduser()
@@ -147,8 +185,10 @@ class TargetSnapshotService:
                 raise ValueError(
                     "The audit target overlaps code-security runtime storage"
                 )
-        if max_file_bytes < 1 or max_file_bytes > 20 * 1024 * 1024:
-            raise ValueError("max_file_bytes must be between 1 and 20971520")
+        if max_file_bytes is not None and (
+            not isinstance(max_file_bytes, int) or isinstance(max_file_bytes, bool) or max_file_bytes < 1
+        ):
+            raise ValueError("max_file_bytes must be a positive integer when provided")
         if len(include_paths or ["."]) > 256:
             raise ValueError("At most 256 include paths are allowed")
         if len(exclude_patterns or []) > 256:
@@ -199,13 +239,21 @@ class TargetSnapshotService:
                     tempfile.mkdtemp(prefix=".snapshot-", dir=self.snapshots_root)
                 )
             for relative_path, source_path in files:
-                data, observed_size = self._read_regular_file(
+                destination = None
+                if temporary is not None:
+                    destination = temporary / relative_path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                result, observed_size = self._read_regular_file(
                     root_descriptor,
                     relative_path,
                     max_file_bytes,
+                    max_total_bytes=MAX_SNAPSHOT_TOTAL_BYTES - total_bytes,
                     expected_signature=initial_states[relative_path],
+                    destination=destination,
                 )
-                if data is None:
+                if result is None:
+                    if destination is not None:
+                        destination.unlink(missing_ok=True)
                     omissions.append(
                         SnapshotOmission(
                             relative_path=relative_path,
@@ -214,28 +262,21 @@ class TargetSnapshotService:
                         )
                     )
                     continue
-                if total_bytes + len(data) > MAX_SNAPSHOT_TOTAL_BYTES:
+                if total_bytes + result.size_bytes > MAX_SNAPSHOT_TOTAL_BYTES:
                     raise ValueError(
                         "Snapshot exceeds the 536870912-byte total size limit"
                     )
-                if temporary is not None:
-                    destination = temporary / relative_path
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.write_bytes(data)
-                digest = hashlib.sha256(data).hexdigest()
-                is_binary = b"\x00" in data[:8192]
-                line_count = 0 if is_binary else len(data.decode("utf-8", errors="replace").splitlines())
                 records.append(
                     SnapshotFile(
                         relative_path=relative_path,
-                        blob_digest=digest,
-                        size_bytes=len(data),
-                        line_count=line_count,
+                        blob_digest=result.blob_digest,
+                        size_bytes=result.size_bytes,
+                        line_count=result.line_count,
                         language=_language(source_path),
-                        is_binary=is_binary,
+                        is_binary=result.is_binary,
                     )
                 )
-                total_bytes += len(data)
+                total_bytes += result.size_bytes
 
             final_git_state = self._git_snapshot_state(target)
             if final_git_state != git_state:
@@ -580,11 +621,14 @@ class TargetSnapshotService:
         cls,
         root_descriptor: int,
         relative_path: str,
-        max_file_bytes: int,
+        max_file_bytes: int | None,
         *,
+        max_total_bytes: int,
         expected_signature: tuple[int, int, int, int, int, int],
-    ) -> tuple[bytes | None, int]:
+        destination: Path | None = None,
+    ) -> tuple[_ReadFileResult | None, int]:
         descriptor = cls._open_snapshot_file(root_descriptor, relative_path)
+        output = None
         try:
             file_stat = os.fstat(descriptor)
             if cls._stat_signature(file_stat) != expected_signature:
@@ -595,24 +639,62 @@ class TargetSnapshotService:
                 raise ValueError(
                     f"Snapshot input is not a regular file: {relative_path}"
                 )
-            if file_stat.st_size > max_file_bytes:
+            if max_file_bytes is not None and file_stat.st_size > max_file_bytes:
                 if cls._stat_signature(os.fstat(descriptor)) != expected_signature:
                     raise ValueError(f"Snapshot input changed while reading: {relative_path}")
                 return None, file_stat.st_size
-            chunks: list[bytes] = []
+            if file_stat.st_size > max_total_bytes:
+                raise ValueError("Snapshot exceeds the 536870912-byte total size limit")
+            if destination is not None:
+                output = destination.open("xb")
+            digest = hashlib.sha256()
+            binary_prefix = bytearray()
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            line_counter = _DecodedLineCounter()
+            is_binary = False
             total = 0
             while True:
-                chunk = os.read(descriptor, min(64 * 1024, max_file_bytes + 1 - total))
+                effective_limit = max_total_bytes
+                if max_file_bytes is not None:
+                    effective_limit = min(effective_limit, max_file_bytes)
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, max(1, effective_limit + 1 - total)),
+                )
                 if not chunk:
                     break
-                chunks.append(chunk)
                 total += len(chunk)
-                if total > max_file_bytes:
+                digest.update(chunk)
+                if len(binary_prefix) < 8192:
+                    binary_prefix.extend(chunk[: 8192 - len(binary_prefix)])
+                    if b"\x00" in binary_prefix:
+                        is_binary = True
+                if not is_binary:
+                    line_counter.feed(decoder.decode(chunk, final=False))
+                if output is not None:
+                    output.write(chunk)
+                if max_file_bytes is not None and total > max_file_bytes:
+                    if cls._stat_signature(os.fstat(descriptor)) != expected_signature:
+                        raise ValueError(f"Snapshot input changed while reading: {relative_path}")
                     return None, total
+                if total > max_total_bytes:
+                    raise ValueError("Snapshot exceeds the 536870912-byte total size limit")
+            if not is_binary:
+                line_counter.feed(decoder.decode(b"", final=True))
             if cls._stat_signature(os.fstat(descriptor)) != expected_signature:
                 raise ValueError(f"Snapshot input changed while reading: {relative_path}")
-            return b"".join(chunks), total
+            return (
+                _ReadFileResult(
+                    blob_digest=digest.hexdigest(),
+                    size_bytes=total,
+                    line_count=0 if is_binary else line_counter.value,
+                    is_binary=is_binary,
+                ),
+                total,
+            )
         finally:
+            if output is not None:
+                output.close()
             os.close(descriptor)
 
     @staticmethod

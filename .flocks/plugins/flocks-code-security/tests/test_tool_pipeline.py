@@ -3590,6 +3590,7 @@ async def test_cancel_stops_bound_background_workers(
     assert batch is not None
     assert batch["status"] == "cancelled"
     assert batch["units"][0]["status"] == "cancelled"
+    assert runtime.store.active_worker_count() == 0
 
 
 @pytest.mark.asyncio

@@ -642,6 +642,7 @@ class AuditOrchestrator:
             return status
         scope = _start_phase_observation(scan_observation, "dynamic_validation")
         parent = scan_observation if scope is None else scope.observation
+        runtime = None
         try:
             _emit(
                 self.progress,
@@ -659,7 +660,7 @@ class AuditOrchestrator:
                     imported,
                     observation_parent=parent,
                 )
-                if imported["selected_bundle_count"] == 0:
+                if imported["accepted_bundle_count"] == 0:
                     runtime.mark_failed_no_artifact(scan_id)
                     status = _require_success(await audit_status(self.ctx, scan_id))
                     _emit(self.progress, "scan.status", status, observation_parent=parent)
@@ -685,6 +686,18 @@ class AuditOrchestrator:
             if task is None:
                 raise RuntimeError("CyberGym task is missing after solver phase")
             if batch.get("status") != "completed" or task["status"] == "active":
+                cancel_fuzz = getattr(runtime, "cancel_fuzz_runs", None)
+                if callable(cancel_fuzz):
+                    await asyncio.shield(
+                        cancel_fuzz(
+                            scan_id,
+                            cancel_source=(
+                                "solver_phase_failed"
+                                if batch.get("status") != "completed"
+                                else "solver_finalization"
+                            ),
+                        )
+                    )
                 selected = runtime.select_final_artifact(scan_id)
                 if selected is None:
                     runtime.mark_failed_no_artifact(scan_id)
@@ -708,6 +721,25 @@ class AuditOrchestrator:
             _end_observation(scope, output={"status": "completed", "counts": status.get("counts", {})})
             return status
         except BaseException as exc:
+            if not isinstance(exc, asyncio.CancelledError) and runtime is not None:
+                try:
+                    await asyncio.shield(
+                        runtime.cancel_fuzz_runs(
+                            scan_id,
+                            cancel_source="solver_phase_failed",
+                        )
+                    )
+                except Exception as cleanup_exc:
+                    _emit(
+                        self.progress,
+                        "dynamic.cleanup_failed",
+                        {
+                            "scan_id": scan_id,
+                            "validator": "cybergym",
+                            "error_type": type(cleanup_exc).__name__,
+                        },
+                        observation_parent=parent,
+                    )
             _emit(
                 self.progress,
                 "dynamic.cancelled" if isinstance(exc, asyncio.CancelledError) else "dynamic.failed",
@@ -915,6 +947,7 @@ async def run_standard_audit(
     *,
     model: str | None = None,
     progress: ProgressCallback | None = None,
+    max_file_bytes: int | None = None,
     copy_source: bool = True,
     dynamic_enabled: bool = False,
     poc_enabled: bool = False,
@@ -945,6 +978,7 @@ async def run_standard_audit(
             scan_mode=scan_mode,
             cybergym_manifest=cybergym_manifest,
             model=model,
+            max_file_bytes=max_file_bytes,
             copy_source=copy_source,
             dynamic_enabled=dynamic_enabled,
             poc_enabled=poc_enabled,

@@ -172,7 +172,7 @@ class CyberGymInputContract:
 
 @dataclass(frozen=True)
 class CyberGymFindingBinding:
-    """Trusted selector that chooses one generic PoC for one dynamic task."""
+    """Trusted priority hint that links a manifest to likely matching PoCs."""
 
     rule_id: str | None = None
     required_paths: tuple[str, ...] = ()
@@ -722,7 +722,78 @@ class CyberGymRuntime:
         *,
         work_unit_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.store.cybergym_context(scan_id, work_unit_id=work_unit_id)
+        context = self.store.cybergym_context(scan_id, work_unit_id=work_unit_id)
+        records = self.store.list_accepted_poc_contexts(scan_id)
+        if not records:
+            context["poc_states"] = []
+            context["execution_state"]["priority_poc_ids"] = []
+            return context
+        manifest = self._manifest(scan_id)
+        poc_ids = {record["poc_id"] for record in records}
+        artifacts = context.get("artifacts", [])
+        artifact_poc_ids: dict[str, str | None] = {}
+        artifact_ids_by_poc: dict[str, list[str]] = {poc_id: [] for poc_id in poc_ids}
+        root_ids_by_poc: dict[str, list[str]] = {poc_id: [] for poc_id in poc_ids}
+        for artifact in artifacts:
+            artifact_id = artifact.get("artifact_id")
+            if not isinstance(artifact_id, str):
+                continue
+            poc_id = self.store.cybergym_artifact_poc_id(scan_id, artifact_id)
+            artifact_poc_ids[artifact_id] = poc_id
+            if poc_id not in poc_ids:
+                continue
+            artifact_ids_by_poc[poc_id].append(artifact_id)
+            provenance = artifact.get("provenance", {})
+            if artifact.get("parent_id") is None and isinstance(provenance, dict) and provenance.get("poc_id") == poc_id:
+                root_ids_by_poc[poc_id].append(artifact_id)
+        runs_by_poc: dict[str, list[dict[str, Any]]] = {poc_id: [] for poc_id in poc_ids}
+        active_fuzz_by_poc: set[str] = set()
+        for run in self.store.list_cybergym_runs(scan_id):
+            run_poc_id = self._run_poc_id(scan_id, run, artifact_poc_ids)
+            if run_poc_id not in poc_ids:
+                continue
+            if run["kind"] == "fuzz" and run["status"] == "running":
+                active_fuzz_by_poc.add(run_poc_id)
+            runs_by_poc[run_poc_id].append(self._compact_run_state(run))
+        priority_poc_ids = [
+            record["poc_id"]
+            for record in records
+            if self._record_matches_finding_binding(record, manifest)
+        ]
+        priority_poc_id_set = set(priority_poc_ids)
+        poc_states = []
+        for record in sorted(
+            records,
+            key=lambda item: (
+                item["poc_id"] not in priority_poc_id_set,
+                item["candidate_id"],
+                item["poc_id"],
+            ),
+        ):
+            poc_id = record["poc_id"]
+            if context["task"]["status"] != "active":
+                actions = ["terminal"]
+            elif active_fuzz_by_poc and poc_id in active_fuzz_by_poc:
+                actions = ["wait_for_fuzz"]
+            elif not root_ids_by_poc[poc_id]:
+                actions = ["create_bootstrap_seed"]
+            else:
+                actions = ["replay", "refine", "gdb", "fuzz", "submit_candidate"]
+            poc_states.append(
+                {
+                    "poc_id": poc_id,
+                    "candidate_id": record["candidate_id"],
+                    "artifact_type": record["bundle"].get("artifact_type"),
+                    "binding_priority": poc_id in priority_poc_id_set,
+                    "root_artifact_ids": root_ids_by_poc[poc_id],
+                    "artifact_ids": artifact_ids_by_poc[poc_id],
+                    "recent_runs": runs_by_poc[poc_id][-8:],
+                    "available_actions": actions,
+                }
+            )
+        context["poc_states"] = poc_states
+        context["execution_state"]["priority_poc_ids"] = priority_poc_ids
+        return context
 
     def artifact_create(
         self,
@@ -740,28 +811,48 @@ class CyberGymRuntime:
         artifact_provenance = provenance or {}
         if not isinstance(artifact_provenance, dict):
             raise ValueError("CyberGym artifact provenance must be an object")
-        selected_poc_id = self.store.get_cybergym_selected_poc(scan_id)
+        accepted_bundles = self.store.list_accepted_poc_bundles(scan_id)
+        accepted_poc_ids = {bundle["poc_id"] for bundle in accepted_bundles}
+        provided_poc_id = artifact_provenance.get("poc_id")
+        if provided_poc_id is not None:
+            if not isinstance(provided_poc_id, str) or not provided_poc_id or len(provided_poc_id) > 256:
+                raise ValueError("poc_id provenance must be a bounded non-empty identifier")
+            if accepted_poc_ids and provided_poc_id not in accepted_poc_ids:
+                raise ValueError("poc_id provenance must refer to an accepted generated PoC")
+            if source_poc_id is not None and provided_poc_id != source_poc_id:
+                raise ValueError("poc_id provenance must match source_poc_id")
         if source_poc_id is not None:
             if not isinstance(source_poc_id, str) or not source_poc_id or len(source_poc_id) > 256:
                 raise ValueError("source_poc_id must be a bounded non-empty identifier")
             self.store.assert_accepted_poc_bundle(scan_id, source_poc_id)
-            if selected_poc_id is None or source_poc_id != selected_poc_id:
-                raise ValueError("source_poc_id must match the CyberGym task's selected generic PoC")
             artifact_provenance = {**artifact_provenance, "poc_id": source_poc_id}
-        if parent_id is None and selected_poc_id is not None:
+        if parent_id is None and accepted_poc_ids and source_poc_id is None:
+            raise ValueError("bootstrap root requires source_poc_id when accepted generic PoCs exist")
+        if parent_id is not None:
+            parent_poc_id = self.store.cybergym_artifact_poc_id(scan_id, parent_id)
+            if accepted_poc_ids and parent_poc_id is None:
+                raise ValueError("parent artifact is not tied to an accepted generic PoC")
+            if source_poc_id is not None and parent_poc_id != source_poc_id:
+                raise ValueError("source_poc_id must match the parent artifact generic PoC lineage")
+            if provided_poc_id is not None and parent_poc_id != provided_poc_id:
+                raise ValueError("poc_id provenance must match the parent artifact generic PoC lineage")
+        if parent_id is None and source_poc_id is not None:
             operation = artifact_provenance.get("operation")
-            is_generic_import = operation == "generic_poc_import" and artifact_provenance.get("poc_id") == selected_poc_id
+            is_generic_import = operation == "generic_poc_import"
             existing_roots = [
-                item["parent_id"] is None
-                and item.get("provenance", {}).get("poc_id") == selected_poc_id
+                item
                 for item in self.store.list_cybergym_artifacts(scan_id)
+                if item["parent_id"] is None
+                and item.get("provenance", {}).get("poc_id") == source_poc_id
             ]
-            has_existing_root = any(existing_roots)
-            if (is_generic_import and has_existing_root) or (
-                not is_generic_import and (source_poc_id != selected_poc_id or has_existing_root)
-            ):
+            root_digest = hashlib.sha256(raw).hexdigest()
+            idempotent_import = is_generic_import and any(
+                item.get("kind") == kind and item.get("sha256") == root_digest
+                for item in existing_roots
+            )
+            if existing_roots and not idempotent_import:
                 raise ValueError(
-                    "CyberGym permits one selected-PoC bootstrap root; later artifacts must have a parent"
+                    "CyberGym permits one bootstrap root per generic PoC; later artifacts must have a parent"
                 )
         if not raw and not manifest.allow_empty_input:
             raise ValueError("The trusted manifest does not allow empty input")
@@ -786,123 +877,149 @@ class CyberGymRuntime:
         )
 
     def seed_from_poc_bundles(self, scan_id: str) -> dict[str, Any]:
-        """Import accepted generic PoCs as manifest-validated CyberGym seed artifacts.
-
-        The generic bundle remains the source of intent. CyberGym only adapts its
-        selected input file to the trusted raw-input contract; subsequent seeds
-        must be derived from this imported artifact and can therefore be refined
-        by replay, GDB, fuzzing, or minimization.
-        """
+        """Import all literal accepted generic PoCs as CyberGym seed artifacts."""
         manifest = self._manifest(scan_id)
-        records = self.store.list_accepted_poc_contexts(scan_id)
-        selected, selection_reason = self._select_poc_bundle(records, manifest)
+        records = sorted(
+            self.store.list_accepted_poc_contexts(scan_id),
+            key=lambda item: (
+                not self._record_matches_finding_binding(item, manifest),
+                item["candidate_id"],
+                item["poc_id"],
+            ),
+        )
         imported: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
-        if selected is None:
+        if not records:
             return {
-                "accepted_bundle_count": len(records),
-                "selected_bundle_count": 0,
-                "selected_poc_id": None,
-                "selection_reason": selection_reason,
+                "accepted_bundle_count": 0,
+                "priority_poc_ids": [],
+                "selection_reason": "no accepted generic PoC",
                 "requires_seed_adaptation": False,
                 "imported_seed_count": 0,
                 "imported": imported,
                 "rejected": rejected,
             }
-        self.store.set_cybergym_selected_poc(scan_id, selected["poc_id"])
-        try:
-            raw, source_path = resolve_cybergym_input(selected["bundle"])
-        except (TypeError, ValueError, KeyError) as exc:
-            rejected.append(
+        priority_poc_ids = [
+            record["poc_id"]
+            for record in records
+            if self._record_matches_finding_binding(record, manifest)
+        ]
+        for record in records:
+            try:
+                raw, source_path = resolve_cybergym_input(record["bundle"])
+                artifact = self.artifact_create(
+                    scan_id,
+                    kind="seed",
+                    raw=raw,
+                    source_poc_id=record["poc_id"],
+                    provenance={
+                        "operation": "generic_poc_import",
+                        "candidate_id": record["candidate_id"],
+                        "source_path": source_path,
+                        "artifact_type": record["bundle"]["artifact_type"],
+                    },
+                )
+            except (TypeError, ValueError, KeyError) as exc:
+                rejected.append(
+                    {
+                        "poc_id": record["poc_id"],
+                        "candidate_id": record["candidate_id"],
+                        "reason": str(exc)[:1_000],
+                    }
+                )
+                continue
+            imported.append(
                 {
-                    "poc_id": selected["poc_id"],
-                    "candidate_id": selected["candidate_id"],
-                    "reason": str(exc)[:1_000],
-                }
-            )
-            return {
-                "accepted_bundle_count": len(records),
-                "selected_bundle_count": 1,
-                "selected_poc_id": selected["poc_id"],
-                "selection_reason": selection_reason,
-                "requires_seed_adaptation": True,
-                "imported_seed_count": 0,
-                "imported": imported,
-                "rejected": rejected,
-            }
-        try:
-            artifact = self.artifact_create(
-                scan_id,
-                kind="seed",
-                raw=raw,
-                provenance={
-                    "operation": "generic_poc_import",
-                    "poc_id": selected["poc_id"],
-                    "candidate_id": selected["candidate_id"],
+                    "poc_id": record["poc_id"],
+                    "candidate_id": record["candidate_id"],
+                    "artifact_id": artifact["artifact_id"],
                     "source_path": source_path,
-                    "artifact_type": selected["bundle"]["artifact_type"],
-                },
-            )
-        except (TypeError, ValueError, KeyError) as exc:
-            rejected.append(
-                {
-                    "poc_id": selected["poc_id"],
-                    "candidate_id": selected["candidate_id"],
-                    "reason": str(exc)[:1_000],
                 }
             )
-            return {
-                "accepted_bundle_count": len(records),
-                "selected_bundle_count": 1,
-                "selected_poc_id": selected["poc_id"],
-                "selection_reason": selection_reason,
-                "requires_seed_adaptation": True,
-                "imported_seed_count": 0,
-                "imported": imported,
-                "rejected": rejected,
-            }
-        imported.append(
-            {
-                "poc_id": selected["poc_id"],
-                "candidate_id": selected["candidate_id"],
-                "artifact_id": artifact["artifact_id"],
-                "source_path": source_path,
-            }
-        )
         return {
             "accepted_bundle_count": len(records),
-            "selected_bundle_count": 1,
-            "selected_poc_id": selected["poc_id"],
-            "selection_reason": selection_reason,
-            "requires_seed_adaptation": False,
-            "imported_seed_count": 1,
+            "priority_poc_ids": priority_poc_ids,
+            "selection_reason": (
+                "finding_binding prioritized matching generic PoCs"
+                if manifest.finding_binding is not None
+                else "all accepted generic PoCs are available to the solver"
+            ),
+            "requires_seed_adaptation": bool(rejected),
+            "imported_seed_count": len(imported),
             "imported": imported,
             "rejected": rejected,
         }
 
     @staticmethod
-    def _select_poc_bundle(
-        records: list[dict[str, Any]],
+    def _record_matches_finding_binding(
+        record: dict[str, Any],
         manifest: CyberGymTargetManifest,
-    ) -> tuple[dict[str, Any] | None, str]:
+    ) -> bool:
         binding = manifest.finding_binding
         if binding is None:
-            if len(records) == 1:
-                return records[0], "only accepted generic PoC"
-            if not records:
-                return None, "no accepted generic PoC"
-            return None, "multiple accepted generic PoCs require finding_binding"
-        matches = [
-            record
-            for record in records
-            if (binding.rule_id is None or record["candidate"].get("rule_id") == binding.rule_id)
+            return False
+        return (
+            (binding.rule_id is None or record["candidate"].get("rule_id") == binding.rule_id)
             and set(binding.required_paths).issubset(set(record["evidence_paths"]))
-        ]
-        if len(matches) == 1:
-            return matches[0], "trusted finding_binding matched one generic PoC"
-        if not matches:
-            return None, "finding_binding matched no accepted generic PoC"
-        return None, "finding_binding matched multiple accepted generic PoCs"
+        )
+
+    def _run_poc_id(
+        self,
+        scan_id: str,
+        run: dict[str, Any],
+        artifact_poc_ids: dict[str, str | None],
+    ) -> str | None:
+        payload = run.get("input", {})
+        if not isinstance(payload, dict):
+            return None
+        direct = payload.get("poc_id")
+        if isinstance(direct, str) and direct:
+            return direct
+        artifact_id = payload.get("artifact_id")
+        if isinstance(artifact_id, str):
+            if artifact_id not in artifact_poc_ids:
+                artifact_poc_ids[artifact_id] = self.store.cybergym_artifact_poc_id(scan_id, artifact_id)
+            return artifact_poc_ids[artifact_id]
+        seed_ids = payload.get("seed_ids")
+        if not isinstance(seed_ids, list):
+            return None
+        known = set()
+        for seed_id in seed_ids:
+            if not isinstance(seed_id, str):
+                continue
+            if seed_id not in artifact_poc_ids:
+                artifact_poc_ids[seed_id] = self.store.cybergym_artifact_poc_id(scan_id, seed_id)
+            poc_id = artifact_poc_ids[seed_id]
+            if poc_id is not None:
+                known.add(poc_id)
+        if len(known) == 1:
+            return next(iter(known))
+        return None
+
+    @staticmethod
+    def _compact_run_state(run: dict[str, Any]) -> dict[str, Any]:
+        result = run.get("result") if isinstance(run.get("result"), dict) else {}
+        return {
+            "run_id": run["run_id"],
+            "kind": run["kind"],
+            "status": run["status"],
+            "summary": {
+                key: result[key]
+                for key in (
+                    "status",
+                    "outcome",
+                    "execution_status",
+                    "termination_reason",
+                    "failure_code",
+                    "crash",
+                    "target_reached",
+                    "vulnerable_branch_reached",
+                    "crash_candidate_count",
+                    "new_corpus_count",
+                )
+                if key in result
+            },
+        }
 
     async def replay(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
         manifest = self._manifest(scan_id)
@@ -977,6 +1094,14 @@ class CyberGymRuntime:
             if artifact is None:
                 raise ValueError("A fuzz seed artifact is not available for this CyberGym task")
             seeds.append(artifact)
+        seed_poc_ids = {
+            self.store.cybergym_artifact_poc_id(scan_id, artifact["artifact_id"])
+            for artifact in seeds
+        }
+        known_poc_ids = {poc_id for poc_id in seed_poc_ids if poc_id is not None}
+        if len(known_poc_ids) > 1 or (known_poc_ids and None in seed_poc_ids):
+            raise ValueError("fuzz_start requires seed artifacts from one generic PoC lineage")
+        poc_id = next(iter(known_poc_ids), None)
         self._assert_fuzz_preflight(scan_id, seed_ids)
         normalized_dictionary = list(dictionary or [])
         input_payload = {
@@ -985,6 +1110,8 @@ class CyberGymRuntime:
             "budget_seconds": seconds,
             "max_length": max_length,
         }
+        if poc_id is not None:
+            input_payload["poc_id"] = poc_id
         if idempotency_key is None:
             idempotency_key = "fuzz-" + hashlib.sha256(
                 json.dumps(
@@ -1173,14 +1300,15 @@ class CyberGymRuntime:
             raise ValueError("verified submission requires a stable vulnerable replay crash")
         self.store.assert_cybergym_runs_terminal(scan_id)
         evidence = self.store.cybergym_artifact_evidence(scan_id, artifact_id)
+        poc_id = self.store.cybergym_artifact_poc_id(scan_id, artifact_id)
         submission = self.store.reserve_cybergym_submission(
             scan_id,
             artifact_id=artifact_id,
             local_validation=local_validation,
             selection_reason=selection_reason.strip(),
             evidence=evidence,
+            selected_poc_id=poc_id,
         )
-        poc_id = self.store.cybergym_artifact_poc_id(scan_id, artifact_id)
         try:
             official_result: dict[str, Any]
             if self.submitter is None:
@@ -1549,6 +1677,7 @@ class CyberGymRuntime:
                 if poc_id is not None
             }
         )
+        poc_id = poc_ids[0] if len(poc_ids) == 1 else None
         for directory, kind in self._fuzz_output_directories(findings, corpus):
             for path in sorted(directory.rglob("*"), key=lambda item: str(item.relative_to(directory)))[:256]:
                 if not path.is_file() or path.is_symlink():
@@ -1566,10 +1695,8 @@ class CyberGymRuntime:
                     "operation": self._manifest(scan_id).engine,
                     "source_name": str(path.relative_to(directory)),
                 }
-                if len(poc_ids) == 1:
-                    provenance["poc_id"] = poc_ids[0]
-                elif poc_ids:
-                    provenance["poc_ids"] = poc_ids
+                if poc_id is not None:
+                    provenance["poc_id"] = poc_id
                 try:
                     artifact = self.artifact_create(
                         scan_id,

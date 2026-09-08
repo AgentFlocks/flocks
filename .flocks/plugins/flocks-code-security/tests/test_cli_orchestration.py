@@ -134,6 +134,131 @@ async def test_cybergym_solver_fallback_finalizes_completed_worker_without_submi
 
 
 @pytest.mark.asyncio
+async def test_cybergym_solver_fallback_cancels_fuzz_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    async def run_phase(_ctx, _scan_id, phase, _progress, _observation):
+        assert phase == "cybergym_solving"
+        return {"status": "failed"}, {"scan_id": "scan_cybergym", "counts": {}}
+
+    async def status(_ctx, scan_id: str) -> ToolResult:
+        assert scan_id == "scan_cybergym"
+        return _result(
+            {
+                "scan_id": scan_id,
+                "counts": {},
+                "cybergym": {"status": "submitted"},
+            }
+        )
+
+    class Store:
+        @staticmethod
+        def get_cybergym_task(_scan_id: str):
+            return {"status": "active"}
+
+    class CyberGym:
+        store = Store()
+
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        @staticmethod
+        def seed_from_poc_bundles(_scan_id: str):
+            return {"accepted_bundle_count": 1}
+
+        async def cancel_fuzz_runs(self, _scan_id: str, *, cancel_source: str):
+            calls.append(("cancel", cancel_source))
+            self.cancelled = True
+            return 1
+
+        def select_final_artifact(self, _scan_id: str):
+            calls.append(("select", self.cancelled))
+            return {
+                "artifact": {"artifact_id": "artifact_1"},
+                "local_validation": "unverified",
+                "selection_reason": "fallback",
+            }
+
+        async def submit(
+            self,
+            _scan_id: str,
+            _artifact_id: str,
+            *,
+            local_validation: str,
+            selection_reason: str,
+        ):
+            calls.append(("submit", self.cancelled))
+            assert local_validation == "unverified"
+            assert selection_reason == "fallback"
+            if not self.cancelled:
+                raise ValueError("fuzz still running")
+            return {"status": "submitted"}
+
+    monkeypatch.setattr(audit_cli, "_run_phase", run_phase)
+    monkeypatch.setattr(audit_cli, "audit_status", status)
+    monkeypatch.setattr(audit_cli, "get_runtime", lambda: SimpleNamespace(cybergym=CyberGym()))
+
+    result = await audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+        scan_mode="cybergym_level1",
+    )._run_cybergym_solver("scan_cybergym", {"counts": {}}, None)
+
+    assert result["cybergym"]["status"] == "submitted"
+    assert calls == [
+        ("cancel", "solver_phase_failed"),
+        ("select", True),
+        ("submit", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cybergym_solver_failure_cancels_active_fuzz_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def run_phase(_ctx, _scan_id, phase, _progress, _observation):
+        assert phase == "cybergym_solving"
+        raise RuntimeError("solver batch failed")
+
+    class CyberGym:
+        @staticmethod
+        def seed_from_poc_bundles(_scan_id: str):
+            return {"accepted_bundle_count": 1}
+
+        @staticmethod
+        async def cancel_fuzz_runs(scan_id: str, *, cancel_source: str):
+            calls.append((scan_id, cancel_source))
+            return 1
+
+    monkeypatch.setattr(audit_cli, "_run_phase", run_phase)
+    monkeypatch.setattr(
+        audit_cli,
+        "get_runtime",
+        lambda: SimpleNamespace(cybergym=CyberGym()),
+    )
+
+    orchestrator = audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+        scan_mode="cybergym_level1",
+    )
+    with pytest.raises(RuntimeError, match="solver batch failed"):
+        await orchestrator._run_cybergym_solver(
+            "scan_cybergym",
+            {"counts": {}},
+            None,
+        )
+
+    assert calls == [("scan_cybergym", "solver_phase_failed")]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_runs_all_required_phases_and_emits_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

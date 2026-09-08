@@ -65,10 +65,16 @@ def test_create_scan_request_accepts_bounded_verification_votes() -> None:
 
     assert payload.verification_votes == 3
     assert payload.copy_source is True
+    assert payload.max_file_bytes is None
     assert code_security.CreateScanRequest(
         workspaceId="workspace-1",
         copySource=False,
     ).copy_source is False
+    large_file_request = code_security.CreateScanRequest(
+        workspaceId="workspace-1",
+        maxFileBytes=64 * 1024 * 1024,
+    )
+    assert large_file_request.max_file_bytes == 64 * 1024 * 1024
     with pytest.raises(ValueError):
         code_security.CreateScanRequest(
             workspaceId="workspace-1",

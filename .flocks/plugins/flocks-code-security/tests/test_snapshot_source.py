@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import flocks_code_security.snapshot as snapshot_module
 from flocks_code_security.coverage import (
     CoverageAttestationService,
     CoverageSubmissionError,
@@ -603,6 +604,64 @@ def test_snapshot_rejects_symlink_root_and_skips_oversized_files(tmp_path: Path)
     assert snapshot.total_bytes == 0
     assert snapshot.omitted_file_count == 1
     assert runtime.store.list_snapshot_omissions(snapshot.snapshot_id)[0].relative_path == "large.txt"
+
+
+def test_snapshot_default_streams_files_larger_than_the_legacy_one_mib_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    contents = b"a" * (1_048_576 + 1)
+    (target / "packet-ieee80211.c").write_bytes(contents)
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(
+        Path,
+        "write_bytes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "snapshot copies must not buffer a complete file through Path.write_bytes"
+        ),
+    )
+
+    snapshot = runtime.snapshots.create(str(target))
+
+    assert snapshot.file_count == 1
+    assert snapshot.total_bytes == len(contents)
+    assert snapshot.omitted_file_count == 0
+    snapshot_file = runtime.store.list_snapshot_files(snapshot.snapshot_id)[0]
+    assert snapshot_file.relative_path == "packet-ieee80211.c"
+    assert snapshot_file.blob_digest == hashlib.sha256(contents).hexdigest()
+    assert snapshot_file.line_count == 1
+    assert (Path(snapshot.root_path) / snapshot_file.relative_path).read_bytes() == contents
+
+
+def test_snapshot_binary_files_skip_text_line_decoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    contents = b"\x00" + b"a" * (1024 * 1024)
+    (target / "blob.bin").write_bytes(contents)
+
+    class Decoder:
+        def decode(self, *_args, **_kwargs):
+            pytest.fail("binary snapshot should not decode text lines")
+
+    monkeypatch.setattr(
+        snapshot_module.codecs,
+        "getincrementaldecoder",
+        lambda _encoding: lambda **_kwargs: Decoder(),
+    )
+    runtime = build_runtime(tmp_path / "plugin-data")
+
+    snapshot = runtime.snapshots.create(str(target))
+
+    assert snapshot.file_count == 1
+    snapshot_file = runtime.store.list_snapshot_files(snapshot.snapshot_id)[0]
+    assert snapshot_file.is_binary is True
+    assert snapshot_file.line_count == 0
+    assert snapshot_file.blob_digest == hashlib.sha256(contents).hexdigest()
 
 
 def test_source_rejects_escape_and_coordinator_role(tmp_path: Path) -> None:
