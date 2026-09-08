@@ -3869,15 +3869,16 @@ class ScanStore:
         }
 
     def select_cybergym_final_artifact(self, scan_id: str) -> dict[str, Any] | None:
+        """Return the best locally verified crash artifact for official submission."""
         artifacts = self.list_cybergym_artifacts(scan_id)
         if not artifacts:
             return None
         ranked: list[tuple[tuple[int, str, str], dict[str, Any], dict[str, Any]]] = []
         for artifact in artifacts:
             evidence = self.cybergym_artifact_evidence(scan_id, artifact["artifact_id"])
-            score = 0
-            if evidence["stable_crash"]:
-                score += 100
+            if not evidence["stable_crash"]:
+                continue
+            score = 100
             if evidence["vulnerable_branch_reached"]:
                 score += 50
             if evidence["target_reached"]:
@@ -3886,15 +3887,10 @@ class ScanStore:
                 score += 10
             poc_id = self.cybergym_artifact_poc_id(scan_id, artifact["artifact_id"]) or ""
             ranked.append(((-score, poc_id, artifact["artifact_id"]), artifact, evidence))
+        if not ranked:
+            return None
         _score, artifact, evidence = min(ranked, key=lambda item: item[0])
-        if evidence["stable_crash"]:
-            validation, reason = "verified", "stable vulnerable-side crash replay"
-        elif evidence["vulnerable_branch_reached"]:
-            validation, reason = "unverified", "strongest retained artifact reached vulnerable branch"
-        elif evidence["target_reached"]:
-            validation, reason = "unverified", "strongest retained artifact reached target function"
-        else:
-            validation, reason = "unverified", "retained raw input artifact"
+        validation, reason = "verified", "stable vulnerable-side crash replay"
         return {"artifact": artifact, "local_validation": validation, "selection_reason": reason, "evidence": evidence}
 
     def reserve_cybergym_submission(
@@ -3980,7 +3976,14 @@ class ScanStore:
         item["official_result"] = json.loads(raw) if raw else None
         return item
 
-    def mark_cybergym_failed_no_artifact(self, scan_id: str) -> dict[str, Any]:
+    def mark_cybergym_failed_no_artifact(
+        self,
+        scan_id: str,
+        *,
+        selection_reason: str = "no generated artifact",
+    ) -> dict[str, Any]:
+        if not isinstance(selection_reason, str) or not selection_reason.strip() or len(selection_reason) > 2_000:
+            raise ValueError("selection_reason must be a non-empty string of at most 2000 characters")
         now = _now()
         with self._lock, self._connect() as connection:
             task = connection.execute(
@@ -3988,21 +3991,18 @@ class ScanStore:
             ).fetchone()
             if task is None:
                 raise ValueError("CyberGym task is not available")
-            count = connection.execute(
-                "SELECT COUNT(*) FROM cybergym_artifacts WHERE scan_id = ?", (scan_id,)
-            ).fetchone()[0]
-            if count:
-                raise ValueError("CyberGym task has artifacts and must select one for finalization")
             active_run = connection.execute(
                 "SELECT 1 FROM cybergym_runs WHERE scan_id = ? AND status = 'running' LIMIT 1",
                 (scan_id,),
             ).fetchone()
             if active_run is not None:
                 raise ValueError("CyberGym execution is still running; wait before marking no artifact")
+            if self.select_cybergym_final_artifact(scan_id) is not None:
+                raise ValueError("CyberGym task has a verified artifact and must submit it")
             cursor = connection.execute(
                 "UPDATE cybergym_tasks SET status = 'failed_no_artifact', local_validation = 'failed_no_artifact', "
-                "selection_reason = 'no generated artifact', updated_at = ? WHERE scan_id = ? AND status = 'active'",
-                (now, scan_id),
+                "selection_reason = ?, updated_at = ? WHERE scan_id = ? AND status = 'active'",
+                (selection_reason.strip(), now, scan_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("CyberGym task has already been finalized")

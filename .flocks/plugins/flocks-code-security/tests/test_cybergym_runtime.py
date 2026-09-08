@@ -122,6 +122,16 @@ def _insert_accepted_raw_pocs(
         )
 
 
+def _record_stable_replay_crash(store: ScanStore, scan_id: str, artifact_id: str) -> None:
+    for _ in range(2):
+        run = store.start_cybergym_run(scan_id, "replay", {"artifact_id": artifact_id})
+        store.finish_cybergym_run(
+            run["run_id"],
+            "completed",
+            {"status": "crash", "crash": True, "exit_code": 139},
+        )
+
+
 class _FixtureExecutor:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
@@ -708,6 +718,51 @@ async def test_fuzz_no_interesting_inputs_is_not_reported_as_a_crash(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_fuzz_zero_guards_is_reported_as_uninstrumented(tmp_path: Path) -> None:
+    class _ZeroGuardExecutor(_FixtureExecutor):
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            if "/opt/fixture-fuzzer" in command:
+                return CommandResult(0, "INFO: Loaded 0 modules (0 inline 8-bit counters): 0", "")
+            return CommandResult(0, "", "")
+
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=_ZeroGuardExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert status["status"] == "failed"
+    assert status["result"]["failure_code"] == "fuzzer_uninstrumented"
+    assert status["result"]["termination_reason"] == "fuzzer_uninstrumented"
+
+
+@pytest.mark.asyncio
+async def test_fuzz_large_output_is_bounded_without_runtime_error(tmp_path: Path) -> None:
+    class _LargeOutputExecutor(_FixtureExecutor):
+        async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
+            self.commands.append(command)
+            if "/opt/fixture-fuzzer" in command:
+                return CommandResult(0, "o" * 80_000, "e" * 80_000)
+            return CommandResult(0, "", "")
+
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=_LargeOutputExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    status = await runtime.fuzz_wait(scan_id, started["run_id"])
+
+    assert status["status"] == "completed"
+    assert status["result"]["termination_reason"] == "engine_completed"
+    assert status["result"]["output_truncated"] is True
+    assert "failure_code" not in status["result"]
+
+
+@pytest.mark.asyncio
 async def test_fuzz_persisted_corpus_is_a_normal_no_crash_completion(tmp_path: Path) -> None:
     class _CorpusExecutor(_FixtureExecutor):
         async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
@@ -840,6 +895,23 @@ def test_no_artifact_is_terminal_and_does_not_consume_budget(tmp_path: Path) -> 
     }
 
 
+def test_no_artifact_finalization_rejects_a_verified_artifact(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store)
+    artifact = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    _record_stable_replay_crash(store, scan_id, artifact["artifact_id"])
+
+    with pytest.raises(ValueError, match="verified artifact"):
+        runtime.mark_failed_no_artifact(
+            scan_id,
+            selection_reason="no_verified_crash",
+        )
+
+    task = store.get_cybergym_task(scan_id)
+    assert task is not None
+    assert task["status"] == "active"
+
+
 @pytest.mark.asyncio
 async def test_missing_artifact_is_rejected_before_budget_consumption(tmp_path: Path) -> None:
     store, scan_id = _store(tmp_path)
@@ -849,6 +921,48 @@ async def test_missing_artifact_is_rejected_before_budget_consumption(tmp_path: 
         await runtime.replay(scan_id, "missing-artifact")
 
     assert store.cybergym_budget(scan_id)["replay"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reachability_only_artifact_is_not_submitted(tmp_path: Path) -> None:
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store)
+    artifact = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    run = store.start_cybergym_run(scan_id, "gdb", {"artifact_id": artifact["artifact_id"]})
+    store.finish_cybergym_run(
+        run["run_id"],
+        "completed",
+        {
+            "status": "completed",
+            "target_reached": True,
+            "vulnerable_branch_reached": True,
+        },
+    )
+
+    assert runtime.select_final_artifact(scan_id) is None
+    with pytest.raises(ValueError, match="verified local crash evidence"):
+        await runtime.submit(
+            scan_id,
+            artifact["artifact_id"],
+            local_validation="unverified",
+            selection_reason="reached vulnerable branch",
+        )
+    with pytest.raises(ValueError, match="stable vulnerable replay crash"):
+        await runtime.submit(
+            scan_id,
+            artifact["artifact_id"],
+            local_validation="verified",
+            selection_reason="reached vulnerable branch",
+        )
+
+    task = runtime.mark_failed_no_artifact(
+        scan_id,
+        selection_reason="no_verified_crash",
+    )
+
+    assert task["status"] == "failed_no_artifact"
+    assert task["final_artifact_id"] is None
+    assert task["selection_reason"] == "no_verified_crash"
 
 
 @pytest.mark.asyncio
@@ -887,12 +1001,13 @@ async def test_unconfigured_judge_is_explicitly_recorded(tmp_path: Path) -> None
     store, scan_id = _store(tmp_path)
     runtime = CyberGymRuntime(store)
     artifact = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    _record_stable_replay_crash(store, scan_id, artifact["artifact_id"])
 
     submission = await runtime.submit(
         scan_id,
         artifact["artifact_id"],
-        local_validation="unverified",
-        selection_reason="fixture artifact",
+        local_validation="verified",
+        selection_reason="stable vulnerable-side crash replay",
     )
 
     assert submission["official_result"] == {
@@ -906,6 +1021,7 @@ async def test_unconfigured_judge_is_explicitly_recorded(tmp_path: Path) -> None
 async def test_judge_rejection_is_preserved_as_official_result(tmp_path: Path) -> None:
     store, scan_id = _store(tmp_path)
     artifact = CyberGymRuntime(store).artifact_create(scan_id, kind="seed", raw=b"seed")
+    _record_stable_replay_crash(store, scan_id, artifact["artifact_id"])
 
     async def reject(_manifest, _raw, _artifact):
         return {"status": "rejected", "reason": "fixture_judge_rejection"}
@@ -913,8 +1029,8 @@ async def test_judge_rejection_is_preserved_as_official_result(tmp_path: Path) -
     submission = await CyberGymRuntime(store, submitter=reject).submit(
         scan_id,
         artifact["artifact_id"],
-        local_validation="unverified",
-        selection_reason="fixture rejection",
+        local_validation="verified",
+        selection_reason="stable vulnerable-side crash replay",
     )
 
     assert submission["official_result"] == {
@@ -1291,12 +1407,13 @@ async def test_official_worker_protocol_bounds_large_outputs_for_persistence(
     )
     runtime = CyberGymRuntime(store, submitter=adapter)
     artifact = runtime.artifact_create(scan_id, kind="seed", raw=b"dynamic-poc")
+    _record_stable_replay_crash(store, scan_id, artifact["artifact_id"])
 
     submission = await runtime.submit(
         scan_id,
         artifact["artifact_id"],
-        local_validation="unverified",
-        selection_reason="large-output regression",
+        local_validation="verified",
+        selection_reason="stable vulnerable-side crash replay",
     )
 
     official_result = submission["official_result"]

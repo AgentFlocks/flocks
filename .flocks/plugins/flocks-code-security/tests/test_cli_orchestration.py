@@ -84,7 +84,7 @@ async def _final_adjudication(
 async def test_cybergym_solver_fallback_finalizes_completed_worker_without_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
+    calls: list[tuple[str, str | None]] = []
 
     async def run_phase(_ctx, _scan_id, phase, _progress, _observation):
         assert phase == "cybergym_solving"
@@ -110,12 +110,12 @@ async def test_cybergym_solver_fallback_finalizes_completed_worker_without_submi
 
         @staticmethod
         def select_final_artifact(_scan_id: str):
-            calls.append("select")
+            calls.append(("select", None))
             return None
 
         @staticmethod
-        def mark_failed_no_artifact(_scan_id: str):
-            calls.append("mark_failed_no_artifact")
+        def mark_failed_no_artifact(_scan_id: str, *, selection_reason: str = "no generated artifact"):
+            calls.append(("mark_failed_no_artifact", selection_reason))
             return {"status": "failed_no_artifact"}
 
     monkeypatch.setattr(audit_cli, "_run_phase", run_phase)
@@ -130,11 +130,14 @@ async def test_cybergym_solver_fallback_finalizes_completed_worker_without_submi
     )._run_cybergym_solver("scan_cybergym", {"counts": {}}, None)
 
     assert result["cybergym"]["status"] == "failed_no_artifact"
-    assert calls == ["select", "mark_failed_no_artifact"]
+    assert calls == [
+        ("select", None),
+        ("mark_failed_no_artifact", "no_verified_crash"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_cybergym_solver_fallback_cancels_fuzz_before_submission(
+async def test_cybergym_solver_fallback_cancels_fuzz_before_no_verified_crash_finalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, object]] = []
@@ -149,7 +152,7 @@ async def test_cybergym_solver_fallback_cancels_fuzz_before_submission(
             {
                 "scan_id": scan_id,
                 "counts": {},
-                "cybergym": {"status": "submitted"},
+                "cybergym": {"status": "failed_no_artifact"},
             }
         )
 
@@ -181,20 +184,14 @@ async def test_cybergym_solver_fallback_cancels_fuzz_before_submission(
                 "selection_reason": "fallback",
             }
 
-        async def submit(
+        def mark_failed_no_artifact(
             self,
             _scan_id: str,
-            _artifact_id: str,
             *,
-            local_validation: str,
-            selection_reason: str,
+            selection_reason: str = "no generated artifact",
         ):
-            calls.append(("submit", self.cancelled))
-            assert local_validation == "unverified"
-            assert selection_reason == "fallback"
-            if not self.cancelled:
-                raise ValueError("fuzz still running")
-            return {"status": "submitted"}
+            calls.append(("mark_failed_no_artifact", selection_reason))
+            return {"status": "failed_no_artifact"}
 
     monkeypatch.setattr(audit_cli, "_run_phase", run_phase)
     monkeypatch.setattr(audit_cli, "audit_status", status)
@@ -207,11 +204,11 @@ async def test_cybergym_solver_fallback_cancels_fuzz_before_submission(
         scan_mode="cybergym_level1",
     )._run_cybergym_solver("scan_cybergym", {"counts": {}}, None)
 
-    assert result["cybergym"]["status"] == "submitted"
+    assert result["cybergym"]["status"] == "failed_no_artifact"
     assert calls == [
         ("cancel", "solver_phase_failed"),
         ("select", True),
-        ("submit", True),
+        ("mark_failed_no_artifact", "no_verified_crash"),
     ]
 
 

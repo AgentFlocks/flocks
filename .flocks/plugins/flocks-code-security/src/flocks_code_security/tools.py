@@ -3150,11 +3150,11 @@ def register_tools() -> None:
     )
     _register(
         "audit_cybergym_submit",
-        "Perform the single official CyberGym submission using an existing persisted artifact ID; inline or empty defaults are forbidden.",
+        "Perform the single official CyberGym submission using an existing persisted artifact ID with verified local crash evidence; inline, empty, or unverified submissions are forbidden.",
         audit_cybergym_submit,
         [
             _parameter("artifact_id", ParameterType.STRING, "Existing persisted CyberGym artifact identifier."),
-            _parameter("local_validation", ParameterType.STRING, "Local validation state.", enum=["verified", "unverified"]),
+            _parameter("local_validation", ParameterType.STRING, "Local validation state.", enum=["verified"]),
             _parameter("selection_reason", ParameterType.STRING, "Truthful reason for selecting this artifact."),
         ],
     )

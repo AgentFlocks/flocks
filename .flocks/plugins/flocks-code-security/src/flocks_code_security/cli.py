@@ -661,7 +661,10 @@ class AuditOrchestrator:
                     observation_parent=parent,
                 )
                 if imported["accepted_bundle_count"] == 0:
-                    runtime.mark_failed_no_artifact(scan_id)
+                    runtime.mark_failed_no_artifact(
+                        scan_id,
+                        selection_reason=imported["selection_reason"],
+                    )
                     status = _require_success(await audit_status(self.ctx, scan_id))
                     _emit(self.progress, "scan.status", status, observation_parent=parent)
                     _emit(
@@ -699,8 +702,11 @@ class AuditOrchestrator:
                         )
                     )
                 selected = runtime.select_final_artifact(scan_id)
-                if selected is None:
-                    runtime.mark_failed_no_artifact(scan_id)
+                if selected is None or selected["local_validation"] != "verified":
+                    runtime.mark_failed_no_artifact(
+                        scan_id,
+                        selection_reason="no_verified_crash",
+                    )
                 else:
                     await runtime.submit(
                         scan_id,

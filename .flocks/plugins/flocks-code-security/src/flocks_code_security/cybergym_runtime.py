@@ -54,10 +54,20 @@ _OFFICIAL_DOCKER_TIMEOUT = 60
 _OFFICIAL_COMMAND_TIMEOUT = 10
 _OFFICIAL_MODE_OUTPUT_JSON_BYTES = 24 * 1024
 _OFFICIAL_MODE_ERROR_JSON_BYTES = 2 * 1024
+_RUN_OUTPUT_JSON_BYTES = 16 * 1024
+_FUZZ_RESULT_ARTIFACT_LIMIT = 64
+_FUZZ_RESULT_REJECTION_LIMIT = 64
 _DEFAULT_CYBERGYM_DATA_DIR = "/home/cybergym/cybergym-server-data"
 _AFL_NO_FINDINGS_MARKERS = (
     "no interesting inputs were found",
     "no new paths found",
+)
+_FUZZ_UNINSTRUMENTED_MARKERS = (
+    "0 guards",
+    "0 inline 8-bit counters",
+    "loaded 0 modules",
+    "loaded 0 pc tables",
+    "no coverage instrumentation",
 )
 
 
@@ -1286,8 +1296,8 @@ class CyberGymRuntime:
         local_validation: str,
         selection_reason: str,
     ) -> dict[str, Any]:
-        if local_validation not in {"verified", "unverified"}:
-            raise ValueError("local_validation must be verified or unverified")
+        if local_validation != "verified":
+            raise ValueError("official CyberGym submission requires verified local crash evidence")
         if not isinstance(selection_reason, str) or not selection_reason.strip() or len(selection_reason) > 2_000:
             raise ValueError("selection_reason must be a non-empty string of at most 2000 characters")
         manifest = self._manifest(scan_id)
@@ -1296,7 +1306,7 @@ class CyberGymRuntime:
             raise ValueError("audit_cybergym_submit requires an existing artifact_id")
         if not artifact["size"] and not manifest.allow_empty_input:
             raise ValueError("The trusted manifest does not allow empty input")
-        if local_validation == "verified" and not self.store.cybergym_artifact_has_stable_crash(scan_id, artifact_id):
+        if not self.store.cybergym_artifact_has_stable_crash(scan_id, artifact_id):
             raise ValueError("verified submission requires a stable vulnerable replay crash")
         self.store.assert_cybergym_runs_terminal(scan_id)
         evidence = self.store.cybergym_artifact_evidence(scan_id, artifact_id)
@@ -1350,8 +1360,16 @@ class CyberGymRuntime:
     def select_final_artifact(self, scan_id: str) -> dict[str, Any] | None:
         return self.store.select_cybergym_final_artifact(scan_id)
 
-    def mark_failed_no_artifact(self, scan_id: str) -> dict[str, Any]:
-        return self.store.mark_cybergym_failed_no_artifact(scan_id)
+    def mark_failed_no_artifact(
+        self,
+        scan_id: str,
+        *,
+        selection_reason: str = "no generated artifact",
+    ) -> dict[str, Any]:
+        return self.store.mark_cybergym_failed_no_artifact(
+            scan_id,
+            selection_reason=selection_reason,
+        )
 
     def _manifest(self, scan_id: str) -> CyberGymTargetManifest:
         task = self.store.get_cybergym_task(scan_id)
@@ -1380,8 +1398,7 @@ class CyberGymRuntime:
             "status": status,
             "crash": status == "crash",
             "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            **_bounded_command_output(result),
         }
 
     async def _execute_gdb(
@@ -1419,8 +1436,7 @@ class CyberGymRuntime:
                 "status": "harness_error",
                 "reason": "gdb_runner_error",
                 "exit_code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                **_bounded_command_output(result),
             }
         output = f"{result.stdout}\n{result.stderr}"
         hits = {
@@ -1433,8 +1449,7 @@ class CyberGymRuntime:
             "vulnerable_branch_reached": hits.get("vulnerable_branch", False),
             "breakpoints": hits,
             "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            **_bounded_command_output(result),
         }
 
     async def _run_fuzz(
@@ -1511,11 +1526,17 @@ class CyberGymRuntime:
                 "crash_candidate_count": crash_candidate_count,
                 "new_corpus_count": new_corpus_count,
                 "exit_code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "artifacts": produced["artifacts"],
-                "rejected_artifacts": produced["rejected"],
+                **_bounded_command_output(result),
+                "artifacts": produced["artifacts"][:_FUZZ_RESULT_ARTIFACT_LIMIT],
+                "rejected_artifacts": produced["rejected"][:_FUZZ_RESULT_REJECTION_LIMIT],
+                "artifact_count": len(produced["artifacts"]),
+                "rejected_artifact_count": len(produced["rejected"]),
             }
+            if (
+                len(produced["artifacts"]) > _FUZZ_RESULT_ARTIFACT_LIMIT
+                or len(produced["rejected"]) > _FUZZ_RESULT_REJECTION_LIMIT
+            ):
+                payload["artifact_list_truncated"] = True
             termination_reason = _fuzz_termination_reason(
                 manifest.engine,
                 result,
@@ -1527,6 +1548,13 @@ class CyberGymRuntime:
                     "status": "failed",
                     "failure_code": "runtime_unavailable" if result.unavailable else "harness_error",
                     "termination_reason": "runtime_unavailable" if result.unavailable else "harness_error",
+                })
+                self._finish_fuzz_run(run_id, "failed", payload)
+            elif _fuzz_uninstrumented(result):
+                payload.update({
+                    "status": "failed",
+                    "failure_code": "fuzzer_uninstrumented",
+                    "termination_reason": "fuzzer_uninstrumented",
                 })
                 self._finish_fuzz_run(run_id, "failed", payload)
             elif result.timed_out:
@@ -1647,8 +1675,7 @@ class CyberGymRuntime:
         return {
             "status": _execution_status(result),
             "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            **_bounded_command_output(result),
             "minimized_data": minimized_data,
         }
 
@@ -1952,6 +1979,20 @@ def _trim_json_string(value: str, limit: int) -> str:
         else:
             upper = midpoint - 1
     return value[:lower]
+
+
+def _bounded_command_output(result: CommandResult) -> dict[str, Any]:
+    stdout = _trim_json_string(result.stdout, _RUN_OUTPUT_JSON_BYTES)
+    stderr = _trim_json_string(result.stderr, _RUN_OUTPUT_JSON_BYTES)
+    output: dict[str, Any] = {"stdout": stdout, "stderr": stderr}
+    if stdout != result.stdout or stderr != result.stderr:
+        output["output_truncated"] = True
+    return output
+
+
+def _fuzz_uninstrumented(result: CommandResult) -> bool:
+    output = f"{result.stdout}\n{result.stderr}".casefold()
+    return any(marker in output for marker in _FUZZ_UNINSTRUMENTED_MARKERS)
 
 
 def _bounded_official_mode_result(value: dict[str, Any]) -> dict[str, Any]:

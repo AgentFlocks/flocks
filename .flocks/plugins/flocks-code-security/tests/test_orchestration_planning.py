@@ -99,6 +99,8 @@ def test_cybergym_solver_prompt_requires_contract_aware_preflight() -> None:
     assert "accepted generic PoCs" in prompt
     assert "one generic PoC lineage" in prompt
     assert "Never call fuzz status" in prompt
+    assert "stop without a final artifact" in prompt
+    assert "honestly mark it unverified" not in prompt
 
 
 def test_cybergym_solver_recovery_prompt_uses_persisted_checkpoint() -> None:
