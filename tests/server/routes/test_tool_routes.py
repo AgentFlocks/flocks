@@ -270,6 +270,7 @@ class TestToolRouteSecurity:
         from flocks.server.routes import tool as tool_routes
 
         permission_ask = AsyncMock(return_value=None)
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
 
         session_id, _ = await _create_session_and_message("owner-session")
@@ -317,6 +318,7 @@ class TestToolRouteSecurity:
         from flocks.server.routes import tool as tool_routes
 
         permission_ask = AsyncMock(return_value=None)
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
         session_id, message_id = await _create_session_and_message("valid-session-context")
 
@@ -367,6 +369,7 @@ class TestToolRouteSecurity:
         from flocks.server.routes import tool as tool_routes
 
         permission_ask = AsyncMock(return_value=None)
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
         session_id, message_id = await _create_session_and_message("valid-batch-session-context")
 

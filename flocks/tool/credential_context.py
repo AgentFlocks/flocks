@@ -58,6 +58,15 @@ _verify_ssl_override: ContextVar[Optional[bool]] = ContextVar(
     "device_verify_ssl_override", default=None
 )
 
+# Credential validation may need to invoke a disabled tool without changing
+# the process-wide ToolRegistry state or persisting a temporary status result.
+_credential_probe_active: ContextVar[bool] = ContextVar(
+    "credential_probe_active", default=False
+)
+_temporary_credential_override_active: ContextVar[bool] = ContextVar(
+    "temporary_credential_override_active", default=False
+)
+
 
 # ---------------------------------------------------------------------------
 # Internal result type for _build_overrides
@@ -119,6 +128,55 @@ def get_verify_ssl_override() -> Optional[bool]:
     """Return the per-device ``verify_ssl`` toggle, or ``None`` if no device
     credential override is active for this coroutine."""
     return _verify_ssl_override.get()
+
+
+def is_credential_probe_active() -> bool:
+    """Return whether the current coroutine is validating temporary credentials."""
+    return _credential_probe_active.get()
+
+
+def is_temporary_credential_override_active() -> bool:
+    """Return whether temporary credentials are active in this coroutine."""
+    return _temporary_credential_override_active.get()
+
+
+@asynccontextmanager
+async def activate_credential_probe() -> AsyncIterator[None]:
+    """Allow a connectivity probe to invoke a disabled tool without enabling it."""
+    token = _credential_probe_active.set(True)
+    try:
+        yield
+    finally:
+        _credential_probe_active.reset(token)
+
+
+@asynccontextmanager
+async def activate_credential_overrides(
+    *,
+    secret_values: Dict[str, str],
+    service_id: Optional[str] = None,
+    config_values: Optional[Dict[str, Any]] = None,
+) -> AsyncIterator[None]:
+    """Temporarily override credentials for one coroutine without persisting them."""
+    t1 = _secret_override.set(dict(secret_values))
+    t2 = _config_override.set(dict(config_values or {}))
+    t3 = _config_override_service.set(service_id)
+    t4 = _config_override_storage_key.set(service_id)
+    t5 = _verify_ssl_override.set(
+        bool((config_values or {}).get("verify_ssl", False))
+    )
+    t6 = _credential_probe_active.set(True)
+    t7 = _temporary_credential_override_active.set(True)
+    try:
+        yield
+    finally:
+        _secret_override.reset(t1)
+        _config_override.reset(t2)
+        _config_override_service.reset(t3)
+        _config_override_storage_key.reset(t4)
+        _verify_ssl_override.reset(t5)
+        _credential_probe_active.reset(t6)
+        _temporary_credential_override_active.reset(t7)
 
 
 # ---------------------------------------------------------------------------

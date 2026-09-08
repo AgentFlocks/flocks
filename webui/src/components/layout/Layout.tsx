@@ -22,18 +22,17 @@ import {
   Settings,
   ArrowUpCircle,
   RefreshCw,
+  Gauge,
   Loader2,
   type LucideIcon,
 } from 'lucide-react';
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import type { ComponentType, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { onboardingAPI } from '@/api/onboarding';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
-// the home page never needs. To keep the lazy split effective, we don't
-// re-import dismissal helpers from the modal modules (a static named import
-// would force Rollup to bundle the whole module eagerly).
-const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
+// the home page never needs.
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
 const SIDEBAR_WIDTH_KEY = 'flocks_layout_sidebar_width';
 const SIDEBAR_DEFAULT_WIDTH = 208;
@@ -55,10 +54,6 @@ function lazyLayoutComponent<T extends LazyLayoutModule>(
       preloadI18nNamespaces(namespaces),
     ]).then(([module]) => module),
   ));
-}
-
-function isOnboardingDismissed(): boolean {
-  return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
 
 function readCollapsedNavSectionIds(): Set<string> {
@@ -176,6 +171,7 @@ import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
 const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
+const FLOCKS_LLM_USAGE_URL = 'https://portal.agentflocks.com';
 
 interface LayoutNavItem {
   name: string;
@@ -380,12 +376,25 @@ export default function Layout() {
     updateSidebarWidth(sidebarWidth + (event.key === 'ArrowRight' ? 16 : -16));
   }, [collapsed, sidebarWidth, updateSidebarWidth]);
 
-  // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
-  // It also re-runs when the user navigates back to /, covering both cases in one place.
-  useLayoutEffect(() => {
-    if (isHome && !isOnboardingDismissed()) {
-      setShowOnboarding(true);
-    }
+  useEffect(() => {
+    if (!isHome) return undefined;
+
+    let cancelled = false;
+    onboardingAPI.getStatus()
+      .then((res) => {
+        if (!cancelled && !res.data.completed) {
+          setShowOnboarding(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setShowOnboarding(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [isHome]);
 
   const handleOpenOnboarding = useCallback(() => setShowOnboarding(true), []);
@@ -1135,7 +1144,7 @@ export default function Layout() {
           >
             {accountMenuOpen && (
               <div className={`absolute z-50 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${
-                collapsed ? 'bottom-2 left-full ml-2 w-48' : 'bottom-full left-3 right-3 mb-2'
+                collapsed ? 'bottom-2 left-full ml-2 w-56' : 'bottom-full left-3 right-3 mb-2 min-w-56'
               }`}>
                 {showFlocksproUpgradeEntry && (
                   <Link
@@ -1159,6 +1168,19 @@ export default function Layout() {
                   <RefreshCw className="h-4 w-4 text-zinc-400" />
                   {t('checkUpdate')}
                 </button>
+                <a
+                  href={FLOCKS_LLM_USAGE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    setSidebarOpen(false);
+                  }}
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                >
+                  <Gauge className="h-4 w-4 flex-shrink-0 text-zinc-400" />
+                  {t('flocksLlmUsageQuota')}
+                </a>
                 <Link
                   to="/settings/preferences"
                   state={settingsReturnState}

@@ -1105,6 +1105,9 @@ class ToolRegistry:
         device_id = None
         per_device_enabled = None
 
+        from flocks.tool.credential_context import is_credential_probe_active
+
+        credential_probe_active = is_credential_probe_active()
         if tool.info.source == "device" and tool.info.provider:
             requested_device_id = kwargs.pop("device_id", None)
             try:
@@ -1125,13 +1128,13 @@ class ToolRegistry:
             if resolution_error:
                 return ToolResult(success=False, error=resolution_error)
             device_id = resolved_device_id
-        elif not tool.info.enabled:
+        elif not tool.info.enabled and not credential_probe_active:
             return ToolResult(
                 success=False,
                 error=f"Tool is disabled: {tool_name}"
             )
 
-        if not tool.info.enabled:
+        if not tool.info.enabled and not credential_probe_active:
             return ToolResult(
                 success=False,
                 error=f"Tool is disabled: {tool_name}"
@@ -1170,21 +1173,22 @@ class ToolRegistry:
         else:
             result = await tool.execute(ctx, **kwargs)
 
-        if result.success:
-            cls._reset_failure_state(tool_name)
-        else:
-            if await cls._failure_auto_disable_enabled():
-                disabled = cls._record_failure(tool, kwargs, result.error)
-            else:
+        if not credential_probe_active:
+            if result.success:
                 cls._reset_failure_state(tool_name)
-                disabled = False
-            if disabled:
-                result.metadata = {**(result.metadata or {}), "disabled": True, "disabled_reason": "repeated_error"}
-                suffix = f"tool disabled after {cls._failure_disable_threshold} identical errors"
-                if result.error:
-                    result.error = f"{result.error} ({suffix})"
+            else:
+                if await cls._failure_auto_disable_enabled():
+                    disabled = cls._record_failure(tool, kwargs, result.error)
                 else:
-                    result.error = suffix
+                    cls._reset_failure_state(tool_name)
+                    disabled = False
+                if disabled:
+                    result.metadata = {**(result.metadata or {}), "disabled": True, "disabled_reason": "repeated_error"}
+                    suffix = f"tool disabled after {cls._failure_disable_threshold} identical errors"
+                    if result.error:
+                        result.error = f"{result.error} ({suffix})"
+                    else:
+                        result.error = suffix
         return result
 
     @classmethod

@@ -114,6 +114,9 @@ describe('Home create WebUI contract page entry', () => {
     expect(
       screen.queryByRole('button', { name: 'createWebUIContractPage' }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'getStarted' }),
+    ).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
   });
 

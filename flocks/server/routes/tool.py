@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from flocks.server.auth import require_admin
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
@@ -868,6 +869,7 @@ async def get_tool(tool_name: str):
     response_model=ToolInfoResponse,
     summary="Update tool settings",
 )
+@serialized_config_mutation
 async def update_tool(
     tool_name: str,
     request: ToolUpdateRequest,
@@ -962,6 +964,7 @@ async def update_tool(
     response_model=ToolInfoResponse,
     summary="Reset a tool to its YAML/registration default",
 )
+@serialized_config_mutation
 async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_admin)):
     """Remove the user setting for ``tool_name`` and restore the default.
 
