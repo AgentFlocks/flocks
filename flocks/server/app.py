@@ -709,6 +709,11 @@ def _is_noisy_request_path(path: str) -> bool:
     """Return True for high-frequency polling endpoints that are noisy on success."""
     if path in _REQUEST_LOG_SKIP_EXACT:
         return True
+    if (
+        path.startswith(("/api/session/", "/session/"))
+        and path.endswith("/status")
+    ):
+        return True
     if path.startswith("/api/session/") and path.endswith("/message"):
         return True
     if path.startswith("/api/question/session/") and path.endswith("/pending"):
