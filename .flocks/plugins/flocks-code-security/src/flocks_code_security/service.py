@@ -105,6 +105,7 @@ EVENT_TITLES = {
     "investigation.skipped": "聚焦调查因范围约束已跳过",
     "poc_generation.skipped": "通用 PoC 生成已跳过",
     "poc_generation.completed": "通用 PoC 生成已完成",
+    "finalization.started": "最终产物封装已开始",
     "scan.finalized": "最终产物已完成完整性校验",
     "scan.coverage_blocked": "覆盖策略阻止生成最终产物",
     "scan.cancelled": "代码审计已取消",
@@ -410,9 +411,11 @@ class _ProgressRecorder:
                 phase_run_id = run["phase_run_id"]
             self.store.finish_phase_run(phase_run_id, "completed", summary=payload)
             event_type = "adjudication.submitted"
-            if payload.get("action") == "finalize":
-                finalization = self.store.start_phase_run(self.scan_id, "finalization")
-                self.phase_runs["finalization"] = finalization["phase_run_id"]
+        elif event == "finalization.started":
+            finalization = self.store.start_phase_run(self.scan_id, "finalization")
+            phase_run_id = finalization["phase_run_id"]
+            self.phase_runs["finalization"] = phase_run_id
+            event_type = "phase.started"
         elif event == "scan.finalized":
             phase_run_id = self.phase_runs.get("finalization")
             if phase_run_id:

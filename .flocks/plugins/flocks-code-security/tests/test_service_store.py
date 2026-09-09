@@ -606,6 +606,7 @@ def test_progress_recorder_marks_coverage_blocked_finalization_as_failed(
         },
     )
 
+    recorder("finalization.started", {"scan_id": scan_id, "phase": "finalization"})
     recorder(
         "scan.coverage_blocked",
         {
@@ -624,6 +625,35 @@ def test_progress_recorder_marks_coverage_blocked_finalization_as_failed(
     assert event["type"] == "scan.coverage_blocked"
     assert event["level"] == "warning"
     assert event["summary"]["failure_code"] == "coverage_blocked"
+
+
+def test_finalization_starts_after_poc_generation_and_dynamic_validation(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="session-1", snapshot_id="snapshot_test", mode="standard", ruleset_digest="rules",
+    )
+    monkeypatch.setattr(service_module, "get_runtime", lambda: SimpleNamespace(store=store))
+    clock = {"now": "2026-09-09T10:00:00+00:00"}
+    monkeypatch.setattr(store_module, "_now", lambda: clock["now"])
+    recorder = _ProgressRecorder(scan_id, dynamic_enabled=True)
+    recorder("adjudication.started", {"adjudication_round": 1})
+    recorder("scan.adjudicated", {"action": "finalize", "adjudication_round": 1})
+    recorder("batch.started", {"phase": "poc_generation", "batch_id": "poc-batch"})
+    clock["now"] = "2026-09-09T10:41:44+00:00"
+    recorder("batch.status", {"phase": "poc_generation", "batch_id": "poc-batch", "status": "completed"})
+    recorder("dynamic.started", {})
+    clock["now"] = "2026-09-09T10:45:37+00:00"
+    recorder("dynamic.completed", {})
+    assert all(phase["phase"] != "finalization" for phase in store.list_phase_runs(scan_id))
+    recorder("finalization.started", {"phase": "finalization"})
+    clock["now"] = "2026-09-09T10:45:41+00:00"
+    recorder("scan.finalized", {})
+    phases = store.list_phase_runs(scan_id)
+    assert [phase["phase"] for phase in phases] == [
+        "adjudication", "poc_generation", "dynamic_validation", "finalization",
+    ]
+    assert phases[-1]["duration_ms"] == 4_000
+    assert phases[-1]["status"] == "completed"
 
 
 def test_recent_event_page_is_bounded_and_chronological(tmp_path: Path) -> None:

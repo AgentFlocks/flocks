@@ -432,6 +432,7 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         "batch.status",
         "scan.status",
         "scan.adjudicated",
+        "finalization.started",
         "scan.finalized",
     ]
 

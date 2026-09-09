@@ -901,6 +901,12 @@ class AuditOrchestrator:
                 scan_observation,
             )
 
+            _emit(
+                self.progress,
+                "finalization.started",
+                {"scan_id": scan_id, "phase": "finalization"},
+                observation_parent=scan_observation,
+            )
             finalized = _require_success(await audit_finalize(self.ctx, scan_id))
             final_event = (
                 "scan.coverage_blocked"

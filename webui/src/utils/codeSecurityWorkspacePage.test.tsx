@@ -1770,7 +1770,38 @@ describe("code security workspace contract page", () => {
       screen
         .getAllByRole("tab")
         .map((tab) => tab.querySelector("strong")?.textContent),
-    ).toEqual(["准备源码快照", "静态验证", "定向复扫", "静态验证"]);
+    ).toEqual([
+      "准备源码快照",
+      "静态验证 · 第 1 轮",
+      "定向复扫",
+      "静态验证 · 第 2 轮",
+    ]);
+  });
+
+  it.each([
+    ["zh-CN", "PoC 生成"],
+    ["en-US", "PoC generation"],
+  ])("localizes the PoC phase in %s", (language, title) => {
+    codeSecurityLanguage = language;
+    render(
+      <PhaseWorkspace
+        phases={[
+          {
+            phase_run_id: "phase_poc",
+            phase: "poc_generation",
+            ordinal: 1,
+            status: "completed",
+            duration_ms: 2_504_000,
+          },
+        ]}
+        events={[]}
+        workers={[]}
+        currentPhase="poc_generation"
+      />,
+    );
+    expect(screen.getByRole("tab")).toHaveTextContent(title);
+    expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
+    expect(screen.queryByText("poc_generation")).not.toBeInTheDocument();
   });
 
   it("shows the immutable snapshot boundary instead of an empty worker panel", () => {

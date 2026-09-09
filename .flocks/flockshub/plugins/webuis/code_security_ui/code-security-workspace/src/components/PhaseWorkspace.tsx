@@ -26,10 +26,12 @@ const PHASE_ORDER = [
   "snapshot",
   "threat_modeling",
   "baseline",
+  "investigation",
   "verification",
   "dynamic_validation",
   "adjudication",
   "targeted_rescan",
+  "poc_generation",
   "finalization",
 ];
 
@@ -39,6 +41,8 @@ const roleLabels: Record<string, string> = {
   investigator: "定向调查员",
   verifier: "静态验证员",
   prober: "动态探测员",
+  poc_generator: "PoC 生成员",
+  cybergym_solver: "动态验证员",
 };
 
 const severityLabels: Record<string, string> = {
@@ -120,12 +124,28 @@ export function PhaseWorkspace({
         );
         return (
           byTime ||
-          PHASE_ORDER.indexOf(a.phase) - PHASE_ORDER.indexOf(b.phase) ||
+          (PHASE_ORDER.includes(a.phase)
+            ? PHASE_ORDER.indexOf(a.phase)
+            : PHASE_ORDER.length) -
+            (PHASE_ORDER.includes(b.phase)
+              ? PHASE_ORDER.indexOf(b.phase)
+              : PHASE_ORDER.length) ||
           a.ordinal - b.ordinal
         );
       }),
     [phases],
   );
+  const phaseTitle = (phase: PhaseRun) => {
+    const label = t(phaseLabels[phase.phase] || phase.phase);
+    const round =
+      phase.phase === "adjudication"
+        ? (numberValue(phase.summary?.adjudication_round) ?? phase.ordinal)
+        : phase.ordinal;
+    return round > 1 ||
+      phases.filter((item) => item.phase === phase.phase).length > 1
+      ? `${label} · ${t("第 {{round}} 轮", { round })}`
+      : label;
+  };
   const defaultId =
     sorted.find(
       (phase) => phase.phase === currentPhase && phase.status === "running",
@@ -214,10 +234,10 @@ export function PhaseWorkspace({
               <StatusBadge
                 status={displayStatus}
                 context={t("{{phase}}阶段", {
-                  phase: t(phaseLabels[phase.phase] || phase.phase),
+                  phase: phaseTitle(phase),
                 })}
               />
-              <strong>{t(phaseLabels[phase.phase] || phase.phase)}</strong>
+              <strong>{phaseTitle(phase)}</strong>
               <span className="cs-tabular">
                 {workerTotal
                   ? t("{{done}}/{{total}} 个工作单元 · ", {
@@ -247,7 +267,7 @@ export function PhaseWorkspace({
           <div className="cs-current-phase__header">
             <div>
               <span className="cs-kicker">{t("当前查看")}</span>
-              <h3>{t(phaseLabels[selected.phase] || selected.phase)}</h3>
+              <h3>{phaseTitle(selected)}</h3>
             </div>
             <StatusBadge
               status={
