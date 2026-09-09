@@ -783,7 +783,10 @@ async def _build_session_runtime_status(session: SessionModel) -> SessionRuntime
     # starts. Treat that window (and inter-prompt queue hand-offs) as queued
     # so API clients never mistake accepted work for completion.
     if runtime_status.type == "idle":
-        if SessionLoop.is_running(session.id):
+        if (
+            Session.has_active_operations(session.id)
+            or SessionLoop.is_running(session.id)
+        ):
             runtime_status = SessionStatusBusy()
         elif (
             _is_prompt_chain_active(session.id)
@@ -5016,6 +5019,7 @@ class ShellRequest(BaseModel):
 async def run_shell_command(sessionID: str, request: ShellRequest, http_request: Request):
     """Run shell command"""
     from flocks.hooks.execution import ExecutionStopped
+    from flocks.server.routes.event import publish_event
     from flocks.session.runner import SessionRunner
 
     current_user = require_user(http_request)
@@ -5038,6 +5042,7 @@ async def run_shell_command(sessionID: str, request: ShellRequest, http_request:
                 agent=request.agent,
                 command=request.command,
                 model=model,
+                event_publish_callback=publish_event,
             )
     except SessionNotFoundError as exc:
         raise HTTPException(

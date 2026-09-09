@@ -27,7 +27,15 @@ import httpx
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
-from flocks.session.message import Message, MessageInfo, MessageRole, TextPart
+from flocks.session.message import (
+    Message,
+    MessageInfo,
+    MessageRole,
+    TextPart,
+    ToolPart,
+    ToolStateCompleted,
+    ToolStateRunning,
+)
 from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
@@ -1132,6 +1140,9 @@ class SessionRunner:
         agent: str,
         command: str,
         model: Optional[Dict[str, str]] = None,
+        event_publish_callback: Optional[
+            Callable[[str, Dict[str, Any]], Awaitable[None]]
+        ] = None,
     ) -> Dict[str, Any]:
         """
         Execute a shell command in session context.
@@ -1151,24 +1162,89 @@ class SessionRunner:
         
         cwd = session.directory or os.getcwd()
 
+        async def _publish(event_type: str, payload: Dict[str, Any]) -> None:
+            if event_publish_callback is None:
+                return
+            try:
+                await event_publish_callback(event_type, payload)
+            except Exception as exc:
+                log.debug("runner.shell.publish_failed", {
+                    "session_id": session_id,
+                    "event_type": event_type,
+                    "error": str(exc),
+                })
+
         async def _effect(
             execution_command: str = command,
             execution_cwd: str = cwd,
         ) -> Dict[str, Any]:
+            started_at_ms = int(time.time() * 1000)
+            user_part_id = Identifier.create("part")
             user_msg = await Message.create(
                 session_id=session_id,
                 role=MessageRole.USER,
                 content="The following tool was executed by the user",
                 agent=agent,
+                time={"created": started_at_ms},
+                part_id=user_part_id,
             )
 
+            assistant_part_id = Identifier.create("part")
             assistant_msg = await Message.create(
                 session_id=session_id,
                 role=MessageRole.ASSISTANT,
                 content="",
                 agent=agent,
                 parent_id=user_msg.id,
+                providerID="builtin",
+                modelID="shell",
+                mode=agent,
+                path={"cwd": execution_cwd, "root": execution_cwd},
+                time={"created": started_at_ms},
+                part_id=assistant_part_id,
             )
+
+            call_id = Identifier.create("call")
+            tool_part_id = Identifier.create("part")
+            tool_input = {
+                "command": execution_command,
+                "workdir": execution_cwd,
+            }
+            running_part = ToolPart(
+                id=tool_part_id,
+                messageID=assistant_msg.id,
+                sessionID=session_id,
+                callID=call_id,
+                tool="bash",
+                metadata=None,
+                state=ToolStateRunning(
+                    input=tool_input,
+                    title="Shell",
+                    metadata={},
+                    time={"start": started_at_ms},
+                ),
+            )
+            await Message.store_part(session_id, assistant_msg.id, running_part)
+
+            await _publish("message.updated", {
+                "info": user_msg.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.part.updated", {
+                "part": {
+                    "id": user_part_id,
+                    "messageID": user_msg.id,
+                    "sessionID": session_id,
+                    "type": "text",
+                    "text": "The following tool was executed by the user",
+                    "time": {"start": started_at_ms},
+                },
+            })
+            await _publish("message.updated", {
+                "info": assistant_msg.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.part.updated", {
+                "part": running_part.model_dump(mode="json", by_alias=True),
+            })
 
             start_time = asyncio.get_event_loop().time()
             try:
@@ -1196,6 +1272,7 @@ class SessionRunner:
                 exit_code = -1
 
             end_time = asyncio.get_event_loop().time()
+            finished_at_ms = int(time.time() * 1000)
 
             log.info("runner.shell", {
                 "session_id": session_id,
@@ -1204,25 +1281,48 @@ class SessionRunner:
                 "duration_ms": int((end_time - start_time) * 1000),
             })
 
+            completed_part = ToolPart(
+                id=tool_part_id,
+                messageID=assistant_msg.id,
+                sessionID=session_id,
+                callID=call_id,
+                tool="bash",
+                metadata=None,
+                state=ToolStateCompleted(
+                    input=tool_input,
+                    output=output,
+                    title="Shell",
+                    metadata={"exitCode": exit_code},
+                    time={"start": started_at_ms, "end": finished_at_ms},
+                    attachments=None,
+                ),
+            )
+            stored_part = await Message.store_part(
+                session_id,
+                assistant_msg.id,
+                completed_part,
+            )
+            updated_assistant = await Message.update(
+                session_id,
+                assistant_msg.id,
+                finish="stop",
+                time={"completed": finished_at_ms},
+            )
+            if updated_assistant is None:
+                raise RuntimeError(
+                    f"Failed to finalize shell message {assistant_msg.id}"
+                )
+
+            await _publish("message.part.updated", {
+                "part": stored_part.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.updated", {
+                "info": updated_assistant.model_dump(mode="json", by_alias=True),
+            })
+
             return {
-                "info": {
-                    "id": assistant_msg.id,
-                    "sessionID": session_id,
-                    "role": "assistant",
-                    "agent": agent,
-                },
-                "parts": [{
-                    "id": Identifier.create("part"),
-                    "messageID": assistant_msg.id,
-                    "sessionID": session_id,
-                    "type": "tool",
-                    "tool": "bash",
-                    "state": {
-                        "status": "completed",
-                        "input": {"command": execution_command},
-                        "output": output,
-                    },
-                }],
+                "info": updated_assistant.model_dump(mode="json", by_alias=True),
+                "parts": [stored_part.model_dump(mode="json", by_alias=True)],
             }
 
         from flocks.session.tool_execution import (

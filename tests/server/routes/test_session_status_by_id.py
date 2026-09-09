@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import pytest
 from fastapi import status
@@ -119,6 +121,110 @@ async def test_prompt_async_is_observable_as_queued_before_background_loop(
     assert status_response.status_code == status.HTTP_200_OK
     assert status_response.json()["status"] == {"type": "queued"}
     assert status_response.json()["isProcessing"] is True
+
+
+@pytest.mark.asyncio
+async def test_shell_is_busy_while_active_and_idle_after_completion(
+    client,
+    session_id: str,
+    monkeypatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _hold_shell(**_kwargs):
+        started.set()
+        await release.wait()
+        return {"info": {"id": "msg_shell"}, "parts": []}
+
+    monkeypatch.setattr(
+        "flocks.session.runner.SessionRunner.shell",
+        _hold_shell,
+    )
+
+    shell_request = asyncio.create_task(
+        client.post(
+            f"/api/session/{session_id}/shell",
+            json={"agent": "rex", "command": "printf done"},
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    try:
+        running_response = await client.get(f"/api/session/{session_id}/status")
+    finally:
+        release.set()
+
+    shell_response = await asyncio.wait_for(shell_request, timeout=1)
+    completed_response = await client.get(f"/api/session/{session_id}/status")
+
+    assert running_response.status_code == status.HTTP_200_OK
+    assert running_response.json()["status"] == {"type": "busy"}
+    assert running_response.json()["isProcessing"] is True
+    assert running_response.json()["pendingPromptCount"] == 0
+    assert shell_response.status_code == status.HTTP_200_OK
+    assert completed_response.status_code == status.HTTP_200_OK
+    assert completed_response.json()["status"] == {"type": "idle"}
+    assert completed_response.json()["isProcessing"] is False
+    assert completed_response.json()["pendingPromptCount"] == 0
+    assert not session_routes.Session.has_active_operations(session_id)
+
+
+@pytest.mark.asyncio
+async def test_shell_response_is_available_after_message_cache_reload(
+    client,
+    session_id: str,
+    monkeypatch,
+) -> None:
+    from flocks.session.message import Message
+
+    process = SimpleNamespace(
+        communicate=lambda: asyncio.sleep(
+            0,
+            result=(b"PR741_SHELL_PERSISTENCE_OK", b""),
+        ),
+        returncode=0,
+    )
+
+    async def _create_subprocess(*_args, **_kwargs):
+        return process
+
+    async def _run_lifecycle(_payload, effect, **_kwargs):
+        return await effect()
+
+    monkeypatch.setattr(
+        "flocks.session.runner.asyncio.create_subprocess_shell",
+        _create_subprocess,
+    )
+    monkeypatch.setattr(
+        "flocks.session.tool_execution.run_tool_execution_lifecycle",
+        _run_lifecycle,
+    )
+
+    shell_response = await client.post(
+        f"/api/session/{session_id}/shell",
+        json={"agent": "rex", "command": "printf PR741_SHELL_PERSISTENCE_OK"},
+    )
+    assert shell_response.status_code == status.HTTP_200_OK
+    assistant_id = shell_response.json()["info"]["id"]
+
+    Message.invalidate_cache(session_id)
+    history_response = await client.get(f"/api/session/{session_id}/message")
+
+    assert history_response.status_code == status.HTTP_200_OK
+    assistant = next(
+        item
+        for item in history_response.json()
+        if item["info"]["id"] == assistant_id
+    )
+    assert assistant["info"]["finish"] == "stop"
+    tool_part = next(part for part in assistant["parts"] if part["type"] == "tool")
+    assert tool_part["tool"] == "bash"
+    assert tool_part["state"]["status"] == "completed"
+    assert tool_part["state"]["input"]["command"] == (
+        "printf PR741_SHELL_PERSISTENCE_OK"
+    )
+    assert tool_part["state"]["output"] == "PR741_SHELL_PERSISTENCE_OK"
 
 
 @pytest.mark.asyncio
