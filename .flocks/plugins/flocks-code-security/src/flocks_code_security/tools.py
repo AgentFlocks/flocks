@@ -2949,7 +2949,7 @@ def register_tools() -> None:
                     "properties": {
                         "path": {"type": "string", "minLength": 1, "maxLength": 256},
                         "encoding": {"type": "string", "enum": ["utf8", "hex", "base64"]},
-                        "data": {"type": "string", "minLength": 1, "maxLength": 180_000},
+                        "data": {"type": "string", "minLength": 1, "maxLength": 262_144},
                     },
                 },
             },

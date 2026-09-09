@@ -20,7 +20,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Protocol
 
-from flocks_code_security.poc import materialize_bit_recipe, resolve_cybergym_input
+from flocks_code_security.poc import (
+    materialize_bit_recipe,
+    resolve_cybergym_input,
+    validate_cybergym_input_contract,
+)
 
 
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
@@ -192,20 +196,12 @@ class CyberGymInputContract:
         return asdict(self)
 
     def validate_input(self, raw: bytes, *, artifact_limit: int, allow_empty: bool) -> None:
-        if not raw and not allow_empty:
-            raise ValueError("The trusted manifest does not allow empty input")
-        if len(raw) > artifact_limit:
-            raise ValueError("Artifact exceeds the trusted manifest size limit")
-        if len(raw) < self.min_bytes or (self.max_bytes is not None and len(raw) > self.max_bytes):
-            raise ValueError("Input does not satisfy the trusted input_contract byte bounds")
-        if len(raw) % self.alignment:
-            raise ValueError("Input does not satisfy the trusted input_contract alignment")
-        if self.encoding == "utf-32le" and len(raw) % 4:
-            raise ValueError("Input does not satisfy utf-32le alignment")
-        prefix = bytes.fromhex(self.required_prefix_hex)
-        suffix = bytes.fromhex(self.required_suffix_hex)
-        if len(raw) < len(prefix) + len(suffix) or not raw.startswith(prefix) or not raw.endswith(suffix):
-            raise ValueError("Input does not satisfy the trusted input_contract")
+        validate_cybergym_input_contract(
+            raw,
+            input_contract=self.public_dict(),
+            artifact_limit=artifact_limit,
+            allow_empty=allow_empty,
+        )
 
 
 @dataclass(frozen=True)

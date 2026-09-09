@@ -69,6 +69,7 @@ def require_cybergym_submission_input(
     bundle: Any,
     *,
     max_bytes: int,
+    input_contract: Any,
 ) -> tuple[bytes, str]:
     """Validate a PoC that can be sent to CyberGym without materialization.
 
@@ -93,7 +94,75 @@ def require_cybergym_submission_input(
         raise ValueError("CyberGym PoC entrypoint must identify its raw input")
     if type(max_bytes) is not int or not 1 <= len(raw) <= max_bytes:
         raise ValueError("CyberGym PoC input exceeds the trusted task byte limit")
+    if input_contract is not None:
+        validate_cybergym_input_contract(
+            raw,
+            input_contract=input_contract,
+            artifact_limit=max_bytes,
+            allow_empty=False,
+        )
     return raw, path
+
+
+def validate_cybergym_input_contract(
+    raw: bytes,
+    *,
+    input_contract: Any,
+    artifact_limit: int,
+    allow_empty: bool,
+) -> None:
+    """Validate bytes against the trusted CyberGym input contract."""
+    if not isinstance(input_contract, dict):
+        raise ValueError("input_contract must be an object")
+    allowed_fields = {
+        "required_prefix_hex",
+        "required_suffix_hex",
+        "min_bytes",
+        "max_bytes",
+        "alignment",
+        "encoding",
+    }
+    if set(input_contract) - allowed_fields:
+        raise ValueError("input_contract contains unknown fields")
+    prefix_hex = input_contract.get("required_prefix_hex", "")
+    suffix_hex = input_contract.get("required_suffix_hex", "")
+    if (
+        not isinstance(prefix_hex, str)
+        or not isinstance(suffix_hex, str)
+        or len(prefix_hex) > 4_096
+        or len(suffix_hex) > 4_096
+    ):
+        raise ValueError("input_contract hex fields are invalid")
+    try:
+        prefix = bytes.fromhex(prefix_hex)
+        suffix = bytes.fromhex(suffix_hex)
+    except ValueError as exc:
+        raise ValueError("input_contract contains invalid hexadecimal bytes") from exc
+    min_bytes = input_contract.get("min_bytes", 0)
+    max_bytes = input_contract.get("max_bytes")
+    alignment = input_contract.get("alignment", 1)
+    encoding = input_contract.get("encoding", "raw")
+    if (
+        type(artifact_limit) is not int
+        or type(min_bytes) is not int
+        or (max_bytes is not None and type(max_bytes) is not int)
+        or min_bytes < 0
+        or (max_bytes is not None and max_bytes < min_bytes)
+        or type(alignment) is not int
+        or not 1 <= alignment <= 4_096
+        or encoding not in {"raw", "utf-32le"}
+    ):
+        raise ValueError("input_contract is invalid")
+    if not raw and not allow_empty:
+        raise ValueError("The trusted manifest does not allow empty input")
+    if len(raw) > artifact_limit:
+        raise ValueError("Artifact exceeds the trusted manifest size limit")
+    if len(raw) < min_bytes or (max_bytes is not None and len(raw) > max_bytes):
+        raise ValueError("Input does not satisfy the trusted input_contract byte bounds")
+    if len(raw) % alignment or (encoding == "utf-32le" and len(raw) % 4):
+        raise ValueError("Input does not satisfy the trusted input_contract alignment")
+    if len(raw) < len(prefix) + len(suffix) or not raw.startswith(prefix) or not raw.endswith(suffix):
+        raise ValueError("Input does not satisfy the trusted input_contract")
 
 
 def materialize_bit_recipe(raw: bytes, recipe: Any, *, max_bytes: int) -> bytes:

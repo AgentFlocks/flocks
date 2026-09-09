@@ -18,10 +18,10 @@ from flocks_code_security.cybergym_runtime import (
     _execution_status,
     _run_official_worker,
 )
-from flocks_code_security.models import SnapshotRef
+from flocks_code_security.models import SessionBinding, SnapshotRef
 from flocks_code_security.poc import require_cybergym_submission_input, resolve_cybergym_input
 from flocks_code_security.runtime import build_runtime
-from flocks_code_security.store import ScanStore
+from flocks_code_security.store import MAX_POC_FILE_BYTES, ScanStore, _cybergym_poc_input_limit
 
 
 def _manifest(*, fuzzer_supported: bool = True) -> dict:
@@ -189,11 +189,103 @@ def test_cybergym_submission_input_is_one_bounded_literal_raw_file() -> None:
         "delivery": {"input_kind": "literal", "input_path": "seed.bin"},
     }
 
-    assert require_cybergym_submission_input(bundle, max_bytes=4) == (b"seed", "seed.bin")
+    assert require_cybergym_submission_input(
+        bundle,
+        max_bytes=4,
+        input_contract={"required_suffix_hex": "6564"},
+    ) == (b"seed", "seed.bin")
 
     bundle["artifact_type"] = "bundle"
     with pytest.raises(ValueError, match="artifact_type=raw_input"):
-        require_cybergym_submission_input(bundle, max_bytes=4)
+        require_cybergym_submission_input(
+            bundle,
+            max_bytes=4,
+            input_contract={},
+        )
+
+
+def test_cybergym_submission_input_rejects_a_dynamic_contract_violation() -> None:
+    bundle = {
+        "artifact_type": "raw_input",
+        "entrypoint": "seed.bin",
+        "files": [{"path": "seed.bin", "encoding": "hex", "data": "41424344"}],
+        "delivery": {"input_kind": "literal", "input_path": "seed.bin"},
+    }
+
+    with pytest.raises(ValueError, match="input_contract"):
+        require_cybergym_submission_input(
+            bundle,
+            max_bytes=4,
+            input_contract={"required_suffix_hex": "01000000"},
+        )
+
+
+def test_cybergym_submission_without_an_input_contract_remains_valid() -> None:
+    bundle = {
+        "artifact_type": "raw_input",
+        "entrypoint": "seed.bin",
+        "files": [{"path": "seed.bin", "encoding": "utf8", "data": "seed"}],
+        "delivery": {"input_kind": "literal", "input_path": "seed.bin"},
+    }
+
+    assert require_cybergym_submission_input(
+        bundle,
+        max_bytes=4,
+        input_contract=None,
+    ) == (b"seed", "seed.bin")
+
+
+def test_cybergym_poc_input_limit_matches_storage_and_task_limits() -> None:
+    manifest = {
+        "limits": {"max_artifact_bytes": MAX_POC_FILE_BYTES * 2},
+        "input_contract": {"max_bytes": MAX_POC_FILE_BYTES * 2},
+    }
+    assert _cybergym_poc_input_limit(manifest) == MAX_POC_FILE_BYTES
+
+    manifest["input_contract"] = {"max_bytes": 64}
+    assert _cybergym_poc_input_limit(manifest) == 64
+
+    manifest["input_contract"] = None
+    assert _cybergym_poc_input_limit(manifest) == MAX_POC_FILE_BYTES
+
+
+def test_store_rejects_a_poc_that_violates_the_persisted_input_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest()
+    manifest["input_contract"] = {"required_suffix_hex": "01000000"}
+    store, scan_id = _store(tmp_path, manifest)
+    with store._lock, store._connect() as connection:
+        connection.execute("UPDATE scans SET poc_enabled = 1 WHERE scan_id = ?", (scan_id,))
+    monkeypatch.setattr(store, "require_repository_summary_consumed", lambda binding: None)
+    binding = SessionBinding(
+        session_id="worker-session",
+        scan_id=scan_id,
+        work_unit_id="unit-unneeded-after-contract-check",
+        snapshot_id="snapshot_cybergym",
+        role="poc_generator",
+        attempt_id="attempt-unneeded-after-contract-check",
+    )
+    bundle = {
+        "candidate_id": "candidate_1",
+        "artifact_type": "raw_input",
+        "entrypoint": "seed.bin",
+        "files": [{"path": "seed.bin", "encoding": "utf8", "data": "ABCD"}],
+        "delivery": {"input_kind": "literal", "input_path": "seed.bin"},
+        "source_refs": [
+            {
+                "relative_path": "src/fixture.c",
+                "blob_digest": "a" * 64,
+                "start_line": 1,
+                "end_line": 1,
+            }
+        ],
+        "rationale": "The persisted task contract must validate generator output.",
+    }
+
+    with pytest.raises(ValueError, match="input_contract"):
+        store.save_poc_bundle(binding, bundle)
 
 
 def test_manifest_rejects_root_mount_and_persists_only_valid_tasks(tmp_path: Path) -> None:

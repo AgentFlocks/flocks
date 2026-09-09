@@ -78,6 +78,27 @@ DYNAMIC_EXECUTION_CATEGORIES = (
     "template-injection",
     "unsafe-deserialization",
 )
+
+
+def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
+    """Return the byte limit that both PoC storage and CyberGym can accept."""
+    limits = manifest.get("limits")
+    contract = manifest.get("input_contract")
+    if not isinstance(limits, dict) or (contract is not None and not isinstance(contract, dict)):
+        raise ValueError("CyberGym task manifest is invalid")
+    artifact_limit = limits.get("max_artifact_bytes")
+    contract_limit = contract.get("max_bytes") if contract is not None else None
+    if type(artifact_limit) is not int or artifact_limit < 1:
+        raise ValueError("CyberGym task artifact limit is invalid")
+    if contract_limit is not None and (type(contract_limit) is not int or contract_limit < 0):
+        raise ValueError("CyberGym task input contract limit is invalid")
+    return min(
+        MAX_POC_FILE_BYTES,
+        artifact_limit,
+        artifact_limit if contract_limit is None else contract_limit,
+    )
+
+
 # Bump this whenever initialize() adds or changes schema migrations.
 STORE_SCHEMA_VERSION = 8
 SQLITE_BUSY_TIMEOUT_MS = 120_000
@@ -2796,13 +2817,14 @@ class ScanStore:
             ).fetchone()
             if cybergym is not None:
                 cybergym_manifest = json.loads(cybergym["manifest_json"])
+                max_bytes = _cybergym_poc_input_limit(cybergym_manifest)
                 execution_manifest["cybergym"] = cybergym_manifest
                 execution_manifest["cybergym_poc_contract"] = {
                     "artifact_type": "raw_input",
                     "file_count": 1,
                     "entrypoint_matches_input_path": True,
                     "input_kind": "literal",
-                    "max_bytes": cybergym_manifest["limits"]["max_artifact_bytes"],
+                    "max_bytes": max_bytes,
                     "dynamic_phase": "replay, vul/fix confirmation, and bounded refinement",
                 }
             output = {
@@ -2938,9 +2960,11 @@ class ScanStore:
                 if cybergym is None:
                     raise ValueError("CyberGym task is missing from this scan")
                 manifest = json.loads(cybergym["manifest_json"])
+                max_bytes = _cybergym_poc_input_limit(manifest)
                 require_cybergym_submission_input(
                     bundle,
-                    max_bytes=manifest.get("limits", {}).get("max_artifact_bytes"),
+                    max_bytes=max_bytes,
+                    input_contract=manifest.get("input_contract"),
                 )
             self._require_active_worker_binding(connection, binding)
             assignment = connection.execute(
