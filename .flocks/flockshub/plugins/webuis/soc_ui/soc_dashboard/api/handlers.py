@@ -32,6 +32,7 @@ ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
+WORKFLOW_METRIC_HISTORY_SCHEMA_VERSION = 3
 WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION = 4
 TASK_DB = Path.home() / ".flocks" / "data" / "tasks.db"
 USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
@@ -1034,16 +1035,16 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             ).fetchone()
             if meta is None:
                 return None
-            verified_row = conn.execute(
+            history_row = conn.execute(
                 "SELECT MIN(bucket_start) FROM workflow_metric_rollups "
                 "WHERE workflow_id = ? AND schema_version >= ?",
-                (workflow_name, WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION),
+                (workflow_name, WORKFLOW_METRIC_HISTORY_SCHEMA_VERSION),
             ).fetchone()
-            verified_started_at = _safe_int(verified_row[0] if verified_row else 0)
-            if verified_started_at <= 0:
-                # Rows from older schemas may contain false zero ingress
-                # counts. Keep them out of the exact path until a v4
-                # contribution establishes coverage under the current contract.
+            history_started_at = _safe_int(history_row[0] if history_row else 0)
+            if history_started_at <= 0:
+                # v1/v2 rows predate input/output reconciliation. v3 remains
+                # usable as processed-history data, while v4 is the current
+                # independently counted contract.
                 return None
             earliest_execution_ms = 0
             if _table_exists(conn, "workflow_executions"):
@@ -1058,7 +1059,7 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
                 "SELECT * FROM workflow_metric_rollups "
                 "WHERE workflow_id = ? AND schema_version >= ?"
             )
-            query_params = [workflow_name, WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION]
+            query_params = [workflow_name, WORKFLOW_METRIC_HISTORY_SCHEMA_VERSION]
             if start_ms > 0 and end_ms > 0:
                 query += " AND bucket_start >= ? AND bucket_start <= ?"
                 query_params.extend((start_ms - (start_ms % 60000), end_ms))
@@ -1068,6 +1069,18 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
         return None
 
     result = _empty_workflow_denoise_stats()
+    current_rows = [
+        row
+        for row in rows
+        if _safe_int(row["schema_version"]) >= WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION
+    ]
+    legacy_rows = [
+        row
+        for row in rows
+        if WORKFLOW_METRIC_HISTORY_SCHEMA_VERSION
+        <= _safe_int(row["schema_version"])
+        < WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION
+    ]
     source_counts = Counter()
     for row in rows:
         parsed_sources = _safe_json_object(row["source_counts"])
@@ -1081,12 +1094,22 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
     filter_removed_count = sum(max(_safe_int(row["filter_removed_count"]), 0) for row in rows)
     duplicate_count = sum(max(_safe_int(row["duplicate_count"]), 0) for row in rows)
     success_count = sum(max(_safe_int(row["success_count"]), 0) for row in rows)
-    error_count = sum(max(_safe_int(row["error_count"]), 0) for row in rows)
-    invalid_count = sum(max(_safe_int(row["invalid_count"]), 0) for row in rows)
+    total_error_count = sum(max(_safe_int(row["error_count"]), 0) for row in rows)
+    error_count = sum(max(_safe_int(row["error_count"]), 0) for row in current_rows)
+    invalid_count = sum(max(_safe_int(row["invalid_count"]), 0) for row in current_rows)
+    historical_error_count = max(total_error_count - error_count, 0)
+    historical_unprocessed_count = sum(
+        max(_safe_int(row["raw_count"]), 0)
+        - min(
+            max(_safe_int(row["raw_count"]), 0),
+            max(_safe_int(row["normalized_count"]), 0),
+        )
+        for row in legacy_rows
+    )
     source_covered_count = sum(max(_safe_int(row["source_covered_count"]), 0) for row in rows)
     coverage_started_at = max(
         _safe_int(meta["coverage_started_at"]),
-        verified_started_at,
+        history_started_at,
         0,
     )
     requested_start_ms = start_ms or earliest_execution_ms
@@ -1099,7 +1122,10 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
     metrics_complete = invalid_count == 0 and error_count == 0
     quality = (
         "complete"
-        if complete_window and metrics_complete and source_complete
+        if complete_window
+        and metrics_complete
+        and source_complete
+        and not legacy_rows
         else "partial"
     )
 
@@ -1120,7 +1146,7 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
 
     result.update(
         {
-            "callCount": success_count + error_count,
+            "callCount": success_count + total_error_count,
             "successCount": success_count,
             "errorCount": error_count,
             "earliestStartedAt": first_bucket,
@@ -1131,8 +1157,10 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             "uniqueCount": unique_count,
             "filterRemovedCount": filter_removed_count,
             "duplicateCount": duplicate_count,
-            "reducedCount": max(raw_count - unique_count, 0),
-            "reductionRate": _ratio(max(raw_count - unique_count, 0), raw_count),
+            "reducedCount": filter_removed_count + duplicate_count,
+            "reductionRate": _ratio(
+                filter_removed_count + duplicate_count, raw_count
+            ),
             "dedupRate": _ratio(duplicate_count, after_filter_count),
             "sourceCounts": dict(source_counts),
             "seriesRaw": series_raw,
@@ -1149,8 +1177,19 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             # from coverage while still contributing to the raw total.
             "sourceCoverageRate": _ratio(min(source_covered_count, raw_count), raw_count),
             "invalidExecutionCount": invalid_count,
-            "unprocessedInputCount": max(raw_count - normalized_count, 0),
-            "dataSource": "workflow.db.workflow_metric_rollups",
+            "unprocessedInputCount": sum(
+                max(_safe_int(row["raw_count"]), 0)
+                - min(
+                    max(_safe_int(row["raw_count"]), 0),
+                    max(_safe_int(row["normalized_count"]), 0),
+                )
+                for row in current_rows
+            ),
+            "historicalErrorCount": historical_error_count,
+            "historicalUnprocessedInputCount": historical_unprocessed_count,
+            "includesLegacyHistory": bool(legacy_rows),
+            "legacyBucketCount": len(legacy_rows),
+            "dataSource": "workflow.db.workflow_metric_rollups.v3+",
         }
     )
     return result
@@ -1178,10 +1217,9 @@ def _get_workflow_denoise_stats(
             return cached["value"]
 
     rollup_result = _get_workflow_metric_rollups(workflow_name, start_time, end_time)
-    # A v4 rollup is authoritative for the interval in which it exists even
-    # when its quality flags report an incomplete or invalid interval. Return
-    # that result with its explicit scope/quality metadata instead of replacing
-    # it with legacy call counts; the page decides which values may be shown.
+    # v3 processed-history and v4 current-contract rollups are authoritative
+    # for the stage counts they persisted. Return their explicit scope/quality
+    # metadata instead of replacing them with synthetic call counts.
     if rollup_result is not None:
         with _cache_lock:
             _workflow_stats_cache[cache_key] = {"updatedAt": now, "value": rollup_result}
@@ -3140,6 +3178,7 @@ def _get_stats(params):
         force=force_refresh,
     )
     denoise = _read_denoise(denoise_files, workflow_stats.get("callCount") or 0)
+    persisted_source_counter = Counter(denoise.get("sourceCounter") or {})
     soc_unique_count = denoise["totalUnique"]
     soc_unique_series = denoise["seriesUnique"]
     timeline_labels = workflow_stats["timelineLabels"] or denoise.get("_timelineLabels", [])
@@ -3168,8 +3207,37 @@ def _get_stats(params):
         workflow_series_unique = soc_unique_series
     if not workflow_series_raw and workflow_series_unique:
         workflow_series_raw = [0] * len(workflow_series_unique)
-    reduced_count = max(processed_total - unique_total, 0)
+    # Parsing/normalization failures are not successful noise reduction.
+    # Only verified filter and dedup removals contribute to the denoise rate.
+    reduced_count = filter_removed_count + duplicate_count
     reduction_rate = _ratio(reduced_count, processed_total)
+    workflow_source_counter = Counter(workflow_stats.get("sourceCounts") or {})
+    workflow_source_metrics_available = bool(
+        workflow_stats.get("sourceMetricsAvailable")
+    )
+    legacy_call_count_source = (
+        workflow_stats.get("dataSource") == "workflow.db.workflow_stats.call_count"
+        and any(workflow_source_counter.values())
+    )
+    if workflow_source_metrics_available or legacy_call_count_source:
+        source_counter = workflow_source_counter
+        source_metrics_available = True
+        source_coverage_rate = workflow_stats.get("sourceCoverageRate", 0)
+        source_metric_data_source = "workflow.db.workflow_metric_rollups"
+    elif triage_quality.get("dataAvailable"):
+        # Source is an independently persisted SOC fact dimension. It remains
+        # authoritative for source cards even when old workflow rollups did
+        # not carry normalize_type_counts. Do not blank valid NDR/HIDS values
+        # merely because the transport metric lacks that optional dimension.
+        source_counter = persisted_source_counter
+        source_metrics_available = True
+        source_coverage_rate = 1
+        source_metric_data_source = "soc.db.soc_dashboard_alert_facts"
+    else:
+        source_counter = Counter()
+        source_metrics_available = False
+        source_coverage_rate = workflow_stats.get("sourceCoverageRate", 0)
+        source_metric_data_source = "unavailable"
     denoise.update(
         {
             "totalRaw": processed_total,
@@ -3183,7 +3251,7 @@ def _get_stats(params):
             "dedupRate": _ratio(duplicate_count, after_filter_total),
             "uniqueRate": _ratio(min(unique_total, processed_total), processed_total),
             "files": workflow_stats.get("callCount"),
-            "sourceCounter": Counter(workflow_stats["sourceCounts"]),
+            "sourceCounter": source_counter,
             "seriesRaw": workflow_series_raw,
             "seriesUnique": workflow_series_unique,
             "_timelineLabels": timeline_labels,
@@ -3289,11 +3357,19 @@ def _get_stats(params):
                 "unavailableReason": workflow_stats.get("unavailableReason", ""),
                 "coverageComplete": workflow_stats.get("coverageComplete", False),
                 "coverageStartedAt": workflow_stats.get("coverageStartedAt", 0),
-                "sourceCoverageRate": workflow_stats.get("sourceCoverageRate", 0),
-                "sourceMetricsAvailable": workflow_stats.get("sourceMetricsAvailable", False),
+                "sourceCoverageRate": source_coverage_rate,
+                "sourceMetricsAvailable": source_metrics_available,
+                "sourceMetricDataSource": source_metric_data_source,
                 "invalidExecutionCount": workflow_stats.get("invalidExecutionCount", 0),
                 "unprocessedInputCount": workflow_stats.get("unprocessedInputCount", 0),
                 "errorExecutionCount": workflow_stats.get("errorCount", 0),
+                "historicalErrorCount": workflow_stats.get("historicalErrorCount", 0),
+                "historicalUnprocessedInputCount": workflow_stats.get(
+                    "historicalUnprocessedInputCount", 0
+                ),
+                "includesLegacyHistory": workflow_stats.get(
+                    "includesLegacyHistory", False
+                ),
                 "metricsAvailable": metrics_available,
             },
             "sampleMode": sample_mode,

@@ -150,6 +150,7 @@ describe('SOC dashboard contract page runtime', () => {
                 sourceMetricsAvailable: false,
                 coverageComplete: false,
                 coverageStartedAt: Date.now() - 60_000,
+                includesLegacyHistory: true,
                 invalidExecutionCount: 0,
                 errorExecutionCount: 0,
                 unprocessedInputCount: 0,
@@ -177,7 +178,7 @@ describe('SOC dashboard contract page runtime', () => {
     await waitFor(() => {
       expect(rawMetric.querySelector('.command-metric-value')).toHaveAttribute('title', '10');
     });
-    expect(within(rawMetric).getByText(/精确采集自 .* · 4 条进入研判/)).toBeInTheDocument();
+    expect(within(rawMetric).getByText(/历史统计始于 .* · 4 条进入研判/)).toBeInTheDocument();
     expect(screen.queryByText(/精确降噪指标尚未覆盖当前时间范围/)).not.toBeInTheDocument();
     expect(screen.queryByText(/降噪指标部分可用/)).not.toBeInTheDocument();
   });

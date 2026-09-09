@@ -2049,7 +2049,7 @@ function CommandMetrics({ stats }) {
   const coverageScope = metricQuality.metricsAvailable
     && metricQuality.coverageComplete === false
     && metricQuality.coverageStartedAt
-    ? `精确采集自 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
+    ? `${metricQuality.includesLegacyHistory ? '历史统计始于' : '精确采集自'} ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
     : '';
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: coverageScope ? `${coverageScope} · ${compactNumber(stats.denoise.totalUnique)} 条进入研判` : `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),

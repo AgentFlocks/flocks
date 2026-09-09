@@ -1339,6 +1339,157 @@ def test_soc_dashboard_reads_persisted_denoise_metric_rollups(tmp_path: Path):
     assert sum(stats["seriesUnique"]) == 4
 
 
+def test_soc_dashboard_merges_v3_history_without_legacy_errors_hiding_metrics(
+    tmp_path: Path,
+):
+    workflow_db = tmp_path / "workflow.db"
+    start_time = 1_800_000
+    end_time = start_time + 3600
+    start_ms = start_time * 1000
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            "CREATE TABLE workflow_metric_meta "
+            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_metric_rollups (
+                workflow_id TEXT, bucket_start INTEGER, raw_count INTEGER,
+                normalized_count INTEGER, after_filter_count INTEGER, unique_count INTEGER,
+                filter_removed_count INTEGER, duplicate_count INTEGER, source_counts TEXT,
+                source_covered_count INTEGER, success_count INTEGER, error_count INTEGER,
+                invalid_count INTEGER, schema_version INTEGER, updated_at INTEGER,
+                PRIMARY KEY (workflow_id, bucket_start)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
+            ("stream_alert_denoise", start_ms, start_ms + 60_000),
+        )
+        conn.executemany(
+            "INSERT INTO workflow_metric_rollups VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "stream_alert_denoise", start_ms, 10, 9, 7, 4, 2, 3,
+                    "{}", 0, 100, 15, 0, 3, start_ms,
+                ),
+                (
+                    "stream_alert_denoise", start_ms + 60_000, 2, 2, 2, 1, 0, 1,
+                    '{"tdp": 2}', 2, 2, 0, 0, 4, start_ms + 60_000,
+                ),
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = workflow_db
+
+    stats = handlers._get_workflow_denoise_stats(
+        "stream_alert_denoise", start_time, end_time, force=True
+    )
+
+    assert stats["metricsAvailable"] is True
+    assert stats["dataQuality"] == "partial"
+    assert stats["rawCount"] == 12
+    assert stats["normalizedCount"] == 11
+    assert stats["uniqueCount"] == 5
+    assert stats["callCount"] == 117
+    assert stats["reducedCount"] == 6
+    assert stats["reductionRate"] == 0.5
+    assert stats["errorCount"] == 0
+    assert stats["historicalErrorCount"] == 15
+    assert stats["unprocessedInputCount"] == 0
+    assert stats["historicalUnprocessedInputCount"] == 1
+    assert stats["includesLegacyHistory"] is True
+    assert stats["legacyBucketCount"] == 1
+    assert sum(stats["seriesRaw"]) == 12
+    assert sum(stats["seriesUnique"]) == 5
+
+
+def test_soc_dashboard_uses_soc_facts_when_rollups_lack_source_dimension(
+    tmp_path: Path,
+):
+    soc_db = tmp_path / "soc.db"
+    event_time = int(datetime(2026, 9, 7, 12, 0).timestamp())
+    with sqlite3.connect(soc_db) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, record_json TEXT NOT NULL, "
+            "asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (
+                json.dumps(
+                    {
+                        "id": "alert-1",
+                        "_source_type": "tdp",
+                        "sip": "192.0.2.10",
+                        "dip": "198.51.100.20",
+                    }
+                ),
+                "2026-09-07",
+                event_time,
+            ),
+        )
+        conn.commit()
+
+    workflow_db = tmp_path / "workflow.db"
+    bucket_ms = event_time * 1000
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            "CREATE TABLE workflow_metric_meta "
+            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE workflow_metric_rollups ("
+            "workflow_id TEXT, bucket_start INTEGER, raw_count INTEGER, "
+            "normalized_count INTEGER, after_filter_count INTEGER, unique_count INTEGER, "
+            "filter_removed_count INTEGER, duplicate_count INTEGER, source_counts TEXT, "
+            "source_covered_count INTEGER, success_count INTEGER, error_count INTEGER, "
+            "invalid_count INTEGER, schema_version INTEGER, updated_at INTEGER, "
+            "PRIMARY KEY (workflow_id, bucket_start))"
+        )
+        conn.execute(
+            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
+            ("stream_alert_denoise", bucket_ms, bucket_ms),
+        )
+        conn.execute(
+            "INSERT INTO workflow_metric_rollups VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "stream_alert_denoise", bucket_ms, 2, 2, 1, 1, 1, 0,
+                "{}", 0, 2, 0, 0, 4, bucket_ms,
+            ),
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = soc_db
+    handlers.WORKFLOW_DB = workflow_db
+    handlers.USAGE_DB = tmp_path / "missing-usage.db"
+    handlers._schema_ready.clear()
+    handlers._stats_response_cache.clear()
+    handlers._workflow_stats_cache.clear()
+
+    stats = handlers._get_stats(
+        {
+            "startTime": str(event_time - 60),
+            "endTime": str(event_time + 60),
+            "force": "true",
+        }
+    )
+
+    sources = {item["key"]: item["value"] for item in stats["sources"]}
+    quality = stats["sourceStatus"]["metricQuality"]
+    assert sources["ndr"] == 1
+    assert sources["edr"] == 0
+    assert quality["sourceMetricsAvailable"] is True
+    assert quality["sourceMetricDataSource"] == "soc.db.soc_dashboard_alert_facts"
+
+
 def test_soc_dashboard_separates_core_metric_and_source_coverage_quality(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
     start_time = 1_800_000
