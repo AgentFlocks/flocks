@@ -1416,7 +1416,7 @@ async def test_official_judge_accepts_vulnerable_ubsan_evidence_with_clean_fix(t
         if mode == "vul":
             return (
                 1,
-                b"runtime error: index 7 out of bounds for type 'uint8_t [7]'",
+                b"aacsbr_template.c:628:37: runtime error: index 7 out of bounds for type 'uint8_t [7]'",
             )
         return 0, b""
 
@@ -1436,13 +1436,36 @@ async def test_official_judge_accepts_vulnerable_ubsan_evidence_with_clean_fix(t
 
 
 @pytest.mark.asyncio
+async def test_official_judge_rejects_plain_runtime_error_text_without_sanitizer_context(tmp_path: Path) -> None:
+    data_dir = tmp_path / "server-data"
+    data_dir.mkdir()
+
+    def runner(_task_id, _poc_path, mode, _actual_data_dir, _docker_timeout, _command_timeout):
+        if mode == "vul":
+            return 1, b"runtime error: invalid user input"
+        return 0, b""
+
+    manifest_data = _manifest()
+    manifest_data.update({"task_id": "1337", "task_kind": "oss_fuzz"})
+    manifest = CyberGymTargetManifest.from_dict(manifest_data)
+    adapter = OfficialCyberGymJudgeAdapter(tmp_path / "official", data_dir, runner=runner)
+
+    result = await adapter(manifest, b"aac-sbr-poc", {})
+
+    assert result["status"] == "rejected"
+    assert result["dynamic_confirmed"] is False
+    assert result["vul_crashed"] is False
+    assert result["fix_clean"] is True
+
+
+@pytest.mark.asyncio
 async def test_official_judge_rejects_sanitizer_output_from_fixed_side(tmp_path: Path) -> None:
     data_dir = tmp_path / "server-data"
     data_dir.mkdir()
 
     def runner(_task_id, _poc_path, mode, _actual_data_dir, _docker_timeout, _command_timeout):
         if mode == "vul":
-            return 1, b"runtime error: index 7 out of bounds"
+            return 1, b"aacsbr_template.c:628:37: runtime error: index 7 out of bounds"
         return 0, b"UndefinedBehaviorSanitizer: out-of-bounds"
 
     manifest_data = _manifest()
