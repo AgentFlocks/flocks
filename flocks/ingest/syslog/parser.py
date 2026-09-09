@@ -27,6 +27,35 @@ _SE_ISO_TS_RE = re.compile(
 _SE_SPACE_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\s*\d{2}:\s*\d{2}")
 
 
+def _embedded_json_payload(text: str) -> tuple[str, Any] | None:
+    """Return the first complete JSON object/array embedded in *text*.
+
+    Some security appliances label their output as RFC3164 while sending a
+    vendor prefix and/or suffix around the JSON alert. ``json.loads`` cannot
+    consume that envelope, but ``raw_decode`` can identify the exact end of
+    the embedded value. Only object/array payloads are accepted so a number
+    or quoted fragment in the device header cannot become an alert.
+
+    The candidate count is bounded. This runs on the syslog listener hot path
+    and malformed input containing thousands of braces must not create
+    quadratic parsing work.
+    """
+    decoder = json.JSONDecoder()
+    candidate_count = 0
+    for match in re.finditer(r"[\[{]", str(text or "")):
+        candidate_count += 1
+        if candidate_count > 16:
+            break
+        start = match.start()
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(value, (dict, list)):
+            return text[start:end], value
+    return None
+
+
 def _pri_parts(pri: int) -> tuple[int, int]:
     facility = pri >> 3
     severity = pri & 7
@@ -275,14 +304,25 @@ def _parse_rfc3164(
         hostname = m.group(2)
         remainder = (m.group(3) or "").strip()
         app_name = ""
-        message = remainder
-        # TAG: message (tag is alphanumeric, often "sshd" or "su")
-        if remainder and ":" in remainder:
+        recovered = (
+            _embedded_json_payload(remainder)
+            if remainder.lstrip().startswith(("{", "["))
+            else None
+        )
+        message = recovered[0] if recovered else remainder
+        # TAG: message (tag is alphanumeric, often "sshd" or "su"). Do
+        # not split a minified JSON object at its first key/value colon.
+        prefix = remainder[: remainder.find(message)].strip() if recovered else remainder
+        if recovered and prefix and ":" in prefix:
+            tag = prefix.rstrip().rstrip(":").strip()
+            if tag and " " not in tag and tag.isprintable():
+                app_name = tag
+        elif not recovered and remainder and ":" in remainder:
             tag, _, body = remainder.partition(":")
             if tag and " " not in tag and tag.isprintable():
                 app_name = tag.strip()
                 message = body.strip()
-        return {
+        result = {
             "raw": raw,
             "facility": facility,
             "severity": severity,
@@ -292,14 +332,21 @@ def _parse_rfc3164(
             "message": message,
             "format": "rfc3164",
         }
+        return result
 
-    return {
+    # Vendor streams commonly force ``format=rfc3164`` while using an ISO or
+    # proprietary timestamp prefix. Recover the complete JSON value instead
+    # of passing the whole envelope to the workflow's ``json.loads`` call.
+    recovered = _embedded_json_payload(rest)
+    message = recovered[0] if recovered else rest.strip()
+    result = {
         "raw": raw,
         "facility": facility,
         "severity": severity,
         "timestamp": "",
         "hostname": "",
         "app_name": "",
-        "message": rest.strip(),
+        "message": message,
         "format": "rfc3164",
     }
+    return result

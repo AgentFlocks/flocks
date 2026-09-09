@@ -8,6 +8,7 @@ import flocks.config
 import flocks.workspace.manager
 import pytest
 
+from flocks.ingest.syslog.parser import parse_syslog
 from flocks.workflow import Workflow, WorkflowEngine
 from flocks.workflow.edge_resolver import EdgeResolver
 from flocks.workflow.execution_plan import resolve_workflow_dataflow_mode
@@ -140,6 +141,37 @@ EXPECTED_MAPPING_KEYS = {
         },
     },
 }
+
+
+def test_denoise_receive_node_accepts_vendor_wrapped_syslog_json() -> None:
+    receive = next(
+        node
+        for node in _workflow_dict("stream_alert_denoise")["nodes"]
+        if node["id"] == "receive_alert"
+    )
+    payload = {
+        "id": "alert-1",
+        "net": {
+            "real_src_ip": "192.0.2.10",
+            "dest_ip": "198.51.100.20",
+            "http": {"url": "/login"},
+        },
+        "threat": {"name": "SQL injection"},
+        "padding": "x" * 25_000,
+    }
+    encoded = json.dumps(payload)
+    parsed = parse_syslog(
+        f"<134>2026-09-09 14:00:00 appliance audit stream {encoded}|!vendor-tail",
+        "rfc3164",
+    )
+    env = {"inputs": {"syslog_message": parsed}, "outputs": {}}
+
+    exec(receive["code"], env, env)
+
+    assert env["outputs"]["input_mode"] == "syslog"
+    assert env["outputs"]["stats"]["raw_count"] == 1
+    assert env["outputs"]["source_log_type"] == "tdp"
+    assert env["outputs"]["raw_alerts"][0]["id"] == "alert-1"
 
 
 def _workflow_dict(workflow_id: str) -> dict[str, object]:

@@ -2017,7 +2017,7 @@ function CommandMetric({ label, value, format, sub, values, color }) {
   return h('div', { className: 'command-metric', style: { '--metric-color': color } }, [
     h('span', { key: 'label' }, label),
     h(AnimatedNumber, { tag: 'b', className: 'command-metric-value', value, format, duration: 1200, key: 'value' }),
-    h('small', { key: 'sub' }, sub),
+    h('small', { title: typeof sub === 'string' ? sub : undefined, key: 'sub' }, sub),
     h(Sparkline, { values, color, key: 'trend' }),
   ]);
 }
@@ -2045,8 +2045,14 @@ function TokenUsageMetric({ tokenUsage }) {
 
 function CommandMetrics({ stats }) {
   const tokenUsage = stats.tokenUsage || EMPTY_STATS.tokenUsage;
+  const metricQuality = stats.sourceStatus?.metricQuality || {};
+  const coverageScope = metricQuality.metricsAvailable
+    && metricQuality.coverageComplete === false
+    && metricQuality.coverageStartedAt
+    ? `精确采集自 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
+    : '';
   return h('section', { className: 'command-metrics' }, [
-    h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
+    h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: coverageScope ? `${coverageScope} · ${compactNumber(stats.denoise.totalUnique)} 条进入研判` : `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
     h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate === null ? null : stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
     h(TokenUsageMetric, { tokenUsage, key: 'tokens' }),
@@ -3147,10 +3153,6 @@ export default function Page() {
   if (Number(metricQuality.unprocessedInputCount || 0) > 0) {
     metricIssues.push(`${metricQuality.unprocessedInputCount} 条输入未完成归一化`);
   }
-  const sourceCoverageRate = Number(metricQuality.sourceCoverageRate);
-  if (metricQuality.metricsAvailable && Number.isFinite(sourceCoverageRate) && sourceCoverageRate < 1) {
-    metricIssues.push(`来源覆盖 ${Math.round(sourceCoverageRate * 1000) / 10}%`);
-  }
   const metricQualityWarning = !stats.generatedAt
     ? ''
     : metricQuality.dataAvailable === false || metricQuality.status === 'unavailable'
@@ -3160,11 +3162,9 @@ export default function Page() {
       : metricQuality.status === 'partial' && !metricQuality.metricsAvailable
         ? `降噪指标校验未通过，相关数字已隐藏${metricIssues.length ? `：${metricIssues.join('；')}` : ''}`
     : metricQuality.metricsAvailable
-    ? metricQuality.status === 'partial'
-      ? `降噪指标部分可用${metricIssues.length ? `：${metricIssues.join('；')}` : ''}${metricQuality.coverageStartedAt ? `；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}` : ''}`
-      : metricIssues.length
-        ? `降噪指标存在异常：${metricIssues.join('；')}`
-        : ''
+    ? metricIssues.length
+      ? `降噪指标存在异常：${metricIssues.join('；')}`
+      : ''
     : metricQuality.status === 'legacy-partial'
       ? `精确降噪指标尚未覆盖当前时间范围，相关数字已隐藏；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
       : '精确降噪指标尚不可用，相关数字已隐藏；新指标链路产生数据后将自动显示';

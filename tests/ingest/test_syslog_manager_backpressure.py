@@ -38,6 +38,34 @@ def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     return SimpleNamespace(context=context, builder=builder, cleanup=cleanup)
 
 
+def test_soc_alert_preview_extracts_source_and_nested_endpoints() -> None:
+    count, preview = syslog_manager._soc_alert_preview(
+        {
+            "message": '{"net":{"real_src_ip":"192.0.2.10","dest_ip":"198.51.100.20"},'
+            '"threat":{"name":"SQL injection"},"id":"alert-1"}',
+        }
+    )
+
+    assert count == 1
+    assert preview == {
+        "id": "alert-1",
+        "_source_type": "tdp",
+        "threat_name": "SQL injection",
+        "sip": "192.0.2.10",
+        "dip": "198.51.100.20",
+    }
+
+
+def test_soc_alert_preview_counts_array_envelope() -> None:
+    count, preview = syslog_manager._soc_alert_preview(
+        {"data": [{"uri": "/one", "sip": "192.0.2.1"}, {"uri": "/two"}]}
+    )
+
+    assert count == 2
+    assert preview["_source_type"] == "skyeye"
+    assert preview["sip"] == "192.0.2.1"
+
+
 @pytest.mark.asyncio
 async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fixed worker pool must cap concurrent ``_trigger_workflow`` calls.

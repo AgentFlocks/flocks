@@ -134,6 +134,54 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container.querySelector('.command-source b')).toHaveAttribute('title', '数据不可用');
   });
 
+  it('shows verified partial-window metrics without a yellow coverage warning', async () => {
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') {
+        return Promise.resolve({
+          data: {
+            generatedAt: new Date().toISOString(),
+            denoise: { totalRaw: 10, totalUnique: 4, duplicateRate: 0.6, duplicates: 6 },
+            timeline: { denoiseRaw: [10], denoiseUnique: [4] },
+            sourceStatus: {
+              metricQuality: {
+                status: 'partial',
+                dataAvailable: true,
+                metricsAvailable: true,
+                sourceMetricsAvailable: false,
+                coverageComplete: false,
+                coverageStartedAt: Date.now() - 60_000,
+                invalidExecutionCount: 0,
+                errorExecutionCount: 0,
+                unprocessedInputCount: 0,
+              },
+            },
+          },
+        });
+      }
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor', events: [], recentEvents: [], workflowEvents: [], batch: {},
+            workflowStats: { callCount: 10, latestStartedAt: Date.now() },
+          },
+        });
+      }
+      if (path === '/ai-tasks') return Promise.resolve({ data: { connection: 'online', summary: {}, tasks: [] } });
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    render(<Page />);
+
+    const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
+    await waitFor(() => {
+      expect(rawMetric.querySelector('.command-metric-value')).toHaveAttribute('title', '10');
+    });
+    expect(within(rawMetric).getByText(/精确采集自 .* · 4 条进入研判/)).toBeInTheDocument();
+    expect(screen.queryByText(/精确降噪指标尚未覆盖当前时间范围/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/降噪指标部分可用/)).not.toBeInTheDocument();
+  });
+
   it('shows unavailable SOC triage metrics as dashes instead of false zeros', async () => {
     pageGetMock.mockImplementation((path: string) => {
       if (path === '/stats') {

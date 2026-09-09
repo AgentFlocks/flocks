@@ -32,7 +32,7 @@ ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
-WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION = 3
+WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION = 4
 TASK_DB = Path.home() / ".flocks" / "data" / "tasks.db"
 USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
 SOC_PINNED_WORKFLOW_NAMES = {
@@ -835,6 +835,9 @@ def _workflow_alert_preview(output):
 
 
 def _workflow_input_preview(inputs):
+    stored_preview = inputs.get("_soc_alert_preview")
+    if isinstance(stored_preview, dict) and stored_preview.get("_type") != "dict":
+        return stored_preview
     syslog_message = inputs.get("syslog_message") or inputs.get("syslog")
     if isinstance(syslog_message, dict):
         message = syslog_message.get("message")
@@ -1038,9 +1041,9 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             ).fetchone()
             verified_started_at = _safe_int(verified_row[0] if verified_row else 0)
             if verified_started_at <= 0:
-                # Existing v2 rows predate input/output reconciliation and may
-                # contain false zero ingress counts. Keep them out of the exact
-                # path until a v3 contribution establishes verified coverage.
+                # Rows from older schemas may contain false zero ingress
+                # counts. Keep them out of the exact path until a v4
+                # contribution establishes coverage under the current contract.
                 return None
             earliest_execution_ms = 0
             if _table_exists(conn, "workflow_executions"):
@@ -1089,7 +1092,7 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
     requested_start_ms = start_ms or earliest_execution_ms
     # An unbounded query is complete only when execution history proves that
     # verified rollups cover the workflow's first execution. Without that
-    # lower bound, treating recent v3 rows as all-time history would silently
+    # lower bound, treating recent v4 rows as all-time history would silently
     # undercount older executions.
     complete_window = requested_start_ms > 0 and coverage_started_at <= requested_start_ms
     source_complete = source_covered_count == raw_count
@@ -1175,7 +1178,11 @@ def _get_workflow_denoise_stats(
             return cached["value"]
 
     rollup_result = _get_workflow_metric_rollups(workflow_name, start_time, end_time)
-    if rollup_result is not None and rollup_result.get("coverageComplete"):
+    # A v4 rollup is authoritative for the interval in which it exists even
+    # when its quality flags report an incomplete or invalid interval. Return
+    # that result with its explicit scope/quality metadata instead of replacing
+    # it with legacy call counts; the page decides which values may be shown.
+    if rollup_result is not None:
         with _cache_lock:
             _workflow_stats_cache[cache_key] = {"updatedAt": now, "value": rollup_result}
             _workflow_stats_cache.move_to_end(cache_key)
@@ -2260,6 +2267,9 @@ def _workflow_task_metrics(output_text, status):
 
 
 def _workflow_task_input_count(inputs):
+    stored_count, stored_quality = _workflow_task_metric(inputs, "_soc_alert_count")
+    if stored_quality == "complete":
+        return stored_count
     # Match stream_alert_denoise's receive node exactly: a decodable syslog
     # payload wins over every batch field.
     value = inputs.get("syslog_message") or inputs.get("syslog")

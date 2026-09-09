@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 import uuid
@@ -54,6 +55,86 @@ _BIND_WAIT_TIMEOUT_S = 3.0
 # Minimum interval between two ``syslog.queue_full_dropped`` warnings; a
 # sustained queue overflow is aggregated into a single warning per window.
 _DROP_LOG_WINDOW_S = 1.0
+_SOC_DENOISE_WORKFLOW_ID = "stream_alert_denoise"
+
+
+def _syslog_alert_items(value: Any) -> Optional[List[Dict[str, Any]]]:
+    """Decode the alert object(s) carried by a parsed syslog message."""
+    if not isinstance(value, dict):
+        return None
+    payload = value.get("data")
+    if not isinstance(payload, (dict, list)):
+        message = value.get("message")
+        if not isinstance(message, str) or not message.strip():
+            return None
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(message.lstrip())
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if isinstance(payload, dict):
+        # Match the receive node's current contract: one decoded JSON object
+        # is one syslog alert, even when one of its business fields is a list.
+        return [payload]
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _first_nested(record: Dict[str, Any], *paths: tuple[str, ...]) -> Any:
+    for path in paths:
+        value: Any = record
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        if value not in (None, "", "none", "unknown"):
+            return value
+    return None
+
+
+def _soc_alert_preview(value: Any) -> tuple[Optional[int], Dict[str, Any]]:
+    """Build a bounded dashboard preview without persisting the full alert."""
+    alerts = _syslog_alert_items(value)
+    if alerts is None:
+        return None, {}
+    if not alerts:
+        return 0, {}
+    alert = alerts[0]
+    source_type = "unknown"
+    if isinstance(alert.get("net"), dict) or any(
+        key in alert for key in ("behave_uuid", "flow_id", "net_real_src_ip", "threat_suuid")
+    ):
+        source_type = "tdp"
+    elif any(key in alert for key in ("uri", "vuln_name", "attack_result", "attack_flag")):
+        source_type = "skyeye"
+    preview = {
+        "id": _first_nested(alert, ("id",), ("event_id",), ("alert_id",)),
+        "_source_type": source_type,
+        "threat_name": _first_nested(
+            alert,
+            ("threat_name",),
+            ("vuln_name",),
+            ("threat", "name"),
+        ),
+        "sip": _first_nested(
+            alert,
+            ("sip",),
+            ("src_ip",),
+            ("net_real_src_ip",),
+            ("attacker",),
+            ("net", "real_src_ip"),
+            ("net", "src_ip"),
+        ),
+        "dip": _first_nested(
+            alert,
+            ("dip",),
+            ("dst_ip",),
+            ("net_dest_ip",),
+            ("victim",),
+            ("net", "dest_ip"),
+            ("net", "dst_ip"),
+        ),
+    }
+    return len(alerts), {key: item for key, item in preview.items() if item not in (None, "")}
 
 
 def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
@@ -615,6 +696,17 @@ class SyslogManager:
         async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
             summarized_inputs = {"_trigger": trigger.type}
             summarized_inputs.update(mapped_inputs)
+            if workflow_id == _SOC_DENOISE_WORKFLOW_ID:
+                syslog_input = (
+                    mapped_inputs.get("syslog_message")
+                    or mapped_inputs.get("syslog")
+                    or mapped_inputs.get(input_key)
+                )
+                alert_count, alert_preview = _soc_alert_preview(syslog_input)
+                if alert_count is not None:
+                    summarized_inputs["_soc_alert_count"] = alert_count
+                if alert_preview:
+                    summarized_inputs["_soc_alert_preview"] = alert_preview
 
             exec_data = await create_execution_record(
                 workflow_id,

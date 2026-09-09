@@ -882,6 +882,14 @@ def test_soc_dashboard_ai_task_input_count_supports_compacted_batches_and_empty_
     assert handlers._workflow_task_input_count(
         {"alerts": {"_type": "list", "count": 2500}}
     ) == 2500
+    assert handlers._workflow_task_input_count(
+        {
+            "_soc_alert_count": 1,
+            "syslog_message": {
+                "message": {"_type": "string", "chars": 23047, "preview": "2026"}
+            },
+        }
+    ) == 1
     assert handlers._workflow_task_input_count({"_raw_alerts_count": 4000}) == 4000
     assert handlers._workflow_task_input_count({"alerts": []}) == 0
     assert handlers._workflow_task_input_count(
@@ -958,6 +966,37 @@ def test_soc_dashboard_ai_task_reconciles_zero_initialized_output_with_input():
     assert empty_task["emptyInput"] is True
 
 
+def test_soc_dashboard_uses_persisted_syslog_preview_for_active_task():
+    handlers = _load_dashboard_handlers()
+    metrics = handlers._workflow_execution_metrics(
+        "{}",
+        json.dumps(
+            {
+                "_soc_alert_count": 1,
+                "_soc_alert_preview": {
+                    "id": "alert-1",
+                    "_source_type": "tdp",
+                    "threat_name": "SQL injection",
+                    "sip": "192.0.2.10",
+                    "dip": "198.51.100.20",
+                },
+                "syslog_message": {
+                    "message": {"_type": "string", "chars": 23047, "preview": "2026"}
+                },
+            }
+        ),
+    )
+
+    assert metrics["sourceType"] == "tdp"
+    assert metrics["preview"] == {
+        "id": "alert-1",
+        "_source_type": "tdp",
+        "threat_name": "SQL injection",
+        "sip": "192.0.2.10",
+        "dip": "198.51.100.20",
+    }
+
+
 def test_soc_dashboard_ai_task_rejects_impossible_stage_counts():
     handlers = _load_dashboard_handlers()
     output = json.dumps(
@@ -1028,7 +1067,7 @@ def test_soc_dashboard_does_not_serve_fresh_cache_after_workflow_db_disappears(
             "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "stream_alert_denoise", start_ms, 1, 1, 1, 1, 0, 0,
-                '{"tdp": 1}', 1, 1, 0, 0, 3, start_ms,
+                '{"tdp": 1}', 1, 1, 0, 0, 4, start_ms,
             ),
         )
         conn.commit()
@@ -1078,7 +1117,7 @@ def test_soc_dashboard_unbounded_rollup_requires_proven_history_start(tmp_path: 
             "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "stream_alert_denoise", bucket_ms, 7, 7, 6, 5, 1, 1,
-                '{"tdp": 7}', 7, 1, 0, 0, 3, bucket_ms,
+                '{"tdp": 7}', 7, 1, 0, 0, 4, bucket_ms,
             ),
         )
         conn.commit()
@@ -1121,7 +1160,7 @@ def test_soc_dashboard_hides_triage_metrics_when_soc_database_is_missing(tmp_pat
             "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "stream_alert_denoise", start_ms, 10, 10, 8, 4, 2, 4,
-                '{"tdp": 10}', 10, 1, 0, 0, 3, start_ms,
+                '{"tdp": 10}', 10, 1, 0, 0, 4, start_ms,
             ),
         )
         conn.commit()
@@ -1269,8 +1308,8 @@ def test_soc_dashboard_reads_persisted_denoise_metric_rollups(tmp_path: Path):
                 # Pre-v3 rows were not reconciled with input volume and must
                 # not contaminate authoritative dashboard totals.
                 ("stream_alert_denoise", start_ms + 120_000, 999, 999, 999, 999, 0, 0, '{"tdp": 999}', 999, 1, 0, 0, 2, start_ms + 120_000),
-                ("stream_alert_denoise", start_ms, 10, 10, 8, 3, 2, 5, '{"tdp": 10}', 10, 1, 0, 0, 3, start_ms),
-                ("stream_alert_denoise", start_ms + 60_000, 4, 4, 4, 1, 0, 3, '{"skyeye": 4}', 4, 1, 0, 0, 3, start_ms + 60_000),
+                ("stream_alert_denoise", start_ms, 10, 10, 8, 3, 2, 5, '{"tdp": 10}', 10, 1, 0, 0, 4, start_ms),
+                ("stream_alert_denoise", start_ms + 60_000, 4, 4, 4, 1, 0, 3, '{"skyeye": 4}', 4, 1, 0, 0, 4, start_ms + 60_000),
             ],
         )
         conn.commit()
@@ -1330,7 +1369,7 @@ def test_soc_dashboard_separates_core_metric_and_source_coverage_quality(tmp_pat
             "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "stream_alert_denoise", start_ms, 10, 6, 5, 4, 1, 1,
-                '{"tdp": 6}', 6, 1, 0, 0, 3, start_ms,
+                '{"tdp": 6}', 6, 1, 0, 0, 4, start_ms,
             ),
         )
         conn.commit()
@@ -1409,7 +1448,7 @@ def test_soc_dashboard_activity_rate_uses_actual_poll_window():
     assert batch["ratePerSecond"] == 0.5
 
 
-def test_soc_dashboard_does_not_replace_full_window_with_partial_rollup(tmp_path: Path):
+def test_soc_dashboard_exposes_verified_partial_rollup_with_explicit_scope(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
     start_time = 1_800_000
     end_time = start_time + 3600
@@ -1454,7 +1493,7 @@ def test_soc_dashboard_does_not_replace_full_window_with_partial_rollup(tmp_path
             "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "stream_alert_denoise", coverage_ms, 2, 2, 2, 1, 0, 1,
-                '{"tdp": 2}', 2, 1, 0, 0, 3, coverage_ms,
+                '{"tdp": 2}', 2, 1, 0, 0, 4, coverage_ms,
             ),
         )
         conn.executemany(
@@ -1476,13 +1515,13 @@ def test_soc_dashboard_does_not_replace_full_window_with_partial_rollup(tmp_path
         force=True,
     )
 
-    assert stats["metricsAvailable"] is False
-    assert stats["dataQuality"] == "legacy-partial"
+    assert stats["metricsAvailable"] is True
+    assert stats["dataQuality"] == "partial"
     assert stats["coverageComplete"] is False
     assert stats["coverageStartedAt"] == coverage_ms
-    assert stats["callCount"] == 3
-    assert stats["rawCount"] == 3
-    assert stats["shadowMetricsAvailable"] is True
+    assert stats["callCount"] == 1
+    assert stats["rawCount"] == 2
+    assert stats["uniqueCount"] == 1
 
 
 def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path, monkeypatch):
