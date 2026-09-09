@@ -352,8 +352,10 @@ async def upload_files(
     files: List[UploadFile] = File(...),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
         dest_dir = mgr.resolve_workspace_path(dest) if dest else mgr.get_workspace_dir()
+        relative_dest_dir = dest_dir.resolve().relative_to(workspace_root)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -411,7 +413,7 @@ async def upload_files(
         })
         results.append({
             "name": target.name,
-            "path": str(target.relative_to(mgr.get_workspace_dir())),
+            "path": str(relative_dest_dir / filename),
             "abs_path": str(target),
             "size": total,
             "is_text_file": is_text,
