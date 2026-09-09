@@ -30,6 +30,38 @@ StatusReader = Callable[[str], dict[str, Any]]
 MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
 
 
+async def _run_audit_with_cleanup(runner: AuditRunner, target: Path, **kwargs: Any) -> dict[str, Any]:
+    """Release CLI-owned async resources before asyncio.run closes their loop."""
+    from flocks.mcp import MCP
+    from flocks.project.instance import Instance
+    from flocks.storage.storage import Storage
+    from flocks.utils.log import Log
+    from flocks.workflow.store import WorkflowStore
+
+    log = Log.create(service="security.cli")
+    existing_tasks = asyncio.all_tasks()
+    try:
+        return await runner(target, **kwargs)
+    finally:
+        pending = asyncio.all_tasks() - existing_tasks
+        for task in pending:
+            task.cancel()
+        if pending:
+            _done, unfinished = await asyncio.wait(pending, timeout=10)
+            if unfinished:
+                log.warn("security.shutdown.tasks_pending", {"count": len(unfinished)})
+        for name, close in (
+            ("mcp", MCP.shutdown),
+            ("instances", Instance.dispose_all),
+            ("workflow_store", WorkflowStore.close),
+            ("storage", Storage.shutdown),
+        ):
+            try:
+                await asyncio.wait_for(close(), timeout=15)
+            except Exception as exc:
+                log.warn("security.shutdown.failed", {"resource": name, "error": str(exc)})
+
+
 def _read_knowledge_base(
     path: Path,
     *,
@@ -336,6 +368,20 @@ def security_audit(
         "--coverage-policy",
         help="Coverage policy: evidence_backed_partial or exhaustive",
     ),
+    max_snapshot_bytes: Optional[int] = typer.Option(
+        None, "--max-snapshot-bytes", min=1,
+        help="Total bytes included in the snapshot (default: 4 GiB)",
+    ),
+    max_file_bytes: Optional[int] = typer.Option(
+        None, "--max-file-bytes", min=1,
+        help="Optional per-file byte cap; omitted files are recorded in coverage",
+    ),
+    include: Optional[list[str]] = typer.Option(
+        None, "--include", help="Repository-relative path to include; repeatable (default: whole repository)",
+    ),
+    exclude: Optional[list[str]] = typer.Option(
+        None, "--exclude", help="Repository-relative glob to exclude; repeatable",
+    ),
     verification_votes: int = typer.Option(
         1,
         "--verification-votes",
@@ -359,6 +405,14 @@ def security_audit(
         run_standard_audit, _scan_status = _load_plugin_cli()
         progress = _json_line if json_output else _progress_line
         audit_kwargs = {"model": model, "progress": progress}
+        if max_snapshot_bytes is not None:
+            audit_kwargs["max_total_bytes"] = max_snapshot_bytes
+        if max_file_bytes is not None:
+            audit_kwargs["max_file_bytes"] = max_file_bytes
+        if include:
+            audit_kwargs["include_paths"] = include
+        if exclude:
+            audit_kwargs["exclude_patterns"] = exclude
         if cleanup_intermediates:
             audit_kwargs["cleanup_intermediates"] = True
         if not copy_source:
@@ -381,7 +435,7 @@ def security_audit(
         if cybergym_manifest is not None:
             audit_kwargs["scan_mode"] = "cybergym_level1"
             audit_kwargs["cybergym_manifest"] = _read_cybergym_manifest(cybergym_manifest)
-        result = asyncio.run(run_standard_audit(target, **audit_kwargs))
+        result = asyncio.run(_run_audit_with_cleanup(run_standard_audit, target, **audit_kwargs))
     except KeyboardInterrupt:
         if not json_output:
             console.print("[yellow]Audit interrupted; cancellation was requested.[/yellow]")

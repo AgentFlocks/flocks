@@ -46,6 +46,16 @@ class WorkflowStore:
     _conn: Optional[aiosqlite.Connection] = None
     _init_pid: Optional[int] = None
     _db_path: Optional[Path] = None
+    _lifecycle_lock: Optional[asyncio.Lock] = None
+    _lifecycle_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    @classmethod
+    def _lock(cls) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if cls._lifecycle_lock is None or cls._lifecycle_loop is not loop:
+            cls._lifecycle_lock = asyncio.Lock()
+            cls._lifecycle_loop = loop
+        return cls._lifecycle_lock
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -53,6 +63,11 @@ class WorkflowStore:
 
     @classmethod
     async def init(cls) -> None:
+        async with cls._lock():
+            await cls._init_unlocked()
+
+    @classmethod
+    async def _init_unlocked(cls) -> None:
         current_pid = os.getpid()
         db_path = cls.get_db_path()
         if cls._initialized and cls._init_pid == current_pid and cls._db_path == db_path:
@@ -98,14 +113,14 @@ class WorkflowStore:
         try:
             await _open_and_migrate()
             log.info("workflow.store.initialized")
-        except Exception as exc:
+        except BaseException as exc:
             if cls._conn:
                 await cls._conn.close()
             cls._conn = None
             cls._initialized = False
             cls._init_pid = None
             cls._db_path = None
-            if Storage._is_db_corruption_error(exc):
+            if isinstance(exc, Exception) and Storage._is_db_corruption_error(exc):
                 await Storage.recover_corrupt_db(
                     db_path,
                     action="workflow.store.init",
@@ -118,12 +133,13 @@ class WorkflowStore:
 
     @classmethod
     async def close(cls) -> None:
-        if cls._conn:
-            await cls._conn.close()
-        cls._conn = None
-        cls._initialized = False
-        cls._init_pid = None
-        cls._db_path = None
+        async with cls._lock():
+            if cls._conn:
+                await cls._conn.close()
+            cls._conn = None
+            cls._initialized = False
+            cls._init_pid = None
+            cls._db_path = None
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:

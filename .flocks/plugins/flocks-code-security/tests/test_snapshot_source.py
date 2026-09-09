@@ -27,6 +27,69 @@ def _git(repository: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 64])
+def test_bulk_line_counter_preserves_splitlines_semantics(chunk_size: int) -> None:
+    for text in ("", "x", "\r\n", "\r\r\n", "one\r\ntwo\rthree\n", "\v\f\x1c\x1d\x1e\x85\u2028\u2029", "\nlast"):
+        counter = snapshot_module._DecodedLineCounter()
+        for offset in range(0, len(text), chunk_size):
+            counter.feed(text[offset:offset + chunk_size])
+            counter.feed("")
+        assert counter.value == len(text.splitlines())
+
+
+def test_snapshot_total_limit_is_checked_before_reading_content(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "first.c").write_bytes(b"1234")
+    (target / "second.c").write_bytes(b"5678")
+    runtime = build_runtime(tmp_path / "plugin-data")
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("over-budget snapshot must fail before hashing any content")
+
+    monkeypatch.setattr(runtime.snapshots, "_read_regular_file", unexpected_read)
+    with pytest.raises(ValueError, match="max_total_bytes=7"):
+        runtime.snapshots.create(str(target), max_total_bytes=7)
+
+
+def test_wireshark_sized_direct_snapshot_can_create_a_scan(tmp_path: Path) -> None:
+    target = tmp_path / "wireshark-sized"
+    source_dir = target / "epan" / "dissectors"
+    source_dir.mkdir(parents=True)
+    for index in range(12_000):
+        (source_dir / f"packet-{index}.c").write_bytes(b"int parse(void) { return 0; }\n")
+    # Sparse files reproduce the reported sizes without allocating 1.6 GiB on disk.
+    # The snapshot still reads and hashes every byte through the real I/O path.
+    for filename, mib in (("libwireshark.a", 443), ("libwiretap.a", 408), ("capture.bin", 749)):
+        with (target / filename).open("wb") as output:
+            output.write(b"!<arch>\n\0")
+            output.truncate(mib * 1024**2)
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target), copy_source=False)
+    assert snapshot.file_count == 12_003
+    assert snapshot.total_bytes > 1_600 * 1024**2
+    assert snapshot.omitted_file_count == 0
+    assert Path(snapshot.root_path) == target
+    assert not (runtime.snapshots.snapshots_root / snapshot.snapshot_id).exists()
+    scan_id = runtime.store.create_scan(
+        parent_session_id="large-repository", snapshot_id=snapshot.snapshot_id,
+        mode="standard", ruleset_digest="rules",
+    )
+    assert runtime.store.get_scan(scan_id)["status"] == "running"
+
+
+def test_explicit_total_limit_and_file_omissions(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.c").write_bytes(b"1234")
+    (target / "large.a").write_bytes(b"x" * 20)
+    runtime = build_runtime(tmp_path / "plugin-data")
+    snapshot = runtime.snapshots.create(str(target), max_file_bytes=4, max_total_bytes=4)
+    assert snapshot.total_bytes == 4
+    assert snapshot.omitted_file_count == 1
+    assert runtime.store.list_snapshot_omissions(snapshot.snapshot_id)[0].relative_path == "large.a"
+
+
 def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()

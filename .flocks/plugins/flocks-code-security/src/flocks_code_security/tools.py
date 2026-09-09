@@ -318,6 +318,7 @@ async def audit_prepare(
     include_paths: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
     max_file_bytes: int | None = None,
+    max_total_bytes: int | None = None,
     copy_source: bool = True,
     cleanup_intermediates: bool = False,
     mode: str = "standard",
@@ -350,6 +351,7 @@ async def audit_prepare(
             include_paths=include_paths,
             exclude_patterns=exclude_patterns,
             max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
             copy_source=copy_source,
         )
         scan_id = await asyncio.to_thread(
@@ -3052,6 +3054,7 @@ def register_tools() -> None:
             _parameter("include_paths", ParameterType.ARRAY, "Optional relative files or directories to include.", required=False, json_schema=string_array),
             _parameter("exclude_patterns", ParameterType.ARRAY, "Optional relative glob patterns to exclude.", required=False, json_schema=string_array),
             _parameter("max_file_bytes", ParameterType.INTEGER, "Optional per-file byte cap. Omit to include all regular files within the total snapshot limit.", required=False),
+            _parameter("max_total_bytes", ParameterType.INTEGER, "Optional total snapshot byte cap; defaults to 4 GiB.", required=False),
             _parameter(
                 "copy_source",
                 ParameterType.BOOLEAN,

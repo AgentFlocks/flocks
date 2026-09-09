@@ -32,6 +32,17 @@ flocks security audit /absolute/path/to/source --no-copy
 
 Direct mode still records the initial inventory and file digests. Audit reads fail closed if an included source file changes, and deleting the scan never deletes the source directory. Direct mode cannot be combined with dynamic validation.
 
+Snapshots include up to 4 GiB by default, allowing large source trees such as
+Wireshark with built static libraries. The total is checked before content hashing.
+Use `--max-snapshot-bytes` to change this limit. Source files are not automatically
+discarded to fit the budget. `--no-copy` still hashes included files.
+
+Optional scope controls are `--include PATH` and `--exclude GLOB` (both repeatable),
+and `--max-file-bytes`. For example, `--exclude '*.a' --exclude '*.o'` explicitly
+omits build products from the requested scope. Files exceeding a per-file cap are
+recorded as omissions; this does not establish complete repository coverage.
+The service/API equivalent of the total cap is `max_total_bytes` / `maxTotalBytes`.
+
 Dynamic validation is explicit opt-in:
 
 ```bash

@@ -70,7 +70,7 @@ LANGUAGES = {
 }
 
 MAX_SNAPSHOT_FILES = 50_000
-MAX_SNAPSHOT_TOTAL_BYTES = 512 * 1024 * 1024
+MAX_SNAPSHOT_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -99,19 +99,15 @@ class _DecodedLineCounter:
         self._previous_was_cr = False
 
     def feed(self, text: str) -> None:
-        for character in text:
-            self._has_text = True
-            if character == "\n" and self._previous_was_cr:
-                self._previous_was_cr = False
-                self._ends_with_break = True
-                continue
-            self._previous_was_cr = False
-            if character in self._BREAKS:
-                self._break_count += 1
-                self._ends_with_break = True
-                self._previous_was_cr = character == "\r"
-            else:
-                self._ends_with_break = False
+        if not text:
+            return
+        self._has_text = True
+        self._break_count += sum(text.count(character) for character in self._BREAKS)
+        self._break_count -= text.count("\r\n")
+        if self._previous_was_cr and text.startswith("\n"):
+            self._break_count -= 1
+        self._previous_was_cr = text.endswith("\r")
+        self._ends_with_break = text[-1] in self._BREAKS
 
     @property
     def value(self) -> int:
@@ -169,6 +165,7 @@ class TargetSnapshotService:
         include_paths: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
         max_file_bytes: int | None = None,
+        max_total_bytes: int | None = None,
         copy_source: bool = True,
     ) -> SnapshotRef:
         raw_target = Path(target_path).expanduser()
@@ -191,6 +188,10 @@ class TargetSnapshotService:
             raise ValueError("max_file_bytes must be a positive integer when provided")
         if len(include_paths or ["."]) > 256:
             raise ValueError("At most 256 include paths are allowed")
+        if max_total_bytes is None:
+            max_total_bytes = MAX_SNAPSHOT_TOTAL_BYTES
+        if type(max_total_bytes) is not int or max_total_bytes < 1:
+            raise ValueError("max_total_bytes must be a positive integer when provided")
         if len(exclude_patterns or []) > 256:
             raise ValueError("At most 256 exclude patterns are allowed")
 
@@ -231,6 +232,15 @@ class TargetSnapshotService:
                 )
                 for relative_path, _source_path in files
             }
+            included_bytes = sum(
+                signature[3] for signature in initial_states.values()
+                if max_file_bytes is None or signature[3] <= max_file_bytes
+            )
+            if included_bytes > max_total_bytes:
+                raise ValueError(
+                    f"Snapshot requires {included_bytes} bytes, exceeding max_total_bytes={max_total_bytes}; "
+                    "raise the snapshot byte limit or select an explicit file scope"
+                )
 
             if copy_source:
                 self.snapshots_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -247,7 +257,7 @@ class TargetSnapshotService:
                     root_descriptor,
                     relative_path,
                     max_file_bytes,
-                    max_total_bytes=MAX_SNAPSHOT_TOTAL_BYTES - total_bytes,
+                    max_total_bytes=max_total_bytes - total_bytes,
                     expected_signature=initial_states[relative_path],
                     destination=destination,
                 )
@@ -262,9 +272,9 @@ class TargetSnapshotService:
                         )
                     )
                     continue
-                if total_bytes + result.size_bytes > MAX_SNAPSHOT_TOTAL_BYTES:
+                if total_bytes + result.size_bytes > max_total_bytes:
                     raise ValueError(
-                        "Snapshot exceeds the 536870912-byte total size limit"
+                        f"Snapshot exceeds max_total_bytes={max_total_bytes}"
                     )
                 records.append(
                     SnapshotFile(
@@ -644,7 +654,7 @@ class TargetSnapshotService:
                     raise ValueError(f"Snapshot input changed while reading: {relative_path}")
                 return None, file_stat.st_size
             if file_stat.st_size > max_total_bytes:
-                raise ValueError("Snapshot exceeds the 536870912-byte total size limit")
+                raise ValueError("Snapshot file exceeds the remaining total byte budget")
             if destination is not None:
                 output = destination.open("xb")
             digest = hashlib.sha256()
@@ -678,7 +688,7 @@ class TargetSnapshotService:
                         raise ValueError(f"Snapshot input changed while reading: {relative_path}")
                     return None, total
                 if total > max_total_bytes:
-                    raise ValueError("Snapshot exceeds the 536870912-byte total size limit")
+                    raise ValueError("Snapshot file exceeds the remaining total byte budget")
             if not is_binary:
                 line_counter.feed(decoder.decode(b"", final=True))
             if cls._stat_signature(os.fstat(descriptor)) != expected_signature:

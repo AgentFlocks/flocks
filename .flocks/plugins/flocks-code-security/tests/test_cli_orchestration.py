@@ -17,6 +17,26 @@ def _result(output: dict) -> ToolResult:
     return ToolResult(success=True, output=output)
 
 
+@pytest.mark.asyncio
+async def test_cli_preserves_large_repository_scope_in_service_request(tmp_path, monkeypatch) -> None:
+    import flocks_code_security.service as service_module
+
+    async def run_scan(request, caller, *, progress):
+        assert request.max_total_bytes == 8 * 1024**3
+        assert request.max_file_bytes == 16 * 1024**2
+        assert request.include_paths == ("epan", "wiretap")
+        assert request.exclude_patterns == ("*.a",)
+        assert request.copy_source is False
+        return {"status": "completed"}
+
+    monkeypatch.setattr(service_module, "get_audit_service", lambda: SimpleNamespace(run_scan=run_scan))
+    result = await audit_cli.run_standard_audit(
+        tmp_path, max_total_bytes=8 * 1024**3, max_file_bytes=16 * 1024**2,
+        include_paths=["epan", "wiretap"], exclude_patterns=["*.a"], copy_source=False,
+    )
+    assert result["status"] == "completed"
+
+
 def test_cli_preflight_rejects_disabled_required_tool() -> None:
     register_tools()
     audit_read = ToolRegistry.get("audit_read")

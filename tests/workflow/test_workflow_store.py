@@ -34,6 +34,50 @@ async def isolated_workflow_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_concurrent_initialization_keeps_one_connection(monkeypatch) -> None:
+    import aiosqlite
+
+    await Storage.init()
+    real_connect = aiosqlite.connect
+    opened = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        if Path(args[0]) == WorkflowStore.get_db_path():
+            opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(aiosqlite, "connect", tracked_connect)
+    try:
+        await asyncio.gather(*(WorkflowStore.init() for _ in range(10)))
+        assert len(opened) == 1
+        assert WorkflowStore._conn is opened[0]
+    finally:
+        await WorkflowStore.close()
+        for connection in opened:
+            await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_initialization_closes_connection(monkeypatch) -> None:
+    await Storage.init()
+    entered = asyncio.Event()
+
+    async def blocked_migration():
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(WorkflowStore, "_migrate_legacy_kv", blocked_migration)
+    task = asyncio.create_task(WorkflowStore.init())
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert WorkflowStore._conn is None
+    assert not WorkflowStore._initialized
+
+
+@pytest.mark.asyncio
 async def test_workflow_store_records_execution_steps_config_and_kv() -> None:
     await WorkflowStore.init()
 

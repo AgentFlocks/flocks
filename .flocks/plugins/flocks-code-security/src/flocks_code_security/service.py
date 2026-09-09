@@ -144,6 +144,7 @@ class StartScanRequest:
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
     max_file_bytes: int | None = None
+    max_total_bytes: int | None = None
     copy_source: bool = True
     cleanup_intermediates: bool = False
     dynamic_enabled: bool = False
@@ -617,6 +618,7 @@ class AuditService:
             include_paths=self._validate_relative_paths(request.include_paths, "include_paths"),
             exclude_patterns=self._validate_exclude_patterns(request.exclude_patterns),
             max_file_bytes=request.max_file_bytes,
+            max_total_bytes=request.max_total_bytes,
             copy_source=bool(request.copy_source),
             cleanup_intermediates=request.cleanup_intermediates,
             dynamic_enabled=bool(request.dynamic_enabled),
@@ -673,6 +675,10 @@ class AuditService:
             )
         if normalized.model and len(normalized.model) > 256:
             raise AuditServiceError("invalid_parameter", "model may contain at most 256 characters")
+        if normalized.max_total_bytes is not None and (
+            type(normalized.max_total_bytes) is not int or normalized.max_total_bytes < 1
+        ):
+            raise AuditServiceError("invalid_parameter", "max_total_bytes must be a positive integer")
         if normalized.dynamic_enabled and not normalized.copy_source:
             raise AuditServiceError(
                 "incompatible_parameters",
@@ -709,6 +715,7 @@ class AuditService:
                 include_paths=list(normalized.include_paths),
                 exclude_patterns=list(normalized.exclude_patterns) or None,
                 max_file_bytes=normalized.max_file_bytes,
+                max_total_bytes=normalized.max_total_bytes,
                 copy_source=normalized.copy_source,
                 cleanup_intermediates=normalized.cleanup_intermediates,
                 mode=normalized.scan_mode,
@@ -1674,6 +1681,7 @@ class AuditService:
             "include_paths": list(request.include_paths),
             "exclude_patterns": list(request.exclude_patterns),
             "max_file_bytes": request.max_file_bytes,
+            "max_total_bytes": request.max_total_bytes,
             "copy_source": request.copy_source,
             "cleanup_intermediates": request.cleanup_intermediates,
             "dynamic_enabled": request.dynamic_enabled,

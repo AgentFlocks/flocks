@@ -3,6 +3,9 @@ from __future__ import annotations
 import builtins
 import json
 import os
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +17,69 @@ from flocks.cli.main import app
 
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
+def test_audit_process_exits_after_opening_workflow_database(tmp_path, outcome) -> None:
+    script = textwrap.dedent('''
+        import asyncio
+        import sys
+        from pathlib import Path
+        from flocks.cli.commands.security import _run_audit_with_cleanup
+        from flocks.workflow.store import WorkflowStore
+        from flocks.mcp import MCP
+
+        # A failing earlier cleanup must not prevent the real SQLite close.
+        async def broken_mcp():
+            raise RuntimeError("fixture MCP shutdown failure")
+        MCP.shutdown = broken_mcp
+
+        async def audit(target):
+            await WorkflowStore.init()
+            await WorkflowStore.kv_put("fixture", {"saved": True})
+            if sys.argv[1] == "error":
+                raise ValueError("original audit failure")
+            if sys.argv[1] == "cancelled":
+                raise asyncio.CancelledError()
+            return {"status": "completed"}
+
+        try:
+            result = asyncio.run(_run_audit_with_cleanup(audit, Path.cwd()))
+            assert sys.argv[1] == "success" and result["status"] == "completed"
+        except ValueError as exc:
+            assert sys.argv[1] == "error" and str(exc) == "original audit failure"
+        except asyncio.CancelledError:
+            assert sys.argv[1] == "cancelled"
+        assert WorkflowStore._conn is None
+        print("process-exited-cleanly", flush=True)
+    ''')
+    result = subprocess.run(
+        [sys.executable, "-c", script, outcome],
+        env={**os.environ, "FLOCKS_DATA_DIR": str(tmp_path / "data")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "process-exited-cleanly" in result.stdout
+
+
+def test_security_audit_forwards_large_repository_options(monkeypatch, tmp_path) -> None:
+    async def run_audit(target, **kwargs):
+        assert kwargs["max_total_bytes"] == 8 * 1024**3
+        assert kwargs["max_file_bytes"] == 16 * 1024**2
+        assert kwargs["include_paths"] == ["epan", "wiretap"]
+        assert kwargs["exclude_patterns"] == ["*.a", "*.o"]
+        assert kwargs["copy_source"] is False
+        return {"status": "completed"}
+
+    monkeypatch.setattr(security_cmd, "_load_plugin_cli", lambda: (run_audit, None))
+    result = runner.invoke(security_cmd.security_app, [
+        "audit", str(tmp_path), "--no-copy", "--max-snapshot-bytes", str(8 * 1024**3),
+        "--max-file-bytes", str(16 * 1024**2), "--include", "epan", "--include", "wiretap",
+        "--exclude", "*.a", "--exclude", "*.o",
+    ])
+    assert result.exit_code == 0, result.output
 
 
 def test_plugin_cli_falls_back_to_source_when_plugin_is_missing(monkeypatch) -> None:
