@@ -1355,6 +1355,7 @@ def _get_workflow_recent_events(
             "id",
             "status",
             "started_at",
+            _workflow_execution_column_expr(execution_columns, "updated_at", "0"),
             _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
             _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
             _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
@@ -1369,15 +1370,20 @@ def _get_workflow_recent_events(
     try:
         with sqlite3.connect(WORKFLOW_DB) as conn:
             conn.row_factory = sqlite3.Row
+            trigger_state = _workflow_trigger_state(conn, workflow_name)
             rows = conn.execute(query, query_params).fetchall()
     except Exception:
         return []
 
+    now_ms = int(time.time() * 1000)
+    active_cutoff = now_ms - trigger_state["timeoutSeconds"] * 1000
+    workflow_enabled = not trigger_state["hasConfig"] or trigger_state["enabled"]
     events = []
     for row in rows:
         execution_id = row["id"]
         status = row["status"]
         started_at = row["started_at"]
+        updated_at = row["updated_at"]
         output_text = row["output_results"]
         input_text = row["input_params"]
         payload_text = row["payload"]
@@ -1396,11 +1402,19 @@ def _get_workflow_recent_events(
                 or f"降噪批次 · 原始 {raw_count} 条"
             )
         normalized_status = str(status or "").lower()
+        freshness_at = max(_safe_int(updated_at), _safe_int(started_at))
+        fresh_active = (
+            normalized_status in WORKFLOW_RUNNING_STATUSES
+            and workflow_enabled
+            and freshness_at >= active_cutoff
+        )
         event_status = (
             "completed"
             if normalized_status in {"success", "completed"}
             else "running"
-            if normalized_status in {"running", "queued", "pending"}
+            if fresh_active
+            else "stale"
+            if normalized_status in WORKFLOW_RUNNING_STATUSES
             else "failed"
         )
         session_id, message_id = _workflow_link_context(

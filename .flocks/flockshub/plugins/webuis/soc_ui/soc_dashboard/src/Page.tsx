@@ -618,7 +618,22 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) 
       : event;
     const lane = next[enriched.stage];
     if (lane.current?.eventId === enriched.eventId) {
-      lane.current = { ...lane.current, ...enriched, playbackStartedAt: lane.current.playbackStartedAt };
+      const updatedCurrent = {
+        ...lane.current,
+        ...enriched,
+        playbackStartedAt: lane.current.playbackStartedAt,
+      };
+      if (
+        enriched.triggerSource === 'workflow_execution'
+        && !isRunningWorkflowEvent(enriched)
+      ) {
+        const [current = null, ...queue] = lane.queue;
+        lane.current = current;
+        lane.queue = queue;
+        lane.last = updatedCurrent;
+      } else {
+        lane.current = updatedCurrent;
+      }
       continue;
     }
     const queuedIndex = lane.queue.findIndex((item) => item?.eventId === enriched.eventId);
@@ -861,37 +876,6 @@ function fullNumber(value) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
   const n = Number(value);
   return new Intl.NumberFormat('zh-CN').format(n);
-}
-
-function workflowDenoiseActivity(callCount, delta, generatedAt, workflowEvent) {
-  if (workflowEvent) {
-    return {
-      ...workflowEvent,
-      eventId: `workflow-playback:${callCount}:${workflowEvent.eventId}`,
-      statsDelta: delta,
-      workflowCallCount: callCount,
-    };
-  }
-  const occurredAt = generatedAt || new Date().toISOString();
-  return {
-    eventId: `workflow-denoise:${callCount}:${occurredAt}`,
-    stage: 'denoise',
-    status: 'completed',
-    occurredAt,
-    triggerSource: 'workflow_stats',
-    statsDelta: delta,
-    workflowCallCount: callCount,
-    hiddenFromQueue: true,
-    sampleCount: delta,
-    alert: {
-      sourceType: 'workflow.db',
-      threatName: '降噪工作流统计更新',
-    },
-    result: {
-      clusterId: `累计 ${fullNumber(callCount)}`,
-      isDuplicate: false,
-    },
-  };
 }
 
 function compactNumber(value) {
@@ -2997,17 +2981,10 @@ export default function Page() {
           const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
           const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
           const activeWorkflowEvents = workflowEvents.filter(isRunningWorkflowEvent);
-          for (const workflowEvent of activeWorkflowEvents) {
-            const hasExecution = Boolean(workflowIdFromEvent(workflowEvent) && executionIdFromWorkflowEvent(workflowEvent));
-            if (hasExecution) {
-              incomingEvents.push(workflowEvent);
-            }
-          }
           const rawCallCount = payload.workflowStats?.callCount;
           const hasWorkflowCount = rawCallCount !== null
             && rawCallCount !== undefined
             && Number.isFinite(Number(rawCallCount));
-          let workflowDelta = 0;
           let workflowChanged = false;
           if (hasWorkflowCount) {
             const callCount = Math.max(Math.trunc(Number(rawCallCount)), 0);
@@ -3017,15 +2994,6 @@ export default function Page() {
               callCount > previousProgress.callCount
               || latestStartedAt > previousProgress.latestStartedAt
             );
-            if (workflowChanged) {
-              workflowDelta = Math.max(callCount - previousProgress.callCount, 1);
-              incomingEvents.push(workflowDenoiseActivity(
-                callCount,
-                workflowDelta,
-                payload.generatedAt,
-                workflowEvents[0],
-              ));
-            }
             workflowProgressByFilter.current.set(workflowFilterKey, { callCount, latestStartedAt });
           }
           const incomingRecentEvents = bootstrap
@@ -3033,13 +3001,30 @@ export default function Page() {
             : workflowChanged
               ? [...rawIncomingEvents, ...activeWorkflowEvents]
               : rawIncomingEvents;
-          setActivity((previous) => enqueueActivity(
-            previous,
-            incomingEvents,
-            payload.generatedAt,
-            incomingRecentEvents,
-            payload.batch,
-          ));
+          setActivity((previous) => {
+            const currentWorkflowEventIds = new Set(
+              [previous.denoise.current, previous.triage.current]
+                .filter((event) => event?.triggerSource === 'workflow_execution')
+                .map((event) => event.eventId),
+            );
+            const workflowStateEvents = workflowEvents.filter((workflowEvent) => {
+              const hasExecution = Boolean(
+                workflowIdFromEvent(workflowEvent)
+                && executionIdFromWorkflowEvent(workflowEvent)
+              );
+              return hasExecution && (
+                isRunningWorkflowEvent(workflowEvent)
+                || currentWorkflowEventIds.has(workflowEvent.eventId)
+              );
+            });
+            return enqueueActivity(
+              previous,
+              [...incomingEvents, ...workflowStateEvents],
+              payload.generatedAt,
+              incomingRecentEvents,
+              payload.batch,
+            );
+          });
           const batch = normalizeActivityBatch(payload.batch);
           const hasStatsChange = workflowChanged
             || batch.receivedCount > 0

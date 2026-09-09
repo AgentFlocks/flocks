@@ -858,6 +858,12 @@ def test_soc_dashboard_ai_tasks_use_authoritative_active_status(tmp_path: Path):
     assert payload["tasks"][1]["rawCountSource"] == "workflow_input"
     assert all(task["executionId"] != "denoise-empty-completed" for task in payload["tasks"])
 
+    denoise_events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    event_statuses = {event["eventId"]: event["status"] for event in denoise_events}
+    assert event_statuses["workflow-execution:denoise-queued"] == "running"
+    assert event_statuses["workflow-execution:denoise-empty-completed"] == "completed"
+    assert event_statuses["workflow-execution:denoise-stale"] == "stale"
+
 
 def test_soc_dashboard_ai_tasks_report_missing_workflow_database(tmp_path: Path):
     handlers = _load_dashboard_handlers()

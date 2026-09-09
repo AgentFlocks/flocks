@@ -503,6 +503,62 @@ describe('SOC dashboard contract page runtime', () => {
     expect(screen.queryByText('降噪处理完成')).not.toBeInTheDocument();
   });
 
+  it('stops activity playback when a workflow execution becomes stale', async () => {
+    const now = Date.now();
+    let activityPolls = 0;
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') return Promise.resolve({ data: {} });
+      if (path === '/activity') {
+        activityPolls += 1;
+        const status = activityPolls === 1 ? 'running' : 'stale';
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor',
+            events: [],
+            recentEvents: [],
+            workflowEvents: [
+              {
+                eventId: 'workflow-execution:stale-denoise',
+                stage: 'denoise',
+                status,
+                occurredAt: new Date(now).toISOString(),
+                triggerSource: 'workflow_execution',
+                workflowId: 'stream_alert_denoise',
+                alert: { id: 'stale-alert', threatName: '降噪批次 · 原始 1 条' },
+                result: { metricsAvailable: true, rawCount: 1, uniqueCount: 1 },
+              },
+            ],
+            batch: {},
+            workflowStats: { callCount: 1, latestStartedAt: now },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 1 },
+            tasks: [],
+          },
+        });
+      }
+      if (path === '/task-center') {
+        return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      }
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    render(<Page />);
+
+    expect((await screen.findAllByText('告警降噪中')).length).toBeGreaterThan(0);
+    await waitFor(() => expect(activityPolls).toBeGreaterThan(1), { timeout: 5000 });
+    await waitFor(() => {
+      expect(screen.queryAllByText('告警降噪中')).toHaveLength(0);
+    });
+    expect(screen.getByText('智能研判核心')).toBeInTheDocument();
+    expect(screen.getByText('发现 1 个失联任务，已移出活跃列表')).toBeInTheDocument();
+  }, 7000);
+
   it('uses dashboard mock rows with the same workflow execution field shape as real task-center data', async () => {
     window.localStorage.setItem('soc-dashboard-mock-v1', '1');
 
