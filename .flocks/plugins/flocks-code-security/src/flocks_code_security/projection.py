@@ -76,6 +76,8 @@ AGENT_TOOLS = {
     ],
     "code-security-cybergym-solver": [
         "audit_cybergym_context",
+        "audit_cybergym_checkpoint",
+        "audit_cybergym_materialize",
         "audit_cybergym_artifact_create",
         "audit_cybergym_replay",
         "audit_cybergym_gdb",

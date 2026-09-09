@@ -97,3 +97,42 @@ Run the plugin regression suite from the Flocks checkout with:
 ```bash
 .venv/bin/pytest -q .flocks/plugins/flocks-code-security/tests
 ```
+
+
+### CyberGym evidence and recovery
+
+Local replay and the official judge share sanitizer classification. Recover-mode
+UBSAN findings can count even with exit code zero; ordinary nonzero exits,
+sanitizer banners, initialization errors and LSAN-under-ptrace errors cannot.
+GDB reachability remains independent of debugger status. New replay observations
+are grouped by manifest digest and crash signature before the two-replay gate;
+the official judge must still find the fixed side clean. A manifest digest
+identifies configuration, not the contents of a mutable image tag: use immutable
+runner images for comparable results.
+
+LibFuzzer preflight requires positive guards or inline-counter evidence. Missing
+coverage evidence is `coverage_unverified`, distinct from observed zero coverage.
+AFL retains its existing engine behavior. Runner rebuilding and protocol-specific
+seed corpora remain deployment inputs; the runtime does not infer network framing
+from a protocol name.
+
+The solver can save an 8 KiB plan per accepted PoC through
+`audit_cybergym_checkpoint`. Context restores the latest plan together with run
+facts and failure summaries. Plans are untrusted notes and never authorize a
+verified result. `audit_cybergym_materialize` derives an input from an existing
+seed using non-overlapping MSB-first bit edits (`offset_bits`, `width_bits`,
+`value`) and optional `size_bytes` with zero padding. It preserves lineage and
+validates the trusted input contract. Widths are limited to 64 bits and a recipe
+to 256 edits; protocol grammars belong in caller-supplied plans and seed corpora.
+
+Fuzz collection keeps crash candidates first, at most 64 artifacts and 16 corpus
+items per run, within 16 MiB of new bytes. Corpus and verification artifacts (seeds, crashes, minimized inputs and dictionaries)
+have separate scan pools, each limited to 256 artifacts and 64 MiB through the
+runtime; the database checks these limits transactionally. Historical corpus
+over the limit is retained but cannot grow, while verification can continue.
+Directory traversal stops after 4096 entries. Results contain compact references,
+bounded diagnostics and explicit partial/failed collection metadata. Omitted
+crashes are reported as incomplete collection. A storage or cleanup failure does
+not erase the observed process outcome, and missing bytes cannot be submitted as
+a verified artifact. Final failure summaries preserve run and worker reasons;
+only a later successful operation in the same lineage resolves an old failure.

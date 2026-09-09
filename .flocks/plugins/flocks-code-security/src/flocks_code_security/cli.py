@@ -45,6 +45,8 @@ DYNAMIC_AGENT_TOOL_NAMES = {"audit_probe_subject", "audit_submit_probe"}
 GUIDED_AUDIT_TOOL_NAMES = {"audit_knowledge_base"}
 CYBERGYM_AGENT_TOOL_NAMES = {
     "audit_cybergym_context",
+    "audit_cybergym_checkpoint",
+    "audit_cybergym_materialize",
     "audit_cybergym_artifact_create",
     "audit_cybergym_replay",
     "audit_cybergym_gdb",

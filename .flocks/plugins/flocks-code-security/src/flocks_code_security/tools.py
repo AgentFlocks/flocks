@@ -157,6 +157,8 @@ AUDIT_TOOL_NAMES = (
     "audit_run_workers",
     "audit_wait_workers",
     "audit_cybergym_context",
+    "audit_cybergym_checkpoint",
+    "audit_cybergym_materialize",
     "audit_cybergym_artifact_create",
     "audit_cybergym_replay",
     "audit_cybergym_gdb",
@@ -427,6 +429,24 @@ async def audit_cybergym_context(ctx: ToolContext) -> ToolResult:
         )
     except STORE_ERRORS as exc:
         return _error(exc, title="CyberGym context failed")
+
+
+async def audit_cybergym_checkpoint(ctx: ToolContext, poc_id: str, plan: dict[str, Any]) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        result = get_runtime().store.save_cybergym_checkpoint(binding.scan_id, poc_id, plan)
+        return ToolResult(success=True, output=result, title="Solver input plan saved")
+    except STORE_ERRORS as exc:
+        return _error(exc, title="Solver checkpoint failed")
+
+
+async def audit_cybergym_materialize(ctx: ToolContext, artifact_id: str, recipe: dict[str, Any]) -> ToolResult:
+    try:
+        binding = _cybergym_binding(ctx)
+        artifact = get_runtime().cybergym.materialize(binding.scan_id, artifact_id, recipe)
+        return ToolResult(success=True, output=artifact, title="Structured input materialized")
+    except STORE_ERRORS as exc:
+        return _error(exc, title="Input materialization failed")
 
 
 async def audit_cybergym_artifact_create(
@@ -3086,6 +3106,28 @@ def register_tools() -> None:
         "Read the bound CyberGym Level 1 manifest, accepted generic PoCs, PoC states, artifact inventory, and budgets without fixed-side data.",
         audit_cybergym_context,
         [],
+    )
+    _register(
+        "audit_cybergym_checkpoint",
+        "Save a bounded input plan for one accepted PoC. Plans are untrusted claims, never validation evidence.",
+        audit_cybergym_checkpoint,
+        [
+            _parameter("poc_id", ParameterType.STRING, "Accepted PoC identifier."),
+            _parameter("plan", ParameterType.OBJECT,
+                       "stage plus optional hypothesis, constraints, next_action, artifact_id, recipe, reason_code. "
+                       "stage: input_planning, materializing, replaying, diagnosing, blocked, inconclusive; max 8 KiB."),
+        ],
+    )
+    _register(
+        "audit_cybergym_materialize",
+        "Derive a seed using bounded MSB-first bit edits. Validates the trusted harness input contract and preserves lineage.",
+        audit_cybergym_materialize,
+        [
+            _parameter("artifact_id", ParameterType.STRING, "Existing seed to edit."),
+            _parameter("recipe", ParameterType.OBJECT,
+                       "Optional size_bytes resizes with zero padding; edits is at most 256 objects with "
+                       "offset_bits, width_bits (1-64), value (unsigned integer). Fields must not overlap."),
+        ],
     )
     _register(
         "audit_cybergym_artifact_create",

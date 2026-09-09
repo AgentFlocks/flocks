@@ -13,13 +13,14 @@ import inspect
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Protocol
 
-from flocks_code_security.poc import resolve_cybergym_input
+from flocks_code_security.poc import materialize_bit_recipe, resolve_cybergym_input
 
 
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
@@ -58,6 +59,11 @@ _OFFICIAL_MODE_ERROR_JSON_BYTES = 2 * 1024
 _RUN_OUTPUT_JSON_BYTES = 16 * 1024
 _FUZZ_RESULT_ARTIFACT_LIMIT = 64
 _FUZZ_RESULT_REJECTION_LIMIT = 64
+_FUZZ_CORPUS_LIMIT = 16
+_FUZZ_PERSIST_BYTES = 16 * 1024 * 1024
+_FUZZ_SCAN_ENTRY_LIMIT = 4096
+_FUZZ_SCAN_ARTIFACT_LIMIT = 256
+_FUZZ_SCAN_BYTES = 64 * 1024 * 1024
 _FUZZ_PREFLIGHT_SECONDS = 10
 _DEFAULT_CYBERGYM_DATA_DIR = "/home/cybergym/cybergym-server-data"
 _AFL_NO_FINDINGS_MARKERS = (
@@ -73,12 +79,16 @@ _FUZZ_UNINSTRUMENTED_MARKERS = (
 )
 _NO_ARTIFACT_REASON_PRIORITY = (
     "fuzzer_uninstrumented",
+    "coverage_unverified",
     "fuzzer_unavailable",
     "runtime_unavailable",
     "harness_error",
     "execution_timeout",
     "fuzzer_error",
     "runtime_error",
+    "artifact_persistence_failed",
+    "artifact_collection_incomplete",
+    "debugger_runtime_error",
     "cancelled",
     "no_crash_found",
 )
@@ -708,7 +718,7 @@ class OfficialCyberGymJudgeAdapter:
         # fixed side to be both exit-clean and sanitizer-clean.
         vul_crashed = _official_mode_has_crash_evidence(raw_vul)
         fix_crashed = _official_mode_has_crash_evidence(raw_fix)
-        fix_clean = fix_exit_code == 0 and not fix_crashed
+        fix_clean = fix_exit_code == 0 and not fix_crashed and not _instrumentation_error(str(raw_fix.get("output", "")))
         dynamic_confirmed = vul_crashed and fix_clean
         return {
             "status": "accepted" if dynamic_confirmed else "rejected",
@@ -757,6 +767,8 @@ class CyberGymRuntime:
     ) -> dict[str, Any]:
         context = self.store.cybergym_context(scan_id, work_unit_id=work_unit_id)
         records = self.store.list_accepted_poc_contexts(scan_id)
+        context["execution_state"]["solver_plans"] = self.store.cybergym_checkpoints(scan_id)
+        context["execution_state"]["failure_summary"] = self.failure_summary(scan_id)
         if not records:
             context["poc_states"] = []
             context["execution_state"]["priority_poc_ids"] = []
@@ -811,7 +823,17 @@ class CyberGymRuntime:
             elif not root_ids_by_poc[poc_id]:
                 actions = ["create_bootstrap_seed"]
             else:
-                actions = ["replay", "refine", "gdb", "fuzz", "submit_candidate"]
+                lineage_runs = [run for run in self.store.list_cybergym_runs(scan_id)
+                                if self._run_poc_id(scan_id, run, artifact_poc_ids) == poc_id]
+                failures = _cybergym_failure_reasons(lineage_runs)
+                stable = any(self.store.cybergym_artifact_has_stable_crash(scan_id, artifact_id)
+                             for artifact_id in artifact_ids_by_poc[poc_id])
+                if stable:
+                    actions = ["submit_candidate"]
+                elif any(reason in failures for reason in {"fuzzer_uninstrumented", "coverage_unverified", "fuzzer_unavailable"}):
+                    actions = ["replay", "refine", "gdb", "checkpoint_and_stop"]
+                else:
+                    actions = ["replay", "refine", "gdb", "fuzz"]
             poc_states.append(
                 {
                     "poc_id": poc_id,
@@ -907,6 +929,21 @@ class CyberGymRuntime:
             raw=raw,
             parent_id=parent_id,
             provenance=artifact_provenance,
+            max_scan_artifacts=_FUZZ_SCAN_ARTIFACT_LIMIT,
+            max_scan_bytes=_FUZZ_SCAN_BYTES,
+        )
+
+    def materialize(self, scan_id: str, artifact_id: str, recipe: dict[str, Any]) -> dict[str, Any]:
+        manifest = self._manifest(scan_id)
+        parent = self.store.get_cybergym_artifact(scan_id, artifact_id, include_data=True)
+        if parent is None:
+            raise ValueError("Recipe seed artifact is not available")
+        raw = materialize_bit_recipe(parent["data"], recipe, max_bytes=manifest.limits.max_artifact_bytes)
+        return self.artifact_create(
+            scan_id, kind="seed", raw=raw, parent_id=artifact_id,
+            provenance={"operation": "bit_recipe", "recipe_digest": hashlib.sha256(
+                json.dumps(recipe, sort_keys=True).encode("utf-8")
+            ).hexdigest(), "source_digest": parent["sha256"]},
         )
 
     def seed_from_poc_bundles(self, scan_id: str) -> dict[str, Any]:
@@ -1060,7 +1097,10 @@ class CyberGymRuntime:
         if artifact is None:
             raise ValueError("Artifact is not available for this CyberGym task")
         self.store.consume_cybergym_budget(scan_id, "replay", manifest.limits.max_replay_runs)
-        run = self.store.start_cybergym_run(scan_id, "replay", {"artifact_id": artifact_id})
+        run = self.store.start_cybergym_run(scan_id, "replay", {
+            "artifact_id": artifact_id,
+            "poc_id": self.store.cybergym_artifact_poc_id(scan_id, artifact_id),
+        })
         try:
             result = await self._execute_replay(manifest, artifact["data"])
             self.store.finish_cybergym_run(run["run_id"], "completed", result)
@@ -1413,8 +1453,32 @@ class CyberGymRuntime:
     def select_final_artifact(self, scan_id: str) -> dict[str, Any] | None:
         return self.store.select_cybergym_final_artifact(scan_id)
 
+    def failure_summary(self, scan_id: str) -> dict[str, Any]:
+        reasons = _cybergym_failure_reasons(self.store.list_cybergym_runs(scan_id))
+        worker_failures = [
+            {"phase": batch["phase"], "work_unit_id": unit["work_unit_id"],
+             "failure_class": unit.get("attempt_failure_class"),
+             "attempt_ordinal": unit.get("attempt_ordinal")}
+            for batch in self.store.list_worker_batches(scan_id)
+            for unit in batch["units"]
+            if unit["status"] == "failed" and batch["phase"] in {"poc_generation", "cybergym_solving"}
+        ]
+        if not self.store.list_cybergym_artifacts(scan_id) and self.store.list_accepted_poc_bundles(scan_id):
+            reasons.append("poc_not_materialized")
+        if worker_failures:
+            solver_failures = [item for item in worker_failures if item["phase"] == "cybergym_solving"]
+            if solver_failures:
+                reasons.append("solver_exhausted" if any(
+                    (item["attempt_ordinal"] or 0) >= 2 for item in solver_failures
+                ) else "solver_failed")
+            if any(item["phase"] == "poc_generation" for item in worker_failures):
+                reasons.append("poc_generation_failed")
+        reasons.sort(key=lambda reason: reason in {"no_crash_found", "no_verified_crash"})
+        return {"primary_reason": next(iter(reasons), "no_verified_crash"),
+                "reasons": reasons, "worker_failures": worker_failures}
+
     def no_artifact_failure_reason(self, scan_id: str) -> str:
-        return _cybergym_no_artifact_failure_reason(self.store.list_cybergym_runs(scan_id))
+        return self.failure_summary(scan_id)["primary_reason"]
 
     def mark_failed_no_artifact(
         self,
@@ -1424,6 +1488,11 @@ class CyberGymRuntime:
     ) -> dict[str, Any]:
         if selection_reason is None:
             selection_reason = self.no_artifact_failure_reason(scan_id)
+        self.store.assert_cybergym_runs_terminal(scan_id)
+        self.store.append_scan_event(
+            scan_id, "cybergym.validation_summary", "CyberGym validation evidence summary",
+            self.failure_summary(scan_id),
+        )
         return self.store.mark_cybergym_failed_no_artifact(
             scan_id,
             selection_reason=selection_reason,
@@ -1455,6 +1524,12 @@ class CyberGymRuntime:
         return {
             "status": status,
             "crash": status == "crash",
+            "sanitizer_finding": _sanitizer_finding(f"{result.stdout}\n{result.stderr}"),
+            "instrumentation_error": _instrumentation_error(f"{result.stdout}\n{result.stderr}"),
+            "crash_signature": _crash_signature(result) if status == "crash" else None,
+            "manifest_digest": hashlib.sha256(json.dumps(manifest.public_dict(), sort_keys=True).encode()).hexdigest(),
+            **({"failure_code": "execution_timeout" if status == "timeout" else status}
+               if status in {"harness_error", "runtime_unavailable", "timeout"} else {}),
             "exit_code": result.returncode,
             **_bounded_command_output(result),
         }
@@ -1489,7 +1564,7 @@ class CyberGymRuntime:
                 "status": "gdb_unavailable",
                 "reason": "gdb_unavailable_in_runner",
             }
-        if execution_status == "harness_error":
+        if execution_status == "harness_error" and not _instrumentation_error(f"{result.stdout}\n{result.stderr}"):
             return {
                 "status": "harness_error",
                 "reason": "gdb_runner_error",
@@ -1502,7 +1577,10 @@ class CyberGymRuntime:
             for index, breakpoint in enumerate(breakpoints)
         }
         return {
-            "status": "completed" if not result.timed_out else "timeout",
+            "status": "timeout" if result.timed_out else "completed",
+            "debugger_status": "error" if result.returncode != 0 else "completed",
+            **({"failure_code": "execution_timeout" if result.timed_out else "debugger_runtime_error"}
+               if result.timed_out or result.returncode != 0 else {}),
             "target_reached": hits.get("target", False),
             "vulnerable_branch_reached": hits.get("vulnerable_branch", False),
             "breakpoints": hits,
@@ -1547,6 +1625,7 @@ class CyberGymRuntime:
         payload = {
             "status": "completed",
             "preflight": True,
+            "readiness": "ready",
             "engine": manifest.engine,
             "execution_status": execution_status,
             "exit_code": result.returncode,
@@ -1557,6 +1636,7 @@ class CyberGymRuntime:
             payload.update({
                 "status": "failed",
                 "failure_code": failure_code,
+                "readiness": "unknown" if failure_code == "coverage_unverified" else "blocked",
                 "termination_reason": failure_code,
             })
         return payload
@@ -1572,6 +1652,7 @@ class CyberGymRuntime:
         max_length: int | None,
         container_name: str,
     ) -> None:
+        payload: dict[str, Any] | None = None
         try:
             with tempfile.TemporaryDirectory(prefix="cybergym-fuzz-") as temporary:
                 scratch = Path(temporary)
@@ -1615,13 +1696,15 @@ class CyberGymRuntime:
                 else:  # pragma: no cover - rejected by manifest validation
                     raise ValueError("Fuzzing is disabled by the trusted manifest")
                 result = await self.executor.run(command, timeout_seconds=seconds + 15)
-                produced = self._persist_fuzz_outputs(
-                    scan_id,
-                    run_id,
-                    corpus,
-                    findings,
-                    seeds=seeds,
-                )
+                try:
+                    produced = self._persist_fuzz_outputs(
+                        scan_id, run_id, corpus, findings, seeds=seeds,
+                    )
+                except (OSError, sqlite3.Error) as exc:
+                    produced = {
+                        "artifacts": [], "rejected": [{"reason": type(exc).__name__}],
+                        "persistence": {"status": "failed", "error_count": 1},
+                    }
             crash_candidate_count = sum(item["kind"] == "crash" for item in produced["artifacts"])
             new_corpus_count = sum(item["kind"] == "corpus" for item in produced["artifacts"])
             engine_status = _execution_status(result)
@@ -1632,7 +1715,15 @@ class CyberGymRuntime:
                 "new_corpus_count": new_corpus_count,
                 "exit_code": result.returncode,
                 **_bounded_command_output(result),
-                "artifacts": produced["artifacts"][:_FUZZ_RESULT_ARTIFACT_LIMIT],
+                "artifacts": [
+                    {key: item[key] for key in ("artifact_id", "kind", "sha256", "size") if key in item}
+                    for item in produced["artifacts"][:_FUZZ_RESULT_ARTIFACT_LIMIT]
+                ],
+                "persistence": produced["persistence"],
+                **({"failure_code": "artifact_persistence_failed"}
+                   if produced["persistence"]["status"] == "failed" else
+                   {"failure_code": "artifact_collection_incomplete"}
+                   if produced["persistence"].get("omitted_crash_count") or produced["persistence"].get("crash_scan_truncated") else {}),
                 "rejected_artifacts": produced["rejected"][:_FUZZ_RESULT_REJECTION_LIMIT],
                 "artifact_count": len(produced["artifacts"]),
                 "rejected_artifact_count": len(produced["rejected"]),
@@ -1678,14 +1769,17 @@ class CyberGymRuntime:
                 self._finish_fuzz_run(run_id, "failed", payload)
             elif termination_reason is not None:
                 payload["outcome"] = (
-                    "crash_candidate_found" if crash_candidate_count else "no_crash_found"
+                    "crash_candidate_found" if crash_candidate_count else
+                    "crash_without_artifact" if engine_status == "crash" else
+                    "collection_incomplete" if payload.get("failure_code") in
+                    {"artifact_persistence_failed", "artifact_collection_incomplete"} else "no_crash_found"
                 )
                 payload["termination_reason"] = termination_reason
                 self._finish_fuzz_run(run_id, "completed", payload)
             else:
                 payload.update({
                     "status": "failed",
-                    "failure_code": "fuzzer_error",
+                    "failure_code": payload.get("failure_code", "fuzzer_error"),
                     "termination_reason": "unexpected_engine_exit",
                 })
                 self._finish_fuzz_run(run_id, "failed", payload)
@@ -1704,7 +1798,10 @@ class CyberGymRuntime:
             self._finish_fuzz_run(
                 run_id,
                 "failed",
-                {"status": "runtime_error", "error": type(exc).__name__, "detail": str(exc)[:1_000]},
+                ({**payload, "failure_code": "artifact_persistence_failed",
+                  "persistence": {"status": "failed", "error": type(exc).__name__}}
+                 if payload is not None else
+                 {"status": "runtime_error", "error": type(exc).__name__, "detail": str(exc)[:1_000]}),
             )
         finally:
             self._fuzz_cancel_sources.pop(run_id, None)
@@ -1799,58 +1896,95 @@ class CyberGymRuntime:
         findings: Path,
         *,
         seeds: list[dict[str, Any]],
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> dict[str, Any]:
         persisted: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
-        seed_digests = {
-            hashlib.sha256(seed["data"]).hexdigest()
-            for seed in seeds
-        }
-        poc_ids = sorted(
-            {
-                poc_id
-                for seed in seeds
-                for poc_id in [
-                    self.store.cybergym_artifact_poc_id(scan_id, seed["artifact_id"])
-                ]
-                if poc_id is not None
-            }
-        )
-        poc_id = poc_ids[0] if len(poc_ids) == 1 else None
+        manifest = self._manifest(scan_id)
+        seen = {("corpus", hashlib.sha256(seed["data"]).hexdigest()) for seed in seeds}
+        # Scan-level corpus and verification quotas are enforced separately,
+        # atomically by the store. Old corpus must not consume the crash budget.
+        remaining_count = _FUZZ_RESULT_ARTIFACT_LIMIT
+        remaining_bytes = _FUZZ_PERSIST_BYTES
+        corpus_count = 0
+        scanned = 0
+        skipped = 0
+        errors = 0
+        written_bytes = 0
+        scan_truncated = False
+        crash_scan_truncated = False
+        omitted_crashes = 0
+        # Findings precede corpus; neither directory count nor a large single
+        # file may bypass the shared run/scan budgets.
         for directory, kind in self._fuzz_output_directories(findings, corpus):
-            for path in sorted(directory.rglob("*"), key=lambda item: str(item.relative_to(directory)))[:256]:
+            for path in directory.rglob("*"):
+                scanned += 1
+                if scanned > _FUZZ_SCAN_ENTRY_LIMIT:
+                    scan_truncated = True
+                    crash_scan_truncated = kind == "crash"
+                    break
                 if not path.is_file() or path.is_symlink():
                     continue
-                raw = path.read_bytes()
-                # AFL copies initial inputs into `queue/` under generated
-                # names (for example `id:000000,orig:seed-0`).  Filename
-                # filtering therefore counts those copies as a discovery.
-                # A corpus item is new only when its bytes differ from every
-                # supplied seed; crash artifacts retain their own evidence.
-                if kind == "corpus" and hashlib.sha256(raw).hexdigest() in seed_digests:
-                    continue
-                provenance: dict[str, Any] = {
-                    "run_id": run_id,
-                    "operation": self._manifest(scan_id).engine,
-                    "source_name": str(path.relative_to(directory)),
-                }
-                if poc_id is not None:
-                    provenance["poc_id"] = poc_id
                 try:
+                    source_name = _trim_json_string(str(path.relative_to(directory)), 512)
+                    if (remaining_count <= 0 or len(persisted) >= _FUZZ_RESULT_ARTIFACT_LIMIT
+                            or (kind == "corpus" and corpus_count >= _FUZZ_CORPUS_LIMIT)):
+                        skipped += 1
+                        omitted_crashes += kind == "crash"
+                        continue
+                    limit = min(manifest.limits.max_artifact_bytes, remaining_bytes)
+                    if path.stat().st_size > limit:
+                        skipped += 1
+                        omitted_crashes += kind == "crash"
+                        continue
+                    with path.open("rb") as stream:
+                        raw = stream.read(limit + 1)
+                    if len(raw) > limit:
+                        skipped += 1
+                        omitted_crashes += kind == "crash"
+                        continue
+                    digest = hashlib.sha256(raw).hexdigest()
+                    if (kind, digest) in seen:
+                        skipped += 1
+                        continue
+                    seen.add((kind, digest))
                     artifact = self.artifact_create(
                         scan_id,
                         kind=kind,
                         raw=raw,
                         parent_id=seeds[0]["artifact_id"],
-                        provenance=provenance,
+                        provenance={"run_id": run_id, "operation": manifest.engine, "source_name": source_name},
                     )
                 except ValueError as exc:
-                    rejected.append(
-                        {"kind": kind, "source_name": provenance["source_name"], "reason": str(exc)}
-                    )
+                    skipped += 1
+                    omitted_crashes += kind == "crash"
+                    if len(rejected) < _FUZZ_RESULT_REJECTION_LIMIT:
+                        rejected.append({"kind": kind, "reason": _trim_json_string(str(exc), 512)})
+                    continue
+                except (OSError, sqlite3.Error) as exc:
+                    errors += 1
+                    if len(rejected) < _FUZZ_RESULT_REJECTION_LIMIT:
+                        rejected.append({"kind": kind, "reason": type(exc).__name__})
                     continue
                 persisted.append(_public_artifact(artifact))
-        return {"artifacts": persisted, "rejected": rejected}
+                remaining_count -= 1
+                remaining_bytes -= len(raw)
+                written_bytes += len(raw)
+                corpus_count += kind == "corpus"
+            if scan_truncated:
+                break
+        return {
+            "artifacts": persisted,
+            "rejected": rejected,
+            "persistence": {
+                "status": "failed" if errors else "partial" if skipped or scan_truncated else "completed",
+                "saved_bytes": written_bytes,
+                "skipped_count": skipped,
+                "error_count": errors,
+                "scan_truncated": scan_truncated,
+                "crash_scan_truncated": crash_scan_truncated,
+                "omitted_crash_count": omitted_crashes,
+            },
+        }
 
     @staticmethod
     def _fuzz_output_directories(findings: Path, corpus: Path) -> list[tuple[Path, str]]:
@@ -2002,52 +2136,81 @@ def _execution_status(result: CommandResult) -> str:
         return "runtime_unavailable"
     if result.timed_out:
         return "timeout"
-    if result.returncode == 0:
-        return "clean"
     if result.returncode in {125, 126, 127, None}:
         return "harness_error"
-    return "crash" if _has_crash_evidence(result) else "non_crash_exit"
+    if _has_crash_evidence(result):
+        return "crash"
+    if _instrumentation_error(f"{result.stdout}\n{result.stderr}"):
+        return "harness_error"
+    return "clean" if result.returncode == 0 else "non_crash_exit"
+
+
+def _instrumentation_error(output: str) -> bool:
+    normalized = output.casefold()
+    return any(marker in normalized for marker in (
+        "leaksanitizer does not work under ptrace",
+        "leaksanitizer has encountered a fatal error",
+        "asan runtime does not come first",
+        "shadow memory range interleaves",
+        "addresssanitizer cannot initialize",
+    )) or bool(re.search(
+        r"(?:ERROR:\s*(?:AddressSanitizer|MemorySanitizer):[^\n]*"
+        r"(?:failed to mmap|out of memory)|Sanitizer CHECK failed:[^\n]*mmap)",
+        output, re.IGNORECASE,
+    ))
+
+
+def _sanitizer_finding(output: str) -> bool:
+    # Keep actual findings even when a separate initialization diagnostic is
+    # present. A sanitizer runtime failure line is not itself a finding.
+    for line in output.splitlines():
+        if _instrumentation_error(line):
+            continue
+        if _UBSAN_RUNTIME_ERROR_RE.search(line) or re.search(
+            r"(?:ERROR|WARNING|SUMMARY):\s*(?:AddressSanitizer|UndefinedBehaviorSanitizer|"
+            r"MemorySanitizer|ThreadSanitizer):\s*\S+",
+            line, re.IGNORECASE,
+        ):
+            return True
+    return "addresssanitizer:deadlysignal" in output.casefold() and not _instrumentation_error(output)
 
 
 def _has_crash_evidence(result: CommandResult) -> bool:
-    """Accept only a signal-like exit or sanitizer report as crash evidence.
-
-    A target may intentionally return a non-zero application code.  That is a
-    useful replay observation, but it must not be promoted to a crash PoC.
-    Docker normally returns 128 + signal for a process killed by a Unix signal;
-    direct subprocess executors may return the negative signal instead.
-    """
-    if _exit_code_is_crash(result.returncode):
-        return True
-    output = f"{result.stdout}\n{result.stderr}".casefold()
-    markers = (
-        "addresssanitizer",
-        "undefinedbehaviorsanitizer",
-        "memorysanitizer",
-        "threadsanitizer",
-        "runtime error:",
-        "deadly signal",
+    output = f"{result.stdout}\n{result.stderr}"
+    if result.unavailable or result.timed_out:
+        return False
+    return _sanitizer_finding(output) or (
+        _exit_code_is_crash(result.returncode) and not _instrumentation_error(output)
     )
-    return any(marker in output for marker in markers)
+
+
+def _crash_signature(result: CommandResult) -> str:
+    output = f"{result.stdout}\n{result.stderr}"
+    lines = [line.strip() for line in output.splitlines() if _sanitizer_finding(line)]
+    # Preserve source locations; normalize ASLR-dependent addresses. The
+    # signature groups observations, it does not establish candidate causality.
+    report = next((line for line in lines if "SUMMARY:" in line), next(iter(lines), ""))
+    if not any("SUMMARY:" in line for line in lines):
+        frame = next((line.strip() for line in output.splitlines() if re.match(r"\s*#0\s", line)), "")
+        report = f"{report}\n{frame}".strip()
+    # Module-relative offsets are stable locations, not ASLR addresses.
+    normalized = re.sub(
+        r"(\+\s*0x[0-9a-fA-F]+)|0x[0-9a-fA-F]+",
+        lambda match: match.group(1) or "<address>", report,
+    )
+    normalized = re.sub(r"==[0-9]+==", "<pid>", normalized)
+    return hashlib.sha256((normalized or f"signal:{abs(result.returncode or 0) % 128}").encode()).hexdigest()
 
 
 def _official_mode_has_crash_evidence(value: dict[str, Any]) -> bool:
     exit_code = value.get("exit_code")
     output = value.get("output")
-    normalized_exit_code = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
-    if _exit_code_is_crash(normalized_exit_code):
-        return True
-    normalized_output = output if isinstance(output, str) else ""
-    markers = (
-        "addresssanitizer",
-        "undefinedbehaviorsanitizer",
-        "memorysanitizer",
-        "threadsanitizer",
-        "deadly signal",
-    )
-    return any(marker in normalized_output.casefold() for marker in markers) or bool(
-        _UBSAN_RUNTIME_ERROR_RE.search(normalized_output)
-    )
+    return _execution_status(CommandResult(
+        returncode=exit_code if type(exit_code) is int else None,
+        stdout=output if isinstance(output, str) else "",
+        stderr="",
+        timed_out=exit_code == _OFFICIAL_TIMEOUT_EXIT_CODE,
+    )) == "crash"
 
 
 def _exit_code_is_crash(exit_code: int | None) -> bool:
@@ -2064,6 +2227,8 @@ def _fuzz_termination_reason(
     """Return a positive, persisted reason when fuzzing ended without an engine error."""
     if crash_candidate_count:
         return "crash_artifact_found"
+    if _execution_status(result) == "crash":
+        return "crash_observed"
     if result.returncode == 0:
         return "engine_completed"
     if new_corpus_count:
@@ -2086,32 +2251,57 @@ def _fuzz_preflight_failure_code(result: CommandResult, execution_status: str) -
         return "execution_timeout"
     if execution_status == "non_crash_exit":
         return "fuzzer_error"
+    output = f"{result.stdout}\n{result.stderr}"
+    if not re.search(r"[1-9]\d*\s+(?:inline 8-bit counters|guards)", output, re.IGNORECASE):
+        return "coverage_unverified"
     return None
 
 
-def _cybergym_no_artifact_failure_reason(runs: list[dict[str, Any]]) -> str:
-    observed: set[str] = set()
+def _cybergym_failure_reasons(runs: list[dict[str, Any]]) -> list[str]:
+    # Only a later successful operation in the same lineage can resolve an
+    # earlier failure. Other lineages and kinds retain their independent facts.
+    latest: dict[tuple[str, str], set[str]] = {}
     for run in runs:
         result = run.get("result")
-        if not isinstance(result, dict):
+        if not isinstance(result, dict) or run.get("status") == "running":
             continue
-        failure_code = result.get("failure_code")
-        if isinstance(failure_code, str) and failure_code:
-            observed.add(failure_code)
-        if run.get("kind") == "fuzz":
-            if result.get("outcome") == "no_crash_found":
-                observed.add("no_crash_found")
-            termination_reason = result.get("termination_reason")
-            if termination_reason in _NO_CRASH_TERMINATION_REASONS:
-                observed.add("no_crash_found")
-        if result.get("status") == "runtime_error":
-            observed.add("runtime_error")
+        inputs = run.get("input") or {}
+        identity = inputs.get("poc_id") or inputs.get("artifact_id") or inputs.get("seed_ids") or "task"
+        key = (str(run.get("kind")), json.dumps(identity, sort_keys=True))
+        observed: set[str] = set()
+        failure = result.get("failure_code")
+        if isinstance(failure, str) and failure:
+            observed.add(failure)
+        status = result.get("status")
+        if status in {"harness_error", "runtime_unavailable", "runtime_error"}:
+            observed.add(status)
+        if status == "timeout":
+            observed.add("execution_timeout")
+        if status == "gdb_unavailable":
+            observed.add("debugger_runtime_error")
         if run.get("status") == "cancelled":
             observed.add("cancelled")
-    for reason in _NO_ARTIFACT_REASON_PRIORITY:
-        if reason in observed:
-            return reason
-    return "no_verified_crash"
+        if run.get("kind") == "fuzz" and (
+            result.get("outcome") == "no_crash_found"
+            or result.get("termination_reason") in _NO_CRASH_TERMINATION_REASONS
+        ):
+            observed.add("no_crash_found")
+        successful = run.get("status") == "completed" and (
+            status in {"clean", "crash"} or
+            (run.get("kind") == "fuzz" and result.get("termination_reason") in
+             {*_NO_CRASH_TERMINATION_REASONS, "crash_artifact_found", "crash_observed"}) or
+            (run.get("kind") == "gdb" and status == "completed" and not failure)
+        )
+        if successful:
+            latest[key] = observed
+        else:
+            latest.setdefault(key, set()).update(observed)
+    observed = set().union(*latest.values()) if latest else set()
+    return [reason for reason in _NO_ARTIFACT_REASON_PRIORITY if reason in observed]
+
+
+def _cybergym_no_artifact_failure_reason(runs: list[dict[str, Any]]) -> str:
+    return next(iter(_cybergym_failure_reasons(runs)), "no_verified_crash")
 
 
 def _docker_user_args() -> list[str]:

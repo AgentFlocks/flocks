@@ -3535,6 +3535,43 @@ class ScanStore:
             },
         }
 
+    def save_cybergym_checkpoint(self, scan_id: str, poc_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+        self.assert_accepted_poc_bundle(scan_id, poc_id)
+        if not isinstance(plan, dict) or set(plan) - {
+            "stage", "hypothesis", "constraints", "next_action", "artifact_id", "recipe", "reason_code"
+        }:
+            raise ValueError("Invalid solver checkpoint fields")
+        if plan.get("stage") not in {"input_planning", "materializing", "replaying", "diagnosing", "blocked", "inconclusive"}:
+            raise ValueError("Invalid solver checkpoint stage")
+        if len(json.dumps(plan, ensure_ascii=False).encode("utf-8")) > 8 * 1024:
+            raise ValueError("Solver checkpoint exceeds 8 KiB")
+        artifact_id = plan.get("artifact_id")
+        if artifact_id is not None and self.cybergym_artifact_poc_id(scan_id, artifact_id) != poc_id:
+            raise ValueError("Checkpoint artifact must belong to the same PoC")
+        task = self.get_cybergym_task(scan_id)
+        if task is None or task["status"] != "active":
+            raise ValueError("CyberGym task is not active")
+        # Plans are agent claims, not validation facts. Events retain their
+        # history; replay/submit never use them as crash evidence.
+        payload = {"poc_id": poc_id, "plan": plan}
+        prior = self.cybergym_checkpoints(scan_id).get(poc_id)
+        if prior == payload:
+            return payload
+        self.append_scan_event(scan_id, "cybergym.checkpoint", "Solver input plan saved", payload)
+        return payload
+
+    def cybergym_checkpoints(self, scan_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM scan_events WHERE scan_id = ? "
+                "AND event_type = 'cybergym.checkpoint' ORDER BY seq", (scan_id,),
+            ).fetchall()
+        checkpoints = {}
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            checkpoints[payload["poc_id"]] = payload
+        return checkpoints
+
     def create_cybergym_artifact(
         self,
         scan_id: str,
@@ -3543,6 +3580,8 @@ class ScanStore:
         raw: bytes,
         parent_id: str | None,
         provenance: dict[str, Any],
+        max_scan_artifacts: int | None = None,
+        max_scan_bytes: int | None = None,
     ) -> dict[str, Any]:
         if kind not in {"seed", "corpus", "crash", "minimized", "dictionary"}:
             raise ValueError("Unsupported CyberGym artifact kind")
@@ -3557,6 +3596,7 @@ class ScanStore:
         digest = hashlib.sha256(raw).hexdigest()
         now = _now()
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             task = connection.execute(
                 "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
             ).fetchone()
@@ -3588,6 +3628,17 @@ class ScanStore:
                     raise ValueError("Identical CyberGym artifacts cannot belong to different generic PoCs")
                 if existing_poc_id == requested_poc_id:
                     return self._decode_cybergym_artifact(existing)
+            # Corpus can be regenerated; seeds, crashes and minimized inputs
+            # are required to continue validation. Give them independent pools
+            # so even historical over-quota corpus cannot block recovery.
+            count, total_bytes = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM cybergym_artifacts "
+                "WHERE scan_id = ? AND (kind = 'corpus') = ?",
+                (scan_id, int(kind == "corpus")),
+            ).fetchone()
+            if ((max_scan_artifacts is not None and count >= max_scan_artifacts)
+                    or (max_scan_bytes is not None and total_bytes + len(raw) > max_scan_bytes)):
+                raise ValueError("CyberGym scan artifact budget exhausted")
             connection.execute(
                 "INSERT INTO cybergym_artifacts (artifact_id, scan_id, kind, sha256, "
                 "size_bytes, raw_bytes, parent_id, provenance_json, created_at) "
@@ -3903,15 +3954,7 @@ class ScanStore:
         return [self._decode_cybergym_run(row) for row in rows]
 
     def cybergym_artifact_has_stable_crash(self, scan_id: str, artifact_id: str) -> bool:
-        crashes = sum(
-            1
-            for run in self.list_cybergym_runs(scan_id)
-            if run["kind"] == "replay"
-            and run["status"] == "completed"
-            and run["input"].get("artifact_id") == artifact_id
-            and (run["result"] or {}).get("crash") is True
-        )
-        return crashes >= 2
+        return self.cybergym_artifact_evidence(scan_id, artifact_id)["stable_crash"]
 
     def cybergym_artifact_evidence(self, scan_id: str, artifact_id: str) -> dict[str, Any]:
         replay: list[dict[str, Any]] = []
@@ -3919,14 +3962,17 @@ class ScanStore:
         for run in self.list_cybergym_runs(scan_id):
             if run["input"].get("artifact_id") != artifact_id:
                 continue
-            if run["kind"] == "replay":
+            if run["kind"] == "replay" and run["status"] == "completed":
                 replay.append(run["result"] or {})
             elif run["kind"] == "gdb":
                 gdb.append(run["result"] or {})
         return {
             "replay": replay,
             "gdb": gdb,
-            "stable_crash": sum(item.get("crash") is True for item in replay) >= 2,
+            "stable_crash": any(count >= 2 for count in Counter(
+                (item.get("manifest_digest"), item.get("crash_signature"))
+                for item in replay if item.get("crash") is True
+            ).values()),
             "vulnerable_branch_reached": any(item.get("vulnerable_branch_reached") is True for item in gdb),
             "target_reached": any(item.get("target_reached") is True for item in gdb),
         }

@@ -152,7 +152,7 @@ class _FixtureExecutor:
             findings.mkdir(exist_ok=True)
             (findings / "crash-1").write_bytes(b"crash")
             return CommandResult(1, "crash", "")
-        return CommandResult(1, "", "AddressSanitizer")
+        return CommandResult(1, "", "ERROR: AddressSanitizer: heap-buffer-overflow")
 
 
 def test_cybergym_input_requires_declared_literal_bytes() -> None:
@@ -674,6 +674,7 @@ async def test_clean_replayed_seed_can_fuzz_without_gdb_target_reachability(tmp_
             self.commands.append(command)
             if "/opt/fixture-fuzzer" in command and "-runs=0" in command:
                 self.preflight_count += 1
+                return CommandResult(0, "INFO: Loaded 1 modules (8 guards)", "")
             return CommandResult(0, "", "")
 
     store, scan_id = _store(tmp_path)
@@ -794,6 +795,8 @@ async def test_fuzz_large_output_is_bounded_without_runtime_error(tmp_path: Path
     class _LargeOutputExecutor(_FixtureExecutor):
         async def run(self, command: list[str], *, timeout_seconds: int) -> CommandResult:
             self.commands.append(command)
+            if "-runs=0" in command:
+                return CommandResult(0, "INFO: Loaded 1 modules (8 guards)", "")
             if "/opt/fixture-fuzzer" in command:
                 return CommandResult(0, "o" * 80_000, "e" * 80_000)
             return CommandResult(0, "", "")
@@ -822,6 +825,8 @@ async def test_fuzz_persisted_corpus_is_a_normal_no_crash_completion(tmp_path: P
                 scratch = Path(mount.split(",src=", 1)[1].split(",dst=", 1)[0])
                 (scratch / "corpus" / "generated").write_bytes(b"expanded")
                 return CommandResult(1, "", "engine stopped after expanding corpus")
+            if "-runs=0" in command:
+                return CommandResult(0, "INFO: Loaded 1 modules (8 guards)", "")
             return CommandResult(0, "", "")
 
     store, scan_id = _store(tmp_path)
@@ -900,6 +905,8 @@ async def test_scan_cancellation_records_fuzz_cancel_source(tmp_path: Path) -> N
             if "/opt/fixture-fuzzer" in command and "-runs=0" not in command:
                 self.fuzz_started.set()
                 await asyncio.Event().wait()
+            if "-runs=0" in command:
+                return CommandResult(0, "INFO: Loaded 1 modules (8 guards)", "")
             return CommandResult(0, "", "")
 
     store, scan_id = _store(tmp_path)
@@ -1466,7 +1473,7 @@ async def test_official_judge_rejects_sanitizer_output_from_fixed_side(tmp_path:
     def runner(_task_id, _poc_path, mode, _actual_data_dir, _docker_timeout, _command_timeout):
         if mode == "vul":
             return 1, b"aacsbr_template.c:628:37: runtime error: index 7 out of bounds"
-        return 0, b"UndefinedBehaviorSanitizer: out-of-bounds"
+        return 0, b"SUMMARY: UndefinedBehaviorSanitizer: out-of-bounds"
 
     manifest_data = _manifest()
     manifest_data.update({"task_id": "1337", "task_kind": "oss_fuzz"})
@@ -1674,3 +1681,301 @@ def test_build_runtime_wires_the_official_judge_adapter(
     runtime = build_runtime(tmp_path / "plugin-data")
 
     assert runtime.cybergym.submitter is sentinel
+
+
+@pytest.mark.parametrize("exit_code,output,expected", [
+    (0, "src/a.c:12:3: runtime error: signed integer overflow", "crash"),
+    (1, "runtime error: invalid configuration", "non_crash_exit"),
+    (1, "AddressSanitizer cannot initialize", "harness_error"),
+    (1, "AddressSanitizer", "non_crash_exit"),
+    (1, "ERROR: AddressSanitizer: heap-buffer-overflow", "crash"),
+    (0, "SUMMARY: UndefinedBehaviorSanitizer: out-of-bounds", "crash"),
+    (1, "LeakSanitizer does not work under ptrace", "harness_error"),
+    (139, "", "crash"),
+])
+def test_local_and_official_evidence_agree(exit_code, output, expected):
+    result = CommandResult(exit_code, "", output)
+    assert _execution_status(result) == expected
+    assert cybergym_runtime._official_mode_has_crash_evidence(
+        {"exit_code": exit_code, "output": output}
+    ) is (expected == "crash")
+
+
+@pytest.mark.parametrize("output,reason", [
+    ("", "coverage_unverified"),
+    ("INFO: Loaded 1 modules (16 guards)", None),
+    ("INFO: Loaded 1 modules (16 inline 8-bit counters)", None),
+    ("INFO: Loaded 0 modules (0 guards)", "fuzzer_uninstrumented"),
+])
+def test_preflight_requires_positive_coverage(output, reason):
+    result = CommandResult(0, output, "")
+    assert cybergym_runtime._fuzz_preflight_failure_code(result, _execution_status(result)) == reason
+
+
+def test_failure_summary_normalizes_legacy_replay_and_resolves_same_lineage():
+    failure = {"kind": "replay", "status": "completed", "input": {"artifact_id": "a"},
+               "result": {"status": "harness_error", "exit_code": 127}}
+    clean = {"kind": "replay", "status": "completed", "input": {"artifact_id": "a"},
+             "result": {"status": "clean", "exit_code": 0}}
+    summarize = cybergym_runtime._cybergym_no_artifact_failure_reason
+    assert summarize([failure]) == "harness_error"
+    assert summarize([failure, clean]) == "no_verified_crash"
+    assert summarize([failure, {**clean, "input": {"artifact_id": "b"}}]) == "harness_error"
+
+
+@pytest.mark.asyncio
+async def test_debugger_error_preserves_reachability_without_crash(tmp_path):
+    class Executor(_FixtureExecutor):
+        async def run(self, command, *, timeout_seconds):
+            return CommandResult(1, "Breakpoint 1, fixture", "LeakSanitizer does not work under ptrace")
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=Executor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    result = await runtime.gdb(scan_id, seed["artifact_id"], {
+        "breakpoints": [{"kind": "target", "location": "fixture"}], "variables": []})
+    assert result["target_reached"] is True
+    assert result["debugger_status"] == "error"
+    assert result["failure_code"] == "debugger_runtime_error"
+    assert runtime.select_final_artifact(scan_id) is None
+
+
+@pytest.mark.asyncio
+async def test_fuzz_artifact_io_failure_keeps_execution_outcome(tmp_path, monkeypatch):
+    import sqlite3
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=_FixtureExecutor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+    original = store.create_cybergym_artifact
+    def fail_crash(*args, **kwargs):
+        if kwargs.get("kind") == "crash":
+            raise sqlite3.OperationalError("injected write failure")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(store, "create_cybergym_artifact", fail_crash)
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    result = (await runtime.fuzz_wait(scan_id, started["run_id"]))["result"]
+    assert result["execution_status"] == "non_crash_exit"
+    assert result["exit_code"] == 1
+    assert result["persistence"]["status"] == "failed"
+    assert result["failure_code"] == "artifact_persistence_failed"
+    assert runtime.select_final_artifact(scan_id) is None
+
+
+def test_fuzz_persistence_bounds_corpus_and_reads(tmp_path, monkeypatch):
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store)
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    corpus, findings = tmp_path / "corpus", tmp_path / "findings"
+    corpus.mkdir()
+    findings.mkdir()
+    for i in range(100):
+        (corpus / str(i)).write_bytes(f"seed-{i}".encode())
+    (findings / "crash-1").write_bytes(b"crash")
+    (findings / "huge").write_bytes(b"x" * 5000)
+    result = runtime._persist_fuzz_outputs(scan_id, "run", corpus, findings,
+        seeds=[{**seed, "data": b"seed"}])
+    assert sum(item["kind"] == "corpus" for item in result["artifacts"]) == 16
+    assert sum(item["kind"] == "crash" for item in result["artifacts"]) == 1
+    assert result["persistence"]["status"] == "partial"
+    assert result["persistence"]["skipped_count"] == 85
+
+
+def test_checkpoint_and_bit_recipe_survive_runtime_restart(tmp_path):
+    store, scan_id = _store(tmp_path)
+    _insert_accepted_raw_pocs(store, scan_id, [("poc_1", "candidate_1", "AB")])
+    runtime = CyberGymRuntime(store)
+    seed_id = runtime.seed_from_poc_bundles(scan_id)["imported"][0]["artifact_id"]
+    recipe = {"edits": [{"offset_bits": 4, "width_bits": 8, "value": 255}]}
+    plan = {"stage": "materializing", "artifact_id": seed_id, "recipe": recipe,
+            "constraints": ["retain outer framing"], "next_action": "materialize"}
+    saved = store.save_cybergym_checkpoint(scan_id, "poc_1", plan)
+    recovered = CyberGymRuntime(ScanStore(tmp_path / "audit.db"))
+    assert recovered.context(scan_id)["execution_state"]["solver_plans"]["poc_1"] == saved
+    artifact = recovered.materialize(scan_id, seed_id, recipe)
+    raw = store.get_cybergym_artifact(scan_id, artifact["artifact_id"], include_data=True)["data"]
+    assert raw == bytes.fromhex("4ff2")
+    assert artifact["parent_id"] == seed_id
+    assert artifact["provenance"]["poc_id"] == "poc_1"
+    assert recovered.select_final_artifact(scan_id) is None
+    with pytest.raises(ValueError, match="stage"):
+        store.save_cybergym_checkpoint(scan_id, "poc_1", {"stage": "verified"})
+
+
+@pytest.mark.parametrize("recipe", [
+    {"size_bytes": 99999},
+    {"edits": [{"offset_bits": 15, "width_bits": 2, "value": 1}]},
+    {"edits": [{"offset_bits": 0, "width_bits": 8, "value": 256}]},
+    {"edits": [{"offset_bits": 0, "width_bits": 8, "value": 1}] * 2},
+])
+def test_bit_recipe_rejects_invalid_fields(recipe):
+    from flocks_code_security.poc import materialize_bit_recipe
+    with pytest.raises(ValueError):
+        materialize_bit_recipe(b"AB", recipe, max_bytes=4096)
+
+
+def test_stable_crash_requires_matching_observation_and_manifest(tmp_path):
+    store, scan_id = _store(tmp_path)
+    seed = CyberGymRuntime(store).artifact_create(scan_id, kind="seed", raw=b"seed")
+    for signature, manifest in [("a", "v1"), ("b", "v1"), ("a", "v2")]:
+        run = store.start_cybergym_run(scan_id, "replay", {"artifact_id": seed["artifact_id"]})
+        store.finish_cybergym_run(run["run_id"], "completed", {
+            "crash": True, "crash_signature": signature, "manifest_digest": manifest})
+    assert store.cybergym_artifact_has_stable_crash(scan_id, seed["artifact_id"]) is False
+    run = store.start_cybergym_run(scan_id, "replay", {"artifact_id": seed["artifact_id"]})
+    store.finish_cybergym_run(run["run_id"], "completed", {
+        "crash": True, "crash_signature": "a", "manifest_digest": "v2"})
+    assert store.cybergym_artifact_has_stable_crash(scan_id, seed["artifact_id"]) is True
+
+
+@pytest.mark.asyncio
+async def test_fuzz_large_provenance_uses_compact_result_references(tmp_path):
+    prefix = b"A" * 2048
+    class Executor(_FixtureExecutor):
+        async def run(self, command, *, timeout_seconds):
+            if "/opt/fixture-fuzzer" in command and "-runs=0" not in command:
+                mount = next(item for item in command if item.startswith("type=bind,src="))
+                scratch = Path(mount.split(",src=", 1)[1].split(",dst=", 1)[0])
+                for i in range(64):
+                    (scratch / "findings" / str(i)).write_bytes(prefix + str(i).encode())
+                return CommandResult(1, "", "ERROR: AddressSanitizer: heap-buffer-overflow")
+            return await super().run(command, timeout_seconds=timeout_seconds)
+    manifest = _manifest()
+    manifest["input_contract"] = {"required_prefix_hex": prefix.hex()}
+    store, scan_id = _store(tmp_path, manifest)
+    runtime = CyberGymRuntime(store, executor=Executor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=prefix + b"seed")
+    await runtime.replay(scan_id, seed["artifact_id"])
+    started = await runtime.fuzz_start(scan_id, [seed["artifact_id"]])
+    run = await runtime.fuzz_wait(scan_id, started["run_id"])
+    assert run["status"] == "completed"
+    assert len(run["result"]["artifacts"]) == 64
+    assert len(json.dumps(run["result"]).encode()) < 128 * 1024
+    assert all("provenance" not in item for item in run["result"]["artifacts"])
+
+
+def test_cancelled_retry_does_not_hide_specific_preflight_failure():
+    runs = [
+        {"kind": "fuzz", "status": "failed", "input": {"poc_id": "p"},
+         "result": {"failure_code": "fuzzer_uninstrumented"}},
+        {"kind": "fuzz", "status": "cancelled", "input": {"poc_id": "p"},
+         "result": {"status": "cancelled"}},
+    ]
+    assert cybergym_runtime._cybergym_no_artifact_failure_reason(runs) == "fuzzer_uninstrumented"
+    runs.append({"kind": "fuzz", "status": "completed", "input": {"poc_id": "p"},
+                 "result": {"termination_reason": "engine_completed", "outcome": "no_crash_found"}})
+    assert cybergym_runtime._cybergym_no_artifact_failure_reason(runs) == "no_crash_found"
+
+
+def test_scan_artifact_quota_is_atomic_and_preserves_idempotency(tmp_path):
+    store, scan_id = _store(tmp_path)
+    args = dict(kind="seed", parent_id=None, provenance={}, max_scan_artifacts=1, max_scan_bytes=4)
+    first = store.create_cybergym_artifact(scan_id, raw=b"seed", **args)
+    assert store.create_cybergym_artifact(scan_id, raw=b"seed", **args)["artifact_id"] == first["artifact_id"]
+    with pytest.raises(ValueError, match="budget exhausted"):
+        store.create_cybergym_artifact(scan_id, raw=b"other", **args)
+
+
+def test_checkpoint_rejects_cross_lineage_and_is_idempotent(tmp_path):
+    store, scan_id = _store(tmp_path)
+    _insert_accepted_raw_pocs(store, scan_id, [("p1", "c1", "A"), ("p2", "c2", "B")])
+    runtime = CyberGymRuntime(store)
+    seeds = runtime.seed_from_poc_bundles(scan_id)["imported"]
+    first = next(item for item in seeds if item["poc_id"] == "p1")
+    plan = {"stage": "input_planning", "artifact_id": first["artifact_id"]}
+    with pytest.raises(ValueError, match="same PoC"):
+        store.save_cybergym_checkpoint(scan_id, "p2", plan)
+    store.save_cybergym_checkpoint(scan_id, "p1", plan)
+    store.save_cybergym_checkpoint(scan_id, "p1", plan)
+    with store._connect() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM scan_events WHERE event_type = 'cybergym.checkpoint'").fetchone()[0]
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_distinct_module_offsets_do_not_satisfy_stable_replay(tmp_path):
+    class Executor:
+        def __init__(self):
+            self.offsets = iter(["0x1234", "0x9876", "0x9876"])
+
+        async def run(self, command, *, timeout_seconds):
+            return CommandResult(1, "", "SUMMARY: AddressSanitizer: heap-buffer-overflow "
+                                 f"(/out/fuzzer+{next(self.offsets)})")
+
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=Executor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    first = await runtime.replay(scan_id, seed["artifact_id"])
+    second = await runtime.replay(scan_id, seed["artifact_id"])
+    assert first["crash_signature"] != second["crash_signature"]
+    assert runtime.select_final_artifact(scan_id) is None
+    await runtime.replay(scan_id, seed["artifact_id"])
+    assert runtime.select_final_artifact(scan_id)["local_validation"] == "verified"
+
+
+@pytest.mark.parametrize("with_summary", [True, False])
+def test_crash_signature_ignores_aslr_but_keeps_module_location(with_summary):
+    def observation(address, pid, offset):
+        output = (f"=={pid}==ERROR: AddressSanitizer: heap-buffer-overflow on address {address}\n"
+                  f"    #0 {address} (/out/fuzzer+{offset})")
+        if with_summary:
+            output += f"\nSUMMARY: AddressSanitizer: heap-buffer-overflow (/out/fuzzer+{offset})"
+        return cybergym_runtime._crash_signature(CommandResult(1, "", output))
+    assert observation("0x123456", 100, "0x42") == observation("0xabcdef", 200, "0x42")
+    assert observation("0x123456", 100, "0x42") != observation("0x123456", 100, "0x43")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("diagnostic,initialization_error", [
+    ("cache failed to mmap; falling back to malloc", False),
+    ("ERROR: AddressSanitizer: failed to mmap shadow memory", True),
+])
+async def test_replay_keeps_real_finding_alongside_runtime_diagnostics(tmp_path, diagnostic, initialization_error):
+    class Executor:
+        async def run(self, command, *, timeout_seconds):
+            return CommandResult(1, diagnostic, "ERROR: AddressSanitizer: heap-buffer-overflow")
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store, executor=Executor())
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    result = await runtime.replay(scan_id, seed["artifact_id"])
+    assert result["status"] == "crash"
+    assert result["sanitizer_finding"] is True
+    assert result["instrumentation_error"] is initialization_error
+    assert cybergym_runtime._official_mode_has_crash_evidence({
+        "exit_code": 1, "output": diagnostic + "\nERROR: AddressSanitizer: heap-buffer-overflow"}) is True
+
+
+@pytest.mark.parametrize("diagnostic", [
+    "ERROR: AddressSanitizer: failed to mmap shadow memory",
+    "ERROR: AddressSanitizer: allocator is out of memory trying to allocate 0x10 bytes",
+    "ERROR: AddressSanitizer: failed to mmap shadow memory\nAddressSanitizer:DEADLYSIGNAL",
+])
+def test_initialization_failure_alone_is_not_a_crash(diagnostic):
+    result = CommandResult(134, "", diagnostic)
+    assert _execution_status(result) == "harness_error"
+    assert cybergym_runtime._official_mode_has_crash_evidence({"exit_code": 134, "output": diagnostic}) is False
+
+
+def test_legacy_corpus_cannot_block_crash_collection_or_refinement(tmp_path, monkeypatch):
+    store, scan_id = _store(tmp_path)
+    runtime = CyberGymRuntime(store)
+    seed = runtime.artifact_create(scan_id, kind="seed", raw=b"seed")
+    # Model old tasks with more than 256 corpus records and more corpus bytes
+    # than the new pool allows; do not delete existing evidence to recover.
+    for i in range(300):
+        store.create_cybergym_artifact(scan_id, kind="corpus", raw=str(i).encode(),
+                                      parent_id=seed["artifact_id"], provenance={})
+    monkeypatch.setattr(cybergym_runtime, "_FUZZ_SCAN_BYTES", 64)
+    corpus, findings = tmp_path / "corpus", tmp_path / "findings"
+    corpus.mkdir()
+    findings.mkdir()
+    (findings / "crash-1").write_bytes(b"new-crash")
+    (corpus / "new-corpus").write_bytes(b"new-corpus")
+    result = runtime._persist_fuzz_outputs(scan_id, "run", corpus, findings,
+                                          seeds=[{**seed, "data": b"seed"}])
+    assert [item["kind"] for item in result["artifacts"]] == ["crash"]
+    assert result["persistence"]["omitted_crash_count"] == 0
+    runtime.materialize(scan_id, seed["artifact_id"], {"size_bytes": 7})
+    runtime.artifact_create(scan_id, kind="minimized", raw=b"min", parent_id=result["artifacts"][0]["artifact_id"])
+    assert sum(item["kind"] == "corpus" for item in store.list_cybergym_artifacts(scan_id)) == 300
+    with pytest.raises(ValueError, match="budget exhausted"):
+        runtime.artifact_create(scan_id, kind="crash", raw=b"x" * 64, parent_id=seed["artifact_id"])

@@ -63,3 +63,38 @@ def resolve_cybergym_input(bundle: Any) -> tuple[bytes, str]:
     if not raw:
         raise ValueError("Generic PoC input file must be non-empty")
     return raw, path
+
+
+def materialize_bit_recipe(raw: bytes, recipe: Any, *, max_bytes: int) -> bytes:
+    """Apply bounded, deterministic MSB-first bit edits to an existing seed.
+
+    Offsets are relative to the bytes actually consumed by the harness. No
+    protocol, shell, filesystem path or network transport is inferred here.
+    """
+    if not isinstance(recipe, dict) or set(recipe) - {"size_bytes", "edits"}:
+        raise ValueError("Recipe supports size_bytes and edits only")
+    size = recipe.get("size_bytes", len(raw))
+    if type(size) is not int or not 1 <= size <= max_bytes:
+        raise ValueError("Recipe size exceeds input budget")
+    edits = recipe.get("edits", [])
+    if not isinstance(edits, list) or len(edits) > 256:
+        raise ValueError("Recipe permits at most 256 bit edits")
+    result = bytearray(raw[:size])
+    result.extend(b"\0" * (size - len(result)))
+    occupied = set()
+    for edit in edits:
+        if not isinstance(edit, dict) or set(edit) != {"offset_bits", "width_bits", "value"}:
+            raise ValueError("Bit edit requires offset_bits, width_bits, value")
+        offset, width, value = edit["offset_bits"], edit["width_bits"], edit["value"]
+        if (any(type(item) is not int for item in (offset, width, value))
+                or not 1 <= width <= 64 or offset < 0 or offset + width > size * 8
+                or not 0 <= value < (1 << width)):
+            raise ValueError("Bit edit is outside its field bounds")
+        for index in range(width):
+            bit = offset + index
+            if bit in occupied:
+                raise ValueError("Recipe bit edits must not overlap")
+            occupied.add(bit)
+            mask = 1 << (7 - bit % 8)
+            result[bit // 8] = (result[bit // 8] & ~mask) | (((value >> (width - 1 - index)) & 1) * mask)
+    return bytes(result)

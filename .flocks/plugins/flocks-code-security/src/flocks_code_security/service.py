@@ -44,9 +44,13 @@ MAX_PROJECTED_EVENT_BYTES = 60 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 32 * 1024
 TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 PUBLIC_SCAN_STATUSES = {"running", *TERMINAL_SCAN_STATUSES}
-CYBERGYM_INCONCLUSIVE_FAILURE_REASONS = {"no_crash_found", "no_verified_crash"}
+CYBERGYM_INCONCLUSIVE_FAILURE_REASONS = {"no_crash_found", "no_verified_crash", "poc_not_materialized", "solver_failed", "solver_exhausted", "poc_generation_failed"}
 CYBERGYM_NOT_RUNNABLE_FAILURE_REASONS = {
     "fuzzer_uninstrumented",
+    "coverage_unverified",
+    "artifact_persistence_failed",
+    "artifact_collection_incomplete",
+    "debugger_runtime_error",
     "fuzzer_unavailable",
     "runtime_unavailable",
     "harness_error",
