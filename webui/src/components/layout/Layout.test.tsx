@@ -163,7 +163,7 @@ vi.mock('@/components/common/LanguageSwitcher', () => ({
 
 vi.mock('@/components/common/UpdateModal', () => ({
   UPDATE_DISMISSED_KEY: 'update-dismissed',
-  default: (props: Record<string, unknown>) => {
+  default: function MockUpdateModal(props: Record<string, unknown>) {
     React.useEffect(() => { (props.onPresented as (() => void) | undefined)?.(); }, [props.onPresented]);
     updateModalMock(props);
     return <div role="dialog" aria-label="update-modal" />;
