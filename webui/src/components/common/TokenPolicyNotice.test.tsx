@@ -46,12 +46,13 @@ it('records presentation before a user immediately closes the card', () => {
   expect(events).toEqual(['display', 'close']);
 });
 
-it('renders the full announcement as a modal with five policy items and safe links', () => {
+it('renders the full announcement as a modal with three policy items and safe links', () => {
   render(<TokenPolicyNotice onPresented={vi.fn()} onClose={vi.fn()} />);
   expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal', 'true');
   expect(screen.getByRole('region')).toHaveClass('overflow-y-auto');
-  expect(screen.getAllByRole('listitem')).toHaveLength(5);
-  expect(screen.getByText(/不统一折算为1000万Token/)).toBeInTheDocument();
+  expect(screen.getAllByRole('listitem')).toHaveLength(3);
+  expect(screen.getByText(/每人每天仍然免费赠送1000w Token/)).toBeInTheDocument();
+  expect(screen.getByText('10月1日起，调整如下：').tagName).toBe('STRONG');
   expect(screen.getByText(/2026年9月9日/)).toBeInTheDocument();
   const links = screen.getAllByRole('link');
   expect(links.map((link) => link.getAttribute('href'))).toEqual([
