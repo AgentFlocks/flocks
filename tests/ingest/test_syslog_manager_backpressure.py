@@ -90,6 +90,39 @@ def test_soc_alert_preview_recovers_nested_vendor_message_when_data_is_empty() -
 
 
 @pytest.mark.asyncio
+async def test_soc_denoise_does_not_create_execution_for_decoded_empty_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    trigger_tool_context: SimpleNamespace,
+) -> None:
+    manager = syslog_manager.SyslogManager()
+    create_execution = AsyncMock()
+    run = AsyncMock()
+    monkeypatch.setattr(syslog_manager, "create_execution_record", create_execution)
+    monkeypatch.setattr(syslog_manager, "run_workflow", run)
+    trigger = TriggerDefinition.model_validate(
+        {
+            "id": "soc-empty-syslog",
+            "type": "syslog",
+            "mapping": {"syslog_message": "$.body"},
+        }
+    )
+
+    await manager._trigger_workflow(
+        "stream_alert_denoise",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"format": "rfc3164", "data": [], "message": "[]"},
+        "syslog_message",
+        trigger=trigger,
+        source="udp://0.0.0.0:5514",
+    )
+
+    create_execution.assert_not_awaited()
+    run.assert_not_awaited()
+    trigger_tool_context.builder.assert_not_awaited()
+    trigger_tool_context.cleanup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fixed worker pool must cap concurrent ``_trigger_workflow`` calls.
 

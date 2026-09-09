@@ -1122,6 +1122,14 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
         )
         for row in legacy_rows
     )
+    unprocessed_input_count = sum(
+        max(_safe_int(row["raw_count"]), 0)
+        - min(
+            max(_safe_int(row["raw_count"]), 0),
+            max(_safe_int(row["normalized_count"]), 0),
+        )
+        for row in current_rows
+    )
     source_covered_count = sum(max(_safe_int(row["source_covered_count"]), 0) for row in rows)
     coverage_started_at = max(
         _safe_int(meta["coverage_started_at"]),
@@ -1135,11 +1143,23 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
     # undercount older executions.
     complete_window = requested_start_ms > 0 and coverage_started_at <= requested_start_ms
     source_complete = source_covered_count == raw_count
-    metrics_complete = invalid_count == 0 and error_count == 0
+    # Failed/invalid executions preserve only independently verified ingress
+    # volume; they do not contribute fabricated normalization or reduction.
+    # Their presence is therefore an operational completeness issue, not a
+    # reason to hide all valid aggregates from successful executions.
+    metrics_available = (
+        raw_count >= normalized_count >= after_filter_count >= unique_count >= 0
+        and filter_removed_count == normalized_count - after_filter_count
+        and duplicate_count == after_filter_count - unique_count
+    )
+    execution_health_complete = (
+        invalid_count == 0 and error_count == 0 and unprocessed_input_count == 0
+    )
     quality = (
         "complete"
         if complete_window
-        and metrics_complete
+        and metrics_available
+        and execution_health_complete
         and source_complete
         and not legacy_rows
         else "partial"
@@ -1183,7 +1203,7 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             "seriesUnique": series_unique,
             "timelineLabels": labels,
             "timelineWindow": window,
-            "metricsAvailable": metrics_complete,
+            "metricsAvailable": metrics_available,
             "sourceMetricsAvailable": source_complete,
             "dataQuality": quality,
             "coverageComplete": complete_window,
@@ -1193,14 +1213,7 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
             # from coverage while still contributing to the raw total.
             "sourceCoverageRate": _ratio(min(source_covered_count, raw_count), raw_count),
             "invalidExecutionCount": invalid_count,
-            "unprocessedInputCount": sum(
-                max(_safe_int(row["raw_count"]), 0)
-                - min(
-                    max(_safe_int(row["raw_count"]), 0),
-                    max(_safe_int(row["normalized_count"]), 0),
-                )
-                for row in current_rows
-            ),
+            "unprocessedInputCount": unprocessed_input_count,
             "historicalErrorCount": historical_error_count,
             "historicalUnprocessedInputCount": historical_unprocessed_count,
             "includesLegacyHistory": bool(legacy_rows),
@@ -4360,7 +4373,9 @@ def _build_pipeline(denoise, triage):
     triage_total = triage["totalRecords"]
     attack_total = triage["attackTotal"]
     reused = triage["cacheHit"] + triage["followersReused"]
-    duplicates = raw - unique
+    # Parsing/normalization failures are not noise reduction. The denoise
+    # aggregate contains only verified filter and dedup removals.
+    duplicates = denoise["duplicates"]
     return {
         "raw": raw,
         "unique": unique,

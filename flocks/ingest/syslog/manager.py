@@ -766,6 +766,19 @@ class SyslogManager:
                     summarized_inputs["_soc_alert_count"] = alert_count
                 if alert_preview:
                     summarized_inputs["_soc_alert_preview"] = alert_preview
+                if alert_count == 0:
+                    # A decoded empty batch cannot produce a SOC denoise
+                    # result. Do not create a doomed execution whose failure
+                    # would pollute operational health and dashboard rollups.
+                    log.info(
+                        "syslog.soc_empty_alert_skipped",
+                        {"workflow_id": workflow_id, "trigger_id": trigger.id},
+                    )
+                    return {
+                        "status": "skipped",
+                        "reason": "empty_soc_alert_input",
+                        "inputCount": 0,
+                    }
 
             exec_data = await create_execution_record(
                 workflow_id,

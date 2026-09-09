@@ -97,12 +97,13 @@ describe('SOC dashboard contract page runtime', () => {
             generatedAt: new Date().toISOString(),
             denoise: { totalRaw: 0, totalUnique: 0, duplicateRate: 0, duplicates: 0 },
             pipeline: { raw: 0, unique: 0 },
-            sources: [{ key: 'ndr', label: 'NDR', value: 0, rate: 0, active: false }],
+            sources: [{ key: 'ndr', label: 'NDR', value: 7, rate: 1, active: true }],
             sourceStatus: {
               metricQuality: {
                 status: 'unavailable',
                 dataAvailable: false,
                 metricsAvailable: false,
+                sourceMetricsAvailable: true,
                 unavailableReason: 'workflow_db_missing',
               },
             },
@@ -126,12 +127,12 @@ describe('SOC dashboard contract page runtime', () => {
 
     const { container } = render(<Page />);
 
-    expect(await screen.findByText('降噪统计数据源不可用，相关数字已隐藏；系统正在重试')).toBeInTheDocument();
     const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
-    expect(within(rawMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    await waitFor(() => expect(within(rawMetric).getByText('--')).toHaveAttribute('title', '数据不可用'));
     const ndrSource = screen.getByText('NDR').closest('.command-source') as HTMLElement;
-    expect(within(ndrSource).getByText('--')).toBeInTheDocument();
-    expect(container.querySelector('.command-source b')).toHaveAttribute('title', '数据不可用');
+    expect(ndrSource.querySelector('b')).toHaveAttribute('title', '7');
+    expect(container.querySelector('.command-source b')).not.toHaveAttribute('title', '数据不可用');
+    expect(container.querySelector('.quality-banner')).not.toBeInTheDocument();
   });
 
   it('shows verified partial-window metrics without a yellow coverage warning', async () => {
@@ -140,20 +141,24 @@ describe('SOC dashboard contract page runtime', () => {
         return Promise.resolve({
           data: {
             generatedAt: new Date().toISOString(),
-            denoise: { totalRaw: 10, totalUnique: 4, duplicateRate: 0.6, duplicates: 6 },
-            timeline: { denoiseRaw: [10], denoiseUnique: [4] },
+            denoise: { totalRaw: 62, totalUnique: 9, duplicateRate: 2 / 62, duplicates: 2 },
+            timeline: { denoiseRaw: [62], denoiseUnique: [9] },
+            sources: [
+              { key: 'ndr', label: 'NDR', value: 50, rate: 1, active: true },
+              { key: 'edr', label: 'HIDS', value: 0, rate: 0, active: false },
+            ],
             sourceStatus: {
               metricQuality: {
                 status: 'partial',
                 dataAvailable: true,
                 metricsAvailable: true,
-                sourceMetricsAvailable: false,
+                sourceMetricsAvailable: true,
                 coverageComplete: false,
                 coverageStartedAt: Date.now() - 60_000,
                 includesLegacyHistory: true,
                 invalidExecutionCount: 0,
-                errorExecutionCount: 0,
-                unprocessedInputCount: 0,
+                errorExecutionCount: 13312,
+                unprocessedInputCount: 51,
               },
             },
           },
@@ -176,11 +181,17 @@ describe('SOC dashboard contract page runtime', () => {
 
     const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
     await waitFor(() => {
-      expect(rawMetric.querySelector('.command-metric-value')).toHaveAttribute('title', '10');
+      expect(rawMetric.querySelector('.command-metric-value')).toHaveAttribute('title', '62');
     });
-    expect(within(rawMetric).getByText(/历史统计始于 .* · 4 条进入研判/)).toBeInTheDocument();
+    expect(within(rawMetric).getByText(/历史统计始于 .* · 9 条进入研判/)).toBeInTheDocument();
+    const ndrSource = screen.getByText('NDR').closest('.command-source') as HTMLElement;
+    const hidsSource = screen.getByText('HIDS').closest('.command-source') as HTMLElement;
+    expect(ndrSource.querySelector('b')).toHaveAttribute('title', '50');
+    expect(hidsSource.querySelector('b')).toHaveAttribute('title', '0');
     expect(screen.queryByText(/精确降噪指标尚未覆盖当前时间范围/)).not.toBeInTheDocument();
     expect(screen.queryByText(/降噪指标部分可用/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/降噪指标存在异常/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/降噪指标校验未通过/)).not.toBeInTheDocument();
   });
 
   it('shows unavailable SOC triage metrics as dashes instead of false zeros', async () => {
@@ -227,14 +238,13 @@ describe('SOC dashboard contract page runtime', () => {
       return Promise.reject(new Error(`unexpected path: ${path}`));
     });
 
-    render(<Page />);
+    const { container } = render(<Page />);
 
-    expect(await screen.findByText('SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试')).toBeInTheDocument();
     const eventMetric = screen.getByText('安全事件量').closest('.command-metric') as HTMLElement;
-    expect(within(eventMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    await waitFor(() => expect(within(eventMetric).getByText('--')).toHaveAttribute('title', '数据不可用'));
     const criticalSeverity = screen.getByText('严重').closest('.severity-node') as HTMLElement;
     expect(within(criticalSeverity).getByText('--')).toHaveAttribute('title', '数据不可用');
-    expect(screen.queryByText('SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试')).toBeInTheDocument();
+    expect(container.querySelector('.quality-banner')).not.toBeInTheDocument();
   });
 
   it('renders unknown metrics as dashes on the loading frame', () => {

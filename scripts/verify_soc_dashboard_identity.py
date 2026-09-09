@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only pre-deployment verification for SOC dashboard alert identity.
+"""Read-only pre-deployment verification for SOC dashboard P0/P2 data chains.
 
 The script intentionally opens SQLite databases with ``mode=ro`` and does not
 start the WebUI, create schemas, update metrics, or modify execution records.
@@ -14,6 +14,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import closing
 from pathlib import Path
 from types import ModuleType
@@ -194,7 +195,7 @@ def _latest_workflow_shapes(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Read-only validation of the SOC dashboard P2 identity chain"
+        description="Read-only validation of the SOC dashboard P0/P2 data chains"
     )
     parser.add_argument(
         "--repo",
@@ -217,7 +218,7 @@ def main() -> int:
     workflow_db = data_dir / "workflow.db"
     results = Results()
 
-    print("SOC dashboard P2 read-only verification")
+    print("SOC dashboard P0/P2 read-only verification")
     print(f"revision={_git_revision(repo)}")
     print(f"data_dir={data_dir}")
 
@@ -239,6 +240,19 @@ def main() -> int:
     results.check(
         hasattr(handlers, "_workflow_preview_value"),
         "candidate dashboard placeholder filter is present",
+    )
+    page_source = (
+        repo
+        / ".flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/Page.tsx"
+    ).read_text(encoding="utf-8")
+    results.check(
+        "quality-banner" not in page_source,
+        "yellow metric/SOC quality banners are absent from the page",
+    )
+    results.check(
+        "const sourceMetricsUnavailable = metricQuality.sourceMetricsAvailable === false;"
+        in page_source,
+        "source cards are independent from denoise metric availability",
     )
     results.check(soc_db.is_file(), "soc.db exists", str(soc_db))
     results.check(workflow_db.is_file(), "workflow.db exists", str(workflow_db))
@@ -291,6 +305,29 @@ def main() -> int:
 
     handlers.WORKFLOW_DB = workflow_db
     handlers.DEFAULT_SQLITE_DB = soc_db
+    try:
+        end_time = int(time.time())
+        rollup = handlers._get_workflow_metric_rollups(
+            "stream_alert_denoise", end_time - 7 * 86400, end_time
+        )
+        results.check(
+            isinstance(rollup, dict),
+            "recent seven-day denoise rollups can be read",
+        )
+        if isinstance(rollup, dict):
+            results.check(
+                rollup.get("metricsAvailable") is True,
+                "failed executions do not hide valid denoise aggregates",
+                "raw={} reduced={} errors={} unprocessed={}".format(
+                    rollup.get("rawCount"),
+                    rollup.get("reducedCount"),
+                    rollup.get("errorCount"),
+                    rollup.get("unprocessedInputCount"),
+                ),
+            )
+    except Exception as exc:
+        results.check(False, "denoise rollup visibility can be evaluated", str(exc))
+
     try:
         shapes = _latest_workflow_shapes(handlers, workflow_db, sample_limit)
         print(

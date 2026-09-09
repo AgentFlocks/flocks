@@ -813,8 +813,9 @@ function mergeStats(raw) {
   const triageQuality = sourceStatus.triageQuality || {};
   const denoiseMetricsUnavailable = metricQuality.metricsAvailable === false;
   const triageMetricsUnavailable = triageQuality.metricsAvailable === false;
-  const sourceMetricsUnavailable = denoiseMetricsUnavailable
-    || metricQuality.sourceMetricsAvailable === false;
+  // Source cards are backed by an independent SOC fact dimension. A broken
+  // workflow metric must not blank a source count that was read successfully.
+  const sourceMetricsUnavailable = metricQuality.sourceMetricsAvailable === false;
   const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
   if (denoiseMetricsUnavailable) {
     for (const key of [
@@ -3156,41 +3157,6 @@ export default function Page() {
     || displayActivity.batch?.receivedCount
     || displayActivity.batch?.triageUpdatedCount
   );
-  const metricQuality = stats.sourceStatus?.metricQuality || {};
-  const triageQuality = stats.sourceStatus?.triageQuality || {};
-  const metricIssues = [];
-  if (Number(metricQuality.invalidExecutionCount || 0) > 0) {
-    metricIssues.push(`${metricQuality.invalidExecutionCount} 次指标格式异常`);
-  }
-  if (Number(metricQuality.errorExecutionCount || 0) > 0) {
-    metricIssues.push(`${metricQuality.errorExecutionCount} 次执行失败`);
-  }
-  if (Number(metricQuality.unprocessedInputCount || 0) > 0) {
-    metricIssues.push(`${metricQuality.unprocessedInputCount} 条输入未完成归一化`);
-  }
-  const metricQualityWarning = !stats.generatedAt
-    ? ''
-    : metricQuality.dataAvailable === false || metricQuality.status === 'unavailable'
-      ? '降噪统计数据源不可用，相关数字已隐藏；系统正在重试'
-      : metricQuality.status === 'stale'
-        ? '降噪统计查询失败，当前显示上次缓存数据，可能已过期'
-      : metricQuality.status === 'partial' && !metricQuality.metricsAvailable
-        ? `降噪指标校验未通过，相关数字已隐藏${metricIssues.length ? `：${metricIssues.join('；')}` : ''}`
-    : metricQuality.metricsAvailable
-    ? metricIssues.length
-      ? `降噪指标存在异常：${metricIssues.join('；')}`
-      : ''
-    : metricQuality.status === 'legacy-partial'
-      ? `精确降噪指标尚未覆盖当前时间范围，相关数字已隐藏；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
-      : '精确降噪指标尚不可用，相关数字已隐藏；新指标链路产生数据后将自动显示';
-  const triageQualityWarning = !stats.generatedAt || triageQuality.metricsAvailable !== false
-    ? ''
-    : triageQuality.unavailableReason === 'soc_db_missing'
-      ? 'SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试'
-      : triageQuality.unavailableReason === 'soc_dashboard_schema_unavailable'
-        ? 'SOC 统计结构尚未就绪，研判、事件与闭环数字已隐藏；系统正在重试'
-      : 'SOC 研判统计查询失败，研判、事件与闭环数字已隐藏；系统正在重试';
-
   return h('div', {
     className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
     'data-animations': 'on',
@@ -3211,8 +3177,6 @@ export default function Page() {
       activity: displayActivity,
     }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
-    metricQualityWarning ? h('div', { className: 'quality-banner', key: 'quality' }, metricQualityWarning) : null,
-    triageQualityWarning ? h('div', { className: 'quality-banner', key: 'triage-quality' }, triageQualityWarning) : null,
     h('main', {
       className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
       key: 'main',
@@ -3254,15 +3218,6 @@ const CSS = `
   overflow-x: auto;
 }
 .adtd-root * { box-sizing: border-box; }
-.quality-banner {
-  margin: 8px 0 0;
-  padding: 8px 12px;
-  border: 1px solid rgba(255,176,32,.34);
-  border-radius: 6px;
-  color: #f1c67d;
-  background: rgba(139,88,22,.16);
-  font-size: 11px;
-}
 .adtd-header {
   position: relative;
   display: grid;
@@ -3330,7 +3285,7 @@ const CSS = `
   font-size: 12px;
 }
 .chip.strong { color: #2ee6a6; border-color: rgba(46,230,166,.42); }
-.chip.warn { color: #ffb020; border-color: rgba(255,176,32,.45); }
+.chip.warn { color: #8bbcff; border-color: rgba(88,166,255,.42); }
 .header-tools { display: flex; justify-content: flex-end; align-items: center; gap: 8px; min-width: 0; }
 .date-range { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .range-sep { color: rgba(170,222,255,.62); font-size: 12px; white-space: nowrap; }
@@ -3515,7 +3470,7 @@ const CSS = `
   border-radius: 6px;
   font-size: 12px;
 }
-.missing-note { color: #ffcf7a; background: rgba(255,176,32,.1); border: 1px solid rgba(255,176,32,.24); }
+.missing-note { color: #9fc7ef; background: rgba(58,117,183,.12); border: 1px solid rgba(88,166,255,.24); }
 .ok-note { color: #90f6cf; background: rgba(46,230,166,.08); border: 1px solid rgba(46,230,166,.2); }
 .sparkline { width: 100%; height: 96px; display: block; }
 .left-col .sparkline {
@@ -5522,7 +5477,7 @@ const CSS = `
   font-size: 11px;
 }
 .event-update-banner:before { content: "ⓘ"; margin-right: 7px; color: #6ba4fb; }
-.event-update-banner.warn { border-color: rgba(255,174,52,.42); color: #f1c67d; background: rgba(139,88,22,.2); }
+.event-update-banner.warn { border-color: rgba(88,166,255,.42); color: #aadeff; background: rgba(45,82,135,.24); }
 .event-rail-limit-note {
   display: block;
   margin: 5px 14px 0;
@@ -5538,10 +5493,10 @@ const CSS = `
 }
 .task-center-inline-warn {
   margin-bottom: 10px;
-  border: 1px solid rgba(255,174,52,.42);
+  border: 1px solid rgba(88,166,255,.42);
   border-radius: 6px;
-  color: #f1c67d;
-  background: rgba(139,88,22,.2);
+  color: #aadeff;
+  background: rgba(45,82,135,.24);
   padding: 9px 11px;
   font-size: 11px;
 }

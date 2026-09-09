@@ -1475,8 +1475,11 @@ def test_soc_dashboard_uses_soc_facts_when_rollups_lack_source_dimension(
             "INSERT INTO workflow_metric_rollups VALUES "
             "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "stream_alert_denoise", bucket_ms, 2, 2, 1, 1, 1, 0,
-                "{}", 0, 2, 0, 0, 4, bucket_ms,
+                # Match the production failure shape: accepted ingress remains
+                # exact while failed executions contribute no fabricated
+                # downstream stages or source dimension.
+                "stream_alert_denoise", bucket_ms, 62, 11, 9, 9, 2, 0,
+                "{}", 0, 1836, 13312, 0, 4, bucket_ms,
             ),
         )
         conn.commit()
@@ -1503,6 +1506,13 @@ def test_soc_dashboard_uses_soc_facts_when_rollups_lack_source_dimension(
     assert sources["edr"] == 0
     assert quality["sourceMetricsAvailable"] is True
     assert quality["sourceMetricDataSource"] == "soc.db.soc_dashboard_alert_facts"
+    assert quality["metricsAvailable"] is True
+    assert quality["errorExecutionCount"] == 13312
+    assert quality["unprocessedInputCount"] == 51
+    assert stats["denoise"]["totalRaw"] == 62
+    assert stats["denoise"]["duplicates"] == 2
+    assert stats["denoise"]["duplicateRate"] == 0.0323
+    assert stats["pipeline"]["reductionSaved"] == 2
 
 
 def test_soc_dashboard_separates_core_metric_and_source_coverage_quality(tmp_path: Path):
@@ -1565,8 +1575,11 @@ def test_soc_dashboard_separates_core_metric_and_source_coverage_quality(tmp_pat
         "stream_alert_denoise", start_time, end_time, force=True
     )
 
-    assert failed_stats["metricsAvailable"] is False
+    assert failed_stats["metricsAvailable"] is True
     assert failed_stats["dataQuality"] == "partial"
+    assert failed_stats["errorCount"] == 1
+    assert failed_stats["rawCount"] == 10
+    assert failed_stats["reducedCount"] == 2
 
 
 def test_soc_dashboard_activity_cursor_tracks_actual_poll_window():
