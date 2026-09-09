@@ -1,5 +1,7 @@
 {
   "title": "Flocks Notifications",
+  "tokenPolicyTitle": "Model token policy update",
+  "tokenPolicyBody": "The model token policy has changed. Please review the update.",
   "subtitle": "Benefits and version highlights are collected here.",
   "close": "Close notification",
   "gotIt": "Got it",

@@ -1,5 +1,7 @@
 {
   "title": "Flocks 通知",
+  "tokenPolicyTitle": "模型 Token 策略变更",
+  "tokenPolicyBody": "模型token策略发生变更，请确认",
   "subtitle": "福利提醒和版本变化都在这里。",
   "close": "关闭通知",
   "gotIt": "知道了",
