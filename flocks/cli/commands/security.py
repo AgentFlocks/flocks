@@ -321,6 +321,11 @@ def security_audit(
         "--generate-poc",
         help="Generate independent source-backed PoC bundles after static adjudication",
     ),
+    cleanup_intermediates: bool = typer.Option(
+        False,
+        "--cleanup-intermediates/--no-cleanup-intermediates",
+        help="Remove execution history and owned temporary files after the audit ends, retaining final artifacts",
+    ),
     copy_source: bool = typer.Option(
         True,
         "--copy/--no-copy",
@@ -354,6 +359,8 @@ def security_audit(
         run_standard_audit, _scan_status = _load_plugin_cli()
         progress = _json_line if json_output else _progress_line
         audit_kwargs = {"model": model, "progress": progress}
+        if cleanup_intermediates:
+            audit_kwargs["cleanup_intermediates"] = True
         if not copy_source:
             audit_kwargs["copy_source"] = False
         if dynamic:

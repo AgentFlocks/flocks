@@ -456,3 +456,17 @@ def test_security_audit_reports_failures(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"] == "worker launch failed"
     assert shutdowns == [True]
+
+
+def test_security_audit_forwards_cleanup_option(monkeypatch, tmp_path) -> None:
+    observed = {}
+
+    async def run_audit(target, **kwargs):
+        observed.update(kwargs)
+        return {"scan_id": "scan_cleanup"}
+
+    monkeypatch.setattr(security_cmd, "_load_plugin_cli", lambda: (run_audit, lambda _: {}))
+    monkeypatch.setattr(security_cmd, "shutdown_langfuse", lambda: None)
+    result = runner.invoke(security_cmd.security_app, ["audit", str(tmp_path), "--cleanup-intermediates", "--json"])
+    assert result.exit_code == 0, result.output
+    assert observed["cleanup_intermediates"] is True

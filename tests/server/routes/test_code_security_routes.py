@@ -133,3 +133,12 @@ async def test_delete_scan_requires_admin_and_returns_no_content(monkeypatch) ->
     assert response.status_code == 204
     assert caller_values["subject"] == "admin-1"
     assert caller_values["is_admin"] is True
+
+
+def test_cleanup_request_flag_is_strict_and_defaults_off() -> None:
+    from pydantic import ValidationError
+
+    assert code_security.CreateScanRequest(workspaceId="workspace").cleanup_intermediates is False
+    assert code_security.CreateScanRequest(workspaceId="workspace", cleanupIntermediates=True).cleanup_intermediates is True
+    with pytest.raises(ValidationError):
+        code_security.CreateScanRequest(workspaceId="workspace", cleanupIntermediates="false")

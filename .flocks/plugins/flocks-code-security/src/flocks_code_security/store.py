@@ -899,6 +899,8 @@ class ScanStore:
                 ("task_owner_token", "TEXT"),
                 ("task_owner_identity", "TEXT"),
                 ("output_dir", "TEXT"),
+                ("cleanup_intermediates", "INTEGER NOT NULL DEFAULT 0"),
+                ("cleanup_summary_json", "TEXT NOT NULL DEFAULT '{}'"),
             )
             for column, definition in scan_column_definitions:
                 if column not in scan_columns:
@@ -1531,6 +1533,7 @@ class ScanStore:
         snapshot_id: str,
         mode: str,
         ruleset_digest: str,
+        cleanup_intermediates: bool = False,
         dynamic_enabled: bool = False,
         poc_enabled: bool = False,
         coverage_policy: str = "evidence_backed_partial",
@@ -1544,6 +1547,8 @@ class ScanStore:
         task_owner_token: str | None = None,
         task_owner_identity: str | None = None,
     ) -> str:
+        if type(cleanup_intermediates) is not bool:
+            raise ValueError("cleanup_intermediates must be a boolean")
         if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:
             raise ValueError("Unsupported coverage policy")
         if (
@@ -1562,8 +1567,8 @@ class ScanStore:
                 "status, ruleset_digest, created_at, updated_at, "
                 "owner_subject, request_source, workspace_ref, idempotency_key, "
                 "request_digest, current_phase, task_owner_pid, task_owner_token, "
-                "task_owner_identity"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "task_owner_identity, cleanup_intermediates"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     parent_session_id,
@@ -1586,6 +1591,7 @@ class ScanStore:
                     task_owner_pid,
                     task_owner_token,
                     task_owner_identity,
+                    int(cleanup_intermediates),
                 ),
             )
         return scan_id
@@ -5231,6 +5237,130 @@ class ScanStore:
         ):
             raise ValueError("Invalid scan cursor")
         return payload[0], payload[1]
+
+    def pending_cleanup_scan_ids(self, *, active_owner_tokens: set[str]) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT scan_id, cleanup_summary_json, task_owner_pid, task_owner_token, "
+                "task_owner_identity FROM scans WHERE cleanup_intermediates = 1 "
+                "AND status IN ('completed', 'failed', 'cancelled', 'interrupted')"
+            ).fetchall()
+        pending = []
+        for row in rows:
+            if _scan_owner_is_running(
+                row["task_owner_pid"], row["task_owner_token"], row["task_owner_identity"],
+                active_owner_tokens=active_owner_tokens,
+            ):
+                continue
+            try:
+                summary = json.loads(row["cleanup_summary_json"])
+            except (TypeError, ValueError):
+                summary = {}
+            if not isinstance(summary, dict) or summary.get("status") != "completed":
+                pending.append(row["scan_id"])
+        return pending
+
+    def cleanup_session_ids(self, scan_id: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT session_id FROM work_attempts WHERE work_unit_id IN "
+                "(SELECT work_unit_id FROM work_units WHERE scan_id = ?) UNION "
+                "SELECT session_id FROM work_units WHERE scan_id = ? AND session_id IS NOT NULL",
+                (scan_id, scan_id),
+            ).fetchall()
+        return [row[0] for row in rows if row[0] and not row[0].startswith("attempt_")]
+
+    def record_cleanup_failure(self, scan_id: str, reason: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE scans SET cleanup_summary_json = ? WHERE scan_id = ?",
+                (json.dumps({"status": "failed", "reason": reason[:1000]}), scan_id),
+            )
+
+    def prune_scan_execution_history(
+        self, scan_id: str, *, deleted_sessions: int = 0, deleted_trees: int = 0,
+    ) -> dict[str, Any]:
+        """Prune transient facts, retaining final semantic artifacts and FK anchors."""
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            scan = connection.execute("SELECT * FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
+            if scan is None or not scan["cleanup_intermediates"]:
+                return {"status": "disabled"}
+            if scan["status"] not in TERMINAL_SCAN_STATUSES:
+                raise ValueError("Only terminal scans can clean execution history")
+            prior = json.loads(scan["cleanup_summary_json"])
+            if prior.get("status") == "completed":
+                return prior
+            if connection.execute(
+                "SELECT 1 FROM cybergym_runs WHERE scan_id = ? AND status = 'running'", (scan_id,),
+            ).fetchone():
+                raise ValueError("Cannot clean an active CyberGym run")
+            counts = {}
+            unit_scope = "SELECT work_unit_id FROM work_units WHERE scan_id = ?"
+            attempt_scope = "SELECT attempt_id FROM work_attempts WHERE work_unit_id IN (" + unit_scope + ")"
+            # Canonical coverage is a final intermediate artifact, not a retry log.
+            cursor = connection.execute(
+                "DELETE FROM coverage_attestations WHERE scan_id = ? AND attestation_id NOT IN ("
+                "SELECT ca.attestation_id FROM coverage_attestations ca WHERE ca.scan_id = ? "
+                "AND ca.attestation_id = (SELECT nested.attestation_id FROM coverage_attestations nested "
+                "WHERE nested.work_unit_id = ca.work_unit_id ORDER BY nested.created_at DESC, "
+                "nested.attestation_id DESC LIMIT 1))", (scan_id, scan_id),
+            )
+            counts["coverage_history"] = cursor.rowcount
+            for table, scope in (
+                ("source_access", "scan_id = ?"),
+                ("submission_rejections", f"attempt_id IN ({attempt_scope})"),
+                ("manifest_access", f"work_unit_id IN ({unit_scope})"),
+                ("knowledge_base_access", "scan_id = ?"),
+                ("threat_model_access", "scan_id = ?"),
+                ("verification_subject_access", f"attempt_id IN ({attempt_scope})"),
+                ("session_bindings", "scan_id = ? AND (work_unit_id IS NOT NULL OR attempt_id IS NOT NULL)"),
+                ("worker_capacity_leases", f"work_unit_id IN ({unit_scope})"),
+                ("worker_batches", "scan_id = ?"),
+                ("cybergym_runs", "scan_id = ?"),
+                ("cybergym_budget", "scan_id = ?"),
+                ("scan_events", "scan_id = ?"),
+                ("scan_phase_runs", "scan_id = ?"),
+            ):
+                counts[table] = connection.execute(f"DELETE FROM {table} WHERE {scope}", (scan_id,)).rowcount
+            counts["work_attempts"] = connection.execute(
+                f"DELETE FROM work_attempts WHERE work_unit_id IN ({unit_scope}) "
+                "AND attempt_id NOT IN (SELECT attempt_id FROM coverage_attestations)", (scan_id,),
+            ).rowcount
+            # Retain only the provenance anchors required by final coverage.
+            connection.execute(
+                f"UPDATE work_attempts SET session_id = attempt_id, background_task_id = NULL, "
+                f"failure_class = NULL, resume_count = 0 WHERE work_unit_id IN ({unit_scope})", (scan_id,),
+            )
+            connection.execute(
+                "UPDATE work_units SET session_id = NULL, background_task_id = NULL, paths_json = '[]' "
+                "WHERE scan_id = ?", (scan_id,),
+            )
+            # Selected bytes and evidence-referenced inputs need their ancestors
+            # for provenance. Everything else is a disposable search candidate.
+            before = connection.execute("SELECT COUNT(*) FROM cybergym_artifacts WHERE scan_id = ?", (scan_id,)).fetchone()[0]
+            connection.execute(
+                "WITH RECURSIVE retained(id) AS ("
+                "SELECT final_artifact_id FROM cybergym_tasks WHERE scan_id = ? "
+                "UNION SELECT artifact_id FROM cybergym_submissions WHERE scan_id = ? "
+                "UNION SELECT artifact_id FROM poc_validations WHERE scan_id = ? "
+                "UNION SELECT a.parent_id FROM cybergym_artifacts a JOIN retained r ON a.artifact_id = r.id"
+                ") DELETE FROM cybergym_artifacts WHERE scan_id = ? "
+                "AND artifact_id NOT IN (SELECT id FROM retained WHERE id IS NOT NULL)",
+                (scan_id, scan_id, scan_id, scan_id),
+            )
+            after = connection.execute("SELECT COUNT(*) FROM cybergym_artifacts WHERE scan_id = ?", (scan_id,)).fetchone()[0]
+            counts["cybergym_artifacts"] = before - after
+            summary = {"status": "completed", "completed_at": _now(), "deleted_rows": counts,
+                       "deleted_sessions": deleted_sessions, "deleted_trees": deleted_trees}
+            connection.execute("UPDATE scans SET cleanup_summary_json = ? WHERE scan_id = ?",
+                               (json.dumps(summary, sort_keys=True), scan_id))
+            connection.execute(
+                "INSERT INTO scan_events (scan_id, event_type, level, title, payload_json, created_at) "
+                "VALUES (?, 'scan.cleanup_completed', 'info', '审计临时执行数据已清理', ?, ?)",
+                (scan_id, json.dumps(summary), summary["completed_at"]),
+            )
+        return summary
 
     def delete_scan(self, scan_id: str) -> None:
         with self._lock, self._connect() as connection:

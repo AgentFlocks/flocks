@@ -145,6 +145,7 @@ class StartScanRequest:
     exclude_patterns: tuple[str, ...] = ()
     max_file_bytes: int | None = None
     copy_source: bool = True
+    cleanup_intermediates: bool = False
     dynamic_enabled: bool = False
     poc_enabled: bool = False
     coverage_policy: str = "evidence_backed_partial"
@@ -537,6 +538,7 @@ class AuditService:
         self.store = self.runtime.store
         self._active: dict[str, _ActiveScan] = {}
         self._start_lock = asyncio.Lock()
+        self._cleanup_tasks: set[asyncio.Task] = set()
 
     def recover_orphaned_scans(self) -> list[str]:
         scan_ids = self.store.recover_interrupted_scans(
@@ -567,7 +569,28 @@ class AuditService:
                 level="warning",
             )
             _ProgressRecorder(scan_id, dynamic_enabled=False)._publish_change(event["seq"])
+        cleanup_ids = self.store.pending_cleanup_scan_ids(
+            active_owner_tokens={item.owner_token for item in self._active.values()},
+        )
+        if cleanup_ids:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self._cleanup_recovered_scans(cleanup_ids))
+            else:
+                task = loop.create_task(self._cleanup_recovered_scans(cleanup_ids))
+                self._cleanup_tasks.add(task)
+                task.add_done_callback(self._cleanup_tasks.discard)
+                task.add_done_callback(self._retrieve_background_task_result)
         return scan_ids
+
+    async def _cleanup_recovered_scans(self, scan_ids: list[str]) -> None:
+        from flocks_code_security.cleanup import cleanup_scan
+
+        for scan_id in scan_ids:
+            scan = self.store.get_scan(scan_id)
+            if scan is not None:
+                await cleanup_scan(self.runtime, scan_id, owned_parent_session=bool(scan.get("task_owner_token")))
 
     async def start_scan(
         self,
@@ -595,6 +618,7 @@ class AuditService:
             exclude_patterns=self._validate_exclude_patterns(request.exclude_patterns),
             max_file_bytes=request.max_file_bytes,
             copy_source=bool(request.copy_source),
+            cleanup_intermediates=request.cleanup_intermediates,
             dynamic_enabled=bool(request.dynamic_enabled),
             poc_enabled=bool(request.poc_enabled),
             coverage_policy=str(request.coverage_policy or "").strip(),
@@ -602,6 +626,8 @@ class AuditService:
             idempotency_key=(request.idempotency_key or "").strip() or None,
             knowledge_base=self._validate_knowledge_base(request.knowledge_base),
         )
+        if type(normalized.cleanup_intermediates) is not bool:
+            raise AuditServiceError("invalid_parameter", "cleanup_intermediates must be a boolean")
         if normalized.scan_mode not in {"standard", "cybergym_level1"}:
             raise AuditServiceError("invalid_parameter", "Unsupported scan_mode")
         if normalized.scan_mode == "cybergym_level1":
@@ -676,6 +702,7 @@ class AuditService:
                 return await self.get_scan(existing["scan_id"], caller)
 
             ctx = await self._create_execution_context(normalized, caller)
+            ctx.extra["audit_managed_cleanup"] = True
             prepare_result = await audit_prepare(
                 ctx,
                 str(normalized.target_path),
@@ -683,6 +710,7 @@ class AuditService:
                 exclude_patterns=list(normalized.exclude_patterns) or None,
                 max_file_bytes=normalized.max_file_bytes,
                 copy_source=normalized.copy_source,
+                cleanup_intermediates=normalized.cleanup_intermediates,
                 mode=normalized.scan_mode,
                 dynamic_enabled=normalized.dynamic_enabled,
                 poc_enabled=normalized.poc_enabled,
@@ -825,7 +853,16 @@ class AuditService:
                 recorder._publish_change(event["seq"])
             raise
         finally:
-            self._active.pop(scan_id, None)
+            try:
+                if request.cleanup_intermediates:
+                    from flocks_code_security.cleanup import cleanup_scan
+                    summary = await cleanup_scan(self.runtime, scan_id, owned_parent_session=True)
+                    if summary.get("status") == "completed":
+                        recorder._publish_change(self.store.list_scan_events(scan_id, limit=1)["latest_seq"])
+            except Exception:
+                logger.warning("Post-audit cleanup failed for %s", scan_id, exc_info=True)
+            finally:
+                self._active.pop(scan_id, None)
 
     async def get_scan(self, scan_id: str, caller: AuditCaller) -> dict[str, Any]:
         return await asyncio.to_thread(self._build_scan_detail, scan_id, caller)
@@ -879,6 +916,8 @@ class AuditService:
             "poc_enabled": bool(scan.get("poc_enabled", 0)),
             "coverage_policy": scan["coverage_policy"],
             "verification_votes": scan["verification_vote_count"],
+            "cleanup_intermediates": bool(scan.get("cleanup_intermediates", 0)),
+            "cleanup": json.loads(scan.get("cleanup_summary_json", "{}")),
             "created_at": scan["created_at"],
             "started_at": scan["created_at"],
             "finished_at": finished_at,
@@ -1091,6 +1130,7 @@ class AuditService:
             raise AuditServiceError("scan_not_running", "Scan is not running", status_code=409)
         active = self._active.get(scan_id)
         ctx = active.ctx if active else self._context_for_scan(scan)
+        ctx.extra["audit_managed_cleanup"] = True
         result = await audit_cancel(ctx, scan_id)
         if not result.success:
             raise AuditServiceError("cancel_failed", str(result.error or "Unable to cancel scan"))
@@ -1121,6 +1161,9 @@ class AuditService:
         _ProgressRecorder(scan_id, dynamic_enabled=bool(scan["dynamic_enabled"]))._publish_change(event["seq"])
         if active and not active.task.done():
             active.task.cancel()
+        elif scan.get("cleanup_intermediates"):
+            from flocks_code_security.cleanup import cleanup_scan
+            await cleanup_scan(self.runtime, scan_id, owned_parent_session=bool(scan.get("task_owner_token")))
         return await self.get_scan(scan_id, caller)
 
     async def delete_scan(self, scan_id: str, caller: AuditCaller) -> None:
@@ -1632,6 +1675,7 @@ class AuditService:
             "exclude_patterns": list(request.exclude_patterns),
             "max_file_bytes": request.max_file_bytes,
             "copy_source": request.copy_source,
+            "cleanup_intermediates": request.cleanup_intermediates,
             "dynamic_enabled": request.dynamic_enabled,
             "poc_enabled": request.poc_enabled,
             "coverage_policy": request.coverage_policy,
@@ -1802,6 +1846,8 @@ class AuditService:
     ) -> list[dict[str, Any]]:
         """Return bounded work-unit metadata without session or task identifiers."""
         data = report_data if report_data is not None else self.store.report_data(scan_id)
+        if json.loads(data.get("scan", {}).get("cleanup_summary_json", "{}")).get("status") == "completed":
+            return []
         candidate_ids: dict[str, set[str]] = {}
         candidate_summaries: dict[str, dict[str, Any]] = {}
         record_counts: dict[str, dict[str, int]] = {}

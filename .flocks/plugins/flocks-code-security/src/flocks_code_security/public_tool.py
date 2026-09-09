@@ -88,6 +88,7 @@ async def code_security_audit(
     exclude_patterns: list[str] | None = None,
     max_file_bytes: int | None = None,
     copy_source: bool = True,
+    cleanup_intermediates: bool = False,
     dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
@@ -133,6 +134,7 @@ async def code_security_audit(
                     exclude_patterns=tuple(exclude_patterns or []),
                     max_file_bytes=max_file_bytes,
                     copy_source=copy_source,
+                    cleanup_intermediates=cleanup_intermediates,
                     dynamic_enabled=dynamic_enabled,
                     coverage_policy=coverage_policy,
                     verification_votes=verification_votes,
@@ -285,6 +287,12 @@ def register_public_tool() -> None:
                     ParameterType.BOOLEAN,
                     "Copy source into a read-only snapshot. Set false to audit the source directory directly.",
                     default=True,
+                ),
+                _parameter(
+                    "cleanup_intermediates",
+                    ParameterType.BOOLEAN,
+                    "Delete execution history and owned temporary files after the audit; retain final artifacts.",
+                    default=False,
                 ),
                 _parameter(
                     "dynamic_enabled",

@@ -1234,9 +1234,11 @@ async def test_large_repository_threat_model_needs_summary_not_inventory_paginat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_enabled", [False, True])
 async def test_prepare_candidate_verify_finalize_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cleanup_enabled: bool,
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -1254,7 +1256,12 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     )
 
     coordinator = _agent_context("coordinator", "message-1", "code-security")
-    prepared = await audit_prepare(coordinator, str(target))
+    from unittest.mock import AsyncMock
+    from flocks_code_security import cleanup as cleanup_module
+    monkeypatch.setattr(cleanup_module, "_delete_session", AsyncMock(return_value=0))
+    monkeypatch.setattr(cleanup_module, "_owned_worker_sessions", AsyncMock(return_value=[]))
+    monkeypatch.setattr(cleanup_module, "runtime_dir", lambda: tmp_path / "runtime")
+    prepared = await audit_prepare(coordinator, str(target), cleanup_intermediates=cleanup_enabled)
     assert prepared.success is True
     scan_id = prepared.output["scan_id"]
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
@@ -1418,6 +1425,15 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert finalized.output["status"] == "completed"
     completed_status = runtime.store.scan_status(scan_id)
     assert completed_status["integrity_status"] == "valid"
+    snapshot_path = Path(runtime.store.get_snapshot(snapshot_id).root_path)
+    assert snapshot_path.exists() is (not cleanup_enabled)
+    assert (target / "app.py").is_file()
+    if cleanup_enabled:
+        assert runtime.store.report_data(scan_id)["source_access_counts"] == {}
+        assert runtime.store.report_data(scan_id)["candidates"]
+        assert runtime.store.report_data(scan_id)["verifications"]
+        assert runtime.store.list_latest_coverage(scan_id)
+        assert json.loads(runtime.store.get_scan(scan_id)["cleanup_summary_json"])["status"] == "completed"
     assert completed_status["integrity_errors"] == []
     output_path = Path(finalized.output["output_dir"])
     assert (output_path / "report.md").is_file()
@@ -3622,10 +3638,16 @@ async def test_background_worker_orchestration_retries_failed_verification(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_enabled", [False, True])
 async def test_cancel_stops_bound_background_workers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cleanup_enabled: bool,
 ) -> None:
+    from flocks_code_security import cleanup as cleanup_module
+    monkeypatch.setattr(cleanup_module, "_delete_session", AsyncMock(return_value=0))
+    monkeypatch.setattr(cleanup_module, "_owned_worker_sessions", AsyncMock(return_value=[]))
+    monkeypatch.setattr(cleanup_module, "runtime_dir", lambda: tmp_path / "runtime")
     from flocks.session.message import Message
     from flocks.session.session import Session
 
@@ -3656,10 +3678,11 @@ async def test_cancel_stops_bound_background_workers(
     manager = _FakeBackgroundManager()
     monkeypatch.setattr(tools_module, "_background_manager", lambda: manager)
     coordinator = _agent_context("coordinator", "message-1", "code-security")
-    prepared = await audit_prepare(coordinator, str(target))
+    prepared = await audit_prepare(coordinator, str(target), cleanup_intermediates=cleanup_enabled)
     scan_id = prepared.output["scan_id"]
     launched = await audit_run_workers(coordinator, scan_id, "threat_modeling")
     assert launched.success
+    assert Session.create.call_args.kwargs["metadata"]["code_security_scan_id"] == scan_id
 
     cancelled = await audit_cancel(coordinator, scan_id)
 
@@ -3667,9 +3690,14 @@ async def test_cancel_stops_bound_background_workers(
     assert cancelled.output["cancelled_workers"] == 1
     assert manager.tasks["task-1"].status == "cancelled"
     batch = runtime.store.get_worker_batch(launched.output["batch_id"])
-    assert batch is not None
-    assert batch["status"] == "cancelled"
-    assert batch["units"][0]["status"] == "cancelled"
+    if cleanup_enabled:
+        assert batch is None
+        assert json.loads(runtime.store.get_scan(scan_id)["cleanup_summary_json"])["status"] == "completed"
+        cleanup_module._delete_session.assert_awaited_once_with("worker", {"worker"})
+    else:
+        assert batch is not None
+        assert batch["status"] == "cancelled"
+        assert batch["units"][0]["status"] == "cancelled"
     assert runtime.store.active_worker_count() == 0
 
 

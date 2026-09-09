@@ -57,6 +57,35 @@ The command prints the `scan_id` as soon as the digest-bound source view is read
 flocks security status <scan_id>
 ```
 
+Audits retain execution history by default. Opt into cleanup for an individual run:
+
+```bash
+flocks security audit /absolute/path/to/source --cleanup-intermediates
+```
+
+The equivalent parameter is `cleanup_intermediates: true` in the Python service and
+`code_security_audit` / `audit_prepare` tools, or `cleanupIntermediates: true` in the
+HTTP create request. Set it to `false` (CLI: `--no-cleanup-intermediates`) to retain
+execution data. The choice is persisted per scan, including across process restarts.
+
+Cleanup runs after completion, failure, cancellation, or recovery of an interrupted
+scan. It removes execution events, phase/retry/access history, unused fuzz inputs,
+audit-owned worker sessions, copied source snapshots, and Docker scratch directories.
+It retains the sealed report bundle, final coverage, threat model, findings, verdicts,
+PoCs, validation/submission results, selected input ancestry, and the minimal database
+records needed to preserve their references. Caller source directories, shared source
+snapshots, and the calling conversation of a tool-started audit are preserved. External
+code projections supplied as an audit target are caller-owned and are never removed.
+
+Scan detail exposes `scan.cleanup` with the cleanup outcome and deletion counts.
+Unfinished or failed cleanup is retried at plugin startup once its owning process
+has stopped; scans still owned by a live audit process are skipped. Worker ownership
+is persisted when its session is created, so launch failures before an attempt is
+recorded can also be cleaned. Cleanup failures do not overwrite the audit result; successful reports must pass
+integrity checks before cleanup. One terminal cleanup event replaces the execution
+history. Deleted SQLite pages become reusable; cleanup does not run a database-wide
+`VACUUM` or remove the database file.
+
 Both commands accept `--json`; `audit` emits newline-delimited progress events suitable for automation. Use `--model provider/model` to pin a model instead of the configured default.
 
 When Langfuse is configured, the same one-command audit is observable under a Langfuse session whose ID is the audit `scan_id`:

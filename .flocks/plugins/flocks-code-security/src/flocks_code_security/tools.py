@@ -319,6 +319,7 @@ async def audit_prepare(
     exclude_patterns: list[str] | None = None,
     max_file_bytes: int | None = None,
     copy_source: bool = True,
+    cleanup_intermediates: bool = False,
     mode: str = "standard",
     dynamic_enabled: bool = False,
     poc_enabled: bool = False,
@@ -362,6 +363,7 @@ async def audit_prepare(
             poc_enabled=bool(poc_enabled or mode == "cybergym_level1"),
             coverage_policy=coverage_policy,
             verification_vote_count=verification_votes,
+            cleanup_intermediates=cleanup_intermediates,
         )
         cybergym_task = None
         if mode == "cybergym_level1":
@@ -1475,6 +1477,9 @@ async def audit_finalize(ctx: ToolContext, scan_id: str) -> ToolResult:
             await _refresh_worker_batch(batch["batch_id"], ctx=ctx)
         await asyncio.to_thread(get_runtime().store.ensure_ready_to_finalize, scan_id)
         output = await asyncio.to_thread(ReportWriter(get_runtime().store).write, scan_id)
+        if not ctx.extra.get("audit_managed_cleanup"):
+            from flocks_code_security.cleanup import cleanup_scan
+            await cleanup_scan(get_runtime(), scan_id)
         return ToolResult(success=True, output=output, title=f"Finalized audit {scan_id}")
     except CoverageBlockedError as exc:
         await asyncio.to_thread(
@@ -1484,6 +1489,9 @@ async def audit_finalize(ctx: ToolContext, scan_id: str) -> ToolResult:
             failure_code=exc.code,
             failure_summary=str(exc),
         )
+        if not ctx.extra.get("audit_managed_cleanup"):
+            from flocks_code_security.cleanup import cleanup_scan
+            await cleanup_scan(get_runtime(), scan_id)
         return ToolResult(
             success=True,
             output={
@@ -1518,6 +1526,9 @@ async def audit_cancel(ctx: ToolContext, scan_id: str) -> ToolResult:
         )
         manager = _background_manager()
         cancelled_workers = sum(manager.cancel(task_id=task_id) for task_id in task_ids)
+        if not ctx.extra.get("audit_managed_cleanup"):
+            from flocks_code_security.cleanup import cleanup_scan
+            await cleanup_scan(get_runtime(), scan_id)
         return ToolResult(
             success=True,
             output={
@@ -1882,7 +1893,7 @@ async def _launch_worker(
             parent_id=parent.id,
             agent=agent_name,
             category="task",
-            metadata={"langfuse": langfuse_metadata},
+            metadata={"langfuse": langfuse_metadata, "code_security_scan_id": scan_id},
             **child_kwargs,
         )
     except BaseException:
@@ -3044,6 +3055,9 @@ def register_tools() -> None:
                 required=False,
                 default=True,
             ),
+            _parameter("cleanup_intermediates", ParameterType.BOOLEAN,
+                       "Remove execution history and owned temporary files after the audit ends; retain final artifacts.",
+                       required=False, default=False),
             _parameter(
                 "mode",
                 ParameterType.STRING,
