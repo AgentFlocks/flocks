@@ -365,6 +365,8 @@ def serve(
     import uvicorn
 
     os.environ["_FLOCKS_SERVER_PORT"] = str(port)
+    # One id per service launch, inherited by all uvicorn workers/reload children.
+    os.environ["_FLOCKS_SERVICE_BOOT_ID"] = secrets_lib.token_hex(16)
 
     console.print(Panel(logo(), border_style="cyan"))
     console.print(f"[cyan]Starting server on:[/cyan] http://{host}:{port}")

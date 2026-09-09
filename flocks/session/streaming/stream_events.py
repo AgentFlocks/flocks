@@ -18,6 +18,7 @@ StreamEventType = Literal[
     "tool-input-start",
     "tool-input-delta",
     "tool-input-end",
+    "tool-input-error",
     "tool-call",
     "tool-result",
     "tool-error",
@@ -80,6 +81,15 @@ class ToolInputEndEvent(BaseStreamEvent):
     """Tool input end"""
     type: Literal["tool-input-end"] = "tool-input-end"
     id: str
+
+
+class ToolInputErrorEvent(BaseStreamEvent):
+    """Tool input failed before a runnable tool call was produced."""
+    type: Literal["tool-input-error"] = "tool-input-error"
+    id: str
+    tool_name: str
+    input: Dict[str, Any] = Field(default_factory=dict)
+    error: str
 
 
 class ToolCallEvent(BaseStreamEvent):
@@ -152,6 +162,7 @@ StreamEvent = (
     ToolInputStartEvent |
     ToolInputDeltaEvent |
     ToolInputEndEvent |
+    ToolInputErrorEvent |
     ToolCallEvent |
     ToolResultEvent |
     ToolErrorEvent |
@@ -184,6 +195,7 @@ def event_from_dict(data: Dict[str, Any]) -> StreamEvent:
         "tool-input-start": ToolInputStartEvent,
         "tool-input-delta": ToolInputDeltaEvent,
         "tool-input-end": ToolInputEndEvent,
+        "tool-input-error": ToolInputErrorEvent,
         "tool-call": ToolCallEvent,
         "tool-result": ToolResultEvent,
         "tool-error": ToolErrorEvent,

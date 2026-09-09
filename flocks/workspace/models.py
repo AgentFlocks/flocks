@@ -14,6 +14,7 @@ class WorkspaceNode(BaseModel):
     size: Optional[int] = None
     modified_at: Optional[float] = None
     is_text_file: bool = False
+    editable: bool = False
     children: Optional[list["WorkspaceNode"]] = None
 
 

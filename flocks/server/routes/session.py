@@ -12,8 +12,8 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Any, Dict, Literal, Union, Tuple
-from fastapi import APIRouter, HTTPException, status, Query, Request
+from typing import List, Optional, Any, Dict, Literal, Union, Tuple, cast
+from fastapi import APIRouter, HTTPException, status, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -41,6 +41,11 @@ from flocks.session.session import (
 )
 from flocks.session.policy import SessionPolicy
 from flocks.session.execution_mode import SessionExecutionMode
+from flocks.session.core.status import (
+    SessionStatusBusy,
+    SessionStatusInfo,
+    SessionStatusQueued,
+)
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
 from flocks.utils.monitor import get_monitor
@@ -296,6 +301,20 @@ class SessionListItem(BaseModel):
     canWrite: bool = False
     canDelete: bool = False
     isShared: bool = False
+
+
+class SessionRuntimeStatusResponse(BaseModel):
+    """Runtime status snapshot for one session."""
+
+    sessionID: str = Field(..., description="Session ID")
+    lifecycleStatus: Literal["active", "archived"] = Field(
+        ...,
+        description="Persisted session lifecycle status",
+    )
+    status: SessionStatusInfo = Field(..., description="Current runtime status")
+    isProcessing: bool = Field(..., description="Whether accepted session work is still in progress")
+    pendingPromptCount: int = Field(0, ge=0, description="Number of prompts waiting in the session queue")
+    observedAt: int = Field(..., description="Server observation timestamp in milliseconds")
 
 
 @dataclass(frozen=True)
@@ -745,6 +764,70 @@ async def get_session_status() -> Dict[str, Any]:
         }
         for session_id, status in statuses.items()
     }
+
+
+async def _build_session_runtime_status(session: SessionModel) -> SessionRuntimeStatusResponse:
+    """Build a process-local runtime status snapshot for one session."""
+    from flocks.session.core.status import SessionStatus
+    from flocks.session.interaction_queue import InteractionQueue
+    from flocks.session.session_loop import SessionLoop
+
+    queued_prompts = await InteractionQueue.list(session.id)
+    runtime_status = SessionStatus.get_for_session(
+        session.id,
+        preferred_instance_id=session.directory,
+    )
+
+    # ``prompt_async`` marks its route-owned chain active before returning
+    # 202, while SessionLoop sets ``busy`` only after the background task
+    # starts. Treat that window (and inter-prompt queue hand-offs) as queued
+    # so API clients never mistake accepted work for completion.
+    if runtime_status.type == "idle":
+        if (
+            Session.has_active_operations(session.id)
+            or SessionLoop.is_running(session.id)
+        ):
+            runtime_status = SessionStatusBusy()
+        elif (
+            _is_prompt_chain_active(session.id)
+            or has_pending_session_tasks(session.id)
+            or queued_prompts
+        ):
+            runtime_status = SessionStatusQueued()
+
+    return SessionRuntimeStatusResponse(
+        sessionID=session.id,
+        lifecycleStatus=cast(Literal["active", "archived"], session.status),
+        status=runtime_status,
+        isProcessing=runtime_status.type != "idle",
+        pendingPromptCount=len(queued_prompts),
+        observedAt=int(time.time() * 1000),
+    )
+
+
+@router.get(
+    "/{sessionID}/status",
+    response_model=SessionRuntimeStatusResponse,
+    summary="Get session runtime status",
+    description="Get the current runtime status of a specific session",
+    operation_id="session.statusById",
+)
+async def get_session_status_by_id(
+    sessionID: str,
+    request: Request,
+    response: Response,
+) -> SessionRuntimeStatusResponse:
+    """Return an explicit runtime status, including idle, for one session."""
+    response.headers["Cache-Control"] = "no-store"
+    current_user = require_user(request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_read_access(session, current_user)
+    return await _build_session_runtime_status(session)
 
 
 @router.get(
@@ -2089,15 +2172,6 @@ class AgentPartInput(BaseModel):
     type: Literal["agent"] = "agent"
     id: Optional[str] = Field(None, description="Part ID")
     name: str = Field(..., description="Agent name")
-
-
-class SubtaskPartInput(BaseModel):
-    """Subtask part input for API compatibility"""
-    type: Literal["subtask"] = "subtask"
-    id: Optional[str] = Field(None, description="Part ID")
-    agent: str = Field(..., description="Agent name")
-    prompt: str = Field(..., description="Subtask prompt")
-    description: Optional[str] = Field(None, description="Subtask description")
 
 
 class PromptRequest(BaseModel):
@@ -4945,6 +5019,7 @@ class ShellRequest(BaseModel):
 async def run_shell_command(sessionID: str, request: ShellRequest, http_request: Request):
     """Run shell command"""
     from flocks.hooks.execution import ExecutionStopped
+    from flocks.server.routes.event import publish_event
     from flocks.session.runner import SessionRunner
 
     current_user = require_user(http_request)
@@ -4967,6 +5042,7 @@ async def run_shell_command(sessionID: str, request: ShellRequest, http_request:
                 agent=request.agent,
                 command=request.command,
                 model=model,
+                event_publish_callback=publish_event,
             )
     except SessionNotFoundError as exc:
         raise HTTPException(

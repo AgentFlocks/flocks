@@ -174,6 +174,93 @@ class TestAgentCreate:
         assert "test-agent" in [agent["name"] for agent in list_resp.json()]
 
     @pytest.mark.asyncio
+    async def test_create_agent_without_tools_field_keeps_permission_unchanged(
+        self,
+        client: AsyncClient,
+    ):
+        """Older clients that omit tools do not implicitly disable question."""
+        payload = {k: v for k, v in _AGENT_PAYLOAD.items() if k != "tools"}
+        payload["name"] = "legacy-create-agent"
+
+        resp = await client.post("/api/agent", json=payload)
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["permission"] == []
+
+    @pytest.mark.asyncio
+    async def test_create_agent_without_question_tool_adds_persistent_deny(self, client: AsyncClient):
+        """Unchecking the question tool persists a deny rule for the always-load tool."""
+        from flocks.agent.registry import Agent
+        from flocks.storage.storage import Storage
+
+        payload = {
+            **_AGENT_PAYLOAD,
+            "name": "no-question-agent",
+            "tools": ["tool_search"],
+        }
+
+        resp = await client.post("/api/agent", json=payload)
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["permission"] == [{
+            "permission": "question",
+            "action": "deny",
+            "pattern": "*",
+            "source": "agent_tools",
+        }]
+
+        stored = await Storage.read("agent/custom/no-question-agent")
+        assert stored["permission"] == resp.json()["permission"]
+
+        Agent._custom_agents.clear()
+        Agent.invalidate_cache()
+
+        agent = await Agent.get("no-question-agent")
+        assert agent is not None
+        assert any(
+            rule.permission == "question" and rule.level.value == "deny"
+            for rule in agent.permission
+        )
+
+        get_resp = await client.get("/api/agent/no-question-agent")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["permission"] == resp.json()["permission"]
+
+    @pytest.mark.asyncio
+    async def test_update_agent_question_tool_toggle_adds_and_removes_managed_deny(
+        self,
+        client: AsyncClient,
+    ):
+        """The Tools checkbox controls only the system-managed question deny rule."""
+        payload = {
+            **_AGENT_PAYLOAD,
+            "name": "question-toggle-agent",
+            "tools": ["question", "tool_search"],
+        }
+
+        create_resp = await client.post("/api/agent", json=payload)
+        assert create_resp.status_code == status.HTTP_200_OK
+        assert create_resp.json()["permission"] == []
+
+        disable_resp = await client.put(
+            "/api/agent/question-toggle-agent",
+            json={"tools": ["tool_search"]},
+        )
+        assert disable_resp.status_code == status.HTTP_200_OK
+        assert disable_resp.json()["permission"] == [{
+            "permission": "question",
+            "action": "deny",
+            "pattern": "*",
+            "source": "agent_tools",
+        }]
+
+        enable_resp = await client.put(
+            "/api/agent/question-toggle-agent",
+            json={"tools": ["question", "tool_search"]},
+        )
+        assert enable_resp.status_code == status.HTTP_200_OK
+        assert enable_resp.json()["permission"] == []
+
+    @pytest.mark.asyncio
     async def test_create_subagent_defaults_to_delegatable(self, client: AsyncClient):
         """Sub-agents default to delegatable=true when the field is omitted."""
         resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)

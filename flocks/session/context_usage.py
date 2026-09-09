@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from flocks.provider.provider import Provider
 from flocks.session.message import Message
-from flocks.session.prompt import SessionPrompt
+from flocks.session.prompt import SessionPrompt, TurnPromptContext
 from flocks.session.session import SessionInfo
 from flocks.utils.log import Log
 
@@ -309,17 +309,41 @@ async def _estimate_system_prompt_tokens(
         if agent is None:
             agent = await Agent.get("rex")
 
-        prompts = await SessionPrompt.build_system_prompts(
+        from flocks.config import Config
+        from flocks.project.project import Project
+
+        try:
+            config = await Config.get()
+            config_instructions = tuple(config.instructions or ())
+        except Exception:
+            config_instructions = ()
+
+        session_directory = (
+            getattr(session, "directory", None) if session is not None else None
+        )
+        worktree = (
+            Project.worktree_for_directory(session_directory)
+            if session_directory
+            else None
+        )
+        prompt_blocks = await SessionPrompt.build_system_prompt_blocks(
             session_id=session_id,
-            session_directory=getattr(session, "directory", None) if session is not None else None,
+            session_directory=session_directory,
             agent_name=getattr(agent, "name", agent_name) if agent is not None else agent_name,
             agent_prompt=getattr(agent, "prompt", None) if agent is not None else None,
             provider_id=provider_id,
             model_id=model_id,
             prompt_tool_names=prompt_tool_names,
-            tool_revision=ToolRegistry.revision(),
+            turn_context=TurnPromptContext(
+                worktree=worktree,
+                config_instructions=config_instructions,
+                tool_revision=ToolRegistry.revision(),
+            ),
         )
-        return sum(SessionPrompt.count_tokens(prompt) for prompt in prompts)
+        return sum(
+            SessionPrompt.count_tokens(block.content)
+            for block in prompt_blocks
+        )
     except Exception as exc:
         log.debug("context_usage.system_prompt_estimate_failed", {
             "session_id": session_id,
@@ -441,8 +465,8 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> t
             if part_type in {"reasoning", "thinking"}:
                 tokens_by_key["reasoning"] += SessionPrompt.count_tokens(_field_value(part, "text", "") or "")
                 continue
-            if part_type in {"agent", "subtask"}:
-                tokens_by_key["agentDelegation"] += _estimate_subtask_part_tokens(part)
+            if part_type == "agent":
+                tokens_by_key["agentDelegation"] += _estimate_agent_part_tokens(part)
                 continue
             if part_type != "tool":
                 continue
@@ -499,7 +523,7 @@ def _context_key_for_tool(tool_name: str) -> str:
     return "tools"
 
 
-def _estimate_subtask_part_tokens(part: Any) -> int:
+def _estimate_agent_part_tokens(part: Any) -> int:
     total = 0
     for field in ("prompt", "description", "name"):
         value = _field_value(part, field, "")

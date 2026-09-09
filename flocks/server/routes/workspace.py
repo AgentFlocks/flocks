@@ -1,7 +1,7 @@
 """
 Workspace routes
 
-Generic file-manager API for ~/.flocks/workspace/ plus a read-only view
+Generic file-manager API for ~/.flocks/workspace/ plus a managed view
 of the agent memory directory (~/.flocks/data/memory/).
 
 All `path` query/body parameters are **relative** to the respective root.
@@ -26,9 +26,10 @@ File operations (workspace only)
   POST   /api/workspace/move          move / rename
   POST   /api/workspace/reveal        open containing folder in system file manager
 
-Memory view (read-only, points to data/memory/)
+Memory view (points to data/memory/)
   GET /api/workspace/memory/list      list memory files
   GET /api/workspace/memory/file      read memory file content
+  PUT /api/workspace/memory/file      update editable memory files
   GET /api/workspace/memory/preview   preview single memory file inline
   GET /api/workspace/memory/download  download single memory file
 
@@ -50,10 +51,12 @@ import zipfile
 from pathlib import Path
 from typing import List, Optional, Literal
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from flocks.project.project import Project
+from flocks.server.auth import get_optional_user, require_user
 from flocks.workspace.manager import WorkspaceManager
 from flocks.workspace.models import WorkspaceNode, WorkspaceStats
 from flocks.utils.log import Log
@@ -98,6 +101,11 @@ def _get_manager() -> WorkspaceManager:
     return mgr
 
 
+def _workspace_root(mgr: WorkspaceManager) -> Path:
+    """Return the canonical workspace root used for relative path rendering."""
+    return mgr.get_workspace_dir().resolve()
+
+
 def _is_allowed_upload_filename(filename: str) -> bool:
     return Path(filename).suffix.lower() in _ALLOWED_UPLOAD_EXTENSIONS
 
@@ -134,12 +142,32 @@ def _node_from_path(path: Path, root: Path) -> WorkspaceNode:
     )
 
 
+def _is_outputs_directory(directory: Path, root: Path) -> bool:
+    """Return whether *directory* is outputs or one of its descendants."""
+    return directory.relative_to(root).parts[:1] == ("outputs",)
+
+
+def _visible_children(directory: Path, root: Path) -> list[Path]:
+    """List displayable children, hiding dot-prefixed filesystem entries.
+
+    Output directories are organized by date, so show their folders newest-first
+    while retaining the normal name order for files.
+    """
+    children = [child for child in directory.iterdir() if not child.name.startswith(".")]
+    if not _is_outputs_directory(directory, root):
+        return sorted(children)
+
+    directories = sorted((child for child in children if child.is_dir()), reverse=True)
+    files = sorted(child for child in children if not child.is_dir())
+    return directories + files
+
+
 def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) -> WorkspaceNode:
     """Blocking recursive tree build — call via asyncio.to_thread."""
     node = _node_from_path(directory, root)
     if current < depth:
         node.children = []
-        for child in sorted(directory.iterdir()):
+        for child in _visible_children(directory, root):
             if child.is_dir():
                 node.children.append(_build_tree_sync(child, root, depth, current + 1))
             else:
@@ -149,7 +177,7 @@ def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) 
 
 def _list_dir_sync(directory: Path, root: Path) -> list[WorkspaceNode]:
     """Blocking single-level directory listing — call via asyncio.to_thread."""
-    return [_node_from_path(child, root) for child in sorted(directory.iterdir())]
+    return [_node_from_path(child, root) for child in _visible_children(directory, root)]
 
 
 def _dir_stats_sync(root: Path):
@@ -247,15 +275,16 @@ async def list_tree(
     depth: int = Query(2, ge=1, le=5, description="Tree depth"),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
-        base = mgr.resolve_workspace_path(path) if path else mgr.get_workspace_dir()
+        base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
-    return await asyncio.to_thread(_build_tree_sync, base, mgr.get_workspace_dir(), depth)
+    return await asyncio.to_thread(_build_tree_sync, base, workspace_root, depth)
 
 
 @router.get("/list", response_model=List[WorkspaceNode], summary="List directory")
@@ -263,15 +292,16 @@ async def list_dir(
     path: str = Query("", description="Relative path from workspace root"),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
-        base = mgr.resolve_workspace_path(path) if path else mgr.get_workspace_dir()
+        base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
-    return await asyncio.to_thread(_list_dir_sync, base, mgr.get_workspace_dir())
+    return await asyncio.to_thread(_list_dir_sync, base, workspace_root)
 
 
 class DirCreateRequest(BaseModel):
@@ -322,8 +352,10 @@ async def upload_files(
     files: List[UploadFile] = File(...),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
         dest_dir = mgr.resolve_workspace_path(dest) if dest else mgr.get_workspace_dir()
+        relative_dest_dir = dest_dir.resolve().relative_to(workspace_root)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -381,7 +413,7 @@ async def upload_files(
         })
         results.append({
             "name": target.name,
-            "path": str(target.relative_to(mgr.get_workspace_dir())),
+            "path": str(relative_dest_dir / filename),
             "abs_path": str(target),
             "size": total,
             "is_text_file": is_text,
@@ -585,9 +617,39 @@ def _memory_child_sort_key(path: Path) -> tuple[int, str]:
     return (0 if path.is_dir() else 1, path.name.casefold())
 
 
-def _build_memory_node_sync(path: Path, memory_dir: Path) -> WorkspaceNode:
+def _memory_path_parts(rel_path: str) -> list[str]:
+    return [part for part in rel_path.replace("\\", "/").split("/") if part]
+
+
+def _is_editable_memory_path(
+    rel_path: str,
+    writable_project_ids: Optional[set[str]] = None,
+) -> bool:
+    """Return whether the current user may edit a memory file path."""
+    path_parts = _memory_path_parts(rel_path)
+    if len(path_parts) == 1:
+        return path_parts[0] in {"USER.md", "MEMORY.md"}
+    if len(path_parts) == 2:
+        return path_parts[0] == "daily" and path_parts[1].endswith(".md")
+    if len(path_parts) == 3:
+        return (
+            path_parts[0] == "projects"
+            and path_parts[2] == "MEMORY.md"
+            and writable_project_ids is not None
+            and path_parts[1] in writable_project_ids
+        )
+    return False
+
+
+def _build_memory_node_sync(
+    path: Path,
+    memory_dir: Path,
+    writable_project_ids: Optional[set[str]],
+) -> WorkspaceNode:
     """Build one recursive node for the Memory tree."""
     node = _node_from_path(path, memory_dir)
+    if node.type == "file":
+        node.editable = _is_editable_memory_path(node.path, writable_project_ids)
     if node.type == "directory":
         children = (
             child
@@ -595,13 +657,16 @@ def _build_memory_node_sync(path: Path, memory_dir: Path) -> WorkspaceNode:
             if not child.is_symlink()
         )
         node.children = [
-            _build_memory_node_sync(child, memory_dir)
+            _build_memory_node_sync(child, memory_dir, writable_project_ids)
             for child in sorted(children, key=_memory_child_sort_key)
         ]
     return node
 
 
-def _list_memory_sync(memory_dir: Path) -> List[WorkspaceNode]:
+def _list_memory_sync(
+    memory_dir: Path,
+    writable_project_ids: Optional[set[str]],
+) -> List[WorkspaceNode]:
     """Build the USER/global/daily/project Memory hierarchy."""
     children = (
         child
@@ -615,16 +680,21 @@ def _list_memory_sync(memory_dir: Path) -> List[WorkspaceNode]:
             child.name.casefold(),
         ),
     )
-    return [_build_memory_node_sync(child, memory_dir) for child in ordered]
+    return [
+        _build_memory_node_sync(child, memory_dir, writable_project_ids)
+        for child in ordered
+    ]
 
 
 @router.get("/memory/list", response_model=List[WorkspaceNode], summary="List memory files")
-async def list_memory():
+async def list_memory(request: Request):
     mgr = _get_manager()
     memory_dir = mgr.get_memory_dir()
     if not memory_dir.exists():
         return []
-    return await asyncio.to_thread(_list_memory_sync, memory_dir)
+    user = get_optional_user(request)
+    writable_project_ids = Project.registered_project_ids(user.id) if user else set()
+    return await asyncio.to_thread(_list_memory_sync, memory_dir, writable_project_ids)
 
 
 @router.get("/memory/file", summary="Read memory file content")
@@ -664,12 +734,19 @@ async def read_memory_file(
 
 
 @router.put("/memory/file", summary="Write memory file content")
-async def write_memory_file(body: FileWriteRequest):
+async def write_memory_file(request: Request, body: FileWriteRequest):
+    user = require_user(request)
     mgr = _get_manager()
     try:
         target = mgr.resolve_memory_path(body.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    writable_project_ids = Project.registered_project_ids(user.id)
+    if not _is_editable_memory_path(body.path, writable_project_ids):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Memory file is read-only",
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(body.content, encoding="utf-8")

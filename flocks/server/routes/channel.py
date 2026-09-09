@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from flocks.channel.gateway.manager import default_manager
 from flocks.channel.registry import default_registry
 from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -534,6 +535,7 @@ def _append_telegram_allow_from(user_id: str) -> None:
 
 
 @router.post("/telegram/pair")
+@serialized_config_mutation
 async def telegram_pair(req: TelegramPairRequest):
     """
     Verify a Telegram pairing code.

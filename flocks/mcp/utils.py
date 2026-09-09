@@ -8,7 +8,7 @@ import os
 import re
 import hashlib
 from typing import Optional, Dict, Any
-from urllib.parse import urlencode, urlparse, parse_qs, parse_qsl, urlunparse
+from urllib.parse import unquote, urlencode, urlparse, parse_qs, parse_qsl, urlunparse
 
 _SENSITIVE_QUERY_PARAMS = frozenset({
     "apikey", "api_key", "key", "token", "access_token",
@@ -316,8 +316,6 @@ def extract_api_key_from_mcp_url(server_name: str, config: Dict[str, Any]) -> Di
     if not url or config.get("type") not in REMOTE_MCP_TYPES or "?" not in url:
         return dict(config)
 
-    from urllib.parse import unquote
-
     base, _, raw_query = url.partition("?")
     fragment = ""
     if "#" in raw_query:
@@ -335,8 +333,9 @@ def extract_api_key_from_mcp_url(server_name: str, config: Dict[str, Any]) -> Di
         key = unquote(key_encoded)
         value = unquote(value_encoded)
         if key.lower() in _SENSITIVE_QUERY_PARAMS and not value.startswith("{secret:"):
-            secret_key = f"{server_name}_mcp_key"
             from flocks.security import get_secret_manager
+            from flocks.security.secrets import get_mcp_secret_id
+            secret_key = get_mcp_secret_id(server_name)
             get_secret_manager().set(secret_key, value)
             new_parts.append(f"{key_encoded}={{secret:{secret_key}}}")
             extracted = True
@@ -383,7 +382,8 @@ def extract_auth_value_from_mcp_config(server_name: str, config: Dict[str, Any])
     elif "scheme" in updated_auth and not scheme:
         updated_auth.pop("scheme", None)
 
-    secret_key = str(auth_config.get("secret_id") or f"{server_name}_mcp_key")
+    from flocks.security.secrets import get_mcp_secret_id
+    secret_key = str(auth_config.get("secret_id") or get_mcp_secret_id(server_name))
     from flocks.security import get_secret_manager
 
     get_secret_manager().set(secret_key, auth_value)
@@ -443,6 +443,37 @@ def mask_sensitive_mcp_config_for_frontend(
     """Mask plain-text secrets before returning MCP config to the frontend."""
     masked_config = dict(config)
 
+    url = config.get("url")
+    if isinstance(url, str) and "?" in url:
+        base, _, raw_query = url.partition("?")
+        fragment = ""
+        if "#" in raw_query:
+            raw_query, _, fragment = raw_query.partition("#")
+
+        masked_parts: list[str] = []
+        changed = False
+        for part in raw_query.split("&"):
+            if "=" not in part:
+                masked_parts.append(part)
+                continue
+            key_encoded, _, value_encoded = part.partition("=")
+            key = unquote(key_encoded)
+            value = unquote(value_encoded)
+            if (
+                key.lower() in _SENSITIVE_QUERY_PARAMS
+                and not _is_secret_placeholder(value)
+            ):
+                masked_parts.append(f"{key_encoded}={MCP_MASKED_SECRET_VALUE}")
+                changed = True
+            else:
+                masked_parts.append(part)
+
+        if changed:
+            masked_url = base + "?" + "&".join(masked_parts)
+            if fragment:
+                masked_url += "#" + fragment
+            masked_config["url"] = masked_url
+
     auth_config = config.get("auth")
     if isinstance(auth_config, dict):
         auth_value = auth_config.get("value")
@@ -475,6 +506,39 @@ def restore_masked_mcp_config_secrets(
 ) -> Dict[str, Any]:
     """Restore masked frontend sentinel values back to their previous secrets."""
     restored_config = dict(updated_config)
+
+    previous_url = previous_config.get("url")
+    next_url = updated_config.get("url")
+    if (
+        isinstance(previous_url, str)
+        and isinstance(next_url, str)
+        and "?" in previous_url
+        and "?" in next_url
+    ):
+        previous_parsed = urlparse(previous_url)
+        next_parsed = urlparse(next_url)
+        previous_values: Dict[str, str] = {}
+        for key, value in parse_qsl(previous_parsed.query, keep_blank_values=True):
+            if key.lower() in _SENSITIVE_QUERY_PARAMS:
+                previous_values[key.lower()] = value
+
+        restored_query: list[tuple[str, str]] = []
+        changed = False
+        for key, value in parse_qsl(next_parsed.query, keep_blank_values=True):
+            normalized_key = key.lower()
+            if (
+                normalized_key in _SENSITIVE_QUERY_PARAMS
+                and value == MCP_MASKED_SECRET_VALUE
+                and normalized_key in previous_values
+            ):
+                value = previous_values[normalized_key]
+                changed = True
+            restored_query.append((key, value))
+
+        if changed:
+            restored_config["url"] = urlunparse(
+                next_parsed._replace(query=urlencode(restored_query))
+            )
 
     previous_auth = previous_config.get("auth")
     next_auth = updated_config.get("auth")

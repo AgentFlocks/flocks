@@ -164,7 +164,6 @@ class CommandResponse(BaseModel):
     template: str = Field(..., description="Command template")
     agent: Optional[str] = Field(None, description="Preferred agent")
     model: Optional[str] = Field(None, description="Preferred model")
-    subtask: Optional[bool] = Field(None, description="Run as subtask")
     hidden: bool = Field(False, description="Hidden from UI")
     aliases: List[str] = Field(default_factory=list, description="Alternate slash aliases")
     visible_surfaces: List[str] = Field(default_factory=list, description="Surfaces where the command is visible")
@@ -182,7 +181,6 @@ def _command_to_response(cmd: CommandInfo) -> CommandResponse:
         template=cmd.template,
         agent=cmd.agent,
         model=cmd.model,
-        subtask=cmd.subtask,
         hidden=cmd.hidden,
         aliases=list(cmd.aliases),
         visible_surfaces=list(cmd.visible_surfaces),

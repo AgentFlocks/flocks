@@ -40,6 +40,7 @@ from flocks.agent.agent import (
 )
 import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.toolset import agent_declares_tool
+from flocks.agent.tool_permissions import permission_items_to_ruleset
 from flocks.agent.prompt_utils import categorize_tools
 from flocks.agent.agent_factory import (
     scan_and_load,
@@ -172,6 +173,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
         native=False,
         hidden=agent_data.get("hidden", False),
         delegatable=agent_data.get("delegatable"),
+        permission=permission_items_to_ruleset(agent_data.get("permission")),
         tools=agent_data.get("tools", []),
         tags=agent_data.get("tags", []),
     )

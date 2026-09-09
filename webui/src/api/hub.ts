@@ -110,6 +110,8 @@ export interface HubCatalogParams {
   trust?: string;
   risk?: string;
   q?: string;
+  /** Place updateable and installed plugins before other catalog entries. */
+  prioritizeInstalled?: boolean;
 }
 
 export interface HubCatalogPageParams extends HubCatalogParams {

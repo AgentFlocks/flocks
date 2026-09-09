@@ -501,16 +501,30 @@ export namespace Config {
 
   const canonicalPermissionToolName = (tool: string) => {
     if (tool === "todowrite" || tool === "todoread") return "todo"
+    if (tool === "task") return "delegate_task"
     return tool
   }
 
   const assignPermission = (target: Record<string, PermissionRule>, tool: string, action: PermissionRule) => {
     const canonical = canonicalPermissionToolName(tool)
-    if (target[canonical] === "deny" || action === "deny") {
+    const existing = target[canonical]
+    if (typeof existing === "object" && typeof action === "object") {
+      target[canonical] = { ...action, ...existing }
+      for (const pattern of Object.keys(action)) {
+        if (pattern in existing && (existing[pattern] === "deny" || action[pattern] === "deny")) {
+          target[canonical][pattern] = "deny"
+        }
+      }
+      return
+    }
+    const containsDeny = (value: PermissionRule | undefined): boolean =>
+      value === "deny" ||
+      (typeof value === "object" && value !== null && Object.values(value).some((item) => containsDeny(item)))
+    if (containsDeny(existing) || containsDeny(action)) {
       target[canonical] = "deny"
       return
     }
-    if (!(canonical in target)) target[canonical] = action
+    if (existing === undefined) target[canonical] = action
   }
 
   const permissionTransform = (x: unknown): Record<string, PermissionRule> => {
@@ -519,7 +533,10 @@ export namespace Config {
     const { __originalKeys, ...rest } = obj
     const result: Record<string, PermissionRule> = {}
     const keys = __originalKeys ?? Object.keys(rest)
-    for (const key of keys) {
+    for (const key of keys.filter((key) => canonicalPermissionToolName(key) === key)) {
+      if (key in rest) assignPermission(result, key, rest[key] as PermissionRule)
+    }
+    for (const key of keys.filter((key) => canonicalPermissionToolName(key) !== key)) {
       if (key in rest) assignPermission(result, key, rest[key] as PermissionRule)
     }
     return result
@@ -536,7 +553,7 @@ export namespace Config {
           glob: PermissionRule.optional(),
           grep: PermissionRule.optional(),
           bash: PermissionRule.optional(),
-          task: PermissionRule.optional(),
+          delegate_task: PermissionRule.optional(),
           external_directory: PermissionRule.optional(),
           todo: PermissionAction.optional(),
           question: PermissionAction.optional(),

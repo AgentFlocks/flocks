@@ -112,6 +112,9 @@ def _schedule_startup_phase(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle application lifecycle"""
+    from flocks.notifications.token_policy import service_boot_id
+
+    service_boot_id()
     # Ensure file logging when server is started without CLI (e.g. uvicorn app:app)
     if Log._writer is None:
         await Log.init(print=False, dev=False, level=LogLevel.INFO)
@@ -188,6 +191,12 @@ async def lifespan(app: FastAPI):
     
     # Initialize storage
     await _run_startup_phase(log, "storage.init", Storage.init)
+    from flocks.notifications.token_policy import TokenPolicyService
+
+    try:
+        await _run_startup_phase(log, "notifications.token_policy.init", TokenPolicyService.initialize_campaign)
+    except Exception as exc:
+        log.warning("notifications.token_policy.init_failed", {"error": str(exc)})
     log.info("storage.initialized")
 
     async def _recover_orphan_tool_parts() -> None:
@@ -708,6 +717,11 @@ _SECURITY_HEADERS = {
 def _is_noisy_request_path(path: str) -> bool:
     """Return True for high-frequency polling endpoints that are noisy on success."""
     if path in _REQUEST_LOG_SKIP_EXACT:
+        return True
+    if (
+        path.startswith(("/api/session/", "/session/"))
+        and path.endswith("/status")
+    ):
         return True
     if path.startswith("/api/session/") and path.endswith("/message"):
         return True

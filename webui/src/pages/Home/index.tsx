@@ -1,7 +1,7 @@
-import { 
-  Bot, 
-  Zap, 
-  Sparkles, 
+import {
+  Bot,
+  Zap,
+  Sparkles,
   Github,
   ChevronDown,
   ChevronRight,
@@ -17,6 +17,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { useCallback, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useStats } from '@/hooks/useStats';
@@ -29,6 +30,51 @@ import { useProductName } from '@/contexts/ProductNameContext';
 const GITHUB_URL = 'https://github.com/AgentFlocks/flocks';
 const GITEE_URL = 'https://gitee.com/flocks/flocks';
 const GITEE_LOGO_URL = `${import.meta.env.BASE_URL}gitee-logo.png`;
+const STAT_CARD_CLASS = 'bg-white rounded-xl p-6 border border-gray-200';
+const STAT_LINK_CARD_CLASS = `${STAT_CARD_CLASS} block transition-all duration-200 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2`;
+
+function StatCard({
+  title,
+  value,
+  icon,
+  to,
+  interactiveClassName,
+  valueClassName = 'text-gray-900',
+  children,
+}: {
+  title: string;
+  value: ReactNode;
+  icon: ReactNode;
+  to?: string;
+  interactiveClassName?: string;
+  valueClassName?: string;
+  children?: ReactNode;
+}) {
+  const content = (
+    <>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-gray-600 text-sm">{title}</span>
+        {icon}
+      </div>
+      <div className={`text-xl font-bold ${valueClassName}`}>{value}</div>
+      {children}
+    </>
+  );
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        aria-label={title}
+        className={`${STAT_LINK_CARD_CLASS} ${interactiveClassName ?? ''}`}
+      >
+        {content}
+      </Link>
+    );
+  }
+
+  return <div className={STAT_CARD_CLASS}>{content}</div>;
+}
 
 export default function Home() {
   const { stats, loading, error } = useStats();
@@ -39,18 +85,30 @@ export default function Home() {
   const { productName } = useProductName();
   const canCreateWebUIContractPage = user?.role === 'admin';
   const [isRepoMenuOpen, setIsRepoMenuOpen] = useState(false);
-  const [creatingWebUIContractPageSession, setCreatingWebUIContractPageSession] = useState(false);
-  const statsErrorHint = error ? t(`stats.loadErrorHint.${error.message}`, { defaultValue: t('stats.loadErrorHint.unavailable') }) : '';
+  const [
+    creatingWebUIContractPageSession,
+    setCreatingWebUIContractPageSession,
+  ] = useState(false);
+  const statsErrorHint = error
+    ? t(`stats.loadErrorHint.${error.message}`, {
+        defaultValue: t('stats.loadErrorHint.unavailable'),
+      })
+    : '';
 
   const handleCreateWebUIContractPage = useCallback(async () => {
     if (creatingWebUIContractPageSession) return;
     setCreatingWebUIContractPageSession(true);
     try {
-      const session = await sessionApi.create({ title: t('createWebUIContractPageSessionTitle') });
+      const session = await sessionApi.create({
+        title: t('createWebUIContractPageSessionTitle'),
+      });
       const message = t('createWebUIContractPageInitialMessage');
-      navigate(`/sessions?session=${session.id}&message=${encodeURIComponent(message)}`);
+      navigate(
+        `/sessions?session=${session.id}&message=${encodeURIComponent(message)}`,
+      );
     } catch (err: unknown) {
-      const detail = err instanceof Error ? err.message : t('createWebUIContractPageError');
+      const detail =
+        err instanceof Error ? err.message : t('createWebUIContractPageError');
       toast.error(t('createWebUIContractPageError'), detail);
     } finally {
       setCreatingWebUIContractPageSession(false);
@@ -87,7 +145,9 @@ export default function Home() {
 
           <div className="flex flex-wrap sm:flex-nowrap gap-3 sm:flex-shrink-0">
             <button
-              onClick={() => window.dispatchEvent(new Event('flocks:open-onboarding'))}
+              onClick={() =>
+                window.dispatchEvent(new Event('flocks:open-onboarding'))
+              }
               className="inline-flex items-center px-6 py-2.5 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors shadow-lg shadow-red-900/40"
             >
               {t('getStarted')}
@@ -138,7 +198,11 @@ export default function Home() {
                     rel="noopener noreferrer"
                     className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors border-t border-white/10"
                   >
-                    <img src={GITEE_LOGO_URL} alt="Gitee" className="mr-2 w-4 h-4 rounded-sm" />
+                    <img
+                      src={GITEE_LOGO_URL}
+                      alt="Gitee"
+                      className="mr-2 w-4 h-4 rounded-sm"
+                    />
                     Gitee
                   </a>
                 </div>
@@ -159,8 +223,12 @@ export default function Home() {
             <MessageSquare className="w-5 h-5 text-sky-500" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900">{t('quickActions.sessions.title')}</h3>
-            <p className="text-xs text-gray-400 mt-0.5 truncate">{t('quickActions.sessions.description')}</p>
+            <h3 className="text-sm font-semibold text-gray-900">
+              {t('quickActions.sessions.title')}
+            </h3>
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
+              {t('quickActions.sessions.description')}
+            </p>
           </div>
           <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-sky-400 flex-shrink-0 transition-colors" />
         </Link>
@@ -173,8 +241,12 @@ export default function Home() {
             <Workflow className="w-5 h-5 text-violet-500" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900">{t('quickActions.workflows.title')}</h3>
-            <p className="text-xs text-gray-400 mt-0.5 truncate">{t('quickActions.workflows.description')}</p>
+            <h3 className="text-sm font-semibold text-gray-900">
+              {t('quickActions.workflows.title')}
+            </h3>
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
+              {t('quickActions.workflows.description')}
+            </p>
           </div>
           <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-violet-400 flex-shrink-0 transition-colors" />
         </Link>
@@ -187,8 +259,12 @@ export default function Home() {
             <Bot className="w-5 h-5 text-emerald-500" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900">{t('quickActions.agents.title')}</h3>
-            <p className="text-xs text-gray-400 mt-0.5 truncate">{t('quickActions.agents.description')}</p>
+            <h3 className="text-sm font-semibold text-gray-900">
+              {t('quickActions.agents.title')}
+            </h3>
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
+              {t('quickActions.agents.description')}
+            </p>
           </div>
           <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-emerald-400 flex-shrink-0 transition-colors" />
         </Link>
@@ -205,98 +281,100 @@ export default function Home() {
             <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3">
               <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
               <div>
-                <span className="text-sm font-medium text-red-900">{t('stats.abnormal')}</span>
-                <span className="text-sm text-red-600 ml-2">{statsErrorHint}</span>
+                <span className="text-sm font-medium text-red-900">
+                  {t('stats.abnormal')}
+                </span>
+                <span className="text-sm text-red-600 ml-2">
+                  {statsErrorHint}
+                </span>
               </div>
             </div>
           )}
           <div className="grid md:grid-cols-4 gap-6">
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.agentCount')}</span>
-              <Bot className="w-5 h-5 text-purple-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.agents.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.agentCount')}
+              value={stats?.agents.total ?? 0}
+              icon={<Bot className="w-5 h-5 text-purple-500" />}
+              to="/agents"
+              interactiveClassName="hover:border-purple-200 hover:shadow-purple-50 focus-visible:ring-purple-500"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.workflowCount')}</span>
-              <Workflow className="w-5 h-5 text-teal-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.workflows.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.workflowCount')}
+              value={stats?.workflows.total ?? 0}
+              icon={<Workflow className="w-5 h-5 text-teal-500" />}
+              to="/workflows"
+              interactiveClassName="hover:border-teal-200 hover:shadow-teal-50 focus-visible:ring-teal-500"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.skillCount')}</span>
-              <BookOpen className="w-5 h-5 text-green-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.skills.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.skillCount')}
+              value={stats?.skills.total ?? 0}
+              icon={<BookOpen className="w-5 h-5 text-green-500" />}
+              to="/skills"
+              interactiveClassName="hover:border-green-200 hover:shadow-green-50 focus-visible:ring-green-500"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.toolCount')}</span>
-              <Wrench className="w-5 h-5 text-orange-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.tools.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.toolCount')}
+              value={stats?.tools.total ?? 0}
+              icon={<Wrench className="w-5 h-5 text-orange-500" />}
+              to="/tools"
+              interactiveClassName="hover:border-orange-200 hover:shadow-orange-50 focus-visible:ring-orange-500"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.weeklyTasks')}</span>
-              <Zap className="w-5 h-5 text-amber-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.tasks.week ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.weeklyTasks')}
+              value={stats?.tasks.week ?? 0}
+              icon={<Zap className="w-5 h-5 text-amber-500" />}
+              to="/tasks"
+              interactiveClassName="hover:border-amber-200 hover:shadow-amber-50 focus-visible:ring-amber-500"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.activeScheduled')}</span>
-              <CalendarClock className="w-5 h-5 text-violet-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.tasks.scheduledActive ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.activeScheduled')}
+              value={stats?.tasks.scheduledActive ?? 0}
+              icon={<CalendarClock className="w-5 h-5 text-violet-500" />}
+              to="/tasks"
+              interactiveClassName="hover:border-violet-200 hover:shadow-violet-50 focus-visible:ring-violet-500"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.modelCount')}</span>
-              <Cpu className="w-5 h-5 text-pink-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.models.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.modelCount')}
+              value={stats?.models.total ?? 0}
+              icon={<Cpu className="w-5 h-5 text-pink-500" />}
+              to="/models"
+              interactiveClassName="hover:border-pink-200 hover:shadow-pink-50 focus-visible:ring-pink-500"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.systemStatus')}</span>
-              <BarChart3 className={`w-5 h-5 ${
-                stats?.system.status === 'healthy' ? 'text-green-500' : 'text-red-500'
-              }`} />
-            </div>
-            <div className={`text-xl font-bold ${
-              stats?.system.status === 'healthy' ? 'text-green-600' : 'text-red-600'
-            }`}>
-              {stats?.system.status === 'healthy' ? t('stats.normal') : t('stats.abnormal')}
-            </div>
-            <div className="text-xs text-gray-500 mt-1">
-              {stats?.system.status ? t(`stats.statusMessage.${stats.system.status}`) : ''}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.systemStatus')}
+              value={
+                stats?.system.status === 'healthy'
+                  ? t('stats.normal')
+                  : t('stats.abnormal')
+              }
+              valueClassName={
+                stats?.system.status === 'healthy'
+                  ? 'text-green-600'
+                  : 'text-red-600'
+              }
+              icon={
+                <BarChart3
+                  className={`w-5 h-5 ${
+                    stats?.system.status === 'healthy'
+                      ? 'text-green-500'
+                      : 'text-red-500'
+                  }`}
+                />
+              }
+            >
+              <div className="text-xs text-gray-500 mt-1">
+                {stats?.system.status
+                  ? t(`stats.statusMessage.${stats.system.status}`)
+                  : ''}
+              </div>
+            </StatCard>
           </div>
         </>
       )}

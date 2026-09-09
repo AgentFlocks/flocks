@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
@@ -282,7 +283,7 @@ class TestMcpRoutes:
             "get_mcp_server",
             lambda name: {
                 "type": "remote",
-                "url": "https://example.com/mcp",
+                "url": "https://example.com/mcp?apikey=url-token&mode=full",
                 "auth": {
                     "type": "apikey",
                     "location": "header",
@@ -300,6 +301,8 @@ class TestMcpRoutes:
 
         assert resp.status_code == 200, resp.text
         data = resp.json()
+        assert data["config"]["url"] == "https://example.com/mcp?apikey=***&mode=full"
+        assert "url-token" not in resp.text
         assert data["config"]["auth"]["value"] == "***"
         assert data["config"]["headers"]["Authorization"] == "***"
         assert data["config"]["headers"]["X-Client"] == "flocks"
@@ -721,6 +724,59 @@ class TestMcpRoutes:
         )
         assert stored_configs["demo-mcp"]["headers"]["X-Client"] == "flocks-web"
 
+    @pytest.mark.asyncio
+    async def test_update_mcp_server_restores_masked_url_query_secret(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        stored_configs: dict[str, dict] = {}
+        saved_secrets: dict[str, str] = {}
+
+        async def fake_status() -> dict[str, McpStatusInfo]:
+            return {}
+
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://old.example.com/mcp?apikey=url-token&mode=full",
+                "enabled": False,
+            },
+        )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "add_mcp_server",
+            lambda name, config: stored_configs.__setitem__(name, config),
+        )
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+
+        class SecretManagerStub:
+            def set(self, key: str, value: str) -> None:
+                saved_secrets[key] = value
+
+        monkeypatch.setattr(
+            "flocks.security.get_secret_manager",
+            lambda: SecretManagerStub(),
+        )
+
+        resp = await client.put(
+            "/api/mcp/demo-mcp",
+            json={
+                "config": {
+                    "url": "https://new.example.com/mcp?apikey=***&mode=compact",
+                    "enabled": False,
+                }
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert saved_secrets == {"demo-mcp_mcp_key": "url-token"}
+        assert (
+            stored_configs["demo-mcp"]["url"]
+            == "https://new.example.com/mcp?apikey={secret:demo-mcp_mcp_key}&mode=compact"
+        )
+
     # ---------------------------------------------------------------------
     # should_reconnect: the contract for ``PUT /api/mcp/{name}`` is that
     # any save where the new config asks the server to be enabled AND the
@@ -1123,3 +1179,251 @@ class TestMcpRoutes:
 
         assert resp.status_code == 504, resp.text
         assert "timed out" in resp.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_configure_threatbook_mcp_rejects_global_region_without_mutation(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        raw_state: dict = {"mcp": {}}
+        secret_state: dict[str, str] = {}
+        validated_configs: list[dict] = []
+        connected_configs: list[dict] = []
+
+        class FakeSecrets:
+            def _load(self):
+                return dict(secret_state)
+
+            def _save(self, data):
+                secret_state.clear()
+                secret_state.update(data)
+
+            def set(self, secret_id: str, value: str):
+                secret_state[secret_id] = value
+
+        async def fake_test(request):
+            validated_configs.append(request.config)
+            return {"success": True, "message": "ok", "tools_count": 4}
+
+        async def fake_status():
+            return {}
+
+        async def fake_load(name: str):
+            return raw_state["mcp"].get(name)
+
+        async def fake_connect(name: str, config: dict):
+            connected_configs.append(config)
+            return True
+
+        async def fake_refresh(name: str):
+            return 4
+
+        def fake_persist(name: str, config: dict):
+            raw_state["mcp"][name] = dict(config)
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+        monkeypatch.setattr(mcp_routes, "test_mcp_connection", fake_test)
+        monkeypatch.setattr(mcp_routes, "_load_mcp_server_config", fake_load)
+        monkeypatch.setattr(mcp_routes, "_persist_mcp_server_config", fake_persist)
+        monkeypatch.setattr(mcp_routes.ConfigWriter, "_read_raw", lambda: raw_state.copy())
+        monkeypatch.setattr(mcp_routes, "_load_raw_mcp_server_config", lambda name: raw_state["mcp"].get(name))
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
+        monkeypatch.setattr(mcp_routes.MCP, "refresh_tools", fake_refresh)
+
+        resp = await client.post(
+            "/api/mcp/threatbook_mcp/threatbook-configure",
+            json={"region": "global", "api_key": "global key"},
+        )
+
+        assert resp.status_code == 400, resp.text
+        assert "China region only" in resp.json()["message"]
+        assert validated_configs == []
+        assert raw_state == {"mcp": {}}
+        assert secret_state == {}
+        assert connected_configs == []
+
+    @pytest.mark.asyncio
+    async def test_get_threatbook_mcp_credentials_uses_non_duplicated_secret_id(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        requested_ids: list[str] = []
+
+        class FakeSecrets:
+            def get(self, secret_id: str):
+                requested_ids.append(secret_id)
+                return "312abcdef321" if secret_id == "threatbook_mcp_key" else None
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+
+        resp = await client.get("/api/mcp/threatbook_mcp/credentials")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["has_credential"] is True
+        assert resp.json()["secret_id"] == "threatbook_mcp_key"
+        assert resp.json()["api_key_masked"] == "************"
+        assert "312abcdef321" not in resp.text
+        assert requested_ids == ["threatbook_mcp_key"]
+
+    @pytest.mark.asyncio
+    async def test_reveal_threatbook_mcp_credentials_returns_full_key_on_demand(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeSecrets:
+            def get(self, secret_id: str):
+                return "312abcdef321" if secret_id == "threatbook_mcp_key" else None
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+        audit = AsyncMock()
+        monkeypatch.setattr(mcp_routes, "emit_audit_event", audit)
+
+        resp = await client.post("/api/mcp/threatbook_mcp/credentials/reveal")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"api_key": "312abcdef321"}
+        assert resp.headers["cache-control"] == "no-store"
+        audit.assert_awaited_once()
+        event_type, payload = audit.await_args.args
+        assert event_type == "mcp.credentials_reveal"
+        assert payload["mcp_name"] == "threatbook_mcp"
+        assert "312abcdef321" not in repr(payload)
+
+    @pytest.mark.asyncio
+    async def test_mcp_credentials_support_historical_inline_url_key(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeSecrets:
+            def get(self, secret_id: str):
+                return None
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+        monkeypatch.setattr(
+            mcp_routes,
+            "_load_raw_mcp_server_config",
+            lambda _name: {
+                "type": "remote",
+                "url": "https://mcp.threatbook.cn/mcp?apikey=historical-key",
+            },
+        )
+        monkeypatch.setattr(mcp_routes, "emit_audit_event", AsyncMock())
+
+        masked = await client.get("/api/mcp/threatbook_mcp/credentials")
+        revealed = await client.post("/api/mcp/threatbook_mcp/credentials/reveal")
+
+        assert masked.status_code == 200, masked.text
+        assert masked.json()["has_credential"] is True
+        assert masked.json()["api_key_masked"] == "************"
+        assert "historical-key" not in masked.text
+        assert revealed.status_code == 200, revealed.text
+        assert revealed.json() == {"api_key": "historical-key"}
+
+    @pytest.mark.asyncio
+    async def test_reveal_mcp_credentials_returns_not_found_when_missing(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeSecrets:
+            def get(self, secret_id: str):
+                return None
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+
+        resp = await client.post("/api/mcp/threatbook_mcp/credentials/reveal")
+
+        assert resp.status_code == 404, resp.text
+
+    @pytest.mark.asyncio
+    async def test_configure_threatbook_mcp_does_not_persist_failed_validation(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        persisted: list[dict] = []
+
+        async def fake_test(request):
+            return {"success": False, "message": "invalid regional key"}
+
+        monkeypatch.setattr(mcp_routes, "test_mcp_connection", fake_test)
+        monkeypatch.setattr(
+            mcp_routes,
+            "_persist_mcp_server_config",
+            lambda name, config: persisted.append(config),
+        )
+
+        resp = await client.post(
+            "/api/mcp/threatbook_mcp/threatbook-configure",
+            json={"region": "cn", "api_key": "bad-key"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["success"] is False
+        assert resp.json()["message"] == "invalid regional key"
+        assert persisted == []
+
+    @pytest.mark.asyncio
+    async def test_configure_threatbook_mcp_restores_previous_state_when_apply_fails(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        old_config = {
+            "type": "remote",
+            "url": "https://mcp.threatbook.cn/mcp?apikey={secret:threatbook_mcp_key}",
+            "enabled": True,
+        }
+        raw_state = {"mcp": {"threatbook_mcp": dict(old_config)}}
+        secret_state = {"threatbook_mcp_key": "old-key"}
+        connect_attempts: list[str] = []
+
+        class FakeSecrets:
+            def _load(self):
+                return dict(secret_state)
+
+            def _save(self, data):
+                secret_state.clear()
+                secret_state.update(data)
+
+            def set(self, secret_id: str, value: str):
+                secret_state[secret_id] = value
+
+        async def fake_test(request):
+            return {"success": True, "message": "ok"}
+
+        async def fake_status():
+            return {
+                "threatbook_mcp": McpStatusInfo(status=McpStatus.CONNECTED),
+            }
+
+        async def fake_remove(name: str):
+            return True
+
+        async def fake_load(name: str):
+            return raw_state["mcp"].get(name)
+
+        async def fake_connect(name: str, config: dict):
+            connect_attempts.append(config["url"])
+            return len(connect_attempts) > 1
+
+        def fake_write_raw(data: dict):
+            raw_state.clear()
+            raw_state.update(data)
+
+        def fake_persist(name: str, config: dict):
+            raw_state["mcp"][name] = dict(config)
+
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+        monkeypatch.setattr(mcp_routes, "test_mcp_connection", fake_test)
+        monkeypatch.setattr(mcp_routes, "_load_mcp_server_config", fake_load)
+        monkeypatch.setattr(mcp_routes, "_load_raw_mcp_server_config", lambda name: raw_state["mcp"].get(name))
+        monkeypatch.setattr(mcp_routes, "_persist_mcp_server_config", fake_persist)
+        monkeypatch.setattr(mcp_routes.ConfigWriter, "_read_raw", lambda: {"mcp": {"threatbook_mcp": dict(raw_state["mcp"]["threatbook_mcp"])}})
+        monkeypatch.setattr(mcp_routes.ConfigWriter, "_write_raw", fake_write_raw)
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(mcp_routes.MCP, "remove", fake_remove)
+        monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+        monkeypatch.setattr(tool_loader, "delete_mcp_config", lambda name: True)
+
+        resp = await client.post(
+            "/api/mcp/threatbook_mcp/threatbook-configure",
+            json={"region": "cn", "api_key": "new-key"},
+        )
+
+        assert resp.status_code == 500, resp.text
+        assert raw_state["mcp"]["threatbook_mcp"] == old_config
+        assert secret_state["threatbook_mcp_key"] == "old-key"
+        assert connect_attempts[-1] == old_config["url"]

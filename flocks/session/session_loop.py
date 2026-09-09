@@ -1319,7 +1319,7 @@ class SessionLoop:
         1. Get messages and analyze (lastUser, lastAssistant, lastFinished)
         2. Check exit conditions
         3. Generate title on first step
-        4. Check for pending tasks (subtask/compaction)
+        4. Check for pending compaction
         5. Check context overflow (compaction before step)
         6. Process step (call LLM + tools)
         7. Loop until complete
@@ -1374,7 +1374,7 @@ class SessionLoop:
             last_user: Optional[MessageInfo] = None
             last_assistant: Optional[MessageInfo] = None
             last_finished: Optional[MessageInfo] = None
-            tasks: List[tuple[str, Any]] = []  # (type, part) - compaction or subtask
+            tasks: List[tuple[str, Any]] = []  # (type, part) - compaction only
             
             scan_started_at = asyncio.get_event_loop().time()
             for msg in reversed(messages):
@@ -1394,14 +1394,12 @@ class SessionLoop:
                 if last_user and last_finished:
                     break
                 
-                # Collect pending tasks before lastFinished
+                # Collect pending compaction before lastFinished
                 if not last_finished:
                     parts = await Message.parts(msg.id, ctx.session.id)
                     for part in parts:
                         if part.type == "compaction":
                             tasks.append(("compaction", part))
-                        elif part.type == "subtask":
-                            tasks.append(("subtask", part))
             log.debug("loop.message_scan_complete", {
                 "session_id": ctx.session.id,
                 "step": ctx.step,
@@ -1497,25 +1495,11 @@ class SessionLoop:
                 except Exception as e:
                     log.error("loop.title_generation.error", {"error": str(e)})
             
-            # Check for pending tasks (matching TUI lines 314-493)
+            # Check for pending compaction
             if tasks:
                 task_type, task_part = tasks.pop()
-                
-                # Handle pending subtask (matching TUI lines 316-481)
-                if task_type == "subtask":
-                    log.info("loop.subtask_detected", {
-                        "session_id": ctx.session.id,
-                        "step": ctx.step,
-                    })
-                    
-                    # Execute subtask using tool execution
-                    await cls._execute_subtask(ctx, last_user, task_part)
-                    
-                    # Continue to next iteration
-                    continue
-                
-                # Handle pending compaction (matching TUI lines 483-494)
-                elif task_type == "compaction":
+
+                if task_type == "compaction":
                     log.info("loop.compaction_pending", {
                         "session_id": ctx.session.id,
                         "step": ctx.step,
@@ -2382,192 +2366,6 @@ class SessionLoop:
             if reminder_msg and callbacks.on_reminder:
                 await callbacks.on_reminder(await Message.get_text_content(reminder_msg))
     
-    @classmethod
-    async def _execute_subtask(
-        cls,
-        ctx: LoopContext,
-        last_user: MessageInfo,
-        task_part: Any,
-    ) -> None:
-        """
-        Execute subtask (matching TUI lines 316-481)
-        
-        完全匹配 TUI 的 subtask 执行流程:
-        1. 创建 assistant message
-        2. 创建 tool part (Task tool)
-        3. 执行 Task tool
-        4. 更新 part 状态
-        5. 创建 synthetic user message
-        """
-        from flocks.tool.registry import ToolRegistry
-        from flocks.agent.registry import Agent
-        
-        # Extract subtask information from part
-        agent_name = getattr(task_part, 'agent', 'hephaestus')
-        prompt = getattr(task_part, 'prompt', '')
-        description = getattr(task_part, 'description', '')
-        command = getattr(task_part, 'command', None)
-        model_info = getattr(task_part, 'model', None)
-        
-        # Get agent
-        agent = await Agent.get(agent_name) or await Agent.get("rex")
-        
-        # Determine model
-        if model_info:
-            provider_id = model_info.get('providerID', ctx.provider_id)
-            model_id = model_info.get('modelID', ctx.model_id)
-        else:
-            provider_id = ctx.provider_id
-            model_id = ctx.model_id
-        
-        # Create assistant message for subtask
-        assistant_msg = await Message.create(
-            session_id=ctx.session.id,
-            role=MessageRole.ASSISTANT,
-            content="",
-            agent=agent_name,
-            model=model_id,
-            provider=provider_id,
-            parent_id=last_user.id,
-        )
-        
-        # Create tool part for Task
-        tool_call_id = Identifier.create("call")
-        from flocks.session.message import ToolPart, ToolStateRunning
-        
-        tool_part = ToolPart(
-            id=Identifier.ascending("part"),
-            sessionID=ctx.session.id,
-            messageID=assistant_msg.id,
-            type="tool",
-            callID=tool_call_id,
-            tool="task",
-            state=ToolStateRunning(
-                status="running",
-                input={
-                    "prompt": prompt,
-                    "description": description,
-                    "subagent_type": agent_name,
-                    "command": command,
-                },
-                time={"start": int(datetime.now().timestamp() * 1000)},
-            ),
-        )
-        
-        # Add part to message
-        await Message.add_part(ctx.session.id, assistant_msg.id, tool_part)
-        
-        # Get Task tool
-        task_tool = ToolRegistry.get("task")
-        if not task_tool:
-            log.error("loop.subtask.task_tool_not_found", {"session_id": ctx.session.id})
-            return
-        
-        # Execute Task tool
-        task_args = {
-            "prompt": prompt,
-            "description": description,
-            "subagent_type": agent_name,
-            "command": command,
-        }
-        
-        # Create tool context
-        from flocks.tool.registry import ToolContext
-        
-        tool_ctx = ToolContext(
-            session_id=ctx.session.id,
-            message_id=assistant_msg.id,
-            agent=agent_name,
-            abort_event=ctx.abort_event,
-        )
-        
-        execution_error: Optional[Exception] = None
-        result = None
-        
-        try:
-            result = await task_tool.execute(tool_ctx, **task_args)
-        except Exception as e:
-            execution_error = e
-            log.error("loop.subtask.execution_failed", {
-                "error": str(e),
-                "agent": agent_name,
-                "description": description,
-            })
-        
-        # Update message finish
-        await Message.update(ctx.session.id, assistant_msg.id, finish="tool-calls")
-        
-        # Update tool part status
-        from flocks.session.message import ToolStateCompleted, ToolStateError
-        
-        if result:
-            # Create completed state
-            completed_state = ToolStateCompleted(
-                status="completed",
-                input={
-                    "prompt": prompt,
-                    "description": description,
-                    "subagent_type": agent_name,
-                    "command": command,
-                },
-                output=result.output if hasattr(result, 'output') else str(result),
-                title=result.title if hasattr(result, 'title') else None,
-                metadata=result.metadata if hasattr(result, 'metadata') else {},
-                time={
-                    "start": tool_part.state.time.get("start"),
-                    "end": int(datetime.now().timestamp() * 1000),
-                },
-            )
-            await Message.update_part(
-                session_id=ctx.session.id,
-                message_id=assistant_msg.id,
-                part_id=tool_part.id,
-                state=completed_state,
-            )
-        else:
-            # Create error state
-            error_msg = str(execution_error) if execution_error else "Tool execution failed"
-            error_state = ToolStateError(
-                status="error",
-                error=f"Tool execution failed: {error_msg}",
-                time={
-                    "start": tool_part.state.time.get("start"),
-                    "end": int(datetime.now().timestamp() * 1000),
-                },
-                metadata={},
-                input={
-                    "prompt": prompt,
-                    "description": description,
-                    "subagent_type": agent_name,
-                    "command": command,
-                },
-            )
-            await Message.update_part(
-                session_id=ctx.session.id,
-                message_id=assistant_msg.id,
-                part_id=tool_part.id,
-                state=error_state,
-            )
-        
-        # Create synthetic user message (matching TUI lines 457-478)
-        # This prevents reasoning models from erroring due to missing user messages
-        synthetic_user_msg = await Message.create(
-            session_id=ctx.session.id,
-            role=MessageRole.USER,
-            content="Summarize the task tool output above and continue with your task.",
-            agent=last_user.agent if hasattr(last_user, 'agent') else agent_name,
-            model=last_user.model if hasattr(last_user, 'model') else model_id,
-            provider=last_user.provider if hasattr(last_user, 'provider') else provider_id,
-            synthetic=True,
-        )
-        
-        log.info("loop.subtask.completed", {
-            "session_id": ctx.session.id,
-            "agent": agent_name,
-            "success": result is not None,
-        })
-    
-
 
 # Export
 __all__ = [

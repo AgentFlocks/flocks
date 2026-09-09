@@ -6,6 +6,26 @@ from httpx import AsyncClient
 from flocks.notifications.service import NotificationService
 
 
+@pytest.fixture
+def builtin_notice(monkeypatch):
+    from flocks.notifications import service as notification_service
+
+    monkeypatch.setattr(notification_service, "DEFAULT_NOTIFICATIONS", (
+        notification_service.NotificationConfig(
+            id="test-benefit",
+            kind="benefit",
+            locales={"en-US": notification_service.NotificationContent(title="Test benefit")},
+        ),
+    ))
+
+
+@pytest.mark.asyncio
+async def test_retired_token_notice_is_not_active(client: AsyncClient):
+    response = await client.get("/api/notifications/active", params={"locale": "zh-CN"})
+    assert response.status_code == 200, response.text
+    assert "token-free-period-extended-2026-04" not in {item["id"] for item in response.json()}
+
+
 @pytest.mark.asyncio
 async def test_notifications_require_browser_login(client: AsyncClient):
     from flocks.auth.service import AuthService
@@ -22,17 +42,17 @@ async def test_notifications_require_browser_login(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_active_notifications_and_dismiss_forever(client: AsyncClient):
+async def test_active_notifications_and_dismiss_forever(client: AsyncClient, builtin_notice):
     response = await client.get(
         "/api/notifications/active",
         params={"locale": "zh-CN"},
     )
     assert response.status_code == 200, response.text
     items = response.json()
-    assert [item["id"] for item in items] == ["token-free-period-extended-2026-04"]
+    assert [item["id"] for item in items] == ["test-benefit"]
     assert items[0]["kind"] == "benefit"
 
-    ack_response = await client.post("/api/notifications/token-free-period-extended-2026-04/ack")
+    ack_response = await client.post("/api/notifications/test-benefit/ack")
     assert ack_response.status_code == 200, ack_response.text
 
     response = await client.get(
@@ -51,10 +71,10 @@ async def test_active_notifications_and_dismiss_forever(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_notification_ack_is_per_user():
+async def test_notification_ack_is_per_user(builtin_notice):
     await NotificationService.acknowledge(
         user_id="user-a",
-        notification_id="token-free-period-extended-2026-04",
+        notification_id="test-benefit",
     )
 
     user_a_items = await NotificationService.list_active(
@@ -66,18 +86,18 @@ async def test_notification_ack_is_per_user():
         locale="en-US",
     )
 
-    assert "token-free-period-extended-2026-04" not in {item.id for item in user_a_items}
-    assert "token-free-period-extended-2026-04" in {item.id for item in user_b_items}
+    assert "test-benefit" not in {item.id for item in user_a_items}
+    assert "test-benefit" in {item.id for item in user_b_items}
 
 
 @pytest.mark.asyncio
-async def test_config_notification_overrides_builtin(monkeypatch):
+async def test_config_notification_overrides_builtin(monkeypatch, builtin_notice):
     from flocks.notifications import service as notification_service
 
     async def fake_load_config_notifications():
         return [
             notification_service.NotificationConfig(
-                id="token-free-period-extended-2026-04",
+                id="test-benefit",
                 enabled=False,
                 priority=999,
                 locales={
@@ -98,7 +118,7 @@ async def test_config_notification_overrides_builtin(monkeypatch):
         user_id="user-a",
         locale="zh-CN",
     )
-    assert "token-free-period-extended-2026-04" not in {item.id for item in items}
+    assert "test-benefit" not in {item.id for item in items}
 
 
 @pytest.mark.asyncio

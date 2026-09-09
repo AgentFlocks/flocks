@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from flocks.workflow import poller_manager
-from flocks.workflow import execution_store
 from flocks.workflow.runner import RunWorkflowResult
 
 
@@ -141,7 +140,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     manager = poller_manager.WorkflowPollerManager()
     created_records: list[dict[str, Any]] = []
     recorded_results: list[dict[str, Any]] = []
-    recorded_steps: list[tuple[str, int, dict[str, Any]]] = []
+    recorded_steps: list[tuple[int, dict[str, Any]]] = []
 
     async def _fake_get_config(_workflow_id: str, *, kind: str) -> dict[str, Any]:
         return {
@@ -173,17 +172,12 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         workflow_id: str,
         exec_id: str,
         exec_data: dict[str, Any],
+        *,
+        steps: list[tuple[int, dict[str, Any]]] | None = None,
     ) -> None:
         _ = workflow_id, exec_id
         recorded_results.append(dict(exec_data))
-
-    async def _fake_record_execution_step(
-        exec_id: str,
-        step_index: int,
-        step: dict[str, Any],
-    ) -> dict[str, Any]:
-        recorded_steps.append((exec_id, step_index, step))
-        return step
+        recorded_steps.extend(steps or [])
 
     def _fake_run_workflow(  # noqa: ANN001
         *,
@@ -242,7 +236,6 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     )
     monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
 
     status = await manager.run_once("wf-business-failure")
@@ -255,9 +248,17 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     assert recorded_results[0]["executionLog"] == []
     assert recorded_results[0]["stepCount"] == 1
     assert recorded_results[0]["loopProgress"]["total_iterations"] == 2
-    assert recorded_steps[0][0] == "exec-1"
-    assert recorded_steps[0][1] == 1
-    assert recorded_steps[0][2]["node_id"] == "load"
+    assert recorded_steps == [
+        (
+            1,
+            {
+                "node_id": "load",
+                "node_type": "python",
+                "inputs": {"iteration": 1, "total_iterations": 2},
+                "outputs": {"load_stats": {"record_count": 9}},
+            },
+        )
+    ]
     assert status["lastStatus"] == "error"
     assert status["lastError"] == "business rule blocked"
     assert status["selectedCount"] == 9
@@ -372,8 +373,10 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         workflow_id: str,
         exec_id: str,
         exec_data: dict[str, Any],
+        *,
+        steps: list[tuple[int, dict[str, Any]]] | None = None,
     ) -> None:
-        _ = workflow_id, exec_id, exec_data
+        _ = workflow_id, exec_id, exec_data, steps
 
     def _fake_run_workflow(  # noqa: ANN001
         *,
@@ -409,7 +412,10 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     assert manager.get_status("wf-stop")["activeRuns"] == 1
 
     release_run.set()
-    await asyncio.sleep(0.05)
+    for _ in range(100):
+        if manager.get_status("wf-stop")["activeRuns"] == 0:
+            break
+        await asyncio.sleep(0.01)
     assert manager.get_status("wf-stop")["activeRuns"] == 0
 
 
@@ -424,7 +430,12 @@ async def test_start_all_only_restarts_enabled_configs(monkeypatch: pytest.Monke
             ("wf-disabled", {"enabled": False}),
         ]
 
-    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+    async def _fake_restart(
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> dict[str, Any]:
+        assert startup is True
         restarted.append(workflow_id)
         return {"workflowId": workflow_id, "state": "running"}
 

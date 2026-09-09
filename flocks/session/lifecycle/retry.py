@@ -135,6 +135,9 @@ class SessionRetry:
         """
         error_name = error.get("name", "")
         error_data = error.get("data", {})
+
+        if error_name == "StreamToolArgumentsTruncatedError":
+            return "Model output was truncated while generating tool arguments"
         
         # Check if it's an APIError with isRetryable flag
         if error_name == "APIError":

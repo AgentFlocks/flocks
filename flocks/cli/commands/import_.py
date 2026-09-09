@@ -98,6 +98,17 @@ def _normalize_part_data(
     metadata = normalized.get("metadata")
     metadata_dict = metadata if isinstance(metadata, dict) else {}
 
+    if part_type == "subtask":
+        normalized["type"] = "text"
+        normalized["text"] = ""
+        normalized["ignored"] = True
+        normalized["metadata"] = {
+            **metadata_dict,
+            "legacyPartType": "subtask",
+        }
+        part_type = "text"
+        metadata_dict = normalized["metadata"]
+
     if "content" in normalized and "text" not in normalized:
         normalized["text"] = normalized.get("content", "")
 
@@ -135,10 +146,6 @@ def _normalize_part_data(
         )
     elif part_type == "agent":
         normalized.setdefault("name", metadata_dict.get("name") or normalized.get("content") or "agent")
-    elif part_type == "subtask":
-        normalized.setdefault("prompt", metadata_dict.get("prompt") or normalized.get("content", ""))
-        normalized.setdefault("description", metadata_dict.get("description") or "")
-        normalized.setdefault("agent", metadata_dict.get("agent") or "agent")
     elif part_type == "retry":
         normalized.setdefault("attempt", metadata_dict.get("attempt") or 1)
         normalized.setdefault("error", metadata_dict.get("error") or {})

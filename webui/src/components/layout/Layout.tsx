@@ -22,18 +22,18 @@ import {
   Settings,
   ArrowUpCircle,
   RefreshCw,
+  Gauge,
   Loader2,
   type LucideIcon,
 } from 'lucide-react';
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import type { ComponentType, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { onboardingAPI } from '@/api/onboarding';
+import { useTokenPolicyNotice } from '@/hooks/useTokenPolicyNotice';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
-// the home page never needs. To keep the lazy split effective, we don't
-// re-import dismissal helpers from the modal modules (a static named import
-// would force Rollup to bundle the whole module eagerly).
-const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
+// the home page never needs.
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
 const SIDEBAR_WIDTH_KEY = 'flocks_layout_sidebar_width';
 const SIDEBAR_DEFAULT_WIDTH = 208;
@@ -55,10 +55,6 @@ function lazyLayoutComponent<T extends LazyLayoutModule>(
       preloadI18nNamespaces(namespaces),
     ]).then(([module]) => module),
   ));
-}
-
-function isOnboardingDismissed(): boolean {
-  return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
 
 function readCollapsedNavSectionIds(): Set<string> {
@@ -147,6 +143,7 @@ function saveSocDashboardTitle(title: string): void {
 const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
+const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
 import { checkUpdate, type VersionInfo } from '@/api/update';
 import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
@@ -176,6 +173,7 @@ import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
 const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
+const FLOCKS_LLM_USAGE_URL = 'https://portal.agentflocks.com';
 
 interface LayoutNavItem {
   name: string;
@@ -261,7 +259,17 @@ export default function Layout() {
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [showUpdate, setShowUpdate] = useState(false);
+  const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
+  const tokenPolicy = useTokenPolicyNotice(user?.id, showOnboarding || updateState === 'visible');
+  const handleUpdatePresented = useCallback(() => {
+    if (document.visibilityState === 'visible') setUpdateState('visible');
+  }, []);
+  const requestUpdate = useCallback(() => {
+    setUpdateState((state) => state === 'visible' ? state : 'pending');
+  }, []);
+  const closeUpdate = useCallback(() => {
+    setUpdateState('idle');
+  }, []);
   const { t, i18n } = useTranslation('nav');
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
@@ -380,12 +388,25 @@ export default function Layout() {
     updateSidebarWidth(sidebarWidth + (event.key === 'ArrowRight' ? 16 : -16));
   }, [collapsed, sidebarWidth, updateSidebarWidth]);
 
-  // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
-  // It also re-runs when the user navigates back to /, covering both cases in one place.
-  useLayoutEffect(() => {
-    if (isHome && !isOnboardingDismissed()) {
-      setShowOnboarding(true);
-    }
+  useEffect(() => {
+    if (!isHome) return undefined;
+
+    let cancelled = false;
+    onboardingAPI.getStatus()
+      .then((res) => {
+        if (!cancelled && !res.data.completed) {
+          setShowOnboarding(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setShowOnboarding(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [isHome]);
 
   const handleOpenOnboarding = useCallback(() => setShowOnboarding(true), []);
@@ -429,7 +450,7 @@ export default function Layout() {
           && !isUpdateDismissed(info, localStorage.getItem(UPDATE_DISMISSED_KEY))
         ) {
           lastPromptedVersionRef.current = updateDismissalKey;
-          setShowUpdate(true);
+          requestUpdate();
         }
         return;
       }
@@ -444,7 +465,7 @@ export default function Layout() {
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive]);
+  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive, requestUpdate]);
 
   useEffect(() => {
     if (!flocksproStatusReady || !canManageUpdates) return undefined;
@@ -611,7 +632,7 @@ export default function Layout() {
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
-  const visibleNotifications = backendNotificationsReady && updateNotificationReady && !showOnboarding && !showUpdate && allNotifications.length > 0
+  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
     ? allNotifications
     : [];
 
@@ -876,8 +897,8 @@ export default function Layout() {
   const openManualUpdateCheck = useCallback(() => {
     setAccountMenuOpen(false);
     setUpdateInfo(null);
-    setShowUpdate(true);
-  }, []);
+    requestUpdate();
+  }, [requestUpdate]);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -890,14 +911,18 @@ export default function Layout() {
               onClose={() => setShowOnboarding(false)}
             />
           )}
-          {showUpdate && (
+          {tokenPolicy.notice && !showOnboarding && updateState !== 'visible' && (
+            <TokenPolicyNotice onClose={tokenPolicy.close} onPresented={tokenPolicy.onPresented} />
+          )}
+          {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !showOnboarding)) && (
             <UpdateModal
               initialInfo={updateInfo}
               forceInitialCheck={updateInfo === null}
               edition={isFlocksproActive ? 'flockspro' : 'flocks'}
               canUpgrade={canManageUpdates}
-              onClose={() => setShowUpdate(false)}
-              onDismiss={() => setShowUpdate(false)}
+              onPresented={handleUpdatePresented}
+              onClose={closeUpdate}
+              onDismiss={closeUpdate}
             />
           )}
           {visibleNotifications.length > 0 && (
@@ -999,7 +1024,7 @@ export default function Layout() {
                 {hasVisibleProductUpdate && (
                   <button
                     type="button"
-                    onClick={() => setShowUpdate(true)}
+                    onClick={requestUpdate}
                     className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-zinc-100 transition-colors hover:bg-amber-500 dark:ring-zinc-950"
                     title={productUpdateTitle}
                     aria-label={productUpdateTitle}
@@ -1018,7 +1043,7 @@ export default function Layout() {
                   {hasVisibleProductUpdate && (
                     <button
                       type="button"
-                      onClick={() => setShowUpdate(true)}
+                      onClick={requestUpdate}
                       title={productUpdateTitle}
                       aria-label={productUpdateTitle}
                       className="relative inline-flex h-4 shrink-0 items-center rounded-sm bg-amber-50 px-1 text-[10px] font-bold leading-none text-amber-600 transition-colors hover:bg-amber-100 dark:bg-amber-950/70 dark:text-amber-300 dark:hover:bg-amber-900"
@@ -1135,7 +1160,7 @@ export default function Layout() {
           >
             {accountMenuOpen && (
               <div className={`absolute z-50 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${
-                collapsed ? 'bottom-2 left-full ml-2 w-48' : 'bottom-full left-3 right-3 mb-2'
+                collapsed ? 'bottom-2 left-full ml-2 w-56' : 'bottom-full left-3 right-3 mb-2 min-w-56'
               }`}>
                 {showFlocksproUpgradeEntry && (
                   <Link
@@ -1159,6 +1184,19 @@ export default function Layout() {
                   <RefreshCw className="h-4 w-4 text-zinc-400" />
                   {t('checkUpdate')}
                 </button>
+                <a
+                  href={FLOCKS_LLM_USAGE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    setSidebarOpen(false);
+                  }}
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                >
+                  <Gauge className="h-4 w-4 flex-shrink-0 text-zinc-400" />
+                  {t('flocksLlmUsageQuota')}
+                </a>
                 <Link
                   to="/settings/preferences"
                   state={settingsReturnState}

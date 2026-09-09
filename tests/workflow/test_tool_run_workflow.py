@@ -10,6 +10,8 @@ Tests cover:
 """
 
 import asyncio
+import threading
+
 import pytest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from typing import Dict, Any
@@ -27,6 +29,7 @@ from flocks.tool import (
 import flocks.tool.task.run_workflow as run_workflow_module
 from flocks.mcp.client import McpClient
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
+from flocks.workflow.store import WorkflowStore
 
 
 class FakeRunWorkflowResult:
@@ -285,7 +288,12 @@ class TestRunWorkflowToolExecution:
             }
         )
         mock_run = Mock(name="run_workflow", return_value=fake)
-        with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
+        direct_audit = AsyncMock(return_value=None)
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value=None),
+            patch.object(run_workflow_module, "_record_workflow_tool_result", direct_audit),
+        ):
             result = await ToolRegistry.execute(
                 "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}
             )
@@ -297,6 +305,7 @@ class TestRunWorkflowToolExecution:
             assert result.metadata["status"] == "success"
             assert result.metadata["steps"] == 1
             assert "run_id" not in result.metadata
+            direct_audit.assert_awaited_once_with("test-workflow-001", fake.__dict__)
 
             # Check that permission was requested
             assert len(tool_context_with_permission._permissions_requested) > 0
@@ -326,7 +335,7 @@ class TestRunWorkflowToolExecution:
                 steps=1,
                 last_node_id="node-1",
                 outputs={"message": "ok"},
-                history=[{"node_id": "node-1", "node_type": "python", "outputs": {"message": "ok"}}],
+                history=[],
                 error=None,
             )
 
@@ -343,6 +352,7 @@ class TestRunWorkflowToolExecution:
         )
         upsert_execution = AsyncMock(return_value=None)
         record_result = AsyncMock(return_value=None)
+        direct_audit = AsyncMock(return_value=None)
 
         with (
             patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
@@ -353,8 +363,9 @@ class TestRunWorkflowToolExecution:
             ),
             patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"),
             patch.object(run_workflow_module, "create_execution_record", create_execution),
-            patch.object(run_workflow_module.WorkflowStore, "upsert_execution", upsert_execution),
+            patch.object(WorkflowStore, "upsert_execution", upsert_execution),
             patch.object(run_workflow_module, "record_execution_result", record_result),
+            patch.object(run_workflow_module, "_record_workflow_tool_result", direct_audit),
         ):
             result = await ToolRegistry.execute(
                 "run_workflow",
@@ -368,8 +379,241 @@ class TestRunWorkflowToolExecution:
         assert "run_id" not in result.metadata
         create_execution.assert_awaited_once()
         record_result.assert_awaited_once()
+        expected_step = {
+            "node_id": "node-1",
+            "node_type": "python",
+            "outputs": {"message": "ok"},
+        }
+        assert record_result.await_args.kwargs["steps"] == [(1, expected_step)]
+        assert record_result.await_args.args[2]["executionLog"] == [expected_step]
         assert upsert_execution.await_count >= 1
+        assert all(call.args[0]["executionLog"] == [] for call in upsert_execution.await_args_list)
+        direct_audit.assert_not_awaited()
         assert any(update.get("workflow_execution_id") == "exec-registered" for update in metadata_updates)
+
+    @pytest.mark.anyio
+    async def test_run_workflow_registered_callbacks_do_not_wait_for_progress_storage(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        write_started = asyncio.Event()
+        release_write = asyncio.Event()
+        runner_finished = threading.Event()
+        write_order: list[str] = []
+
+        async def blocked_upsert(_summary):
+            write_order.append("progress-start")
+            write_started.set()
+            await release_write.wait()
+            write_order.append("progress-end")
+
+        async def record_result(*args, **kwargs):  # noqa: ANN002, ANN003
+            write_order.append("final")
+
+        def run_side_effect(**kwargs):
+            kwargs["on_step_start"](
+                kwargs["run_id"],
+                1,
+                MagicMock(id="node-1", type="python"),
+                {},
+            )
+            kwargs["on_step_complete"](
+                {
+                    "node_id": "node-1",
+                    "node_type": "python",
+                    "outputs": {"ok": True},
+                }
+            )
+            runner_finished.set()
+            return FakeRunWorkflowResult(
+                status="SUCCEEDED",
+                run_id=kwargs["run_id"],
+                steps=1,
+                last_node_id="node-1",
+                outputs={"ok": True},
+                history=[],
+                error=None,
+            )
+
+        mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
+        create_execution = AsyncMock(
+            return_value={
+                "id": "exec-blocked",
+                "workflowId": "test-workflow-001",
+                "status": "running",
+                "startedAt": 1,
+                "executionLog": [],
+            }
+        )
+        record_result_mock = AsyncMock(side_effect=record_result)
+
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"),
+            patch.object(run_workflow_module, "create_execution_record", create_execution),
+            patch.object(WorkflowStore, "upsert_execution", blocked_upsert),
+            patch.object(run_workflow_module, "record_execution_result", record_result_mock),
+            patch.object(run_workflow_module, "_record_workflow_tool_result", AsyncMock(return_value=None)),
+        ):
+            task = asyncio.create_task(
+                ToolRegistry.execute(
+                    "run_workflow",
+                    ctx=tool_context_with_permission,
+                    workflow=simple_workflow,
+                    inputs={},
+                )
+            )
+            await write_started.wait()
+            assert await asyncio.to_thread(runner_finished.wait, 0.1)
+            record_result_mock.assert_not_awaited()
+            release_write.set()
+            result = await task
+
+        assert result.success is True
+        record_result_mock.assert_awaited_once()
+        assert write_order[-2:] == ["progress-end", "final"]
+
+    @pytest.mark.anyio
+    async def test_run_workflow_registered_cancellation_keeps_completed_and_pending_steps(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        persisted_summaries: list[dict[str, Any]] = []
+
+        async def capture_upsert(summary):
+            persisted_summaries.append(dict(summary))
+
+        def run_side_effect(**kwargs):
+            kwargs["on_step_start"](
+                kwargs["run_id"],
+                1,
+                MagicMock(id="node-1", type="python"),
+                {},
+            )
+            kwargs["on_step_complete"](
+                {
+                    "node_id": "node-1",
+                    "node_type": "python",
+                    "outputs": {"ok": True},
+                }
+            )
+            tool_context_with_permission.abort.set()
+            kwargs["on_step_start"](
+                kwargs["run_id"],
+                2,
+                MagicMock(id="node-2", type="tool"),
+                {"message": "hello"},
+            )
+            return FakeRunWorkflowResult(
+                status="SUCCEEDED",
+                run_id=kwargs["run_id"],
+                steps=1,
+                last_node_id="node-2",
+                outputs={"ok": True},
+                history=[],
+                error=None,
+            )
+
+        mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
+        create_execution = AsyncMock(
+            return_value={
+                "id": "exec-cancelled",
+                "workflowId": "test-workflow-001",
+                "status": "running",
+                "startedAt": 1,
+                "executionLog": [],
+            }
+        )
+        record_result = AsyncMock(return_value=None)
+        direct_audit = AsyncMock(return_value=None)
+
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"),
+            patch.object(run_workflow_module, "create_execution_record", create_execution),
+            patch.object(WorkflowStore, "upsert_execution", capture_upsert),
+            patch.object(run_workflow_module, "record_execution_result", record_result),
+            patch.object(run_workflow_module, "_record_workflow_tool_result", direct_audit),
+        ):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow=simple_workflow,
+                inputs={},
+            )
+
+        steps = record_result.await_args.kwargs["steps"]
+        assert result.success is False
+        assert result.metadata["status"] == "cancelled"
+        assert [step_index for step_index, _ in steps] == [1, 2]
+        assert [step["node_id"] for _, step in steps] == ["node-1", "node-2"]
+        assert steps[1][1]["error"] == "Run cancelled before node completed"
+        assert record_result.await_args.args[2]["status"] == "cancelled"
+        assert persisted_summaries[-1]["currentPhase"] == "cancelling"
+        direct_audit.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_run_workflow_registered_failure_keeps_callback_steps(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        def run_side_effect(**kwargs):
+            kwargs["on_step_start"](
+                kwargs["run_id"],
+                1,
+                MagicMock(id="node-1", type="python"),
+                {},
+            )
+            kwargs["on_step_complete"](
+                {
+                    "node_id": "node-1",
+                    "node_type": "python",
+                    "outputs": {"ok": True},
+                }
+            )
+            kwargs["on_step_start"](
+                kwargs["run_id"],
+                2,
+                MagicMock(id="node-2", type="tool"),
+                {"message": "hello"},
+            )
+            raise RuntimeError("runner failed")
+
+        mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
+        create_execution = AsyncMock(
+            return_value={
+                "id": "exec-failed",
+                "workflowId": "test-workflow-001",
+                "status": "running",
+                "startedAt": 1,
+                "executionLog": [],
+            }
+        )
+        record_result = AsyncMock(return_value=None)
+
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"),
+            patch.object(run_workflow_module, "create_execution_record", create_execution),
+            patch.object(WorkflowStore, "upsert_execution", AsyncMock(return_value=None)),
+            patch.object(run_workflow_module, "record_execution_result", record_result),
+        ):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow=simple_workflow,
+                inputs={},
+            )
+
+        steps = record_result.await_args.kwargs["steps"]
+        assert result.success is False
+        assert "runner failed" in result.error
+        assert [step_index for step_index, _ in steps] == [1, 2]
+        assert [step["node_id"] for _, step in steps] == ["node-1", "node-2"]
+        assert record_result.await_args.args[2]["executionLog"] == [step for _, step in steps]
 
     @pytest.mark.anyio
     async def test_run_workflow_registered_id_overrides_missing_workflow_json_id(
@@ -416,7 +660,7 @@ class TestRunWorkflowToolExecution:
                 return_value={"id": "wf-directory-id", "workflowJson": workflow_without_id},
             ),
             patch.object(run_workflow_module, "create_execution_record", create_execution),
-            patch.object(run_workflow_module.WorkflowStore, "upsert_execution", AsyncMock(return_value=None)),
+            patch.object(WorkflowStore, "upsert_execution", AsyncMock(return_value=None)),
             patch.object(run_workflow_module, "record_execution_result", AsyncMock(return_value=None)),
         ):
             result = await ToolRegistry.execute(
@@ -476,17 +720,16 @@ class TestRunWorkflowToolExecution:
             }
         )
         upsert_execution = AsyncMock(return_value=None)
-        record_step = AsyncMock(return_value=None)
         record_result = AsyncMock(return_value=None)
+        direct_audit = AsyncMock(return_value=None)
 
         with (
             patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
             patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"),
             patch.object(run_workflow_module, "create_execution_record", create_execution),
-            patch.object(run_workflow_module.WorkflowStore, "upsert_execution", upsert_execution),
-            patch.object(run_workflow_module, "record_execution_step", record_step),
+            patch.object(WorkflowStore, "upsert_execution", upsert_execution),
             patch.object(run_workflow_module, "record_execution_result", record_result),
-            patch.object(run_workflow_module, "_record_workflow_tool_result", AsyncMock(return_value=None)),
+            patch.object(run_workflow_module, "_record_workflow_tool_result", direct_audit),
         ):
             result = await ToolRegistry.execute(
                 "run_workflow",
@@ -496,8 +739,9 @@ class TestRunWorkflowToolExecution:
             )
 
         assert result.success is True
-        record_step.assert_awaited()
-        step_payload = record_step.await_args.args[2]
+        steps = record_result.await_args.kwargs["steps"]
+        assert [step_index for step_index, _ in steps] == [1]
+        step_payload = steps[0][1]
         assert step_payload["inputs"] == {
             "_raw_alerts_count": 150,
             "source": "syslog",
@@ -506,18 +750,19 @@ class TestRunWorkflowToolExecution:
             "_raw_alerts_count": 150,
             "message": "ok",
         }
+        direct_audit.assert_not_awaited()
         assert result.metadata["has_output"] is True
         assert result.metadata["output_keys"] == ["enriched_alerts", "message"]
         assert "outputs" not in result.metadata
         assert "history" not in result.metadata
-        assert result.metadata["history_count"] == 0
+        assert result.metadata["history_count"] == 1
 
         final_exec_data = record_result.await_args.args[2]
         assert final_exec_data["outputResults"] == {
             "_enriched_alerts_count": 150,
             "message": "done",
         }
-        assert final_exec_data["executionLog"] == []
+        assert final_exec_data["executionLog"] == [step_payload]
         assert final_exec_data["stepCount"] == 1
         assert any(update.get("workflow_execution_id") == "exec-compacted" for update in metadata_updates)
 

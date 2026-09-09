@@ -1,7 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, X, XCircle, Zap } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Loader2,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import { catalogAPI, defaultModelAPI, providerAPI } from '@/api/provider';
@@ -11,20 +21,22 @@ import {
   type OnboardingApplyResponse,
   type OnboardingRegion,
   type OnboardingRequest,
+  type OnboardingStatusResponse,
   type OnboardingValidateResponse,
 } from '@/api/onboarding';
 import type { CatalogProvider } from '@/types';
+import { getDefaultThreatBookRegion, THREATBOOK_REGION_CONFIG } from '@/constants/threatbook';
 
-const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
-
-const TBCLOUD_LINKS = {
-  cn: 'https://x.threatbook.com/flocks/activate',
-  global: 'https://i.threatbook.io/flocks/activate',
-};
+const MODEL_KEY_LINK = 'https://portal.agentflocks.com';
 
 const THREATBOOK_PROVIDER_IDS = ['threatbook-cn-llm', 'threatbook-io-llm'] as const;
+const THREATBOOK_FREE_PROVIDER_OPTION = 'threatbook-free';
+const STORED_KEY_MASK = '************';
 
 type SectionTone = 'success' | 'warning' | 'error';
+type OnboardingStep = 'model' | 'intel';
+type SkipTarget = OnboardingStep | null;
+type ThreatBookIntelStatus = NonNullable<OnboardingStatusResponse['threatbook_intel']>;
 
 interface SectionStatus {
   tone: SectionTone;
@@ -38,20 +50,20 @@ interface ResolvedDefaultModel {
   modelId: string;
 }
 
-export function isOnboardingDismissed(): boolean {
-  return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
-}
-
-export function dismissOnboarding(): void {
-  localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true');
-}
-
-export function undismissOnboarding(): void {
-  localStorage.removeItem(ONBOARDING_DISMISSED_KEY);
-}
-
 interface OnboardingModalProps {
   onClose: () => void;
+}
+
+function isThreatBookProvider(providerId: string | null | undefined): boolean {
+  return THREATBOOK_PROVIDER_IDS.includes(providerId as any);
+}
+
+function providerIdForRegion(region: OnboardingRegion): string {
+  return region === 'global' ? 'threatbook-io-llm' : 'threatbook-cn-llm';
+}
+
+function regionForProvider(providerId: string | null | undefined): OnboardingRegion {
+  return providerId === 'threatbook-io-llm' ? 'global' : 'cn';
 }
 
 function statusStyles(tone: SectionTone) {
@@ -196,17 +208,183 @@ function ValidationPanel({
   );
 }
 
-export default function OnboardingModal({ onClose }: OnboardingModalProps) {
-  const { t } = useTranslation('common');
-  const navigate = useNavigate();
+function StepPill({
+  active,
+  label,
+}: {
+  active: boolean;
+  label: string;
+}) {
+  return (
+    <div className={`text-base sm:text-lg ${
+      active ? 'font-bold text-green-600' : 'font-medium text-gray-400'
+    }`}>
+      {label}
+    </div>
+  );
+}
 
-  const [hasLLM, setHasLLM] = useState<boolean | null>(null);
+function StatusMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-gray-100 bg-white px-3 py-2">
+      <p className="text-[11px] text-gray-500">{label}</p>
+      <p className="mt-1 break-words text-sm font-medium text-gray-900">{value}</p>
+    </div>
+  );
+}
+
+function RegionChooser({
+  value,
+  onChange,
+  chinaLabel,
+  globalLabel,
+  disabled = false,
+}: {
+  value: OnboardingRegion;
+  onChange: (value: OnboardingRegion) => void;
+  chinaLabel: string;
+  globalLabel: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1.5 shadow-sm">
+      {([
+        ['cn', chinaLabel],
+        ['global', globalLabel],
+      ] as Array<[OnboardingRegion, string]>).map(([candidate, label]) => (
+        <button
+          key={candidate}
+          type="button"
+          onClick={() => onChange(candidate)}
+          disabled={disabled}
+          className={`rounded-lg px-5 py-2 text-sm font-semibold transition-colors ${
+            value === candidate
+              ? 'bg-green-50 text-green-700 ring-1 ring-green-200'
+              : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+          } disabled:cursor-not-allowed disabled:opacity-50`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function OnboardingSecretInput({
+  value,
+  hasStoredKey,
+  visible,
+  revealing,
+  placeholder,
+  showLabel,
+  hideLabel,
+  onChange,
+  onToggleVisibility,
+}: {
+  value: string;
+  hasStoredKey: boolean;
+  visible: boolean;
+  revealing: boolean;
+  placeholder: string;
+  showLabel: string;
+  hideLabel: string;
+  onChange: (value: string) => void;
+  onToggleVisibility: () => void;
+}) {
+  const showingStoredMask = hasStoredKey && !visible;
+
+  return (
+    <div className="relative min-w-0 flex-1">
+      <input
+        type={visible ? 'text' : 'password'}
+        value={showingStoredMask ? STORED_KEY_MASK : value}
+        readOnly={showingStoredMask}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        autoComplete="off"
+        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 pr-10 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+      />
+      <button
+        type="button"
+        onClick={onToggleVisibility}
+        disabled={revealing || (!hasStoredKey && !value)}
+        title={visible ? hideLabel : showLabel}
+        className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {revealing
+          ? <Loader2 className="h-4 w-4 animate-spin" />
+          : visible
+            ? <EyeOff className="h-4 w-4" />
+            : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  );
+}
+
+function SkipConfirmDialog({
+  t,
+  target,
+  onCancel,
+  onConfirm,
+}: {
+  t: (key: string, options?: any) => string;
+  target: SkipTarget;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!target) return null;
+
+  const isModel = target === 'model';
+
+  return (
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/25 px-4">
+      <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-500" />
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-gray-900">
+              {isModel ? t('onboarding.bootstrap.skipModelTitle') : t('onboarding.bootstrap.skipIntelTitle')}
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-gray-600">
+              {isModel ? t('onboarding.bootstrap.skipModelDescription') : t('onboarding.bootstrap.skipIntelDescription')}
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+          >
+            {t('onboarding.bootstrap.returnToConfig')}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700"
+          >
+            {t('onboarding.bootstrap.confirmSkip')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function OnboardingModal({ onClose }: OnboardingModalProps) {
+  const { t, i18n } = useTranslation('common');
+  const navigate = useNavigate();
+  const defaultIntelRegion = useMemo(() => getDefaultThreatBookRegion(i18n.language), [i18n.language]);
+
+  const [step, setStep] = useState<OnboardingStep>('model');
   const [catalog, setCatalog] = useState<CatalogProvider[]>([]);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [hasLLM, setHasLLM] = useState<boolean | null>(null);
   const [starting, setStarting] = useState(false);
   const [startStatus, setStartStatus] = useState<SectionStatus | null>(null);
-  const [dontShowAgain, setDontShowAgain] = useState(() => isOnboardingDismissed());
-  const [resolvedDefaultModel, setResolvedDefaultModel] = useState<ResolvedDefaultModel | null>(null);
+  const [skipConfirm, setSkipConfirm] = useState<SkipTarget>(null);
 
+  const [resolvedDefaultModel, setResolvedDefaultModel] = useState<ResolvedDefaultModel | null>(null);
   const [primaryProviderId, setPrimaryProviderId] = useState<string>('threatbook-cn-llm');
   const [primaryModelId, setPrimaryModelId] = useState('');
   const [primaryApiKey, setPrimaryApiKey] = useState('');
@@ -214,36 +392,76 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [primarySaving, setPrimarySaving] = useState(false);
   const [primaryConfigured, setPrimaryConfigured] = useState(false);
   const [primaryStatus, setPrimaryStatus] = useState<SectionStatus | null>(null);
-  const [primarySectionCollapsed, setPrimarySectionCollapsed] = useState(false);
   const [primaryEditing, setPrimaryEditing] = useState(false);
+  const [primaryKeyVisible, setPrimaryKeyVisible] = useState(false);
+  const [primaryKeyRevealed, setPrimaryKeyRevealed] = useState(false);
+  const [primaryKeyRevealing, setPrimaryKeyRevealing] = useState(false);
+  const [modelRegion, setModelRegion] = useState<OnboardingRegion>('cn');
+  const [modelSkipped, setModelSkipped] = useState(false);
 
-  const [optionalThreatBookRegion, setOptionalThreatBookRegion] = useState<OnboardingRegion>('cn');
-  const [optionalThreatBookApiKey, setOptionalThreatBookApiKey] = useState('');
-  const [optionalSaving, setOptionalSaving] = useState(false);
-  const [optionalConfigured, setOptionalConfigured] = useState(false);
-  const [optionalStatus, setOptionalStatus] = useState<SectionStatus | null>(null);
-  const [optionalSectionCollapsed, setOptionalSectionCollapsed] = useState(false);
-  const [optionalThreatBookLoaded, setOptionalThreatBookLoaded] = useState(false);
+  const [intelRegion, setIntelRegion] = useState<OnboardingRegion>(() => getDefaultThreatBookRegion(i18n.language));
+  const [intelApiKey, setIntelApiKey] = useState('');
+  const [intelSaving, setIntelSaving] = useState(false);
+  const [intelConfigured, setIntelConfigured] = useState(false);
+  const [intelStatus, setIntelStatus] = useState<SectionStatus | null>(null);
+  const [intelEditing, setIntelEditing] = useState(false);
+  const [intelKeyVisible, setIntelKeyVisible] = useState(false);
+  const [intelKeyRevealed, setIntelKeyRevealed] = useState(false);
+  const [intelKeyRevealing, setIntelKeyRevealing] = useState(false);
+  const [intelSkipped, setIntelSkipped] = useState(false);
+  const [intelRuntimeStatus, setIntelRuntimeStatus] = useState<ThreatBookIntelStatus | null>(null);
+
+  const refreshOnboardingStatus = useCallback(async (silent = false) => {
+    if (!silent) setStatusLoading(true);
+    try {
+      const res = await onboardingAPI.getStatus();
+      const defaultModel = res.data.default_model;
+      setHasLLM(res.data.completed);
+      setPrimaryConfigured(Boolean(res.data.has_default_model));
+      setResolvedDefaultModel(defaultModel
+        ? {
+            providerId: defaultModel.provider_id,
+            modelId: defaultModel.model_id,
+          }
+        : null);
+      if (defaultModel) {
+        setPrimaryProviderId(defaultModel.provider_id);
+        setPrimaryModelId(defaultModel.model_id);
+        setModelRegion(regionForProvider(defaultModel.provider_id));
+        setPrimaryEditing(false);
+      }
+      if (res.data.threatbook_intel) {
+        const intel = res.data.threatbook_intel;
+        setIntelRuntimeStatus(intel);
+        setIntelConfigured(intel.configured);
+        setIntelRegion(intel.region || defaultIntelRegion);
+        if (intel.configured) setIntelEditing(false);
+      }
+    } catch {
+      try {
+        const resolved = await defaultModelAPI.getResolved();
+        setHasLLM(true);
+        setPrimaryConfigured(true);
+        setResolvedDefaultModel({
+          providerId: resolved.data.provider_id,
+          modelId: resolved.data.model_id,
+        });
+        setPrimaryProviderId(resolved.data.provider_id);
+        setPrimaryModelId(resolved.data.model_id);
+        setModelRegion(regionForProvider(resolved.data.provider_id));
+        setPrimaryEditing(false);
+      } catch {
+        setHasLLM(false);
+        setPrimaryConfigured(false);
+        setResolvedDefaultModel(null);
+      }
+    } finally {
+      if (!silent) setStatusLoading(false);
+    }
+  }, [defaultIntelRegion]);
 
   useEffect(() => {
-    defaultModelAPI.getResolved()
-      .then((res) => {
-        const resolved = {
-          providerId: res.data.provider_id,
-          modelId: res.data.model_id,
-        };
-        setResolvedDefaultModel(resolved);
-        setPrimaryProviderId(resolved.providerId);
-        setPrimaryModelId(resolved.modelId);
-        setPrimaryConfigured(true);
-        setPrimarySectionCollapsed(true);
-        setPrimaryEditing(false);
-        setHasLLM(true);
-      })
-      .catch(() => {
-        setHasLLM(false);
-      });
-
+    refreshOnboardingStatus();
     catalogAPI.list()
       .then((res) => {
         setCatalog(res.data.providers || []);
@@ -251,47 +469,59 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       .catch(() => {
         setCatalog([]);
       });
-
-  }, []);
+  }, [refreshOnboardingStatus]);
 
   const primaryProviders = useMemo(() => {
-    const filtered = catalog.filter((provider) =>
-      THREATBOOK_PROVIDER_IDS.includes(provider.id as any)
+    return catalog.filter((provider) =>
+      isThreatBookProvider(provider.id)
       || provider.id === 'openai-compatible'
       || provider.id === resolvedDefaultModel?.providerId
       || provider.models.length > 0
     );
-
-    const preferredOrder = ['threatbook-cn-llm', 'threatbook-io-llm'];
-    return filtered.sort((a, b) => {
-      const aIndex = preferredOrder.indexOf(a.id);
-      const bIndex = preferredOrder.indexOf(b.id);
-      if (aIndex !== -1 || bIndex !== -1) {
-        return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex);
-      }
-      return a.name.localeCompare(b.name);
-    });
   }, [catalog, resolvedDefaultModel?.providerId]);
+
+  const providerOptions = useMemo(() => {
+    const hasThreatBook = primaryProviders.some((provider) => isThreatBookProvider(provider.id))
+      || isThreatBookProvider(primaryProviderId);
+    const nonThreatBook = primaryProviders
+      .filter((provider) => !isThreatBookProvider(provider.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      hasThreatBook,
+      nonThreatBook,
+    };
+  }, [primaryProviderId, primaryProviders]);
+
+  const primaryProviderIsThreatBook = useMemo(
+    () => isThreatBookProvider(primaryProviderId),
+    [primaryProviderId]
+  );
 
   const selectedPrimaryProvider = useMemo(
     () => primaryProviders.find((provider) => provider.id === primaryProviderId) || null,
     [primaryProviderId, primaryProviders]
   );
 
-  const primaryProviderIsThreatBook = useMemo(
-    () => THREATBOOK_PROVIDER_IDS.includes(primaryProviderId as any),
-    [primaryProviderId]
+  const selectedPrimaryModel = useMemo(
+    () => selectedPrimaryProvider?.models.find((model) => model.id === primaryModelId) || null,
+    [primaryModelId, selectedPrimaryProvider]
   );
 
-  const primaryThreatBookRegion: OnboardingRegion = primaryProviderId === 'threatbook-io-llm' ? 'global' : 'cn';
-
-  const primaryApiPlaceholder = useMemo(() => {
-    if (primaryProviderIsThreatBook) return t('onboarding.bootstrap.tbPlaceholder');
-    return (
-      selectedPrimaryProvider?.credential_schemas?.[0]?.fields?.find((field) => field.name === 'api_key')?.placeholder
-      || t('onboarding.bootstrap.thirdPartyKeyPlaceholder')
-    );
-  }, [primaryProviderIsThreatBook, selectedPrimaryProvider, t]);
+  const primaryResolvedProviderId = resolvedDefaultModel?.providerId || primaryProviderId;
+  const primaryResolvedModelId = resolvedDefaultModel?.modelId || primaryModelId;
+  const primaryResolvedProvider = useMemo(
+    () => primaryProviders.find((provider) => provider.id === primaryResolvedProviderId) || null,
+    [primaryProviders, primaryResolvedProviderId]
+  );
+  const primaryResolvedModel = useMemo(
+    () => primaryResolvedProvider?.models.find((model) => model.id === primaryResolvedModelId) || null,
+    [primaryResolvedModelId, primaryResolvedProvider]
+  );
+  const primaryResolvedProviderIsThreatBook = useMemo(
+    () => isThreatBookProvider(primaryResolvedProviderId),
+    [primaryResolvedProviderId]
+  );
 
   const needsPrimaryBaseUrl = useMemo(() => {
     if (!selectedPrimaryProvider || primaryProviderIsThreatBook) return false;
@@ -300,17 +530,23 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     );
   }, [primaryProviderIsThreatBook, selectedPrimaryProvider]);
 
+  const primaryApiPlaceholder = useMemo(() => {
+    if (primaryProviderIsThreatBook) return t('onboarding.bootstrap.modelKeyPlaceholder');
+    return (
+      selectedPrimaryProvider?.credential_schemas?.[0]?.fields?.find((field) => field.name === 'api_key')?.placeholder
+      || t('onboarding.bootstrap.thirdPartyKeyPlaceholder')
+    );
+  }, [primaryProviderIsThreatBook, selectedPrimaryProvider, t]);
+
   useEffect(() => {
-    if (!primaryProviderId && primaryProviders.length > 0) {
-      setPrimaryProviderId(primaryProviders[0].id);
+    if (!primaryProviderId && providerOptions.hasThreatBook) {
+      setPrimaryProviderId(providerIdForRegion(modelRegion));
     }
-  }, [primaryProviderId, primaryProviders]);
+  }, [modelRegion, primaryProviderId, providerOptions.hasThreatBook]);
 
   useEffect(() => {
     if (!selectedPrimaryProvider) {
-      if (!primaryConfigured) {
-        setPrimaryModelId('');
-      }
+      if (!primaryConfigured) setPrimaryModelId('');
       return;
     }
     const hasModels = selectedPrimaryProvider.models.length > 0;
@@ -328,44 +564,22 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   }, [
     needsPrimaryBaseUrl,
     primaryBaseUrl,
+    primaryConfigured,
     primaryModelId,
     primaryProviderIsThreatBook,
     selectedPrimaryProvider,
   ]);
 
-  const selectedPrimaryModel = useMemo(
-    () => selectedPrimaryProvider?.models.find((model) => model.id === primaryModelId) || null,
-    [primaryModelId, selectedPrimaryProvider]
-  );
-  const primaryResolvedProviderId = resolvedDefaultModel?.providerId || primaryProviderId;
-  const primaryResolvedModelId = resolvedDefaultModel?.modelId || primaryModelId;
-  const primaryResolvedProvider = useMemo(
-    () => primaryProviders.find((provider) => provider.id === primaryResolvedProviderId) || null,
-    [primaryProviders, primaryResolvedProviderId]
-  );
-  const primaryResolvedModel = useMemo(
-    () => primaryResolvedProvider?.models.find((model) => model.id === primaryResolvedModelId) || null,
-    [primaryResolvedModelId, primaryResolvedProvider]
-  );
-  const primaryResolvedProviderIsThreatBook = useMemo(
-    () => THREATBOOK_PROVIDER_IDS.includes(primaryResolvedProviderId as any),
-    [primaryResolvedProviderId]
-  );
-
-  const getProviderLabel = (provider: CatalogProvider) => {
-    if (provider.id === 'threatbook-cn-llm') return t('onboarding.bootstrap.providerThreatBookCn');
-    if (provider.id === 'threatbook-io-llm') return t('onboarding.bootstrap.providerThreatBookGlobal');
-    return provider.name;
+  const getProviderLabel = (provider: CatalogProvider | null, providerId?: string) => {
+    const id = provider?.id || providerId || '';
+    if (isThreatBookProvider(id)) return t('onboarding.bootstrap.providerThreatBookFree');
+    return provider?.name || id;
   };
 
   const primaryConfiguredSummary = useMemo(() => {
-    if (!primaryConfigured || !primaryProviderId) return '';
-
-    const providerLabel = selectedPrimaryProvider
-      ? getProviderLabel(selectedPrimaryProvider)
-      : primaryProviderId;
-    const modelLabel = selectedPrimaryModel?.name || primaryModelId;
-
+    if (!primaryConfigured || !primaryResolvedProviderId) return '';
+    const providerLabel = getProviderLabel(primaryResolvedProvider, primaryResolvedProviderId);
+    const modelLabel = primaryResolvedModel?.name || primaryResolvedModelId;
     if (!providerLabel || !modelLabel) return '';
     return t('onboarding.bootstrap.primaryConfiguredSummary', {
       provider: providerLabel,
@@ -373,92 +587,79 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     });
   }, [
     primaryConfigured,
-    primaryModelId,
-    primaryProviderId,
-    selectedPrimaryModel,
-    selectedPrimaryProvider,
+    primaryResolvedModel,
+    primaryResolvedModelId,
+    primaryResolvedProvider,
+    primaryResolvedProviderId,
     t,
   ]);
-  const primaryConfiguredRegionLabel = useMemo(() => {
-    if (!primaryResolvedProviderIsThreatBook) return '';
-    return primaryResolvedProviderId === 'threatbook-io-llm'
-      ? t('onboarding.bootstrap.regionGlobal')
-      : t('onboarding.bootstrap.regionChina');
-  }, [primaryResolvedProviderId, primaryResolvedProviderIsThreatBook, t]);
-  const primaryConfiguredDetailsHint = useMemo(() => {
-    if (!primaryConfigured) return '';
-    if (primaryResolvedProviderId === 'threatbook-cn-llm') {
-      return t('onboarding.bootstrap.configuredThreatBookCnDetails');
-    }
-    if (primaryResolvedProviderId === 'threatbook-io-llm') {
-      return t('onboarding.bootstrap.configuredThreatBookGlobalDetails');
-    }
-    return t('onboarding.bootstrap.configuredThirdPartyDetails');
-  }, [primaryConfigured, primaryResolvedProviderId, t]);
 
-  const optionalConfiguredSummary = useMemo(() => {
-    if (!optionalConfigured) return '';
-    return optionalThreatBookRegion === 'cn'
-      ? t('onboarding.bootstrap.optionalThreatBookCnSuccess')
-      : t('onboarding.bootstrap.optionalThreatBookGlobalSuccess');
-  }, [optionalConfigured, optionalThreatBookRegion, t]);
+  const primaryConfiguredStatusValue = useMemo(() => {
+    if (!primaryConfigured) return t('onboarding.bootstrap.statusNotConfigured');
+    return hasLLM
+      ? t('onboarding.bootstrap.statusVerified')
+      : t('onboarding.bootstrap.statusSavedNeedsVerify');
+  }, [hasLLM, primaryConfigured, t]);
+
+  const intelMcpStatusValue = useMemo(() => {
+    if (!intelRuntimeStatus || !intelRuntimeStatus.mcp_configured) return t('onboarding.bootstrap.statusNotConfigured');
+    if (intelRuntimeStatus.mcp_connected) return t('onboarding.bootstrap.statusConnected');
+    if (intelRuntimeStatus.mcp_status === 'error') return t('onboarding.bootstrap.statusError');
+    if (intelRuntimeStatus.mcp_status === 'disabled') return t('onboarding.bootstrap.statusDisabled');
+    return t('onboarding.bootstrap.statusConfigured');
+  }, [intelRuntimeStatus, t]);
+
+  const intelRegionLabel = useMemo(() => (
+    intelRegion === 'cn'
+      ? t('onboarding.bootstrap.intelRegionChina')
+      : t('onboarding.bootstrap.intelRegionGlobal')
+  ), [intelRegion, t]);
+
+  const intelConfiguredStatusValue = useMemo(() => {
+    if (!intelConfigured) return t('onboarding.bootstrap.statusNotConfigured');
+    return t('onboarding.bootstrap.intelConfiguredVerified', { region: intelRegionLabel });
+  }, [intelConfigured, intelRegionLabel, t]);
+
+  const currentIntelCapabilities = useMemo(() => {
+    const matrix = intelRuntimeStatus?.service_matrix || { cn: ['api', 'mcp'], global: ['api'] };
+    const configuredCapabilities = new Set(matrix[intelRegion] || []);
+    configuredCapabilities.add('api');
+    return ['api', 'mcp'].filter((capability) => configuredCapabilities.has(capability));
+  }, [intelRegion, intelRuntimeStatus?.service_matrix]);
 
   const canSavePrimary = primaryProviderIsThreatBook
     ? Boolean(primaryApiKey.trim())
     : Boolean(primaryProviderId && primaryModelId && primaryApiKey.trim());
-
-  const canSaveOptionalThreatBook = primaryConfigured && !primaryProviderIsThreatBook && Boolean(optionalThreatBookApiKey.trim());
-  const canStart = hasLLM === true || primaryConfigured;
-  const showOptionalThreatBookSection = !primaryProviderIsThreatBook && primaryConfigured;
+  const canSaveIntel = Boolean(intelApiKey.trim());
   const showPrimaryConfiguredDetails = primaryConfigured && !primaryEditing;
+  const showIntelConfiguredDetails = intelConfigured && !intelEditing;
+  const hasStoredPrimaryKey = Boolean(
+    primaryConfigured
+    && primaryEditing
+    && resolvedDefaultModel
+    && primaryProviderId === resolvedDefaultModel.providerId,
+  );
+  const hasStoredIntelKey = Boolean(
+    intelConfigured
+    && intelEditing
+    && intelRuntimeStatus?.region === intelRegion
+    && (intelRuntimeStatus.api_configured || intelRuntimeStatus.mcp_configured),
+  );
 
-  useEffect(() => {
-    if (!showOptionalThreatBookSection || optionalThreatBookLoaded) return;
-
-    let cancelled = false;
-
-    Promise.allSettled([
-      providerAPI.getServiceCredentials('threatbook-cn'),
-      providerAPI.getServiceCredentials('threatbook-io'),
-      mcpAPI.getCredentials('threatbook_mcp'),
-    ]).then((results) => {
-      if (cancelled) return;
-
-      const cnServiceConfigured = results[0].status === 'fulfilled' && results[0].value.data.has_credential;
-      const globalServiceConfigured = results[1].status === 'fulfilled' && results[1].value.data.has_credential;
-      const cnMcpConfigured = results[2].status === 'fulfilled' && results[2].value.data.has_credential;
-
-      if (cnServiceConfigured && cnMcpConfigured) {
-        setOptionalThreatBookRegion('cn');
-        setOptionalConfigured(true);
-        setOptionalSectionCollapsed(true);
-      } else if (globalServiceConfigured) {
-        setOptionalThreatBookRegion('global');
-        setOptionalConfigured(true);
-        setOptionalSectionCollapsed(true);
-      }
-
-      setOptionalThreatBookLoaded(true);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [optionalThreatBookLoaded, showOptionalThreatBookSection]);
-
-  const buildPrimaryPayload = (threatbookKey?: string): OnboardingRequest => {
+  const buildPrimaryPayload = (): OnboardingRequest => {
     if (primaryProviderIsThreatBook) {
       return {
-        region: primaryThreatBookRegion,
+        region: modelRegion,
         use_threatbook_model: true,
         threatbook_api_key: primaryApiKey.trim() || null,
+        threatbook_model_only: true,
       };
     }
 
     return {
-      region: optionalThreatBookRegion,
+      region: modelRegion,
       use_threatbook_model: false,
-      threatbook_api_key: threatbookKey?.trim() || null,
+      threatbook_api_key: null,
       third_party_llm: {
         provider_id: primaryProviderId,
         api_key: primaryApiKey.trim(),
@@ -469,10 +670,10 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     };
   };
 
-  const buildOptionalThreatBookPayload = (): OnboardingRequest => ({
-    region: optionalThreatBookRegion,
+  const buildIntelPayload = (): OnboardingRequest => ({
+    region: intelRegion,
     use_threatbook_model: false,
-    threatbook_api_key: optionalThreatBookApiKey.trim() || null,
+    threatbook_api_key: intelApiKey.trim() || null,
     threatbook_services_only: true,
   });
 
@@ -496,52 +697,84 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     validation,
   });
 
-  const handleToggleDismiss = (checked: boolean) => {
-    setDontShowAgain(checked);
-    if (checked) {
-      dismissOnboarding();
-    } else {
-      undismissOnboarding();
-    }
-  };
-
   const handlePrimaryProviderChange = (providerId: string) => {
-    setPrimaryProviderId(providerId);
+    if (providerId === THREATBOOK_FREE_PROVIDER_OPTION) {
+      setPrimaryProviderId(providerIdForRegion(modelRegion));
+    } else {
+      setPrimaryProviderId(providerId);
+    }
     setPrimaryApiKey('');
+    setPrimaryKeyVisible(false);
+    setPrimaryKeyRevealed(false);
     setPrimaryBaseUrl('');
     setPrimaryStatus(null);
-    setPrimaryConfigured(false);
-    setPrimarySectionCollapsed(false);
-    setOptionalStatus(null);
-    setOptionalConfigured(false);
-    setOptionalThreatBookLoaded(false);
+    setPrimaryEditing(true);
+    setModelSkipped(false);
   };
 
-  const handleTogglePrimarySection = () => {
-    if (primarySectionCollapsed) {
-      setPrimarySectionCollapsed(false);
-      setPrimaryEditing(false);
+  const handlePrimaryKeyVisibility = async () => {
+    if (primaryKeyVisible) {
+      setPrimaryKeyVisible(false);
       return;
     }
-    setPrimarySectionCollapsed(true);
-    setPrimaryEditing(false);
-  };
 
-  const handleEditPrimary = () => {
-    setPrimaryEditing(true);
-    setPrimaryStatus(null);
-  };
-
-  const handleBackToPrimaryDetails = () => {
-    if (!primaryConfigured) return;
-    if (resolvedDefaultModel) {
-      setPrimaryProviderId(resolvedDefaultModel.providerId);
-      setPrimaryModelId(resolvedDefaultModel.modelId);
+    if (hasStoredPrimaryKey && !primaryKeyRevealed) {
+      try {
+        setPrimaryKeyRevealing(true);
+        setPrimaryStatus(null);
+        const response = await providerAPI.revealCredentials(primaryProviderId);
+        if (!response.data.api_key) throw new Error(t('onboarding.bootstrap.revealModelKeyError'));
+        setPrimaryApiKey(response.data.api_key);
+        setPrimaryKeyRevealed(true);
+      } catch (err: any) {
+        setPrimaryStatus({
+          tone: 'error',
+          message: err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.revealModelKeyError'),
+        });
+        return;
+      } finally {
+        setPrimaryKeyRevealing(false);
+      }
     }
-    setPrimaryApiKey('');
-    setPrimaryBaseUrl('');
-    setPrimaryStatus(null);
-    setPrimaryEditing(false);
+
+    setPrimaryKeyVisible(true);
+  };
+
+  const handleIntelKeyVisibility = async () => {
+    if (intelKeyVisible) {
+      setIntelKeyVisible(false);
+      return;
+    }
+
+    if (hasStoredIntelKey && !intelKeyRevealed) {
+      try {
+        setIntelKeyRevealing(true);
+        setIntelStatus(null);
+        let apiKey: string | null | undefined;
+        if (intelRuntimeStatus?.api_configured) {
+          const serviceId = intelRuntimeStatus.api_service_id
+            || THREATBOOK_REGION_CONFIG[intelRegion].apiServiceId;
+          const response = await providerAPI.revealServiceCredentials(serviceId);
+          apiKey = response.data.api_key;
+        } else if (intelRuntimeStatus?.mcp_configured && intelRuntimeStatus.mcp_name) {
+          const response = await mcpAPI.revealCredentials(intelRuntimeStatus.mcp_name);
+          apiKey = response.data.api_key;
+        }
+        if (!apiKey) throw new Error(t('onboarding.bootstrap.revealIntelKeyError'));
+        setIntelApiKey(apiKey);
+        setIntelKeyRevealed(true);
+      } catch (err: any) {
+        setIntelStatus({
+          tone: 'error',
+          message: err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.revealIntelKeyError'),
+        });
+        return;
+      } finally {
+        setIntelKeyRevealing(false);
+      }
+    }
+
+    setIntelKeyVisible(true);
   };
 
   const handleSavePrimary = async () => {
@@ -549,13 +782,25 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
     setPrimarySaving(true);
     setPrimaryStatus(null);
-    setOptionalStatus(null);
     setStartStatus(null);
 
     try {
-      const payload = buildPrimaryPayload();
-      const validateRes = await onboardingAPI.validate(payload);
-      const validateData = validateRes.data;
+      let payload = buildPrimaryPayload();
+      let validateRes = await onboardingAPI.validate(payload);
+      let validateData = validateRes.data;
+
+      if (
+        primaryProviderIsThreatBook
+        && validateData.error_code === 'region_mismatch'
+        && validateData.suggested_region
+      ) {
+        payload = {
+          ...payload,
+          region: validateData.suggested_region,
+        };
+        validateRes = await onboardingAPI.validate(payload);
+        validateData = validateRes.data;
+      }
 
       if (!validateData.can_apply) {
         setPrimaryStatus(buildErrorStatus(validateData, t('onboarding.bootstrap.testFailed')));
@@ -564,39 +809,37 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
       const applyRes = await onboardingAPI.apply(payload);
       const applyData = applyRes.data;
-      const savedProviderId = applyData.default_model?.provider_id || primaryProviderId;
+      const savedProviderId = applyData.default_model?.provider_id
+        || (primaryProviderIsThreatBook ? providerIdForRegion(payload.region) : primaryProviderId);
       const savedModelId = applyData.default_model?.model_id
         || primaryModelId
         || selectedPrimaryProvider?.models[0]?.id
         || '';
+
       setResolvedDefaultModel({
         providerId: savedProviderId,
         modelId: savedModelId,
       });
+      setPrimaryProviderId(savedProviderId);
       setPrimaryModelId(savedModelId);
+      setModelRegion(regionForProvider(savedProviderId));
       setPrimaryConfigured(true);
-      setPrimarySectionCollapsed(true);
       setPrimaryEditing(false);
+      setPrimaryApiKey('');
+      setPrimaryKeyVisible(false);
+      setPrimaryKeyRevealed(false);
+      setModelSkipped(false);
       setHasLLM(true);
 
       const successMessage = primaryProviderIsThreatBook
-        ? (primaryThreatBookRegion === 'cn'
-            ? t('onboarding.bootstrap.primaryThreatBookCnSuccess')
-            : t('onboarding.bootstrap.primaryThreatBookGlobalSuccess'))
+        ? t('onboarding.bootstrap.primaryThreatBookSuccess')
         : t('onboarding.bootstrap.primaryThirdPartySuccess', {
-            provider: getProviderLabel(selectedPrimaryProvider!),
+            provider: getProviderLabel(selectedPrimaryProvider, primaryProviderId),
             model: selectedPrimaryModel?.name || primaryModelId,
           });
 
-      if (primaryProviderIsThreatBook) {
-        setPrimaryStatus(buildSuccessStatus(validateData, applyData, successMessage));
-      } else {
-        setPrimaryStatus({
-          tone: 'success',
-          message: successMessage,
-          apply: applyData,
-        });
-      }
+      setPrimaryStatus(buildSuccessStatus(validateData, applyData, successMessage));
+      refreshOnboardingStatus(true);
     } catch (err: any) {
       setPrimaryStatus({
         tone: 'error',
@@ -607,40 +850,56 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     }
   };
 
-  const handleSaveOptionalThreatBook = async () => {
-    if (!canSaveOptionalThreatBook) return;
+  const handleSaveIntel = async () => {
+    if (!canSaveIntel) return;
 
-    setOptionalSaving(true);
-    setOptionalStatus(null);
+    setIntelSaving(true);
+    setIntelStatus(null);
     setStartStatus(null);
 
     try {
-      const payload = buildOptionalThreatBookPayload();
-      const validateRes = await onboardingAPI.validate(payload);
-      const validateData = validateRes.data;
+      let payload = buildIntelPayload();
+      let validateRes = await onboardingAPI.validate(payload);
+      let validateData = validateRes.data;
+
+      if (validateData.error_code === 'region_mismatch' && validateData.suggested_region) {
+        payload = {
+          ...payload,
+          region: validateData.suggested_region,
+        };
+        validateRes = await onboardingAPI.validate(payload);
+        validateData = validateRes.data;
+      }
 
       if (!validateData.can_apply) {
-        setOptionalStatus(buildErrorStatus(validateData, t('onboarding.bootstrap.serviceTestFailed')));
+        setIntelStatus(buildErrorStatus(validateData, t('onboarding.bootstrap.serviceTestFailed')));
         return;
       }
 
       const applyRes = await onboardingAPI.apply(payload);
       const applyData = applyRes.data;
-      setOptionalConfigured(true);
-      setOptionalSectionCollapsed(true);
-
-      const successMessage = optionalThreatBookRegion === 'cn'
-        ? t('onboarding.bootstrap.optionalThreatBookCnSuccess')
-        : t('onboarding.bootstrap.optionalThreatBookGlobalSuccess');
-
-      setOptionalStatus(buildSuccessStatus(validateData, applyData, successMessage));
+      setIntelRegion(payload.region);
+      setIntelConfigured(true);
+      setIntelEditing(false);
+      setIntelApiKey('');
+      setIntelKeyVisible(false);
+      setIntelKeyRevealed(false);
+      setIntelSkipped(false);
+      setIntelStatus(buildSuccessStatus(
+        validateData,
+        applyData,
+        payload.region === 'cn'
+          ? t('onboarding.bootstrap.intelChinaSuccess')
+          : t('onboarding.bootstrap.intelGlobalSuccess'),
+      ));
+      refreshOnboardingStatus(true);
     } catch (err: any) {
-      setOptionalStatus({
+      setIntelStatus({
         tone: 'error',
         message: err?.response?.data?.message || err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.saveError'),
       });
     } finally {
-      setOptionalSaving(false);
+      setIntelSaving(false);
     }
   };
 
@@ -665,429 +924,510 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     }
   };
 
-  const isLoading = hasLLM === null;
+  const handleConfirmSkip = () => {
+    if (skipConfirm === 'model') {
+      setModelSkipped(true);
+      setStep('intel');
+      setSkipConfirm(null);
+      return;
+    }
+    if (skipConfirm === 'intel') {
+      setIntelSkipped(true);
+      setSkipConfirm(null);
+      handleStart();
+    }
+  };
+
+  const renderModelStep = () => (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-base font-semibold text-gray-900">{t('onboarding.bootstrap.modelPageTitle')}</h3>
+        <p className="mt-2 text-sm leading-6 text-gray-600">{t('onboarding.bootstrap.modelPageDescription')}</p>
+      </div>
+
+      {statusLoading && (
+        <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/70 px-4 py-3">
+          <p className="text-xs text-gray-500">{t('status.loading')}</p>
+        </div>
+      )}
+
+      {!statusLoading && showPrimaryConfiguredDetails && (
+        <div className="rounded-xl border border-green-200 bg-green-50/50 p-4 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold text-gray-800">{t('onboarding.bootstrap.configuredDetailsTitle')}</p>
+              <p className="mt-1 text-[11px] text-gray-600">{primaryConfiguredSummary}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setPrimaryApiKey('');
+                setPrimaryKeyVisible(false);
+                setPrimaryKeyRevealed(false);
+                setPrimaryEditing(true);
+                setPrimaryStatus(null);
+              }}
+              className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            >
+              {t('onboarding.bootstrap.editPrimary')}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <StatusMetric label={t('onboarding.bootstrap.configuredStatusLabel')} value={primaryConfiguredStatusValue} />
+            <StatusMetric
+              label={t('onboarding.bootstrap.configuredProviderLabel')}
+              value={getProviderLabel(primaryResolvedProvider, primaryResolvedProviderId)}
+            />
+            <StatusMetric
+              label={t('onboarding.bootstrap.configuredModelLabel')}
+              value={primaryResolvedModel?.name || primaryResolvedModelId}
+            />
+          </div>
+
+          <ValidationPanel
+            t={t}
+            status={primaryStatus}
+            visibleResourceKeys={primaryResolvedProviderIsThreatBook ? ['threatbook_llm'] : ['third_party_llm']}
+          />
+        </div>
+      )}
+
+      {!statusLoading && !showPrimaryConfiguredDetails && (
+        <div className="rounded-xl border border-gray-200 p-4 space-y-4">
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-gray-600">
+              {t('onboarding.bootstrap.providerLabel')}
+            </label>
+            <select
+              value={primaryProviderIsThreatBook ? THREATBOOK_FREE_PROVIDER_OPTION : primaryProviderId}
+              onChange={(event) => handlePrimaryProviderChange(event.target.value)}
+              disabled={primaryKeyRevealing || primarySaving}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+            >
+              {providerOptions.hasThreatBook && (
+                <option value={THREATBOOK_FREE_PROVIDER_OPTION}>
+                  {t('onboarding.bootstrap.providerThreatBookFree')}
+                </option>
+              )}
+              {providerOptions.nonThreatBook.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {!primaryProviderIsThreatBook && (selectedPrimaryProvider?.models?.length ? (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-gray-600">
+                {t('onboarding.bootstrap.modelLabel')}
+              </label>
+              <select
+                value={primaryModelId}
+                onChange={(event) => {
+                  setPrimaryModelId(event.target.value);
+                  setPrimaryStatus(null);
+                }}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+              >
+                {selectedPrimaryProvider.models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={primaryModelId}
+              onChange={(event) => {
+                setPrimaryModelId(event.target.value);
+                setPrimaryStatus(null);
+              }}
+              placeholder={t('onboarding.bootstrap.thirdPartyModelIdPlaceholder')}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+            />
+          ))}
+
+          {needsPrimaryBaseUrl && (
+            <input
+              type="text"
+              value={primaryBaseUrl}
+              onChange={(event) => {
+                setPrimaryBaseUrl(event.target.value);
+                setPrimaryStatus(null);
+              }}
+              placeholder={t('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+            />
+          )}
+
+          <div className="flex flex-col gap-2 sm:flex-row">
+            {primaryConfigured && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (resolvedDefaultModel) {
+                    setPrimaryProviderId(resolvedDefaultModel.providerId);
+                    setPrimaryModelId(resolvedDefaultModel.modelId);
+                    setModelRegion(regionForProvider(resolvedDefaultModel.providerId));
+                  }
+                  setPrimaryApiKey('');
+                  setPrimaryKeyVisible(false);
+                  setPrimaryKeyRevealed(false);
+                  setPrimaryBaseUrl('');
+                  setPrimaryStatus(null);
+                  setPrimaryEditing(false);
+                }}
+                disabled={primaryKeyRevealing || primarySaving}
+                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {t('onboarding.bootstrap.backToConfiguredDetails')}
+              </button>
+            )}
+            <OnboardingSecretInput
+              value={primaryApiKey}
+              hasStoredKey={hasStoredPrimaryKey}
+              visible={primaryKeyVisible}
+              revealing={primaryKeyRevealing}
+              onChange={(value) => {
+                setPrimaryApiKey(value);
+                setPrimaryStatus(null);
+              }}
+              placeholder={primaryApiPlaceholder}
+              showLabel={t('onboarding.bootstrap.showKey')}
+              hideLabel={t('onboarding.bootstrap.hideKey')}
+              onToggleVisibility={handlePrimaryKeyVisibility}
+            />
+            {primaryProviderIsThreatBook && (
+              <a
+                href={MODEL_KEY_LINK}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:border-amber-400 hover:bg-amber-50"
+              >
+                <ExternalLink className="h-3 w-3" />
+                {t('onboarding.bootstrap.modelKeyLink')}
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={handleSavePrimary}
+              disabled={!canSavePrimary || primarySaving}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {primarySaving && (
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+              )}
+              {primarySaving ? t('onboarding.bootstrap.testing') : t('onboarding.bootstrap.savePrimary')}
+            </button>
+          </div>
+
+          <ValidationPanel
+            t={t}
+            status={primaryStatus}
+            visibleResourceKeys={primaryProviderIsThreatBook ? ['threatbook_llm'] : ['third_party_llm']}
+          />
+        </div>
+      )}
+    </div>
+  );
+
+  const renderIntelStep = () => (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-base font-semibold text-gray-900">{t('onboarding.bootstrap.intelPageTitle')}</h3>
+        <p className="mt-2 text-sm leading-6 text-gray-600">{t('onboarding.bootstrap.intelPageDescription')}</p>
+      </div>
+
+      {showIntelConfiguredDetails && (
+        <div className="rounded-xl border border-green-200 bg-green-50/50 p-4 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold text-gray-800">{t('onboarding.bootstrap.configuredDetailsTitle')}</p>
+              <p className="mt-1 text-[11px] text-gray-600">{t('onboarding.bootstrap.intelConfiguredHint')}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setIntelApiKey('');
+                setIntelKeyVisible(false);
+                setIntelKeyRevealed(false);
+                setIntelEditing(true);
+                setIntelStatus(null);
+              }}
+              className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            >
+              {t('onboarding.bootstrap.editIntel')}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <StatusMetric
+              label={t('onboarding.bootstrap.configuredStatusLabel')}
+              value={intelConfiguredStatusValue}
+            />
+            <StatusMetric
+              label={t('onboarding.bootstrap.configuredRegionLabel')}
+              value={intelRegionLabel}
+            />
+            <StatusMetric
+              label={t('onboarding.bootstrap.intelApiLabel')}
+              value={intelRuntimeStatus?.api_configured
+                ? t('onboarding.bootstrap.statusConfigured')
+                : t('onboarding.bootstrap.statusNotConfigured')}
+            />
+            {currentIntelCapabilities.includes('mcp') && (
+              <StatusMetric
+                label={t('onboarding.bootstrap.intelMcpLabel')}
+                value={intelMcpStatusValue}
+              />
+            )}
+          </div>
+
+          <ValidationPanel
+            t={t}
+            status={intelStatus}
+            visibleResourceKeys={currentIntelCapabilities.map((capability) => `threatbook_${capability}`)}
+            compactResourceList
+            minimal
+          />
+        </div>
+      )}
+
+      {!showIntelConfiguredDetails && (
+        <div className="rounded-xl border border-gray-200 p-4 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-gray-800">{t('onboarding.bootstrap.intelRegionTitle')}</p>
+              <p className="mt-1 text-xs text-gray-500">{t('onboarding.bootstrap.intelRegionHint')}</p>
+            </div>
+            <RegionChooser
+              value={intelRegion}
+              onChange={(region) => {
+                setIntelRegion(region);
+                setIntelApiKey('');
+                setIntelKeyVisible(false);
+                setIntelKeyRevealed(false);
+                setIntelStatus(null);
+                setIntelSkipped(false);
+              }}
+              chinaLabel={t('onboarding.bootstrap.intelRegionChina')}
+              globalLabel={t('onboarding.bootstrap.intelRegionGlobal')}
+              disabled={intelKeyRevealing || intelSaving}
+            />
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {currentIntelCapabilities.includes('api') && (
+              <span className="rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
+                {t('onboarding.bootstrap.intelApiCapability')}
+              </span>
+            )}
+            {currentIntelCapabilities.includes('mcp') && (
+              <span className="rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
+                {t('onboarding.bootstrap.intelMcpCapability')}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row">
+            {intelConfigured && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIntelRegion(intelRuntimeStatus?.region || defaultIntelRegion);
+                  setIntelApiKey('');
+                  setIntelKeyVisible(false);
+                  setIntelKeyRevealed(false);
+                  setIntelStatus(null);
+                  setIntelEditing(false);
+                }}
+                disabled={intelKeyRevealing || intelSaving}
+                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {t('onboarding.bootstrap.backToConfiguredDetails')}
+              </button>
+            )}
+            <OnboardingSecretInput
+              value={intelApiKey}
+              hasStoredKey={hasStoredIntelKey}
+              visible={intelKeyVisible}
+              revealing={intelKeyRevealing}
+              onChange={(value) => {
+                setIntelApiKey(value);
+                setIntelStatus(null);
+              }}
+              placeholder={t('onboarding.bootstrap.intelKeyPlaceholder')}
+              showLabel={t('onboarding.bootstrap.showKey')}
+              hideLabel={t('onboarding.bootstrap.hideKey')}
+              onToggleVisibility={handleIntelKeyVisibility}
+            />
+            <a
+              href={THREATBOOK_REGION_CONFIG[intelRegion].activationUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:border-amber-400 hover:bg-amber-50"
+            >
+              <ExternalLink className="h-3 w-3" />
+              {t('onboarding.bootstrap.intelKeyLink')}
+            </a>
+            <button
+              type="button"
+              onClick={handleSaveIntel}
+              disabled={!canSaveIntel || intelSaving}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {intelSaving && (
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+              )}
+              {intelSaving ? t('onboarding.bootstrap.testing') : t('onboarding.bootstrap.saveIntel')}
+            </button>
+          </div>
+
+          <ValidationPanel
+            t={t}
+            status={intelStatus}
+            visibleResourceKeys={currentIntelCapabilities.map((capability) => `threatbook_${capability}`)}
+            compactResourceList
+            onSwitchRegion={
+              intelStatus?.validation?.error_code === 'region_mismatch'
+                ? () => {
+                    if (intelStatus.validation?.suggested_region) {
+                      setIntelRegion(intelStatus.validation.suggested_region);
+                      setIntelStatus(null);
+                    }
+                  }
+                : null
+            }
+          />
+        </div>
+      )}
+
+      <div className="rounded-xl border border-gray-200 bg-gray-50/70 p-4">
+        <p className="text-xs font-semibold text-gray-700">{t('onboarding.bootstrap.summaryTitle')}</p>
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <StatusMetric
+            label={t('onboarding.bootstrap.summaryModel')}
+            value={primaryConfigured
+              ? primaryConfiguredStatusValue
+              : modelSkipped
+                ? t('onboarding.bootstrap.statusSkipped')
+                : t('onboarding.bootstrap.statusNotConfigured')}
+          />
+          <StatusMetric
+            label={t('onboarding.bootstrap.summaryIntel')}
+            value={intelConfigured
+              ? intelConfiguredStatusValue
+              : intelSkipped
+                ? t('onboarding.bootstrap.statusSkipped')
+                : t('onboarding.bootstrap.statusNotConfigured')}
+          />
+          <StatusMetric
+            label={t('onboarding.bootstrap.summaryNext')}
+            value={t('onboarding.bootstrap.summaryNextValue')}
+          />
+        </div>
+      </div>
+    </div>
+  );
+
+  const footerPrimaryAction = step === 'model'
+    ? {
+        label: t('onboarding.bootstrap.nextStep'),
+        disabled: statusLoading || primarySaving || primaryKeyRevealing,
+        onClick: () => setStep('intel'),
+      }
+    : {
+        label: starting ? t('onboarding.startingButton') : t('onboarding.startButton'),
+        disabled: starting || primarySaving || intelSaving || intelKeyRevealing,
+        onClick: handleStart,
+      };
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] mx-4 overflow-hidden flex flex-col">
-        <div className="relative px-6 pt-5 pb-4">
-          <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-red-500 via-red-500 to-violet-500" />
+      <div className="relative mx-4 flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+        <div className="relative px-6 pb-4 pt-5">
+          <div className="absolute left-0 right-0 top-0 h-1 bg-green-500" />
           <button
             onClick={onClose}
-            className="absolute top-4 right-4 p-1 text-gray-300 hover:text-gray-500 rounded-lg hover:bg-gray-100 transition-colors"
+            className="absolute right-4 top-4 rounded-lg p-1 text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-500"
           >
-            <X className="w-4 h-4" />
+            <X className="h-4 w-4" />
           </button>
-          <h2 className="text-lg font-bold text-gray-900 pr-8">{t('onboarding.title')}</h2>
+          <h2 className="pr-8 text-lg font-bold text-gray-900">{t('onboarding.title')}</h2>
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <StepPill
+              active={step === 'model'}
+              label={t('onboarding.bootstrap.stepModel')}
+            />
+            <span className="text-lg font-semibold text-gray-300 sm:text-xl">》</span>
+            <StepPill
+              active={step === 'intel'}
+              label={t('onboarding.bootstrap.stepIntel')}
+            />
+            <span className="text-lg font-semibold text-gray-300 sm:text-xl">》</span>
+            <StepPill active={false} label={t('onboarding.bootstrap.stepRex')} />
+          </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-4">
-          <div className="space-y-4">
-          <div className="rounded-xl border border-amber-200 bg-amber-50/60 overflow-hidden">
-            <div className="px-4 py-4">
-              <div className="flex items-center gap-2">
-                <Zap className="w-4 h-4 text-amber-500 flex-shrink-0" />
-                <span className="text-sm font-semibold text-amber-800">{t('onboarding.bootstrap.welcomeTitle')}</span>
-              </div>
-              <p className="mt-2 text-sm text-amber-800/90 leading-relaxed">
-                {t('onboarding.bootstrap.welcomeIntro')}
-              </p>
-              <p className="mt-2 text-xs text-amber-700/80 leading-relaxed">
-                {t('onboarding.bootstrap.welcomeHint')}
-              </p>
-            </div>
-          </div>
-
-          {!isLoading && hasLLM && (
-            <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-green-50 border border-green-200">
-              <CheckCircle2 className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />
-              <span className="text-xs text-green-700">{t('onboarding.bootstrap.configured')}</span>
-            </div>
-          )}
-
-          <div className="rounded-xl border border-gray-200 p-4 space-y-4">
-            <button
-              type="button"
-              onClick={handleTogglePrimarySection}
-              className="w-full flex items-center justify-between gap-3 text-left"
-            >
-              <div>
-                <p className="text-xs font-semibold text-gray-700">{t('onboarding.bootstrap.primaryTitle')}</p>
-                {primaryConfiguredSummary && (
-                  <p className="mt-1 text-[11px] text-green-700">{primaryConfiguredSummary}</p>
-                )}
-                {t('onboarding.bootstrap.primarySubtitle') && (
-                  <p className="mt-1 text-[11px] text-gray-500">{t('onboarding.bootstrap.primarySubtitle')}</p>
-                )}
-              </div>
-              {primarySectionCollapsed ? (
-                <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
-              ) : (
-                <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
-              )}
-            </button>
-
-            {isLoading && (
-              <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/60 px-4 py-3">
-                <p className="text-xs text-gray-500">{t('status.loading')}</p>
-              </div>
-            )}
-
-            {!isLoading && !primarySectionCollapsed && showPrimaryConfiguredDetails && (
-              <div className="rounded-xl border border-green-200 bg-green-50/50 p-4 space-y-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-semibold text-gray-800">
-                      {t('onboarding.bootstrap.configuredDetailsTitle')}
-                    </p>
-                    <p className="mt-1 text-[11px] text-gray-600">
-                      {primaryConfiguredDetailsHint}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleEditPrimary}
-                    className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
-                  >
-                    {t('onboarding.bootstrap.editPrimary')}
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
-                    <p className="text-[11px] text-gray-500">
-                      {t('onboarding.bootstrap.configuredStatusLabel')}
-                    </p>
-                    <p className="mt-1 text-sm font-medium text-green-700">
-                      {t('onboarding.bootstrap.configuredReadyValue')}
-                    </p>
-                  </div>
-                  <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
-                    <p className="text-[11px] text-gray-500">
-                      {t('onboarding.bootstrap.configuredProviderLabel')}
-                    </p>
-                    <p className="mt-1 text-sm font-medium text-gray-900">
-                      {primaryResolvedProvider
-                        ? getProviderLabel(primaryResolvedProvider)
-                        : primaryResolvedProviderId}
-                    </p>
-                  </div>
-                  <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
-                    <p className="text-[11px] text-gray-500">
-                      {t('onboarding.bootstrap.configuredModelLabel')}
-                    </p>
-                    <p className="mt-1 text-sm font-medium text-gray-900">
-                      {primaryResolvedModel?.name || primaryResolvedModelId}
-                    </p>
-                  </div>
-                  {primaryConfiguredRegionLabel && (
-                    <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
-                      <p className="text-[11px] text-gray-500">
-                        {t('onboarding.bootstrap.configuredRegionLabel')}
-                      </p>
-                      <p className="mt-1 text-sm font-medium text-gray-900">
-                        {primaryConfiguredRegionLabel}
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                <ValidationPanel
-                  t={t}
-                  status={primaryStatus}
-                  visibleResourceKeys={primaryResolvedProviderIsThreatBook ? undefined : ['third_party_llm']}
-                />
-              </div>
-            )}
-
-            {!isLoading && !primarySectionCollapsed && !showPrimaryConfiguredDetails && (
-              <>
-                <select
-                  value={primaryProviderId}
-                  onChange={(e) => handlePrimaryProviderChange(e.target.value)}
-                  className="w-full text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all"
-                >
-                  {primaryProviders.map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {getProviderLabel(provider)}
-                    </option>
-                  ))}
-                </select>
-
-                {primaryProviderIsThreatBook && (
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-700">
-                    <span>
-                      {primaryThreatBookRegion === 'cn'
-                        ? t('onboarding.bootstrap.primaryThreatBookCnFreeHint')
-                        : t('onboarding.bootstrap.primaryThreatBookGlobalFreeHint')}
-                    </span>
-                    <a
-                      href={primaryThreatBookRegion === 'cn' ? TBCLOUD_LINKS.cn : TBCLOUD_LINKS.global}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-300 bg-white text-[11px] font-medium text-amber-700 hover:bg-amber-50 hover:border-amber-400 transition-colors"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                      {primaryThreatBookRegion === 'cn'
-                        ? t('onboarding.bootstrap.primaryThreatBookCnLink')
-                        : t('onboarding.bootstrap.primaryThreatBookGlobalLink')}
-                    </a>
-                  </div>
-                )}
-
-                {!primaryProviderIsThreatBook && (selectedPrimaryProvider?.models?.length ? (
-                  <select
-                    value={primaryModelId}
-                    onChange={(e) => {
-                      setPrimaryModelId(e.target.value);
-                      setPrimaryStatus(null);
-                    }}
-                    className="w-full text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all"
-                  >
-                    {selectedPrimaryProvider.models.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    value={primaryModelId}
-                    onChange={(e) => {
-                      setPrimaryModelId(e.target.value);
-                      setPrimaryStatus(null);
-                    }}
-                    placeholder={t('onboarding.bootstrap.thirdPartyModelIdPlaceholder')}
-                    className="w-full text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all placeholder-gray-300"
-                  />
-                ))}
-
-                {needsPrimaryBaseUrl && (
-                  <input
-                    type="text"
-                    value={primaryBaseUrl}
-                    onChange={(e) => {
-                      setPrimaryBaseUrl(e.target.value);
-                      setPrimaryStatus(null);
-                    }}
-                    placeholder={t('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')}
-                    className="w-full text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all placeholder-gray-300"
-                  />
-                )}
-
-                <div className="flex gap-2">
-                  {primaryConfigured && (
-                    <button
-                      type="button"
-                      onClick={handleBackToPrimaryDetails}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-700 text-sm font-medium transition-colors hover:bg-gray-50"
-                    >
-                      {t('onboarding.bootstrap.backToConfiguredDetails')}
-                    </button>
-                  )}
-                  <input
-                    type="password"
-                    value={primaryApiKey}
-                    onChange={(e) => {
-                      setPrimaryApiKey(e.target.value);
-                      setPrimaryStatus(null);
-                    }}
-                    placeholder={primaryApiPlaceholder}
-                    className="flex-1 text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all placeholder-gray-300"
-                  />
-                  <button
-                    onClick={handleSavePrimary}
-                    disabled={!canSavePrimary || primarySaving}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
-                  >
-                    {primarySaving && (
-                      <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                    )}
-                    {primarySaving ? t('onboarding.bootstrap.testing') : t('onboarding.bootstrap.savePrimary')}
-                  </button>
-                </div>
-
-                {primaryProviderIsThreatBook ? (
-                  <p className="text-[11px] text-gray-500">
-                    {primaryThreatBookRegion === 'cn'
-                      ? t('onboarding.bootstrap.primaryThreatBookCnHint')
-                      : t('onboarding.bootstrap.primaryThreatBookGlobalHint')}
-                  </p>
-                ) : (selectedPrimaryModel || primaryModelId) ? (
-                  <p className="text-[11px] text-gray-500">
-                    {t('onboarding.bootstrap.thirdPartyModelHint', { model: selectedPrimaryModel?.name || primaryModelId })}
-                  </p>
-                ) : null}
-
-                <ValidationPanel
-                  t={t}
-                  status={primaryStatus}
-                  visibleResourceKeys={primaryProviderIsThreatBook ? undefined : ['third_party_llm']}
-                  onSwitchRegion={
-                    primaryStatus?.validation?.error_code === 'region_mismatch'
-                      ? () => {
-                          const suggested = primaryStatus.validation?.suggested_region;
-                          if (suggested === 'cn') handlePrimaryProviderChange('threatbook-cn-llm');
-                          if (suggested === 'global') handlePrimaryProviderChange('threatbook-io-llm');
-                        }
-                      : null
-                  }
-                />
-              </>
-            )}
-          </div>
-
-          {showOptionalThreatBookSection && (
-            <div className="rounded-xl border border-gray-200 p-4 space-y-4">
-              <button
-                type="button"
-                onClick={() => setOptionalSectionCollapsed((prev) => !prev)}
-                className="w-full flex items-center justify-between gap-3 text-left"
-              >
-                <div>
-                  <p className="text-xs font-semibold text-gray-700">{t('onboarding.bootstrap.optionalThreatBookTitle')}</p>
-                  {optionalConfiguredSummary && (
-                    <p className="mt-1 text-[11px] text-green-700">{optionalConfiguredSummary}</p>
-                  )}
-                  <p className="mt-1 text-[11px] text-gray-500">{t('onboarding.bootstrap.optionalThreatBookSubtitle')}</p>
-                </div>
-                {optionalSectionCollapsed ? (
-                  <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                ) : (
-                  <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                )}
-              </button>
-
-              {!optionalSectionCollapsed && (
-                <>
-                  <div className="flex flex-wrap items-center gap-4">
-                    <div className="flex flex-wrap items-center gap-4">
-                      {(['cn', 'global'] as OnboardingRegion[]).map((candidate) => (
-                        <label
-                          key={candidate}
-                          className="inline-flex items-center gap-2 cursor-pointer text-xs text-gray-700"
-                        >
-                          <input
-                            type="radio"
-                            name="optional-threatbook-region"
-                            checked={optionalThreatBookRegion === candidate}
-                            onChange={() => {
-                              setOptionalThreatBookRegion(candidate);
-                              setOptionalStatus(null);
-                              setOptionalConfigured(false);
-                            }}
-                            className="h-3.5 w-3.5 border-gray-300 text-red-600 focus:ring-red-500"
-                          />
-                          <span>{candidate === 'cn' ? t('onboarding.bootstrap.regionChina') : t('onboarding.bootstrap.regionGlobal')}</span>
-                        </label>
-                      ))}
-                    </div>
-
-                    <a
-                      href={optionalThreatBookRegion === 'cn' ? TBCLOUD_LINKS.cn : TBCLOUD_LINKS.global}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-amber-300 bg-white text-xs font-medium text-amber-700 hover:bg-amber-50 hover:border-amber-400 transition-colors"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                      {optionalThreatBookRegion === 'cn'
-                        ? t('onboarding.bootstrap.primaryThreatBookCnLink')
-                        : t('onboarding.bootstrap.primaryThreatBookGlobalLink')}
-                    </a>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      value={optionalThreatBookApiKey}
-                      onChange={(e) => {
-                        setOptionalThreatBookApiKey(e.target.value);
-                        setOptionalStatus(null);
-                        setOptionalConfigured(false);
-                      }}
-                      placeholder={t('onboarding.bootstrap.tbPlaceholder')}
-                      className="flex-1 text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all placeholder-gray-300"
-                    />
-                    <button
-                      onClick={handleSaveOptionalThreatBook}
-                      disabled={!canSaveOptionalThreatBook || optionalSaving}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
-                    >
-                      {optionalSaving && (
-                        <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                      )}
-                      {optionalSaving ? t('onboarding.bootstrap.testing') : t('onboarding.bootstrap.saveOptionalThreatBook')}
-                    </button>
-                  </div>
-
-                  {!optionalConfigured && (
-                    <p className="text-[11px] text-gray-500">{t('onboarding.bootstrap.tbSkipHint')}</p>
-                  )}
-
-                  <ValidationPanel
-                    t={t}
-                    status={optionalStatus}
-                    visibleResourceKeys={['threatbook_api', 'threatbook_mcp']}
-                    compactResourceList
-                    minimal
-                    onSwitchRegion={
-                      optionalStatus?.validation?.error_code === 'region_mismatch'
-                        ? () => {
-                            if (optionalStatus.validation?.suggested_region) {
-                              setOptionalThreatBookRegion(optionalStatus.validation.suggested_region);
-                              setOptionalStatus(null);
-                            }
-                          }
-                        : null
-                    }
-                  />
-                </>
-              )}
-            </div>
-          )}
+          <div className="space-y-5">
+            {step === 'model' ? renderModelStep() : renderIntelStep()}
           </div>
         </div>
 
-        <div className="px-6 py-4 bg-gray-50/80 border-t border-gray-100">
+        <div className="border-t border-gray-100 bg-gray-50/80 px-6 py-4">
           {startStatus && (
             <div className="mb-3">
               <ValidationPanel t={t} status={startStatus} />
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <label className="flex items-center gap-2 cursor-pointer select-none group">
-              <input
-                type="checkbox"
-                checked={dontShowAgain}
-                onChange={(e) => handleToggleDismiss(e.target.checked)}
-                className="w-3.5 h-3.5 rounded border-gray-300 text-red-600 focus:ring-red-500 focus:ring-offset-0 cursor-pointer"
-              />
-              <span className="text-xs text-gray-400 group-hover:text-gray-500 transition-colors">
-                {t('onboarding.dismissButton')}
-              </span>
-            </label>
-            <button
-              onClick={handleStart}
-              disabled={!canStart || starting || isLoading || primarySaving || optionalSaving}
-              title={!canStart ? t('onboarding.bootstrap.startBlockedHint') : undefined}
-              className="flex items-center gap-2 px-5 py-2 bg-gradient-to-r from-red-600 to-red-600 hover:from-red-700 hover:to-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg shadow-sm shadow-red-500/25 hover:shadow-md hover:shadow-red-500/30 transition-all"
-            >
-              {starting ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                  {t('onboarding.startingButton')}
-                </>
-              ) : (
-                <>
-                  {t('onboarding.startButton')}
-                  <ArrowRight className="w-4 h-4" />
-                </>
+          <div className="flex items-center justify-end gap-3">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSkipConfirm(step)}
+                disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing || statusLoading}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {t('onboarding.bootstrap.skipPage')}
+              </button>
+              {step === 'intel' && (
+                <button
+                  type="button"
+                  onClick={() => setStep('model')}
+                  disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing}
+                  className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {t('onboarding.bootstrap.previousStep')}
+                </button>
               )}
-            </button>
+              <button
+                type="button"
+                onClick={footerPrimaryAction.onClick}
+                disabled={footerPrimaryAction.disabled}
+                className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-red-600 to-red-600 px-5 py-2 text-sm font-medium text-white shadow-sm shadow-red-500/25 transition-all hover:from-red-700 hover:to-red-700 hover:shadow-md hover:shadow-red-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {starting && (
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                )}
+                {footerPrimaryAction.label}
+                {!starting && <ArrowRight className="h-4 w-4" />}
+              </button>
+            </div>
           </div>
         </div>
+
+        <SkipConfirmDialog
+          t={t}
+          target={skipConfirm}
+          onCancel={() => setSkipConfirm(null)}
+          onConfirm={handleConfirmSkip}
+        />
       </div>
     </div>
   );
