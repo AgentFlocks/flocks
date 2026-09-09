@@ -1468,6 +1468,10 @@ def test_soc_dashboard_uses_soc_facts_when_rollups_lack_source_dimension(
             "PRIMARY KEY (workflow_id, bucket_start))"
         )
         conn.execute(
+            "CREATE TABLE workflow_executions ("
+            "workflow_id TEXT, status TEXT, started_at INTEGER)"
+        )
+        conn.execute(
             "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
             ("stream_alert_denoise", bucket_ms, bucket_ms),
         )
@@ -1481,6 +1485,13 @@ def test_soc_dashboard_uses_soc_facts_when_rollups_lack_source_dimension(
                 "stream_alert_denoise", bucket_ms, 62, 11, 9, 9, 2, 0,
                 "{}", 0, 1836, 13312, 0, 4, bucket_ms,
             ),
+        )
+        conn.executemany(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?)",
+            [
+                ("stream_alert_denoise", "success", bucket_ms + offset)
+                for offset in (-30_000, -20_000, -10_000, 0, 10_000, 20_000)
+            ],
         )
         conn.commit()
 
@@ -1509,10 +1520,76 @@ def test_soc_dashboard_uses_soc_facts_when_rollups_lack_source_dimension(
     assert quality["metricsAvailable"] is True
     assert quality["errorExecutionCount"] == 13312
     assert quality["unprocessedInputCount"] == 51
-    assert stats["denoise"]["totalRaw"] == 62
-    assert stats["denoise"]["duplicates"] == 2
-    assert stats["denoise"]["duplicateRate"] == 0.0323
-    assert stats["pipeline"]["reductionSaved"] == 2
+    assert quality["status"] == "legacy-compatible"
+    assert quality["coverageComplete"] is True
+    assert quality["displayMetricDataSource"].endswith(".compatibility")
+    assert stats["denoise"]["totalRaw"] == 6
+    assert stats["denoise"]["totalUnique"] == 1
+    assert stats["denoise"]["duplicates"] == 5
+    assert stats["denoise"]["duplicateRate"] == 0.8333
+    assert sum(stats["timeline"]["denoiseRaw"]) == 6
+    assert stats["timeline"]["denoiseReductionRate"]
+    assert stats["pipeline"]["reductionSaved"] == 5
+
+
+def test_soc_dashboard_legacy_metric_total_keeps_full_execution_history_shape(
+    tmp_path: Path,
+):
+    workflow_db = tmp_path / "workflow.db"
+    start_time = int(datetime(2026, 9, 1).timestamp())
+    end_time = start_time + 7 * 24 * 3600 - 1
+    day_ms = 24 * 3600 * 1000
+    start_ms = start_time * 1000
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            "CREATE TABLE workflow_stats ("
+            "workflow_id TEXT PRIMARY KEY, call_count INTEGER, updated_at INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE soc_dashboard_workflow_stats_samples ("
+            "workflow_id TEXT, sampled_at INTEGER, call_count INTEGER, "
+            "PRIMARY KEY (workflow_id, sampled_at))"
+        )
+        conn.execute(
+            "CREATE TABLE workflow_executions ("
+            "workflow_id TEXT, status TEXT, started_at INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?)",
+            ("stream_alert_denoise", 100, start_ms + 6 * day_ms),
+        )
+        conn.executemany(
+            "INSERT INTO soc_dashboard_workflow_stats_samples VALUES (?, ?, ?)",
+            [
+                ("stream_alert_denoise", start_ms + day_ms, 20),
+                ("stream_alert_denoise", start_ms + 6 * day_ms, 100),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?)",
+            [
+                ("stream_alert_denoise", "success", start_ms + day_ms),
+                ("stream_alert_denoise", "success", start_ms + 3 * day_ms),
+                ("stream_alert_denoise", "failed", start_ms + 3 * day_ms + 1_000),
+                ("stream_alert_denoise", "success", start_ms + 3 * day_ms + 2_000),
+                ("stream_alert_denoise", "success", start_ms + 6 * day_ms),
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = workflow_db
+
+    stats = handlers._get_legacy_dashboard_metric_stats(
+        "stream_alert_denoise",
+        start_time,
+        end_time,
+    )
+
+    assert stats["callCount"] == 100
+    assert sum(stats["seriesRaw"]) == 100
+    assert len([value for value in stats["seriesRaw"] if value > 0]) == 3
+    assert max(stats["seriesRaw"]) == 60
 
 
 def test_soc_dashboard_separates_core_metric_and_source_coverage_quality(tmp_path: Path):

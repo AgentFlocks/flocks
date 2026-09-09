@@ -80,7 +80,7 @@ const EMPTY_STATS = {
   topThreatTypes: [],
   severityLevels: [],
   riskLevels: [],
-  timeline: { denoiseRaw: [], denoiseUnique: [], triageTotal: [], triageAttack: [] },
+  timeline: { denoiseRaw: [], denoiseUnique: [], denoiseReductionRate: [], triageTotal: [], triageAttack: [] },
 };
 
 const ACTIVITY_QUEUE_LIMIT = 8;
@@ -845,6 +845,7 @@ function mergeStats(raw) {
   if (denoiseMetricsUnavailable) {
     timeline.denoiseRaw = [];
     timeline.denoiseUnique = [];
+    timeline.denoiseReductionRate = [];
   }
   if (triageMetricsUnavailable) {
     timeline.triageTotal = [];
@@ -2062,7 +2063,7 @@ function CommandMetrics({ stats }) {
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: coverageScope ? `${coverageScope} · ${compactNumber(stats.denoise.totalUnique)} 条进入研判` : `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
-    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate === null ? null : stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
+    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate === null ? null : stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseReductionRate, color: '#21d8a3', key: 'rate' }),
     h(TokenUsageMetric, { tokenUsage, key: 'tokens' }),
   ]);
 }

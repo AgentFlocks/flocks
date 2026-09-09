@@ -1030,6 +1030,164 @@ def _unavailable_workflow_denoise_stats(reason):
     return result
 
 
+def _get_legacy_dashboard_metric_stats(workflow_name, start_time, end_time):
+    """Restore the original dashboard volume semantics from execution history.
+
+    The first SOC dashboard counted one denoise workflow execution as one raw
+    alert. Keep that compatibility view isolated from the newer stage-quality
+    rollups: the latter remain useful for diagnostics and source attribution,
+    but their collection began after part of the retained execution history.
+    """
+    if not WORKFLOW_DB.is_file():
+        return None
+    start_seconds = max(_safe_int(start_time), 0)
+    end_seconds = max(_safe_int(end_time), 0)
+    bucket_start, bucket_seconds, bucket_count, labels, window = _timeline_spec(
+        [],
+        start_seconds,
+        max(end_seconds, start_seconds),
+    )
+    origin_ms = bucket_start * 1000
+    bucket_ms = max(bucket_seconds, 1) * 1000
+    execution_query = (
+        "SELECT CAST((started_at - ?) / ? AS INTEGER) AS bucket_index, "
+        "COUNT(*), MIN(started_at), MAX(started_at) "
+        "FROM workflow_executions WHERE workflow_id = ?"
+    )
+    execution_params = [origin_ms, bucket_ms, workflow_name]
+    if start_seconds > 0 and end_seconds > 0:
+        execution_query += " AND started_at >= ? AND started_at <= ?"
+        execution_params.extend((start_seconds * 1000, end_seconds * 1000))
+    execution_query += " GROUP BY bucket_index ORDER BY bucket_index"
+    try:
+        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            if not _table_exists(conn, "workflow_executions"):
+                return None
+            rows = conn.execute(execution_query, execution_params).fetchall()
+            original_total = _legacy_workflow_call_count(
+                conn,
+                workflow_name,
+                start_seconds,
+                end_seconds,
+            )
+    except Exception:
+        return None
+
+    execution_series = [0] * bucket_count
+    earliest_started_at = 0
+    latest_started_at = 0
+    execution_count = 0
+    for bucket_index, row_count, first_started_at, last_started_at in rows:
+        count = max(_safe_int(row_count), 0)
+        execution_count += count
+        index = _safe_int(bucket_index)
+        if 0 <= index < bucket_count:
+            execution_series[index] += count
+        first_value = max(_safe_int(first_started_at), 0)
+        last_value = max(_safe_int(last_started_at), 0)
+        if first_value and (not earliest_started_at or first_value < earliest_started_at):
+            earliest_started_at = first_value
+        latest_started_at = max(latest_started_at, last_value)
+    call_count = execution_count if original_total is None else original_total
+    series_raw = _distribute_metric_total(call_count, execution_series)
+    return {
+        "callCount": call_count,
+        "seriesRaw": series_raw,
+        "timelineLabels": labels,
+        "timelineWindow": window,
+        "earliestStartedAt": earliest_started_at,
+        "latestStartedAt": latest_started_at,
+        "metricsAvailable": True,
+        "dataSource": "workflow.db.workflow_stats+workflow_executions.compatibility",
+    }
+
+
+def _legacy_workflow_call_count(conn, workflow_name, start_time, end_time):
+    """Read the original workflow counter without mutating its snapshot table."""
+    if not _table_exists(conn, "workflow_stats"):
+        return None
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
+    }
+    updated_expr = "updated_at" if "updated_at" in columns else "0"
+    current = conn.execute(
+        f"SELECT call_count, {updated_expr} FROM workflow_stats WHERE workflow_id = ?",
+        (workflow_name,),
+    ).fetchone()
+    if current is None:
+        return None
+    current_count = max(_safe_int(current[0]), 0)
+    if not (start_time > 0 and end_time > 0):
+        return current_count
+    if not _table_exists(conn, WORKFLOW_SNAPSHOT_TABLE):
+        updated_at = _safe_int(current[1])
+        return current_count if start_time * 1000 <= updated_at <= end_time * 1000 else None
+
+    start_ms = start_time * 1000
+    end_ms = end_time * 1000
+    previous = conn.execute(
+        f"SELECT call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at < ? "
+        "ORDER BY sampled_at DESC LIMIT 1",
+        (workflow_name, start_ms),
+    ).fetchone()
+    samples = conn.execute(
+        f"SELECT sampled_at, call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at >= ? AND sampled_at <= ? "
+        "ORDER BY sampled_at",
+        (workflow_name, start_ms, end_ms),
+    ).fetchall()
+    current_updated_at = _safe_int(current[1])
+    if (
+        start_ms <= current_updated_at <= end_ms
+        and (not samples or max(_safe_int(samples[-1][1]), 0) != current_count)
+    ):
+        samples.append((current_updated_at, current_count))
+    if not samples:
+        return None
+    previous_count = max(_safe_int(previous[0]), 0) if previous else 0
+    total = 0
+    for _, sample_count in samples:
+        next_count = max(_safe_int(sample_count), 0)
+        total += next_count - previous_count if next_count >= previous_count else next_count
+        previous_count = next_count
+    return total
+
+
+def _distribute_metric_total(total, weights):
+    """Scale an execution history shape while preserving the original total."""
+    total = max(_safe_int(total), 0)
+    normalized_weights = [max(_safe_int(value), 0) for value in weights]
+    weight_total = sum(normalized_weights)
+    if not normalized_weights:
+        return []
+    if total == 0 or weight_total == 0:
+        return [0] * len(normalized_weights)
+    distributed = []
+    cumulative_weight = 0
+    assigned = 0
+    for weight in normalized_weights:
+        cumulative_weight += weight
+        cumulative_target = round(total * cumulative_weight / weight_total)
+        distributed.append(cumulative_target - assigned)
+        assigned = cumulative_target
+    return distributed
+
+
+def _reduction_rate_series(raw_series, unique_series):
+    size = max(len(raw_series), len(unique_series))
+    result = []
+    for index in range(size):
+        raw = max(_safe_int(raw_series[index] if index < len(raw_series) else 0), 0)
+        unique = max(
+            _safe_int(unique_series[index] if index < len(unique_series) else 0),
+            0,
+        )
+        result.append(_ratio(max(raw - unique, 0), raw))
+    return result
+
+
 def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
     if not WORKFLOW_DB.is_file():
         return None
@@ -3243,11 +3401,40 @@ def _get_stats(params):
     persisted_source_counter = Counter(denoise.get("sourceCounter") or {})
     soc_unique_count = denoise["totalUnique"]
     soc_unique_series = denoise["seriesUnique"]
-    timeline_labels = workflow_stats["timelineLabels"] or denoise.get("_timelineLabels", [])
-    timeline_window = workflow_stats["timelineWindow"] or denoise.get("_timelineWindow", "")
-    workflow_series_raw = workflow_stats["seriesRaw"]
-    metrics_available = bool(workflow_stats.get("metricsAvailable"))
-    if metrics_available:
+    compatibility_stats = _get_legacy_dashboard_metric_stats(
+        "stream_alert_denoise",
+        range_start_time,
+        range_end_time,
+    )
+    compatibility_metrics_available = bool(
+        compatibility_stats
+        and compatibility_stats.get("metricsAvailable")
+        and (
+            _safe_int(compatibility_stats.get("callCount")) > 0
+            or soc_unique_count == 0
+        )
+    )
+    display_stats = (
+        compatibility_stats if compatibility_metrics_available else workflow_stats
+    )
+    timeline_labels = display_stats["timelineLabels"] or denoise.get(
+        "_timelineLabels", []
+    )
+    timeline_window = display_stats["timelineWindow"] or denoise.get("_timelineWindow", "")
+    workflow_series_raw = display_stats["seriesRaw"]
+    rollup_metrics_available = bool(workflow_stats.get("metricsAvailable"))
+    metrics_available = compatibility_metrics_available or rollup_metrics_available
+    if compatibility_metrics_available:
+        # Original dashboard contract: one workflow execution is one raw
+        # alert; persisted SOC facts are the alerts that entered triage.
+        processed_total = compatibility_stats["callCount"]
+        normalized_total = processed_total
+        after_filter_total = processed_total
+        unique_total = soc_unique_count
+        filter_removed_count = 0
+        duplicate_count = max(processed_total - soc_unique_count, 0)
+        workflow_series_unique = soc_unique_series
+    elif rollup_metrics_available:
         processed_total = workflow_stats["rawCount"]
         normalized_total = workflow_stats["normalizedCount"]
         after_filter_total = workflow_stats["afterFilterCount"]
@@ -3273,6 +3460,11 @@ def _get_stats(params):
     # Only verified filter and dedup removals contribute to the denoise rate.
     reduced_count = filter_removed_count + duplicate_count
     reduction_rate = _ratio(reduced_count, processed_total)
+    display_call_count = (
+        processed_total
+        if compatibility_metrics_available
+        else workflow_stats.get("callCount")
+    )
     workflow_source_counter = Counter(workflow_stats.get("sourceCounts") or {})
     workflow_source_metrics_available = bool(
         workflow_stats.get("sourceMetricsAvailable")
@@ -3312,16 +3504,20 @@ def _get_stats(params):
             "duplicateRate": reduction_rate,
             "dedupRate": _ratio(duplicate_count, after_filter_total),
             "uniqueRate": _ratio(min(unique_total, processed_total), processed_total),
-            "files": workflow_stats.get("callCount"),
+            "files": display_call_count,
             "sourceCounter": source_counter,
             "seriesRaw": workflow_series_raw,
             "seriesUnique": workflow_series_unique,
             "_timelineLabels": timeline_labels,
             "_timelineWindow": timeline_window,
-            "workflowCallCount": workflow_stats["callCount"],
+            "workflowCallCount": display_call_count,
             "socPersistedUnique": soc_unique_count,
-            "dataSource": workflow_stats.get("dataSource"),
-            "dataQuality": workflow_stats.get("dataQuality"),
+            "dataSource": display_stats.get("dataSource"),
+            "dataQuality": (
+                "legacy-compatible"
+                if compatibility_metrics_available
+                else workflow_stats.get("dataQuality")
+            ),
         }
     )
     triage = _read_triage(triage_files)
@@ -3414,11 +3610,31 @@ def _get_stats(params):
             "workflowStats": workflow_stats,
             "triageQuality": triage_quality,
             "metricQuality": {
-                "status": workflow_stats.get("dataQuality", "legacy"),
-                "dataAvailable": workflow_stats.get("dataAvailable", True),
-                "unavailableReason": workflow_stats.get("unavailableReason", ""),
-                "coverageComplete": workflow_stats.get("coverageComplete", False),
-                "coverageStartedAt": workflow_stats.get("coverageStartedAt", 0),
+                "status": (
+                    "legacy-compatible"
+                    if compatibility_metrics_available
+                    else workflow_stats.get("dataQuality", "legacy")
+                ),
+                "dataAvailable": (
+                    True
+                    if compatibility_metrics_available
+                    else workflow_stats.get("dataAvailable", True)
+                ),
+                "unavailableReason": (
+                    ""
+                    if compatibility_metrics_available
+                    else workflow_stats.get("unavailableReason", "")
+                ),
+                "coverageComplete": (
+                    True
+                    if compatibility_metrics_available
+                    else workflow_stats.get("coverageComplete", False)
+                ),
+                "coverageStartedAt": (
+                    compatibility_stats.get("earliestStartedAt", 0)
+                    if compatibility_metrics_available
+                    else workflow_stats.get("coverageStartedAt", 0)
+                ),
                 "sourceCoverageRate": source_coverage_rate,
                 "sourceMetricsAvailable": source_metrics_available,
                 "sourceMetricDataSource": source_metric_data_source,
@@ -3429,9 +3645,11 @@ def _get_stats(params):
                 "historicalUnprocessedInputCount": workflow_stats.get(
                     "historicalUnprocessedInputCount", 0
                 ),
-                "includesLegacyHistory": workflow_stats.get(
-                    "includesLegacyHistory", False
+                "includesLegacyHistory": (
+                    compatibility_metrics_available
+                    or workflow_stats.get("includesLegacyHistory", False)
                 ),
+                "displayMetricDataSource": display_stats.get("dataSource"),
                 "metricsAvailable": metrics_available,
             },
             "sampleMode": sample_mode,
@@ -3470,6 +3688,10 @@ def _get_stats(params):
             or _timeline_window(start_date, end_date, len(denoise["seriesRaw"])),
             "denoiseRaw": denoise["seriesRaw"],
             "denoiseUnique": denoise["seriesUnique"],
+            "denoiseReductionRate": _reduction_rate_series(
+                denoise["seriesRaw"],
+                denoise["seriesUnique"],
+            ),
             "triageTotal": triage_series_total,
             "triageAttack": triage_series_attack,
         },
