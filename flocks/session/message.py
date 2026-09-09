@@ -2469,7 +2469,12 @@ class Message:
             # Update timestamp
             time_data = message.time if hasattr(message, 'time') else message.model_dump().get("time", {})
             if isinstance(time_data, dict):
-                patch["time"] = {**time_data, "updated": int(datetime.now().timestamp() * 1000)}
+                requested_time = patch.get("time")
+                patch["time"] = {
+                    **time_data,
+                    **(requested_time if isinstance(requested_time, dict) else {}),
+                    "updated": int(datetime.now().timestamp() * 1000),
+                }
             
             updated = message.model_copy(update=patch)
             messages[msg_index] = updated
