@@ -195,8 +195,13 @@ describe('SOC dashboard contract page runtime', () => {
 
     const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
     const eventMetric = screen.getByText('安全事件量').closest('.command-metric') as HTMLElement;
+    const aiTaskTab = screen.getByRole('tab', { name: 'AI处理任务' });
+    const aiTaskHeader = aiTaskTab.closest('.event-rail-head') as HTMLElement;
     expect(within(rawMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
     expect(within(eventMetric).getByText('--')).toHaveAttribute('title', '数据不可用');
+    expect(within(aiTaskHeader).getByText('--')).toHaveAttribute('title', '数据不可用');
+    expect(screen.getByText('AI 处理任务数据加载中')).toBeInTheDocument();
+    expect(screen.queryByText('当前没有运行或等待中的 AI 任务')).not.toBeInTheDocument();
   });
 
   it('pauses task-center polling while the page is hidden', async () => {

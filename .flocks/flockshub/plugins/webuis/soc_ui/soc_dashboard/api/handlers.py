@@ -351,6 +351,68 @@ def _create_dashboard_triggers(conn):
     )
 
 
+def _ensure_dashboard_meta_schema(conn):
+    columns = {
+        str(row[1]): row
+        for row in conn.execute(f"PRAGMA table_info({META_TABLE})").fetchall()
+    }
+    if not columns:
+        conn.execute(
+            f"""
+            CREATE TABLE {META_TABLE} (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT NOT NULL
+            )
+            """
+        )
+        return False
+
+    meta_key = columns.get("meta_key")
+    meta_value = columns.get("meta_value")
+    schema_is_canonical = bool(
+        meta_key
+        and meta_value
+        and int(meta_key[5] or 0) == 1
+        and int(meta_value[3] or 0) == 1
+    )
+    if schema_is_canonical:
+        return False
+
+    # Some early deployments created this internal table without the primary
+    # key. INSERT OR REPLACE then appended schema versions indefinitely and an
+    # unordered fetchone() kept returning the oldest value. Preserve the most
+    # recent value for each valid key while restoring the canonical constraint.
+    preserved = {}
+    if meta_key and meta_value:
+        try:
+            rows = conn.execute(
+                f"SELECT meta_key, meta_value FROM {META_TABLE} ORDER BY rowid"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = conn.execute(
+                f"SELECT meta_key, meta_value FROM {META_TABLE}"
+            ).fetchall()
+        for key, value in rows:
+            if key is not None and value is not None:
+                preserved[str(key)] = str(value)
+
+    conn.execute(f"DROP TABLE {META_TABLE}")
+    conn.execute(
+        f"""
+        CREATE TABLE {META_TABLE} (
+            meta_key TEXT PRIMARY KEY,
+            meta_value TEXT NOT NULL
+        )
+        """
+    )
+    if preserved:
+        conn.executemany(
+            f"INSERT INTO {META_TABLE}(meta_key, meta_value) VALUES(?, ?)",
+            preserved.items(),
+        )
+    return True
+
+
 def _ensure_sqlite_schema():
     db_path = DEFAULT_SQLITE_DB
     if not db_path.is_file():
@@ -364,6 +426,7 @@ def _ensure_sqlite_schema():
             return True
         with sqlite3.connect(db_path, timeout=30) as conn:
             conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("BEGIN IMMEDIATE")
             exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                 (DEFAULT_SQLITE_TABLE,),
@@ -396,18 +459,15 @@ def _ensure_sqlite_schema():
                 f"CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_records_row_id "
                 f"ON {DEFAULT_SQLITE_TABLE}(row_id)"
             )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {META_TABLE} (
-                    meta_key TEXT PRIMARY KEY,
-                    meta_value TEXT NOT NULL
-                )
-                """
-            )
+            meta_schema_repaired = _ensure_dashboard_meta_schema(conn)
             version_row = conn.execute(
                 f"SELECT meta_value FROM {META_TABLE} WHERE meta_key='schema_version'"
             ).fetchone()
-            needs_rebuild = not version_row or str(version_row[0]) != SCHEMA_VERSION
+            needs_rebuild = (
+                meta_schema_repaired
+                or not version_row
+                or str(version_row[0]) != SCHEMA_VERSION
+            )
             if needs_rebuild:
                 conn.execute(f"DROP TABLE IF EXISTS {FACTS_TABLE}")
             conn.execute(

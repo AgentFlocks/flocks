@@ -226,6 +226,79 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
     assert schema_version == "4"
 
 
+def test_soc_dashboard_repairs_duplicate_schema_version_metadata(tmp_path: Path):
+    db_path = tmp_path / "soc.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE alert_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_json TEXT NOT NULL,
+                asset_date TEXT NOT NULL,
+                event_time INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (
+                json.dumps(
+                    {
+                        "_source_type": "tdp",
+                        "threat_name": "SQL injection",
+                        "triage_status": "ok",
+                        "_triage_persisted_at": "2026-09-08T18:23:14",
+                    }
+                ),
+                "2026-09-08",
+                1788862994,
+            ),
+        )
+        conn.execute(
+            "CREATE TABLE soc_dashboard_meta (meta_key TEXT, meta_value TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO soc_dashboard_meta VALUES ('schema_version', ?)",
+            [("1",), ("2",), ("2",), ("4",), ("4",)],
+        )
+        conn.execute(
+            "CREATE TABLE soc_dashboard_alert_facts "
+            "(alert_row_id INTEGER PRIMARY KEY, row_key TEXT)"
+        )
+        conn.execute("INSERT INTO soc_dashboard_alert_facts VALUES (999, 'stale')")
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    handlers._schema_ready.clear()
+
+    assert handlers._ensure_sqlite_schema() is True
+
+    with sqlite3.connect(db_path) as conn:
+        meta_columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(soc_dashboard_meta)")
+        }
+        version_rows = conn.execute(
+            "SELECT meta_key, meta_value FROM soc_dashboard_meta "
+            "WHERE meta_key='schema_version'"
+        ).fetchall()
+        facts = conn.execute(
+            "SELECT alert_row_id, row_key FROM soc_dashboard_alert_facts"
+        ).fetchall()
+
+    sources, quality = handlers._find_sqlite_sources_with_quality(
+        "2026-09-08", "2026-09-08"
+    )
+
+    assert meta_columns["meta_key"][5] == 1
+    assert meta_columns["meta_value"][3] == 1
+    assert version_rows == [("schema_version", "4")]
+    assert facts == [(1, "1")]
+    assert [source.record_count for source in sources] == [1]
+    assert quality["status"] == "complete"
+    assert quality["metricsAvailable"] is True
+
+
 def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     db_path = tmp_path / "soc.db"
     asset_date = "2026-07-14"

@@ -2566,7 +2566,9 @@ function WorkflowTaskProgress({ task }) {
 function CommandAiTaskPanel({ aiTasks }) {
   const summary = { ...createAiTasksState().summary, ...(aiTasks.summary || {}) };
   const visibleTasks = (aiTasks.tasks || []).slice(0, EVENT_RAIL_TASK_LIMIT);
-  const banner = aiTasks.connection === 'error' || aiTasks.connection === 'unavailable'
+  const banner = aiTasks.connection === 'initializing'
+    ? 'AI 处理任务数据加载中'
+    : aiTasks.connection === 'error' || aiTasks.connection === 'unavailable'
     ? '处理任务数据不可用，正在重试'
     : summary.running && summary.waiting
       ? `正在处理 ${summary.running} 个，等待 ${summary.waiting} 个`
@@ -2646,7 +2648,9 @@ function CommandAiTaskPanel({ aiTasks }) {
 }
 
 function CommandEventRail({ aiTasks, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
-  const queueCount = Math.max(Number(aiTasks.summary?.active || 0), 0);
+  const queueCount = aiTasks.connection === 'online'
+    ? Math.max(Number(aiTasks.summary?.active || 0), 0)
+    : null;
   const taskCenterCount = Number(taskCenter.sessionCount || 0);
   const content = collapsed ? [] : [
     h('div', { className: 'event-rail-head rail-view-head', key: 'head' }, [
