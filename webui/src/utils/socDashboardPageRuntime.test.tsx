@@ -359,6 +359,76 @@ describe('SOC dashboard contract page runtime', () => {
     expect(await screen.findByText('已流转至研判')).toBeInTheDocument();
   });
 
+  it('uses the persisted SOC alert when a denoise execution has no identity fields', async () => {
+    const occurredAt = new Date().toISOString();
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') return Promise.resolve({ data: {} });
+      if (path === '/activity') {
+        return Promise.resolve({
+          data: {
+            cursor: 'cursor',
+            events: [],
+            recentEvents: [
+              {
+                eventId: 'alert-row:identified-alert',
+                stage: 'denoise',
+                status: 'completed',
+                occurredAt,
+                triggerSource: 'soc_record',
+                alert: {
+                  id: 'identified-alert',
+                  sourceType: 'tdp',
+                  threatName: 'SQL注入攻击',
+                  srcIp: '192.0.2.15',
+                  dstIp: '198.51.100.27',
+                },
+                result: { clusterId: 'cluster-1', isDuplicate: false },
+              },
+            ],
+            workflowEvents: [
+              {
+                eventId: 'workflow-execution:empty-input',
+                stage: 'denoise',
+                status: 'running',
+                occurredAt,
+                triggerSource: 'workflow_execution',
+                workflowId: 'stream_alert_denoise',
+                alert: {
+                  id: 'empty-input',
+                  sourceType: 'unknown',
+                  threatName: '降噪批次',
+                },
+                result: { rawCount: 0, uniqueCount: 0 },
+              },
+            ],
+            batch: {},
+            workflowStats: { callCount: 1, latestStartedAt: Date.now() },
+          },
+        });
+      }
+      if (path === '/ai-tasks') {
+        return Promise.resolve({
+          data: {
+            connection: 'online',
+            summary: { active: 0, running: 0, waiting: 0, stale: 0, emptyInput: 1 },
+            tasks: [],
+          },
+        });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    const { container } = render(<Page />);
+
+    const core = container.querySelector('.ai-core') as HTMLElement;
+    await waitFor(() => expect(within(core).getByText('192.0.2.15')).toBeInTheDocument());
+    expect(within(core).getByText('SQL注入攻击')).toBeInTheDocument();
+    expect(within(core).getByText('198.51.100.27')).toBeInTheDocument();
+    expect(within(core).queryByText('unknown')).not.toBeInTheDocument();
+    expect(within(core).queryByText('待识别')).not.toBeInTheDocument();
+  });
+
   it('renders task center overview with corrected metric semantics', async () => {
     pageGetMock.mockImplementation((path: string) => {
       if (path === '/stats') {
@@ -573,7 +643,13 @@ describe('SOC dashboard contract page runtime', () => {
                 occurredAt: new Date(now).toISOString(),
                 triggerSource: 'workflow_execution',
                 workflowId: 'stream_alert_denoise',
-                alert: { id: 'stale-alert', threatName: '降噪批次 · 原始 1 条' },
+                alert: {
+                  id: 'stale-alert',
+                  sourceType: 'tdp',
+                  srcIp: '192.0.2.10',
+                  dstIp: '198.51.100.20',
+                  threatName: '降噪批次 · 原始 1 条',
+                },
                 result: { metricsAvailable: true, rawCount: 1, uniqueCount: 1 },
               },
             ],

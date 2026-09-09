@@ -27,7 +27,7 @@ _SE_ISO_TS_RE = re.compile(
 _SE_SPACE_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\s*\d{2}:\s*\d{2}")
 
 
-def _embedded_json_payload(text: str) -> tuple[str, Any] | None:
+def extract_embedded_json_payload(text: str) -> tuple[str, Any] | None:
     """Return the first complete JSON object/array embedded in *text*.
 
     Some security appliances label their output as RFC3164 while sending a
@@ -305,7 +305,7 @@ def _parse_rfc3164(
         remainder = (m.group(3) or "").strip()
         app_name = ""
         recovered = (
-            _embedded_json_payload(remainder)
+            extract_embedded_json_payload(remainder)
             if remainder.lstrip().startswith(("{", "["))
             else None
         )
@@ -337,7 +337,7 @@ def _parse_rfc3164(
     # Vendor streams commonly force ``format=rfc3164`` while using an ISO or
     # proprietary timestamp prefix. Recover the complete JSON value instead
     # of passing the whole envelope to the workflow's ``json.loads`` call.
-    recovered = _embedded_json_payload(rest)
+    recovered = extract_embedded_json_payload(rest)
     message = recovered[0] if recovered else rest.strip()
     result = {
         "raw": raw,

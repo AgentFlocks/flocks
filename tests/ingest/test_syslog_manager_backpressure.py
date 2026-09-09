@@ -66,6 +66,29 @@ def test_soc_alert_preview_counts_array_envelope() -> None:
     assert preview["sip"] == "192.0.2.1"
 
 
+def test_soc_alert_preview_recovers_nested_vendor_message_when_data_is_empty() -> None:
+    count, preview = syslog_manager._soc_alert_preview(
+        {
+            "format": "se",
+            "data": [],
+            "message": (
+                '2026 vendor-prefix {"event":{"event_id":"alert-2",'
+                '"source_ip":"192.0.2.30","destination_ip":"198.51.100.40",'
+                '"rule_name":"Command injection"}} vendor-tail'
+            ),
+        }
+    )
+
+    assert count == 1
+    assert preview == {
+        "id": "alert-2",
+        "_source_type": "tdp",
+        "threat_name": "Command injection",
+        "sip": "192.0.2.30",
+        "dip": "198.51.100.40",
+    }
+
+
 @pytest.mark.asyncio
 async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fixed worker pool must cap concurrent ``_trigger_workflow`` calls.

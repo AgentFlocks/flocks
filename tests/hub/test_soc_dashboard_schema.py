@@ -826,6 +826,21 @@ def test_soc_dashboard_ai_tasks_use_authoritative_active_status(tmp_path: Path):
                 "{}", "{}", "", now_ms - 3 * 60 * 60 * 1000, None,
                 now_ms - 3 * 60 * 60 * 1000, "{}",
             ),
+            (
+                "denoise-empty-running", "stream_alert_denoise", "running", "receive", 1, 7,
+                json.dumps({"_soc_alert_count": 0}),
+                json.dumps(
+                    {
+                        "stats": {
+                            "raw_count": 0,
+                            "normalized_count": 0,
+                            "after_filter_count": 0,
+                            "after_dedup_count": 0,
+                        }
+                    }
+                ),
+                "", now_ms - 500, None, now_ms, "{}",
+            ),
         ]
         conn.executemany(
             "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -847,6 +862,7 @@ def test_soc_dashboard_ai_tasks_use_authoritative_active_status(tmp_path: Path):
         "disabled": 0,
         "returned": 2,
         "truncated": False,
+        "emptyInput": 1,
     }
     assert [task["executionId"] for task in payload["tasks"]] == [
         "triage-running",
@@ -857,12 +873,11 @@ def test_soc_dashboard_ai_tasks_use_authoritative_active_status(tmp_path: Path):
     assert payload["tasks"][1]["counts"]["raw"] == 2
     assert payload["tasks"][1]["rawCountSource"] == "workflow_input"
     assert all(task["executionId"] != "denoise-empty-completed" for task in payload["tasks"])
+    assert all(task["executionId"] != "denoise-empty-running" for task in payload["tasks"])
 
-    denoise_events = handlers._get_workflow_recent_events("stream_alert_denoise")
-    event_statuses = {event["eventId"]: event["status"] for event in denoise_events}
-    assert event_statuses["workflow-execution:denoise-queued"] == "running"
-    assert event_statuses["workflow-execution:denoise-empty-completed"] == "completed"
-    assert event_statuses["workflow-execution:denoise-stale"] == "stale"
+    # Unidentified/empty transport executions must not replace a persisted
+    # SOC alert in the centre visualization.
+    assert handlers._get_workflow_recent_events("stream_alert_denoise") == []
 
 
 def test_soc_dashboard_ai_tasks_report_missing_workflow_database(tmp_path: Path):
@@ -2855,7 +2870,6 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     }
     assert [event["alert"]["threatName"] for event in activity["workflowEvents"]] == [
         "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
     ]
 
     events = handlers._get_workflow_recent_events(
@@ -2863,10 +2877,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
         start_time,
         end_time,
     )
-    assert [event["alert"]["threatName"] for event in events] == [
-        "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
-    ]
+    assert [event["alert"]["threatName"] for event in events] == ["Syslog duplicate"]
     assert events[0]["result"]["rawCount"] == 1
     assert events[0]["result"]["uniqueCount"] == 0
     assert events[0]["result"]["duplicateCount"] == 1

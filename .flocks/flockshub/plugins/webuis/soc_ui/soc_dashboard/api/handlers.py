@@ -854,6 +854,22 @@ def _workflow_input_preview(inputs):
     return {}
 
 
+def _workflow_preview_value(preview, *keys):
+    if not isinstance(preview, dict):
+        return None
+    for key in keys:
+        value = preview.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip().lower() not in {
+            "",
+            "none",
+            "null",
+            "unknown",
+            "待识别",
+        }:
+            return value
+    return None
+
+
 def _workflow_execution_metrics(output_text, input_text=""):
     output = _safe_json_object(output_text)
     inputs = _safe_json_object(input_text)
@@ -1432,10 +1448,29 @@ def _get_workflow_recent_events(
         output_text = row["output_results"]
         input_text = row["input_params"]
         payload_text = row["payload"]
+        inputs = _safe_json_object(input_text)
         metrics = _workflow_execution_metrics(output_text, input_text)
         preview = metrics["preview"]
         raw_count = metrics["rawCount"]
         unique_count = metrics["uniqueCount"]
+        source_type = metrics["sourceType"]
+        src_ip = _workflow_preview_value(
+            preview, "sip", "src_ip", "source_ip", "net_real_src_ip"
+        )
+        dst_ip = _workflow_preview_value(
+            preview, "dip", "dst_ip", "destination_ip", "net_dest_ip"
+        )
+        input_count = _workflow_task_input_count(inputs)
+        if workflow_stage == "denoise" and (
+            input_count == 0
+            or _norm(source_type) in {"unknown", "none"}
+            or not src_ip
+            or not dst_ip
+        ):
+            # Empty/unidentified transport executions are diagnostics, not
+            # alert activity. Let the persisted SOC event drive the centre
+            # visualization instead of replacing known fields with placeholders.
+            continue
         threat_name = ""
         if workflow_stage == "triage":
             threat_name = _workflow_latest_alert_name(workflow_name, output_text, input_text)
@@ -1483,10 +1518,10 @@ def _get_workflow_recent_events(
                 "sampleCount": max(unique_count, 1),
                 "alert": {
                     "id": str(preview.get("id") or execution_id),
-                    "sourceType": metrics["sourceType"],
+                    "sourceType": source_type,
                     "threatName": threat_name,
-                    "srcIp": preview.get("sip") or preview.get("src_ip") or preview.get("net_real_src_ip"),
-                    "dstIp": preview.get("dip") or preview.get("dst_ip") or preview.get("net_dest_ip"),
+                    "srcIp": src_ip,
+                    "dstIp": dst_ip,
                 },
                 "result": {
                     "isDuplicate": metrics["isDuplicate"],
@@ -2433,8 +2468,12 @@ def _workflow_task_row(row, workflow_id, effective_status):
         "currentPhase": str(row["current_phase"] or ""),
         "title": title,
         "sourceType": source_type,
-        "srcIp": preview.get("sip") or preview.get("src_ip") or preview.get("net_real_src_ip"),
-        "dstIp": preview.get("dip") or preview.get("dst_ip") or preview.get("net_dest_ip"),
+        "srcIp": _workflow_preview_value(
+            preview, "sip", "src_ip", "source_ip", "net_real_src_ip"
+        ),
+        "dstIp": _workflow_preview_value(
+            preview, "dip", "dst_ip", "destination_ip", "net_dest_ip"
+        ),
         "counts": counts,
         "dataQuality": data_quality,
         "rawCountSource": raw_count_source,
@@ -2457,6 +2496,7 @@ def _get_ai_tasks():
         "disabled": 0,
         "returned": 0,
         "truncated": False,
+        "emptyInput": 0,
     }
     if not WORKFLOW_DB.is_file():
         return {
@@ -2563,7 +2603,16 @@ def _get_ai_tasks():
                 ).fetchall()
                 for row in rows:
                     effective_status = str(row["status"] or "").lower()
-                    tasks.append(_workflow_task_row(row, workflow_id, effective_status))
+                    task = _workflow_task_row(row, workflow_id, effective_status)
+                    if task["emptyInput"]:
+                        summary["emptyInput"] += 1
+                        summary["active"] = max(summary["active"] - 1, 0)
+                        if effective_status == "running":
+                            summary["running"] = max(summary["running"] - 1, 0)
+                        elif effective_status in {"queued", "pending"}:
+                            summary["waiting"] = max(summary["waiting"] - 1, 0)
+                        continue
+                    tasks.append(task)
             tasks.sort(
                 key=lambda item: (
                     0 if item["status"] == "running" else 1,

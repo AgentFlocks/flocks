@@ -566,6 +566,13 @@ function isRunningWorkflowEvent(event) {
     && ['running', 'queued', 'pending'].includes(String(event?.status || '').toLowerCase());
 }
 
+function workflowEventHasIdentifiedAlert(event) {
+  if (event?.stage !== 'denoise') return false;
+  const source = String(event?.alert?.sourceType || '').trim().toLowerCase();
+  const validSource = source && !['unknown', 'none', '待识别'].includes(source);
+  return Boolean(validSource && event?.alert?.srcIp && event?.alert?.dstIp);
+}
+
 function normalizeActivityBatch(raw) {
   const batch = { ...emptyActivityBatch(), ...(raw || {}) };
   for (const key of ['windowMs', 'receivedCount', 'duplicateCount', 'uniqueCount', 'clusterCount', 'triageUpdatedCount', 'sampledCount', 'suppressedCount', 'ratePerSecond']) {
@@ -2984,9 +2991,15 @@ export default function Page() {
           const rawIncomingEvents = bootstrap
             ? recentUnseenActivity(payload.recentEvents)
             : (payload.events || []);
-          const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
           const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
-          const activeWorkflowEvents = workflowEvents.filter(isRunningWorkflowEvent);
+          const hasIdentifiedWorkflowDenoise = workflowEvents.some(workflowEventHasIdentifiedAlert);
+          const incomingEvents = rawIncomingEvents.filter((event) => (
+            event?.stage !== 'denoise' || !hasIdentifiedWorkflowDenoise
+          ));
+          const activeWorkflowEvents = workflowEvents.filter((event) => (
+            isRunningWorkflowEvent(event)
+            && (event?.stage !== 'denoise' || workflowEventHasIdentifiedAlert(event))
+          ));
           const rawCallCount = payload.workflowStats?.callCount;
           const hasWorkflowCount = rawCallCount !== null
             && rawCallCount !== undefined
@@ -3018,7 +3031,9 @@ export default function Page() {
                 workflowIdFromEvent(workflowEvent)
                 && executionIdFromWorkflowEvent(workflowEvent)
               );
-              return hasExecution && (
+              const displayable = workflowEvent?.stage !== 'denoise'
+                || workflowEventHasIdentifiedAlert(workflowEvent);
+              return hasExecution && displayable && (
                 isRunningWorkflowEvent(workflowEvent)
                 || currentWorkflowEventIds.has(workflowEvent.eventId)
               );
