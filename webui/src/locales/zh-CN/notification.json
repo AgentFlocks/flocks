@@ -1,5 +1,7 @@
 {
   "title": "Flocks 通知",
+  "tokenPolicyTitle": "Flocks社区公告｜关于10月的模型使用额度",
+  "tokenPolicyBody": "各位Flocks社区伙伴：\n\n感谢你一路以来对Flocks的支持，也感谢大家把自己的经验和使用反馈带回社区。为了支持平台持续维护、让更多安全运营场景长期用起来，我们将在10月1日调整模型额度的支持方式，引入按金额计费和自助充值机制。\n\n9月内，现行免费Token策略持续有效。\n\n**10月1日起，调整如下：**\n\n1. **每天仍有免费额度。** 每人每天仍然免费赠送1000w Token模型调用额度。\n2. **需要更多用量时，可以自主充值。** 使用X社区账号登录[https://portal.agentflocks.com](https://portal.agentflocks.com)，即可自助充值，满足超出每日免费额度的使用需求。企业用户也可以联系微步销售，沟通团队后续的模型用量及相关服务需求。\n3. **原有额外支持将同步调整。** 10月1日起，公共免费Token池及此前单独增加的临时额度（包括每日3000万以上Token额度）将停止提供，统一按新的额度规则使用。\n\n本次调整涉及微步模型平台的Token支持与购买方式。我们理解，这会影响部分伙伴现有的使用安排。如果你正在运行巡检、告警研判等定时任务，建议评估了解对应模型的价格、任务频率和日常消耗，提前做好额度和预算准备。对使用临时加额或依赖公共池的伙伴，这可能会改变后续的可用额度和使用成本，所以提前一个月左右和大家说明，也欢迎大家在群里或私戳群主，反馈使用过程中遇到的具体问题。\n\n企业采购需求请联系微步销售。\n\n感谢大家一直以来的支持。期待和大家一起，把已经跑通的安全运营场景持续用好、不断完善。\n\n项目地址：[https://github.com/AgentFlocks/flocks](https://github.com/AgentFlocks/flocks)  \n使用文档：[https://agentflocks.github.io/flocks-docs/](https://agentflocks.github.io/flocks-docs/)  \n充值入口：[https://portal.agentflocks.com](https://portal.agentflocks.com)\n\nFlocks团队  \n2026年9月9日",
   "subtitle": "福利提醒和版本变化都在这里。",
   "close": "关闭通知",
   "gotIt": "知道了",
