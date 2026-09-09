@@ -11,7 +11,7 @@ export function StatusBadge({
 }) {
   const { t } = useCodeSecurityI18n();
   const label = t(
-    lifecycleLabels[status] || phaseStatusLabels[status] || status,
+    lifecycleLabels[status] || phaseStatusLabels[status] || "未知状态",
   );
   const localizedContext = t(context);
   return (

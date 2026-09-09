@@ -282,7 +282,7 @@ export function ScanListPanel({
                     onSelect(scan.scan_id);
                     if (overlayLayout) onClose();
                   }}
-                  aria-label={`${scan.display_name} · ${t(lifecycleLabels[scan.lifecycle_status] || scan.lifecycle_status)}`}
+                  aria-label={`${scan.display_name} · ${t(lifecycleLabels[scan.lifecycle_status] || "未知状态")}`}
                   aria-current={
                     selectedId === scan.scan_id ? "page" : undefined
                   }

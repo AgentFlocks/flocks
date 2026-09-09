@@ -6,7 +6,8 @@ import {
   formatDuration,
   formatFileSize,
   formatTime,
-  phaseLabels,
+  phaseLabel,
+  roleLabels,
   shortId,
 } from "../labels";
 import type {
@@ -34,16 +35,6 @@ const PHASE_ORDER = [
   "poc_generation",
   "finalization",
 ];
-
-const roleLabels: Record<string, string> = {
-  threat_modeler: "威胁建模员",
-  baseline: "基线分析员",
-  investigator: "定向调查员",
-  verifier: "静态验证员",
-  prober: "动态探测员",
-  poc_generator: "PoC 生成员",
-  cybergym_solver: "动态验证员",
-};
 
 const severityLabels: Record<string, string> = {
   critical: "严重",
@@ -136,7 +127,7 @@ export function PhaseWorkspace({
     [phases],
   );
   const phaseTitle = (phase: PhaseRun) => {
-    const label = t(phaseLabels[phase.phase] || phase.phase);
+    const label = t(phaseLabel(phase.phase));
     const round =
       phase.phase === "adjudication"
         ? (numberValue(phase.summary?.adjudication_round) ?? phase.ordinal)
@@ -1005,7 +996,7 @@ function WorkerAttemptHistory({ attempts }: { attempts: WorkerAttempt[] }) {
                 {t("第 {{ordinal}} 次执行", { ordinal: attempt.ordinal })}
               </strong>
               <small>
-                {t(attemptStatusLabels[attempt.status] || attempt.status)}
+                {t(attemptStatusLabels[attempt.status] || "未知状态")}
               </small>
             </div>
             <code>
@@ -1270,7 +1261,7 @@ function WorkerList({
                   <div className="cs-worker-card__identity">
                     <div className="cs-worker-card__title">
                       <strong>
-                        {t(roleLabels[worker.role] || worker.role)}
+                        {t(roleLabels[worker.role] || "未知角色")}
                       </strong>
                       <span
                         className="cs-worker-model"
@@ -1312,10 +1303,7 @@ function WorkerList({
                           <span
                             className={`cs-severity cs-severity--${candidate.severity}`}
                           >
-                            {t(
-                              severityLabels[candidate.severity] ||
-                                candidate.severity,
-                            )}
+                            {t(severityLabels[candidate.severity] || "未知")}
                           </span>
                         )}
                         <span

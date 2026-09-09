@@ -9,7 +9,7 @@ import {
 
 import { Icon } from "../icons";
 import { useCodeSecurityI18n, type Translator } from "../i18n";
-import { formatTime, phaseLabels, phaseStatusLabels, shortId } from "../labels";
+import { formatTime, phaseLabel, phaseStatusLabels, shortId } from "../labels";
 import type { AuditEvent } from "../types";
 
 const ROW_HEIGHT = 72;
@@ -125,9 +125,7 @@ export function EventStream({
       )
     : grouped.length;
   const visible = grouped.slice(start, end);
-  const phaseFilterLabel = t(
-    phase === "all" ? "全部阶段" : phaseLabels[phase] || phase,
-  );
+  const phaseFilterLabel = t(phase === "all" ? "全部阶段" : phaseLabel(phase));
 
   const returnToLatest = () => {
     setAutoFollow(true);
@@ -174,7 +172,7 @@ export function EventStream({
               <option value="all">{t("全部阶段")}</option>
               {phaseOptions.map((value) => (
                 <option key={value} value={value}>
-                  {t(phaseLabels[value] || value)}
+                  {t(phaseLabel(value))}
                 </option>
               ))}
             </select>
@@ -384,7 +382,7 @@ function EventRow({
       <div>
         <strong>{title}</strong>
         <p>
-          <span>{t(phaseLabels[phase] || phase || event.type)}</span>
+          <span>{t(phase ? phaseLabel(phase) : "代码审计")}</span>
           {group.count > 1 && (
             <span
               className="cs-event-row__group"

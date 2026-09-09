@@ -9,10 +9,27 @@ export const phaseLabels: Record<string, string> = {
   verification: "静态验证",
   poc_generation: "PoC 生成",
   dynamic_validation: "动态验证",
+  probing: "动态探测",
+  cybergym_solving: "动态验证",
   adjudication: "主智能体裁决",
   targeted_rescan: "定向复扫",
   finalization: "产物封装",
 };
+
+export const roleLabels: Record<string, string> = {
+  coordinator: "主智能体",
+  threat_modeler: "威胁建模员",
+  baseline: "基线分析员",
+  investigator: "定向调查员",
+  verifier: "静态验证员",
+  prober: "动态探测员",
+  poc_generator: "PoC 生成员",
+  cybergym_solver: "动态验证员",
+};
+
+export function phaseLabel(phase: string): string {
+  return phaseLabels[phase] || "未知阶段";
+}
 
 export const lifecycleLabels: Record<string, string> = {
   preparing: "准备中",

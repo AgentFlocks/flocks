@@ -27,6 +27,7 @@ import {
   integrityStatusLabels,
   lifecycleLabels,
   phaseLabels,
+  roleLabels,
   phaseStatusLabels,
   severityLabels,
   verdictLabels,
@@ -1778,17 +1779,33 @@ describe("code security workspace contract page", () => {
     ]);
   });
 
-  it.each([
-    ["zh-CN", "PoC 生成"],
-    ["en-US", "PoC generation"],
-  ])("localizes the PoC phase in %s", (language, title) => {
+  it.each(
+    [
+      ["snapshot", "准备源码快照", "Prepare source snapshot"],
+      ["threat_modeling", "威胁建模", "Threat modeling"],
+      ["baseline", "基线扫描", "Baseline scan"],
+      ["investigation", "定向调查", "Targeted investigation"],
+      ["verification", "静态验证", "Static validation"],
+      ["poc_generation", "PoC 生成", "PoC generation"],
+      ["probing", "动态探测", "Dynamic probing"],
+      ["cybergym_solving", "动态验证", "Dynamic validation"],
+      ["dynamic_validation", "动态验证", "Dynamic validation"],
+      ["adjudication", "主智能体裁决", "Primary agent adjudication"],
+      ["targeted_rescan", "定向复扫", "Targeted rescan"],
+      ["finalization", "产物封装", "Artifact packaging"],
+      ["future_internal_phase", "未知阶段", "Unknown phase"],
+    ].flatMap(([phase, chinese, english]) => [
+      [phase, "zh-CN", chinese],
+      [phase, "en-US", english],
+    ]),
+  )("localizes %s in %s", (phase, language, title) => {
     codeSecurityLanguage = language;
     render(
       <PhaseWorkspace
         phases={[
           {
             phase_run_id: "phase_poc",
-            phase: "poc_generation",
+            phase,
             ordinal: 1,
             status: "completed",
             duration_ms: 2_504_000,
@@ -1796,12 +1813,44 @@ describe("code security workspace contract page", () => {
         ]}
         events={[]}
         workers={[]}
-        currentPhase="poc_generation"
+        currentPhase={phase}
       />,
     );
     expect(screen.getByRole("tab")).toHaveTextContent(title);
     expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
-    expect(screen.queryByText("poc_generation")).not.toBeInTheDocument();
+    expect(screen.queryByText(phase)).not.toBeInTheDocument();
+  });
+
+  it("localizes raw worker phases in event rows and filters", () => {
+    const phases = [
+      "investigation",
+      "probing",
+      "cybergym_solving",
+      "future_internal_phase",
+    ];
+    render(
+      <EventStream
+        events={phases.map((phase, index) => ({
+          seq: index + 1,
+          scan_id: "scan_demo",
+          type: "phase.started",
+          level: "info",
+          title: "审计阶段已开始",
+          summary: { phase },
+          created_at: "2026-09-09T06:00:00Z",
+        }))}
+        hasOlder={false}
+        loading={false}
+        loadingOlder={false}
+        onLoadOlder={async () => undefined}
+      />,
+    );
+    for (const label of ["定向调查", "动态探测", "动态验证", "未知阶段"]) {
+      expect(screen.getByRole("option", { name: label })).toBeInTheDocument();
+      expect(screen.getAllByText(label).length).toBeGreaterThan(1);
+    }
+    for (const phase of phases)
+      expect(screen.queryByText(phase)).not.toBeInTheDocument();
   });
 
   it("shows the immutable snapshot boundary instead of an empty worker panel", () => {
@@ -2529,6 +2578,7 @@ describe("code security workspace contract page", () => {
   it("provides English translations for every shared code security label", () => {
     const sharedLabels = [
       phaseLabels,
+      roleLabels,
       lifecycleLabels,
       phaseStatusLabels,
       integrityStatusLabels,

@@ -809,10 +809,7 @@ export default function Page() {
                   {scans.map((scan) => (
                     <option key={scan.scan_id} value={scan.scan_id}>
                       {scan.display_name} ·{" "}
-                      {t(
-                        lifecycleLabels[scan.lifecycle_status] ||
-                          scan.lifecycle_status,
-                      )}
+                      {t(lifecycleLabels[scan.lifecycle_status] || "未知状态")}
                     </option>
                   ))}
                 </select>
