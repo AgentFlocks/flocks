@@ -1872,10 +1872,14 @@ async def _launch_worker(
             candidate_id=candidate["candidate_id"],
         )
     elif phase == "poc_generation" and candidate is not None:
+        cybergym_input_required = await asyncio.to_thread(
+            lambda: runtime.store.get_cybergym_task(scan_id) is not None
+        )
         prompt = poc_generator_prompt(
             snapshot_id=snapshot_id,
             candidate_id=candidate["candidate_id"],
             knowledge_base_present=knowledge_base_present,
+            cybergym_input_required=cybergym_input_required,
         )
     elif phase == "cybergym_solving":
         prompt = cybergym_solver_prompt(recovery_reason=recovery_reason)

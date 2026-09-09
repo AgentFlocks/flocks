@@ -19,7 +19,7 @@ from flocks_code_security.cybergym_runtime import (
     _run_official_worker,
 )
 from flocks_code_security.models import SnapshotRef
-from flocks_code_security.poc import resolve_cybergym_input
+from flocks_code_security.poc import require_cybergym_submission_input, resolve_cybergym_input
 from flocks_code_security.runtime import build_runtime
 from flocks_code_security.store import ScanStore
 
@@ -179,6 +179,21 @@ def test_cybergym_input_rejects_an_unmatched_declared_file() -> None:
 
     with pytest.raises(ValueError, match="identify exactly one"):
         resolve_cybergym_input(bundle)
+
+
+def test_cybergym_submission_input_is_one_bounded_literal_raw_file() -> None:
+    bundle = {
+        "artifact_type": "raw_input",
+        "entrypoint": "seed.bin",
+        "files": [{"path": "seed.bin", "encoding": "hex", "data": "73656564"}],
+        "delivery": {"input_kind": "literal", "input_path": "seed.bin"},
+    }
+
+    assert require_cybergym_submission_input(bundle, max_bytes=4) == (b"seed", "seed.bin")
+
+    bundle["artifact_type"] = "bundle"
+    with pytest.raises(ValueError, match="artifact_type=raw_input"):
+        require_cybergym_submission_input(bundle, max_bytes=4)
 
 
 def test_manifest_rejects_root_mount_and_persists_only_valid_tasks(tmp_path: Path) -> None:

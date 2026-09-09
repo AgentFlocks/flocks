@@ -46,6 +46,20 @@ def test_poc_prompt_preserves_target_language_delivery_distinction() -> None:
     assert "not guessed offsets" in prompt
 
 
+def test_cybergym_poc_prompt_requires_a_direct_harness_input() -> None:
+    prompt = poc_generator_prompt(
+        snapshot_id="snapshot_1",
+        candidate_id="candidate_1",
+        cybergym_input_required=True,
+    )
+
+    assert "artifact_type raw_input" in prompt
+    assert "delivery.input_kind=literal" in prompt
+    assert "source_harness" in prompt
+    assert "fixed runner" in prompt
+    assert "source_harness for a C/C++ API" not in prompt
+
+
 def test_worker_launcher_imports_the_poc_prompt_builder() -> None:
     """PoC worker launch must fail after task creation only for real launch errors."""
     assert tools_module.poc_generator_prompt is poc_generator_prompt

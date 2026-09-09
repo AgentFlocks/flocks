@@ -65,6 +65,37 @@ def resolve_cybergym_input(bundle: Any) -> tuple[bytes, str]:
     return raw, path
 
 
+def require_cybergym_submission_input(
+    bundle: Any,
+    *,
+    max_bytes: int,
+) -> tuple[bytes, str]:
+    """Validate a PoC that can be sent to CyberGym without materialization.
+
+    CyberGym's official runner mounts one input file.  Keep generic bundles
+    flexible for normal audits, but make the producer of a CyberGym PoC commit
+    to that exact byte sequence before the dynamic phase starts.
+    """
+    if not isinstance(bundle, dict) or bundle.get("artifact_type") != "raw_input":
+        raise ValueError("CyberGym PoC must use artifact_type=raw_input")
+    files = bundle.get("files")
+    if not isinstance(files, list) or len(files) != 1:
+        raise ValueError("CyberGym PoC must contain exactly one raw input file")
+    delivery = bundle.get("delivery")
+    if not isinstance(delivery, dict) or delivery.get("input_kind") != "literal":
+        raise ValueError("CyberGym PoC requires delivery.input_kind=literal")
+    entrypoint = bundle.get("entrypoint")
+    input_path = delivery.get("input_path")
+    if not isinstance(entrypoint, str) or input_path != entrypoint:
+        raise ValueError("CyberGym PoC delivery.input_path must equal entrypoint")
+    raw, path = resolve_cybergym_input(bundle)
+    if path != entrypoint:
+        raise ValueError("CyberGym PoC entrypoint must identify its raw input")
+    if type(max_bytes) is not int or not 1 <= len(raw) <= max_bytes:
+        raise ValueError("CyberGym PoC input exceeds the trusted task byte limit")
+    return raw, path
+
+
 def materialize_bit_recipe(raw: bytes, recipe: Any, *, max_bytes: int) -> bytes:
     """Apply bounded, deterministic MSB-first bit edits to an existing seed.
 

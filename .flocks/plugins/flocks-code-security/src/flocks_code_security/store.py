@@ -44,6 +44,7 @@ from flocks_code_security.models import (
 from flocks_code_security.poc import (
     POC_FILE_ENCODINGS,
     decode_poc_bytes,
+    require_cybergym_submission_input,
 )
 
 
@@ -2794,7 +2795,16 @@ class ScanStore:
                 (binding.scan_id,),
             ).fetchone()
             if cybergym is not None:
-                execution_manifest["cybergym"] = json.loads(cybergym["manifest_json"])
+                cybergym_manifest = json.loads(cybergym["manifest_json"])
+                execution_manifest["cybergym"] = cybergym_manifest
+                execution_manifest["cybergym_poc_contract"] = {
+                    "artifact_type": "raw_input",
+                    "file_count": 1,
+                    "entrypoint_matches_input_path": True,
+                    "input_kind": "literal",
+                    "max_bytes": cybergym_manifest["limits"]["max_artifact_bytes"],
+                    "dynamic_phase": "replay, vul/fix confirmation, and bounded refinement",
+                }
             output = {
                 "candidate_id": candidate["candidate_id"],
                 "trust": "untrusted_candidate_claim",
@@ -2920,6 +2930,18 @@ class ScanStore:
             scan = self._require_scan_status(connection, binding.scan_id, {"running"})
             if not bool(scan["poc_enabled"]):
                 raise ValueError("PoC generation is not enabled for this scan")
+            if scan["mode"] == "cybergym_level1":
+                cybergym = connection.execute(
+                    "SELECT manifest_json FROM cybergym_tasks WHERE scan_id = ?",
+                    (binding.scan_id,),
+                ).fetchone()
+                if cybergym is None:
+                    raise ValueError("CyberGym task is missing from this scan")
+                manifest = json.loads(cybergym["manifest_json"])
+                require_cybergym_submission_input(
+                    bundle,
+                    max_bytes=manifest.get("limits", {}).get("max_artifact_bytes"),
+                )
             self._require_active_worker_binding(connection, binding)
             assignment = connection.execute(
                 "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
