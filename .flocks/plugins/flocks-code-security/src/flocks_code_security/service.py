@@ -144,6 +144,7 @@ class StartScanRequest:
     model: str | None = None
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
+    source_exclusions: tuple[dict[str, str], ...] = ()
     max_file_bytes: int | None = None
     max_total_bytes: int | None = None
     copy_source: bool = True
@@ -625,6 +626,7 @@ class AuditService:
             model=(request.model or "").strip() or None,
             include_paths=self._validate_relative_paths(request.include_paths, "include_paths"),
             exclude_patterns=self._validate_exclude_patterns(request.exclude_patterns),
+            source_exclusions=self._validate_source_exclusions(request.source_exclusions, request.exclude_patterns),
             max_file_bytes=request.max_file_bytes,
             max_total_bytes=request.max_total_bytes,
             copy_source=bool(request.copy_source),
@@ -761,6 +763,11 @@ class AuditService:
                     return await self.get_scan(existing["scan_id"], caller)
                 raise AuditServiceError("idempotency_conflict", str(exc), status_code=409) from exc
 
+            if normalized.source_exclusions:
+                self.store.append_scan_event(
+                    scan_id, "source.archive_exclusions", "External source symlinks explicitly excluded",
+                    {"exclusions": list(normalized.source_exclusions)}, level="warning",
+                )
             if knowledge_base is not None:
                 prepared = {
                     **prepared,
@@ -1642,6 +1649,23 @@ class AuditService:
         return normalized
 
     @staticmethod
+    def _validate_source_exclusions(values, patterns) -> tuple[dict[str, str], ...]:
+        import glob
+
+        if len(values) > 128 or len(json.dumps(values).encode("utf-8")) > 48_000:
+            raise AuditServiceError("invalid_parameter", "Source exclusion metadata exceeds limit")
+        result = []
+        for item in values:
+            if (not isinstance(item, dict) or set(item) != {"path", "target", "reason"}
+                    or not all(isinstance(value, str) for value in item.values())
+                    or item["reason"] != "external_symlink"
+                    or not item["target"].startswith("/")
+                    or glob.escape(item["path"]) not in patterns):
+                raise AuditServiceError("invalid_parameter", "Source exclusions must match explicit audit scope")
+            result.append(dict(item))
+        return tuple(result)
+
+    @staticmethod
     def _validate_knowledge_base(
         value: KnowledgeBaseInput | None,
     ) -> KnowledgeBaseInput | None:
@@ -1720,6 +1744,8 @@ class AuditService:
                 else None
             ),
         }
+        if request.source_exclusions:
+            payload["source_exclusions"] = list(request.source_exclusions)
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 

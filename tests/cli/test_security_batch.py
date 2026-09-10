@@ -559,3 +559,69 @@ def test_named_container_cleanup_escapes_name_filter(tmp_path, monkeypatch):
     batch_dynamic.remove_containers("batch:0", "runner.v1")
     assert "name=^/runner\\.v1$" in calls[0]
     assert "label=flocks.batch.task=batch:0" in calls[0]
+
+
+def _archive_with_link(tmp_path, entries):
+    archive = tmp_path / "links.tar.gz"
+    with tarfile.open(archive, "w:gz") as out:
+        source = tarfile.TarInfo("main.c")
+        source.size = 4
+        out.addfile(source, io.BytesIO(b"code"))
+        for name, target, kind in entries:
+            entry = tarfile.TarInfo(name)
+            entry.type = kind
+            entry.linkname = target
+            out.addfile(entry)
+    destination = tmp_path / "source"
+    destination.mkdir()
+    return archive, destination
+
+
+def test_explicit_external_symlink_exclusion_never_materializes_host_file(tmp_path):
+    outside = tmp_path / "host-secret"
+    outside.write_text("must not enter source")
+    archive, source = _archive_with_link(tmp_path, [
+        ("./install-sh", str(outside), tarfile.SYMTYPE),
+        ("alias.c", "main.c", tarfile.SYMTYPE),
+    ])
+    result = extract_source(archive, source, 100, skip_external_symlinks={"install-sh": str(outside)})
+    assert result == [{"path": "install-sh", "target": str(outside), "reason": "external_symlink"}]
+    assert not (source / "install-sh").exists()
+    assert (source / "alias.c").read_bytes() == b"code"
+    assert outside.read_text() == "must not enter source"
+
+
+@pytest.mark.parametrize("entries,policy", [
+    ([("install-sh", "/etc/passwd", tarfile.SYMTYPE)], {"install-sh": "/usr/share/install-sh"}),
+    ([("../install-sh", "/usr/share/install-sh", tarfile.SYMTYPE)], {"install-sh": "/usr/share/install-sh"}),
+    ([("install-sh", "/usr/share/install-sh", tarfile.LNKTYPE)], {"install-sh": "/usr/share/install-sh"}),
+    ([("install-sh", "/usr/share/install-sh", tarfile.SYMTYPE), ("alias", "install-sh", tarfile.SYMTYPE)], {"install-sh": "/usr/share/install-sh"}),
+    ([("install-sh", "/usr/share/install-sh", tarfile.SYMTYPE), ("alias", "install-sh", tarfile.LNKTYPE)], {"install-sh": "/usr/share/install-sh"}),
+    ([("install-sh", "/usr/share/install-sh", tarfile.SYMTYPE), ("install-sh/child", "main.c", tarfile.SYMTYPE)], {"install-sh": "/usr/share/install-sh"}),
+])
+def test_exclusion_does_not_relax_other_archive_guards(tmp_path, entries, policy):
+    archive, source = _archive_with_link(tmp_path, entries)
+    with pytest.raises((ValueError, tarfile.FilterError)):
+        extract_source(archive, source, 100, skip_external_symlinks=policy)
+    assert not list(source.iterdir())
+
+
+def test_batch_freezes_exact_link_policy_and_cli_exposes_option(tmp_path, monkeypatch):
+    root = make_batch(tmp_path, monkeypatch)
+    second = batch.prepare_batch(tmp_path / "input", run_dir=tmp_path / "second",
+        concurrency=1, task_timeout=10, model=None, poc=False, max_snapshot_bytes=1024,
+        skip_external_symlinks=["./install-sh=/usr/share/install-sh"])
+    assert batch.read_json(second / "batch.json")["skip_external_symlinks"] == {"install-sh": "/usr/share/install-sh"}
+    assert batch.read_json(root / "batch.json")["skip_external_symlinks"] == {}
+    from flocks.cli.commands import security_batch
+    monkeypatch.setattr(security_batch, "_run", lambda *_: None)
+    result = CliRunner().invoke(security_app, ["batch", "run", str(tmp_path / "input"),
+        "--run-dir", str(tmp_path / "cli"), "--skip-external-symlink", "install-sh=/usr/share/install-sh"])
+    assert result.exit_code == 0, result.stdout
+    assert batch.read_json(tmp_path / "cli/batch.json")["skip_external_symlinks"] == {"install-sh": "/usr/share/install-sh"}
+
+
+@pytest.mark.parametrize("rule", ["/absolute=/target", "../outside=/target", "name=relative", "name", "name\\child=/target"])
+def test_invalid_link_exclusion_rules_are_rejected(rule):
+    with pytest.raises(ValueError):
+        batch.parse_link_exclusions([rule])

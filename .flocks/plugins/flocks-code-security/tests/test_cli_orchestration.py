@@ -1314,3 +1314,16 @@ async def test_poc_partial_batch_drains_unassigned_candidates(tmp_path, monkeypa
     assert phase.await_count == 2
     assert result["counts"]["confirmed_without_poc_bundle"] > 0
     assert "poc_generation.incomplete" in events
+
+
+@pytest.mark.asyncio
+async def test_cli_passes_archive_exclusions_to_service(tmp_path, monkeypatch):
+    from flocks_code_security import service as service_module
+    exclusions = [{"path": "install-sh", "target": "/usr/share/install-sh", "reason": "external_symlink"}]
+    async def run_scan(request, caller, *, progress):
+        assert request.source_exclusions == tuple(exclusions)
+        assert request.exclude_patterns == ("install-sh",)
+        assert service_module.AuditService._validate_source_exclusions(request.source_exclusions, request.exclude_patterns) == tuple(exclusions)
+        return {"status": "completed"}
+    monkeypatch.setattr(service_module, "get_audit_service", lambda: SimpleNamespace(run_scan=run_scan))
+    await audit_cli.run_standard_audit(tmp_path, source_exclusions=exclusions, exclude_patterns=["install-sh"])

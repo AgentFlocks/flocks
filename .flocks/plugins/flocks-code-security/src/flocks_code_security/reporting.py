@@ -209,6 +209,10 @@ class ReportWriter:
                 }
             )
             supplemental_contents: dict[str, bytes] = {}
+            if data.get("source_exclusions"):
+                supplemental_contents["source-exclusions.json"] = canonical_json_bytes({
+                    "scanId": scan_id, "exclusions": data["source_exclusions"],
+                })
             if scan["dynamic_enabled"]:
                 dynamic_document = {
                     "documentType": "flocks-code-security.dynamic-validation",
@@ -381,6 +385,11 @@ class ReportWriter:
                 poc_generation=poc_document,
             )
             manifest["scan"]["status"] = final_status
+            if data.get("source_exclusions"):
+                manifest["scan"]["scope"].setdefault("limitations", []).append(
+                    f"{len(data['source_exclusions'])} external archive symlink(s) were explicitly excluded; "
+                    "coverage describes the remaining source only. See source-exclusions.json."
+                )
             if missing_poc_ids:
                 manifest["scan"]["scope"].setdefault("limitations", []).append(failure_summary)
             artifact_contents.update(
@@ -1083,7 +1092,14 @@ class ReportWriter:
             key=question_key,
         )
 
+        import glob
+
+        archive_exclusions = {glob.escape(item["path"]): item for item in data.get("source_exclusions", [])}
+
         def exclusion_reason(pattern: str) -> str:
+            if pattern in archive_exclusions:
+                item = archive_exclusions[pattern]
+                return f"external_symlink: target {item['target']} was not read; explicitly excluded from archive"
             if pattern in DEFAULT_EXCLUDES:
                 return "Excluded by the deterministic snapshot safety policy"
             return "Excluded by the requested audit scope"
@@ -1431,6 +1447,8 @@ class ReportWriter:
             f"- Deferred work: **{len(coverage['deferred'])}**",
             f"- Static validation limitations: **{len(limitations)}**",
         ]
+        for limitation in scan.get("scope", {}).get("limitations", []):
+            lines.append("- Scope limitation: " + ReportWriter._markdown_text(limitation))
         missing_pocs = (scan.get("pocGeneration") or {}).get("missingCandidateIds", [])
         if missing_pocs:
             lines.append("- PoC generation incomplete; missing candidates: " + ", ".join(

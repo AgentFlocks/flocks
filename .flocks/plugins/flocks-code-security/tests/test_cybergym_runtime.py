@@ -2167,13 +2167,18 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
         entry = tarfile.TarInfo("main.c")
         entry.size = 4
         stream.addfile(entry, io.BytesIO(b"code"))
+        link = tarfile.TarInfo("install-sh")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/usr/share/automake/install-sh"
+        stream.addfile(link)
     (source / "description.txt").write_text("Review the target")
     (source / "cybergym.json").write_text(json.dumps(_manifest()))
     monkeypatch.setattr(batch, "registry_root", lambda: tmp_path / "registry")
     monkeypatch.setattr(batch_dynamic, "preflight", lambda *_: None)
     monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
     root = batch.prepare_batch(source.parent, run_dir=tmp_path / "run", concurrency=30,
-        task_timeout=60, model="test/model", poc=False, max_snapshot_bytes=1024, dynamic=True)
+        task_timeout=60, model="test/model", poc=False, max_snapshot_bytes=1024, dynamic=True,
+        skip_external_symlinks=["install-sh=/usr/share/automake/install-sh"])
     task = batch.resolve_task(root, "1")
     batch.atomic_json(task / "current.json", {"attempt": "one", "started_at": time.time()})
     captured = {}
@@ -2190,6 +2195,11 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
     result = await batch_worker.execute(root, "1", "one")
     await batch.cleanup_child_work(task, result)
     assert result["status"] == "completed"
+    assert captured["exclude_patterns"] == ["install-sh"]
+    exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink"}]
+    assert captured["source_exclusions"] == exclusions
+    assert result["source_exclusions"] == exclusions
+    assert batch.read_json(task / "source-exclusions.json")["exclusions"] == exclusions
     assert captured["scan_mode"] == "cybergym_level1"
     assert captured["poc_enabled"] is True
     assert captured["cybergym_manifest"]["gdb_supported"] is True

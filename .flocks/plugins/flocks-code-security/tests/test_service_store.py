@@ -2061,3 +2061,12 @@ def test_initialize_migrates_legacy_coverage_as_untrusted_partial_state(
 
     store.initialize()
     assert len(store.list_latest_coverage(scan_id)) == 1
+
+
+def test_archive_exclusions_require_explicit_scope_and_affect_request_identity():
+    exclusions = ({"path": "install-sh", "target": "/usr/share/install-sh", "reason": "external_symlink"},)
+    with pytest.raises(AuditServiceError, match="explicit audit scope"):
+        AuditService._validate_source_exclusions(exclusions, ())
+    first = StartScanRequest(target_path=Path("/tmp/source"), exclude_patterns=("install-sh",), source_exclusions=exclusions)
+    second = StartScanRequest(target_path=Path("/tmp/source"), exclude_patterns=("install-sh",))
+    assert AuditService._request_digest(first) != AuditService._request_digest(second)

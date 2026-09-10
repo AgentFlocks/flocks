@@ -1283,9 +1283,14 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     monkeypatch.setattr(cleanup_module, "_delete_session", AsyncMock(return_value=0))
     monkeypatch.setattr(cleanup_module, "_owned_worker_sessions", AsyncMock(return_value=[]))
     monkeypatch.setattr(cleanup_module, "runtime_dir", lambda: tmp_path / "runtime")
-    prepared = await audit_prepare(coordinator, str(target), cleanup_intermediates=cleanup_enabled)
+    prepared = await audit_prepare(coordinator, str(target), cleanup_intermediates=cleanup_enabled,
+                                   exclude_patterns=["install-sh"] if poc_failed else None)
     assert prepared.success is True
     scan_id = prepared.output["scan_id"]
+    if poc_failed:
+        source_exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink"}]
+        runtime.store.append_scan_event(scan_id, "source.archive_exclusions", "Archive scope",
+                                        {"exclusions": source_exclusions}, level="warning")
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
     await _complete_threat_model(
         runtime,
@@ -1472,6 +1477,12 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         assert manifest["scan"]["status"] == "failed"
         assert manifest["scan"]["pocGeneration"]["missingCandidateIds"] == [candidate.output["candidate_id"]]
         assert "PoC generation incomplete" in (output / "report.md").read_text()
+        assert json.loads((output / "source-exclusions.json").read_text())["exclusions"] == source_exclusions
+        assert runtime.store.report_data(scan_id)["source_exclusions"] == source_exclusions
+        assert "external archive symlink" in (output / "report.md").read_text()
+        coverage = json.loads((output / "coverage.json").read_text())
+        assert "external_symlink" in json.dumps(coverage)
+        assert any(item["path"] == "source-exclusions.json" for item in manifest["scan"]["artifacts"])
         with runtime.store._connect() as connection:
             events = connection.execute("SELECT payload_json FROM scan_events WHERE event_type = 'worker.execution_failed'").fetchall()
         assert len(events) == 1

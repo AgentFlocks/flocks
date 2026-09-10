@@ -5342,7 +5342,7 @@ class ScanStore:
                 if self.retain_ui_history and table in {"scan_events", "scan_phase_runs", "cybergym_runs"}:
                     continue
                 if table == "scan_events":
-                    scope += " AND event_type != 'worker.execution_failed'"
+                    scope += " AND event_type NOT IN ('worker.execution_failed', 'source.archive_exclusions')"
                 counts[table] = connection.execute(f"DELETE FROM {table} WHERE {scope}", (scan_id,)).rowcount
             counts["work_attempts"] = connection.execute(
                 f"DELETE FROM work_attempts WHERE work_unit_id IN ({unit_scope}) "
@@ -6855,6 +6855,10 @@ class ScanStore:
                 """,
                 (scan_id,),
             ).fetchall()
+            exclusion_rows = connection.execute(
+                "SELECT payload_json FROM scan_events WHERE scan_id = ? "
+                "AND event_type = 'source.archive_exclusions' ORDER BY seq", (scan_id,),
+            ).fetchall()
             omission_rows = connection.execute(
                 """
                 SELECT relative_path, reason, size_bytes
@@ -6955,6 +6959,8 @@ class ScanStore:
             "work_units": work_units,
             "work_attempts": [dict(row) for row in work_attempt_rows],
             "source_access_counts": source_access_counts,
+            "source_exclusions": [item for row in exclusion_rows
+                                  for item in json.loads(row["payload_json"])["exclusions"]],
             "submission_rejections": [
                 {
                     **{

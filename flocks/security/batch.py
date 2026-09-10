@@ -111,6 +111,27 @@ def resolve_task(root: Path, task_id: str, *, config: dict | None = None) -> Pat
     return path
 
 
+def parse_link_exclusions(values: list[str]) -> dict[str, str]:
+    """Exact archive-relative symlink paths and absolute link text, not globs."""
+    from pathlib import PurePosixPath
+
+    if len(values) > 128 or sum(len(value.encode("utf-8")) for value in values) > 16_000:
+        raise ValueError("External symlink exclusions exceed the 128-entry/16-KiB limit")
+    result = {}
+    for value in values:
+        name, separator, target = value.partition("=")
+        path = PurePosixPath(name)
+        if (not separator or not name or path.is_absolute() or ".." in path.parts
+                or str(path) == "." or "\\" in name or name != name.strip()
+                or not target.startswith("/") or any(ord(c) < 32 for c in value)):
+            raise ValueError("Expected --skip-external-symlink ARCHIVE_RELATIVE_PATH=/absolute/link/target")
+        name = path.as_posix()
+        if name in result and result[name] != target:
+            raise ValueError(f"Conflicting external symlink targets: {name}")
+        result[name] = target
+    return result
+
+
 def prepare_batch(
     source: Path,
     *,
@@ -122,9 +143,11 @@ def prepare_batch(
     max_snapshot_bytes: int,
     dynamic: bool = False,
     dynamic_concurrency: int = 2,
+    skip_external_symlinks: list[str] | None = None,
 ) -> Path:
     if concurrency < 1 or task_timeout < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
         raise ValueError("Concurrency, timeout and size limit must be positive")
+    link_exclusions = parse_link_exclusions(skip_external_symlinks or [])
     source = source.expanduser().resolve(strict=True)
     tasks = {}
     for directory in sorted(source.iterdir(), key=lambda p: (int(p.name) if p.name.isdecimal() else -1, p.name)):
@@ -184,6 +207,7 @@ def prepare_batch(
                 "dynamic": dynamic,
                 "dynamic_concurrency": dynamic_concurrency,
                 "max_snapshot_bytes": max_snapshot_bytes,
+                "skip_external_symlinks": link_exclusions,
                 "tasks": tasks,
             },
         )

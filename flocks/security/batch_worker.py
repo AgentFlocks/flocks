@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
+import glob
 import shutil
 import signal
 import sys
@@ -17,23 +19,47 @@ from flocks.security.batch import atomic_json, file_lock, read_json, resolve_tas
 from flocks.utils.process_identity import process_identity
 
 
-def extract_source(archive: Path, destination: Path, limit: int) -> None:
-    """Validate the complete archive before extracting; never normalize by deleting links."""
+def extract_source(
+    archive: Path, destination: Path, limit: int,
+    *, skip_external_symlinks: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Validate all entries; omit only explicitly approved external symlinks."""
+    from flocks.security.batch import parse_link_exclusions
+
+    policy = parse_link_exclusions([f"{name}={target}" for name, target in (skip_external_symlinks or {}).items()])
+    exclusions = {}
     with tarfile.open(archive, "r:gz") as bundle:
         total = 0
         members = []
-        for member in bundle:
-            if len(members) >= 200_000:
+        for index, member in enumerate(bundle):
+            if index >= 200_000:
                 raise ValueError("Archive contains too many entries")
             if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
                 raise ValueError(f"Unsupported archive entry: {member.name}")
+            total += max(0, member.size)
+            if total > limit:
+                raise ValueError("Archive exceeds --max-snapshot-bytes")
+            name = PurePosixPath(member.name)
+            if (member.issym() and not name.is_absolute() and ".." not in name.parts
+                    and policy.get(name.as_posix()) == member.linkname):
+                exclusions[name.as_posix()] = {
+                    "path": name.as_posix(), "target": member.linkname, "reason": "external_symlink",
+                }
+                continue
             # data_filter rejects traversal and external links, and strips unsafe permissions.
             checked = tarfile.data_filter(member, str(destination))
             if checked is not None:
-                total += max(0, checked.size)
-                if total > limit:
-                    raise ValueError("Archive exceeds --max-snapshot-bytes")
                 members.append(checked)
+        for member in members:
+            name = PurePosixPath(member.name).as_posix()
+            if any(name == path or name.startswith(path + "/") for path in exclusions):
+                raise ValueError(f"Archive entry overlaps an excluded symlink: {name}")
+            if member.issym() or member.islnk():
+                target = posixpath.normpath(posixpath.join(
+                    posixpath.dirname(name) if member.issym() else "", member.linkname,
+                ))
+                if any(target == path or target.startswith(path + "/") for path in exclusions):
+                    raise ValueError(f"Archive link depends on an excluded symlink: {name}")
         bundle.extractall(destination, members=members, filter="data")
     if any(path.is_symlink() for path in destination.rglob("*")):
         # The audit snapshot rejects symlinks. Materialize only internal, non-cyclic
@@ -43,7 +69,10 @@ def extract_source(archive: Path, destination: Path, limit: int) -> None:
 
         def copy_node(source: Path, target: Path, ancestors: frozenset[Path]) -> None:
             nonlocal total, entries
-            resolved = source.resolve(strict=True)
+            try:
+                resolved = source.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"Unresolved or cyclic source link: {source.relative_to(destination)}") from exc
             if not resolved.is_relative_to(destination.resolve()) or resolved in ancestors:
                 raise ValueError(f"External or cyclic source link: {source.name}")
             entries += 1
@@ -64,6 +93,7 @@ def extract_source(archive: Path, destination: Path, limit: int) -> None:
         copy_node(destination, normalized, frozenset())
         shutil.rmtree(destination)
         normalized.rename(destination)
+    return [exclusions[name] for name in sorted(exclusions)]
 
 
 def cleanup_work(path: str | None, task_dir: Path) -> None:
@@ -127,7 +157,12 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
         source = work / "source"
         source.mkdir()
         # Extraction stays in this killable process, not an uninterruptible parent thread.
-        extract_source(archive, source, config["max_snapshot_bytes"])
+        exclusions = extract_source(
+            archive, source, config["max_snapshot_bytes"],
+            skip_external_symlinks=config.get("skip_external_symlinks"),
+        )
+        result["source_exclusions"] = exclusions
+        atomic_json(task_dir / "source-exclusions.json", {"exclusions": exclusions})
         description = work / "description.txt"
         description.write_text(task["description_content"], encoding="utf-8")
 
@@ -149,6 +184,8 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 scan_mode="cybergym_level1" if config.get("dynamic") else "standard",
                 cybergym_manifest=task.get("cybergym_manifest"),
                 copy_source=False,
+                exclude_patterns=[glob.escape(item["path"]) for item in exclusions],
+                source_exclusions=exclusions,
                 cleanup_intermediates=True,
                 max_total_bytes=config["max_snapshot_bytes"],
             )
