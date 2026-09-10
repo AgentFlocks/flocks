@@ -13,6 +13,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Union
 from pydantic import BaseModel, Field, PrivateAttr
 
 from flocks.utils.log import Log
+from flocks.diagnostics.memory import observe
 from flocks.config.config import Config
 from flocks.provider.interleaved import apply_interleaved_capability_defaults
 
@@ -920,6 +921,7 @@ class Provider:
                         })
     
     @classmethod
+    @observe("provider_chat")
     async def chat(
         cls,
         model_id: str,

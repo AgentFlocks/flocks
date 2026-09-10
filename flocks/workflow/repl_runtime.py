@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict, Optional, TextIO, Tuple
 
 from .errors import NodeExecutionError, RunCancelledError
-from flocks.diagnostics.memory import observe
+from flocks.diagnostics.memory import child_started, diagnostic_code, observe, watch_resource
 from .llm import get_lazy_llm
 from .tools import ToolFacade, get_tool_registry
 
@@ -241,7 +241,9 @@ class PythonExecRuntime(Runtime):
         }
     )
 
+    @observe("runtime")
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+        watch_resource("runtime", self)
         if not isinstance(code, str):
             raise NodeExecutionError(node_id="<runtime>", message=f"Code must be a string, got {type(code).__name__}")
         if not code.strip():
@@ -323,7 +325,7 @@ class PythonExecRuntime(Runtime):
                     previous_trace = sys.gettrace()
                     sys.settrace(_cancel_trace)
                 with contextlib.redirect_stdout(buf):
-                    exec(code, g, g)
+                    exec(diagnostic_code(code), g, g)
             except SystemExit:
                 # Node code called exit() / sys.exit() — treat as early return with
                 # whatever has been written to outputs so far.  Do NOT propagate
@@ -405,6 +407,7 @@ class SandboxPythonExecRuntime(Runtime):
     tool_registry: Optional[Any] = None
     cancel_checker: Optional[Callable[[], bool]] = None
 
+    @observe("runtime")
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
             raise NodeExecutionError(
@@ -944,6 +947,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
     rpc_max_response_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_RESPONSE_BYTES
     rpc_max_workers: int = _HOST_PROCESS_RPC_MAX_WORKERS
 
+    @observe("runtime")
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
             raise NodeExecutionError(
@@ -1088,6 +1092,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
             self._close_parent_fds(managed_fds)
             raise NodeExecutionError(node_id="<runtime>", message="Isolated process stdio is unavailable")
 
+        child_started(proc.pid)
         stderr_chunks: list[str] = []
         stderr_thread = threading.Thread(
             target=_drain_text_stream,
@@ -1105,6 +1110,9 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         stdout_lines: queue.Queue[Optional[tuple[bytes, int]]] = queue.Queue(
             maxsize=min(rpc_max_workers, _HOST_PROCESS_RPC_QUEUE_SIZE)
         )
+        watch_resource("rpc_request_budget", inflight_budget)
+        watch_resource("rpc_response_budget", response_budget)
+        watch_resource("rpc_queue", stdout_lines)
 
         def _queue_stdout_line(line: Optional[tuple[bytes, int]]) -> bool:
             while not stdout_reader_stop.is_set():

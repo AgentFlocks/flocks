@@ -20,6 +20,8 @@ SOURCE_FILES = (
     "flocks/server/app.py", "flocks/workflow/runner.py", "flocks/workflow/engine.py",
     "flocks/workflow/llm.py", "flocks/workflow/repl_runtime.py", "flocks/workflow/_async_runtime.py",
     "flocks/workflow/store.py", "flocks/ingest/syslog/listener.py", "flocks/ingest/syslog/manager.py",
+    "flocks/provider/provider.py", "flocks/utils/log.py",
+    "flocks/provider/sdk/openai_base.py", "flocks/storage/storage.py",
     "flocks/server/routes/knowledge.py", "flocks/diagnostics/memory.py", "flocks/diagnostics/sidecar.py",
     "flocks/diagnostics/common.py", "flocks/diagnostics/control.py",
 )
@@ -112,17 +114,20 @@ def main(argv=None):
     enable.add_argument("--allocations", action="store_true", help="显式开启有开销的单帧分配追踪")
     enable.add_argument("--minutes", type=int, default=180, choices=range(1, 361), metavar="1..360")
     enable.add_argument("--trace-seconds", type=int, default=600, choices=range(10, 901), metavar="10..900")
+    enable.add_argument("--trace-frames", type=int, default=3, choices=(1, 2, 3))
+    enable.add_argument("--repeat-trace", action="store_true", help="追踪停止后冷却 120 秒再开一个窗口，最多 12 次")
     commands.add_parser("status", help="检查开关、采样时间和 PID，不请求后端")
     commands.add_parser("collect", help="仅打包最新诊断目录，后端卡死时也可运行")
     commands.add_parser("trace", help="对当前运行中的诊断采集请求一个有限分配追踪窗口")
     commands.add_parser("disable", help="关闭后续启动诊断；通知当前采集停止，不重启服务")
-    mark = commands.add_parser("mark", help="标记复現阶段；不接受业务正文")
+    mark = commands.add_parser("mark", help="标记复现阶段；不接受业务正文")
     mark.add_argument("phase", choices=("idle", "syslog-on", "denoise-on", "triage-on", "soc-open", "soc-closed", "growth", "before-restart"))
     args = parser.parse_args(argv)
     try:
         if args.command == "enable":
             write_json(config_path(), {"enabled": True, "allocations": args.allocations,
-                                       "duration_s": args.minutes * 60, "trace_seconds": args.trace_seconds})
+                                       "duration_s": args.minutes * 60, "trace_seconds": args.trace_seconds,
+                                       "trace_frames": args.trace_frames, "repeat_trace": args.repeat_trace})
             print(f"已写入 {config_path()}。请执行 flocks restart --server-only 后再执行 status。")
             if args.allocations:
                 print("分配追踪有 CPU/内存开销，最多 900 秒，达到安全阈值会提前停止；系统采样继续。")

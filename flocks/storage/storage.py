@@ -204,6 +204,8 @@ class Storage:
     @classmethod
     async def configure_connection(cls, conn: aiosqlite.Connection) -> aiosqlite.Connection:
         """Apply the runtime SQLite contract to an async connection."""
+        from flocks.diagnostics.memory import watch_resource
+        watch_resource("sqlite_connection", conn)
         await conn.execute(f"PRAGMA journal_mode={cls._sqlite_journal_mode}")
         await conn.execute(f"PRAGMA synchronous={cls._sqlite_synchronous}")
         await conn.execute(f"PRAGMA busy_timeout={cls._sqlite_busy_timeout_ms}")

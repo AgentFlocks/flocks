@@ -21,7 +21,9 @@ from pathlib import Path
 
 BASE = "5678bddef031900e51f43cd34e4eea098d6b3bd3"
 HOOKS = ("flocks/server/app.py", "flocks/workflow/runner.py", "flocks/workflow/engine.py",
-         "flocks/workflow/llm.py", "flocks/workflow/repl_runtime.py", "flocks/ingest/syslog/listener.py")
+         "flocks/workflow/llm.py", "flocks/workflow/repl_runtime.py", "flocks/ingest/syslog/listener.py",
+         "flocks/workflow/_async_runtime.py", "flocks/workflow/store.py", "flocks/provider/provider.py", "flocks/utils/log.py")
+HOOKS += ("flocks/provider/sdk/openai_base.py", "flocks/storage/storage.py")
 
 
 def sha(data):

@@ -40,6 +40,8 @@ def gc_sample(directory):
         if first != second or len(first) != GC_RECORD.size:
             return {"inconsistent": True}
         seq, phase, generation, when, tid, collected, uncollectable = GC_RECORD.unpack(first)
+        if seq == 0:
+            return {"phase": "not_observed"}
         if seq % 2:
             return {"inconsistent": True}
         return {"sequence": seq, "phase": "start" if phase == 1 else "stop",
@@ -80,6 +82,49 @@ def thread_sample(pid):
     return {"threads": rows, "task_scan_truncated": scanned > 256, "direct_children_sample": child_rows}
 
 
+def descriptor_sample(pid):
+    counts = {"socket": 0, "pipe": 0, "anon_inode": 0, "other": 0}
+    seen = 0
+    try:
+        with os.scandir(f"/proc/{pid}/fd") as entries:
+            for entry in entries:
+                seen += 1
+                if seen > 2048:
+                    break
+                try:
+                    target = os.readlink(entry.path)
+                    category = next((name for name in ("socket", "pipe", "anon_inode")
+                                     if target.startswith(name + ":")), "other")
+                    counts[category] += 1
+                except OSError:
+                    pass
+    except OSError:
+        return {"unavailable": True}
+    # Do not record filenames, remote addresses or socket inodes.
+    return {"counts_sample": counts, "truncated": seen > 2048}
+
+
+def http_socket_sample(pid):
+    result = {"port": 5173, "namespace_states_sample": {}, "listener_rx_queue": []}
+    for table in ("tcp", "tcp6"):
+        try:
+            content = read_small(f"/proc/{pid}/net/{table}", 131072)
+            if len(content) >= 131072:
+                result["table_truncated"] = True
+            for line in content.splitlines()[1:1025]:
+                fields = line.split()
+                if len(fields) < 5 or int(fields[1].rsplit(":", 1)[1], 16) != 5173:
+                    continue
+                state = fields[3]
+                states = result["namespace_states_sample"]
+                states[state] = states.get(state, 0) + 1
+                if state == "0A":
+                    result["listener_rx_queue"].append(int(fields[4].split(":")[1], 16))
+        except (OSError, ValueError, IndexError):
+            continue
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pid", type=int, required=True)
@@ -103,7 +148,8 @@ def main():
                 break
             journal.write({"type": "os_sample", "process": sample, "system": system_sample(args.pid),
                            "gc": gc_sample(args.directory),
-                           **(thread_sample(args.pid) if index % 3 == 0 else {})})
+                           **({**thread_sample(args.pid), "file_descriptors": descriptor_sample(args.pid),
+                               "http_sockets": http_socket_sample(args.pid)} if index % 3 == 0 else {})})
             index += 1
         except (FileNotFoundError, ProcessLookupError):
             reason = "target_exited"

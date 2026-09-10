@@ -415,3 +415,121 @@ def test_overlay_wrong_baseline_has_no_partial_writes(monkeypatch, tmp_path):
     with pytest.raises(ValueError):
         overlay.install(tmp_path / "release", bundle)
     assert source.read_text() == "# unexpected source\n"
+
+
+def test_node_allocation_has_workflow_filename_and_future_semantics(recorder):
+    from flocks.workflow.engine import WorkflowEngine
+    from flocks.workflow.models import Workflow
+
+    workflow = Workflow.model_validate({"name": "allocation-origin", "start": "retain", "nodes": [{
+        "id": "retain", "type": "python", "code": (
+            "def helper(x: MissingName): return x\n"
+            "outputs['annotation'] = helper.__annotations__['x']\n"
+            "outputs['data'] = bytearray(2 * 1024 * 1024)\n"
+        )}], "edges": []})
+    recorder.options["trace_frames"] = 3
+    recorder.start_trace()
+    outputs, _ = WorkflowEngine(workflow)._execute_node(workflow.nodes[0], {})
+    assert outputs["annotation"] == "MissingName"
+    recorder.trace_step({})
+    records = [json.loads(line) for line in (recorder.directory / "allocations.jsonl").read_text().splitlines()]
+    snapshot = next(record for record in records if record["type"] == "allocation_snapshot")
+    row = next(row for row in snapshot["top"] if row["file"] == "<flocks-node:allocation-origin/retain>")
+    assert row["bytes"] >= 2 * 1024 * 1024 and row["line"] == 3
+    assert len(row["stack"]) == 3
+    assert memory._context.get() is None
+
+
+def test_real_host_rpc_retains_node_correlation_not_business_data(recorder, monkeypatch):
+    from flocks.workflow import repl_runtime
+    from flocks.workflow.engine import WorkflowEngine
+    from flocks.workflow.models import Workflow
+
+    captured_resources = []
+
+    class LLM:
+        @memory.observe("llm")
+        def ask(self, prompt, **kwargs):
+            captured_resources.extend(recorder.resource_sample())
+            return "PRIVATE-LLM-RESULT"
+
+    monkeypatch.setattr(repl_runtime, "get_lazy_llm", lambda **kwargs: LLM())
+    workflow = Workflow.model_validate({"name": "isolated-correlation", "start": "ask", "nodes": [{
+        "id": "ask", "type": "python", "processIsolated": True,
+        "code": "outputs['answer'] = llm.ask('PRIVATE-PROMPT')"}], "edges": []})
+    outputs, _ = WorkflowEngine(workflow)._execute_node(workflow.nodes[0], {})
+    assert outputs == {"answer": "PRIVATE-LLM-RESULT"}
+    events = list(recorder.events.queue)
+    starts = {row["kind"]: row for row in events if row["type"] == "operation_start"}
+    assert starts["llm"]["parent_id"] == starts["rpc"]["id"]
+    assert starts["rpc"]["parent_id"] == starts["runtime"]["id"]
+    assert starts["runtime"]["parent_id"] == starts["node"]["id"]
+    assert starts["llm"]["workflow"] == "isolated-correlation" and starts["llm"]["node"] == "ask"
+    assert starts["rpc"]["native_tid"] != starts["node"]["native_tid"]
+    assert {row["resource_kind"] for row in captured_resources} >= {"rpc_request_budget", "rpc_response_budget", "rpc_queue"}
+    assert any(row["type"] == "node_child_started" for row in events)
+    assert "PRIVATE" not in json.dumps(events)
+    assert not recorder.runtime_scopes and not recorder.active
+    assert memory._context.get() is None
+
+
+def test_resource_watch_does_not_keep_runtime_alive(recorder):
+    class Runtime:
+        globals = {"secret": [1, 2, 3]}
+
+    value = Runtime()
+    ref = weakref.ref(value)
+    memory.watch_resource("runtime", value)
+    assert recorder.resource_sample()
+    del value
+    assert ref() is None
+    assert not recorder.resource_sample() and not recorder.resources
+
+
+def test_payload_shape_is_bounded_and_content_free():
+    payload = {"PRIVATE": [{"PRIVATE": "PRIVATE" * 1000} for _ in range(10000)]}
+    shape = memory._shape(payload)
+    assert shape["children_sample"][0]["length"] == 10000
+    assert len(json.dumps(shape)) < 4096
+    assert "PRIVATE" not in json.dumps(shape)
+
+
+def test_high_frequency_log_and_json_are_aggregate_only(recorder):
+    from flocks.workflow.store import WorkflowStore
+    assert WorkflowStore._json_loads('{"PRIVATE": "PRIVATE"}') == {"PRIVATE": "PRIVATE"}
+    assert not any(row.get("kind") == "db.decode" for row in recorder.events.queue)
+    stat = next(value for key, value in recorder.stats.items() if key.startswith("db.decode/"))
+    assert stat["started"] == stat["finished"] == 1
+    assert stat["max_input_shallow_bytes"] > 0
+
+
+def test_compile_is_identity_when_disabled(monkeypatch):
+    monkeypatch.setattr(memory, "_recorder", None)
+    code = "outputs['result'] = 1"
+    assert memory.diagnostic_code(code) is code
+
+
+def test_response_stream_tracks_bytes_without_retaining_content(recorder):
+    from flocks.provider.sdk.openai_base import _ResponseSizeLimitedStream
+
+    value = _ResponseSizeLimitedStream(None, 12345)
+    value._received_bytes = 5678
+    row = next(row for row in recorder.resource_sample() if row["resource_kind"] == "llm_response_stream")
+    assert row["received_bytes"] == 5678 and row["max_bytes"] == 12345
+    ref = weakref.ref(value)
+    del value
+    assert ref() is None
+    assert not recorder.resource_sample()
+
+
+def test_sidecar_socket_metrics_do_not_record_addresses(monkeypatch):
+    sidecar = load_cli("sidecar", monkeypatch)
+    content = ("header\n"
+               "0: 0100007F:1435 00000000:0000 0A 00000000:00000151 ignored\n"
+               "1: 0100007F:1435 0708090A:1234 01 00000000:00000000 ignored\n"
+               "2: 0100007F:1600 0708090A:1234 01 00000000:00000000 ignored\n")
+    monkeypatch.setattr(sidecar, "read_small", lambda path, size: content if path.endswith("/tcp") else "header\n")
+    value = sidecar.http_socket_sample(123)
+    assert value["listener_rx_queue"] == [337]
+    assert value["namespace_states_sample"] == {"0A": 1, "01": 1}
+    assert "0100007F" not in json.dumps(value) and "0708090A" not in json.dumps(value)

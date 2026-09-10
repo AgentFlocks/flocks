@@ -78,6 +78,8 @@ class _ResponseSizeLimitedStream(httpx.AsyncByteStream):
         self._stream = stream
         self._max_bytes = max_bytes
         self._received_bytes = 0
+        from flocks.diagnostics.memory import watch_resource
+        watch_resource("llm_response_stream", self)
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:

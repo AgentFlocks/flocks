@@ -34,6 +34,7 @@ import asyncio
 import concurrent.futures
 import threading
 from typing import Any, Callable, Coroutine
+from flocks.diagnostics.memory import observe
 
 __all__ = ["run_sync", "run_sync_cancellable", "_get_loop_for_testing"]
 
@@ -100,6 +101,7 @@ def _assert_not_workflow_loop(coro: Coroutine[Any, Any, Any], loop: asyncio.Abst
         )
 
 
+@observe("llm_wait")
 def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
     """Run *coro* on the shared background loop and return its result.
 
@@ -129,6 +131,7 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
         raise asyncio.CancelledError() from exc
 
 
+@observe("llm_wait")
 def run_sync_cancellable(
     coro: Coroutine[Any, Any, Any],
     cancel_checker: Callable[[], bool],

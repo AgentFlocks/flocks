@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, TextIO
 from datetime import date, datetime, timedelta
 import json
 import glob as file_glob
+from flocks.diagnostics.memory import observe
 
 
 _DEFAULT_LOG_RETENTION_DAYS = 30
@@ -69,6 +70,7 @@ class _AppendTextWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = open(self.path, "a", buffering=1, encoding="utf-8")
 
+    @observe("log_write")
     def write(self, message: str) -> int:
         with self._lock:
             if self._handle is None:

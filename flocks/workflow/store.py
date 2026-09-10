@@ -14,6 +14,7 @@ import aiosqlite
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
+from flocks.diagnostics.memory import observe
 
 log = Log.create(service="workflow.store")
 
@@ -138,10 +139,12 @@ class WorkflowStore:
         return await cls._db()
 
     @staticmethod
+    @observe("db.encode")
     def _json_dumps(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
 
     @staticmethod
+    @observe("db.decode")
     def _json_loads(value: Optional[str], default: Any = None) -> Any:
         if value is None:
             return default
@@ -280,6 +283,7 @@ class WorkflowStore:
         log.info("workflow.store.legacy_kv_migrated", counts)
 
     @classmethod
+    @observe("db.upsert_execution")
     async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
         db = await cls._db()
         payload = dict(exec_data)
@@ -319,6 +323,7 @@ class WorkflowStore:
         await db.commit()
 
     @classmethod
+    @observe("db.get_execution")
     async def get_execution(cls, exec_id: str) -> Optional[Dict[str, Any]]:
         db = await cls._db()
         async with db.execute(
@@ -332,6 +337,7 @@ class WorkflowStore:
         return value if isinstance(value, dict) else None
 
     @classmethod
+    @observe("db.list_executions")
     async def list_executions(
         cls,
         workflow_id: str,
@@ -409,6 +415,7 @@ class WorkflowStore:
         return exec_ids
 
     @classmethod
+    @observe("db.record_step")
     async def record_step(
         cls,
         exec_id: str,
@@ -436,6 +443,7 @@ class WorkflowStore:
         await db.commit()
 
     @classmethod
+    @observe("db.list_steps")
     async def list_steps(
         cls,
         exec_id: str,
@@ -639,6 +647,7 @@ class WorkflowStore:
         return cur.rowcount
 
     @classmethod
+    @observe("db.kv_put")
     async def kv_put(cls, key: str, value: Any, value_type: str = _JSON_TYPE) -> None:
         db = await cls._db()
         now = cls._now_iso()
@@ -654,6 +663,7 @@ class WorkflowStore:
         await db.commit()
 
     @classmethod
+    @observe("db.kv_get")
     async def kv_get(cls, key: str) -> Optional[Any]:
         db = await cls._db()
         async with db.execute("SELECT value FROM workflow_kv WHERE key = ?", (key,)) as cur:
@@ -684,6 +694,7 @@ class WorkflowStore:
         return await cls.kv_list_keys(prefix)
 
     @classmethod
+    @observe("db.kv_entries")
     async def kv_entries(cls, prefix: str) -> List[Tuple[str, Any]]:
         db = await cls._db()
         async with db.execute(
