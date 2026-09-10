@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "ai_redteam_ui",
+  "type": "webui",
+  "name": "AI Redteam Workspace WebUI",
+  "nameCn": "AI 红队工作区页面",
+  "description": "AI redteam workspace pages for campaigns and attack surface.",
+  "descriptionCn": "AI 红队工作区页面，包含演练总览和攻击面。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "integration"
+  ],
+  "useCases": [
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "official",
+  "edition": "pro",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/webuis/ai_redteam_ui"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "workspace.json"
+  ],
+  "components": [],
+  "checksums": {}
+}

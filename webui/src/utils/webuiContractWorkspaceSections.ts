@@ -90,3 +90,24 @@ export function buildWebUIContractWorkspaceSections(
     },
   ];
 }
+
+/**
+ * Flatten a workspace into its pages in navigation order: section by section,
+ * each section's pages in their configured order. Used by the sidebar menu and
+ * the workspace page tabs so both show the same sequence.
+ */
+export function buildWebUIContractWorkspacePageList(
+  workspace: WebUIContractWorkspaceListItem,
+  language?: string | null,
+): WebUIContractPageListItem[] {
+  const seen = new Set<string>();
+  const pages: WebUIContractPageListItem[] = [];
+  for (const section of buildWebUIContractWorkspaceSections(workspace, language)) {
+    for (const page of section.pages) {
+      if (seen.has(page.id)) continue;
+      seen.add(page.id);
+      pages.push(page);
+    }
+  }
+  return pages;
+}

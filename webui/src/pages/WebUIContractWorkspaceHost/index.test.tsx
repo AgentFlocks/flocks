@@ -26,11 +26,22 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+function renderHostAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 describe('WebUIContractWorkspaceHost', () => {
   setupSSEMock();
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     listWorkspacesMock.mockResolvedValue({
       data: [
         {
@@ -108,20 +119,66 @@ describe('WebUIContractWorkspaceHost', () => {
     });
   });
 
-  it('waits for an explicit page selection on the workspace root', async () => {
-    render(
-      <MemoryRouter initialEntries={['/contracts/webui/workspaces/scene_workspace']}>
-        <Routes>
-          <Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+  it('redirects the workspace root to its default page', async () => {
+    renderHostAt('/contracts/webui/workspaces/scene_workspace');
 
     await waitFor(() => {
-      expect(screen.getByText('workspace.selectPage')).toBeInTheDocument();
+      expect(screen.getByText('page:ops-overview')).toBeInTheDocument();
     });
-    expect(screen.queryByText('page:risk-dashboard')).not.toBeInTheDocument();
-    expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
+    expect(screen.queryByText('workspace.selectPage')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the first ready page when the default page id is unknown', async () => {
+    listWorkspacesMock.mockResolvedValue({
+      data: [
+        {
+          id: 'scene_workspace',
+          title: '场景工作区',
+          route: '/contracts/webui/workspaces/scene_workspace',
+          icon: 'ShieldCheck',
+          order: 10,
+          enabled: true,
+          placement: 'sceneWorkspace',
+          defaultPageId: 'missing-page',
+          sections: [],
+          pages: [
+            {
+              id: 'investigation-list',
+              title: '调查列表',
+              route: '/contracts/webui/investigation-list',
+              icon: 'AlertTriangle',
+              order: 5,
+              enabled: true,
+              placement: 'home.after',
+              buildHash: '',
+              buildStatus: 'failed',
+              workspaceId: 'scene_workspace',
+              workspaceTitle: '场景工作区',
+              workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
+            },
+            {
+              id: 'ops-overview',
+              title: '运营总览',
+              route: '/contracts/webui/ops-overview',
+              icon: 'Shield',
+              order: 10,
+              enabled: true,
+              placement: 'home.after',
+              buildHash: 'abc',
+              buildStatus: 'ready',
+              workspaceId: 'scene_workspace',
+              workspaceTitle: '场景工作区',
+              workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
+            },
+          ],
+        },
+      ],
+    });
+    renderHostAt('/contracts/webui/workspaces/scene_workspace');
+
+    await waitFor(() => {
+      expect(screen.getByText('page:ops-overview')).toBeInTheDocument();
+    });
   });
 
   it('renders a selected operation page without a fixed workspace sidebar', async () => {
@@ -137,6 +194,7 @@ describe('WebUIContractWorkspaceHost', () => {
       expect(screen.getByText('page:investigation-list')).toBeInTheDocument();
     });
     expect(screen.getByText('page:investigation-list').parentElement).toHaveClass('p-6');
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
   });
 

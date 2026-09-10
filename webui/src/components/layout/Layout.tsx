@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation, matchPath, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import {
   Home,
   MessageSquare,
@@ -20,20 +20,37 @@ import {
   ServerCog,
   LogOut,
   Settings,
+  LayoutGrid,
+  Boxes,
   ArrowUpCircle,
   RefreshCw,
   Gauge,
+  GripVertical,
   Loader2,
+  Pencil,
+  Plus,
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import type { ComponentType, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type {
+  ComponentType,
+  CSSProperties,
+  DragEvent as ReactDragEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { onboardingAPI } from '@/api/onboarding';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
 // the home page never needs.
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
+const EXPANDED_PRIMARY_NAV_SECTION_KEY = 'flocks_layout_expanded_primary_nav_section';
+const WORKSPACE_NAV_SECTION_PREFIX = 'workspace:';
+const AI_WORKBENCH_NAV_SECTION_ID = 'aiWorkbench';
+const SCENE_NAV_SECTION_ID = 'sceneWorkspaces';
+// Pane used for routes that are not a sidebar entry (they are not kept as tabs).
+const TRANSIENT_PANE_HREF = '__current__';
 const SIDEBAR_WIDTH_KEY = 'flocks_layout_sidebar_width';
 const SIDEBAR_DEFAULT_WIDTH = 208;
 const SIDEBAR_MIN_WIDTH = 176;
@@ -78,6 +95,33 @@ function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
   } catch {
     // Local storage can be unavailable in restricted browser contexts.
   }
+}
+
+/**
+ * The AI workbench and each scene workspace (SOC) form an accordion: at most
+ * one of them shows its second-level menu at a time. `undefined` means nothing
+ * has been stored yet, `null` means the user collapsed all of them.
+ */
+function readExpandedPrimaryNavSectionId(): string | null | undefined {
+  try {
+    const rawValue = localStorage.getItem(EXPANDED_PRIMARY_NAV_SECTION_KEY);
+    if (rawValue === null) return undefined;
+    return rawValue === '' ? null : rawValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveExpandedPrimaryNavSectionId(sectionId: string | null): void {
+  try {
+    localStorage.setItem(EXPANDED_PRIMARY_NAV_SECTION_KEY, sectionId ?? '');
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
+function workspaceNavSectionId(workspaceId: string): string {
+  return `${WORKSPACE_NAV_SECTION_PREFIX}${workspaceId}`;
 }
 
 function clampSidebarWidth(width: number): number {
@@ -159,9 +203,26 @@ import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import {
-  buildWebUIContractWorkspaceSections,
+  buildWebUIContractWorkspacePageList,
   getLocalizedWebUIContractTitle,
 } from '@/utils/webuiContractWorkspaceSections';
+import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
+import { moveItem, saveNavItemOrder, saveWorkspacePageOrder } from '@/utils/workspaceNavOrder';
+import { useLayoutOpenTabs } from '@/hooks/useLayoutOpenTabs';
+import { findActiveTabHref, resolveOpenTabs } from '@/utils/layoutTabs';
+import {
+  AGENT_PARTITION_DEFAULT_PATH,
+  SETTINGS_PARTITION_DEFAULT_PATH,
+  readPartitionPaths,
+  resolveNavPartition,
+  savePartitionPaths,
+  type NavPartitionId,
+  type NavPartitionPaths,
+} from '@/utils/navPartitions';
+import { useSettingsSectionGroups } from '@/utils/settingsSections';
+import PartitionTopBar, { type PartitionTopBarItem } from './PartitionTopBar';
+import KeepAlivePanes from './KeepAlivePanes';
+import { contentRoutes as appContentRoutes } from '@/routes/contentRoutes';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
@@ -177,15 +238,25 @@ interface LayoutNavItem {
   name: string;
   href: string;
   icon: LucideIcon;
-  opensWorkspaceMenu?: boolean;
-  workspaceId?: string;
+  /** Opens in a new tab instead of routing (Flocks LLM usage portal). */
+  external?: boolean;
+  /** Workspace page id; present for reorderable workspace pages. */
+  pageId?: string;
 }
 
 interface LayoutNavSection {
   id?: string;
   name: string;
+  /** Top-bar partition this section belongs to. */
+  partition: NavPartitionId;
   items: LayoutNavItem[];
   collapsible?: boolean;
+  /** Sections in the same accordion group expand one at a time. */
+  accordionGroup?: 'primary';
+  /** Set for sections that mirror a WebUI contract workspace (e.g. SOC). */
+  workspace?: WebUIContractWorkspaceListItem;
+  /** Only the first group of a workspace carries its actions (自定义页面 …). */
+  workspaceActions?: boolean;
 }
 
 function formatProVersion(version?: string | null): string | null {
@@ -245,7 +316,12 @@ function isSocWorkspace(workspace: WebUIContractWorkspaceListItem | null): boole
     || workspace.title.includes('SOC 工作区');
 }
 
-export default function Layout() {
+interface LayoutProps {
+  /** Pages rendered inside the layout; defaults to the app routes (tests inject probes). */
+  contentRoutes?: RouteObject[];
+}
+
+export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps = {}) {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
@@ -284,14 +360,28 @@ export default function Layout() {
   const notificationGateReady = flocksproStatusReady
     && (!canManageUpdates || hasCompletedUpdateCheck);
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
-  const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
-  const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
+  const {
+    pages: webuiContractPages,
+    workspaces: webuiContractWorkspaces = [],
+    loading: webuiContractNavLoading,
+  } = useWebUIContractPages();
+  const workspacePageOrders = useWorkspacePageOrders();
+  const [openTabRecords, setOpenTabRecords] = useLayoutOpenTabs();
+  // Tab whose close is in flight: React Router commits the navigation as a
+  // transition, so until the route changes it must not be re-added.
+  const openTabRecordsRef = useRef(openTabRecords);
+  useEffect(() => {
+    openTabRecordsRef.current = openTabRecords;
+  }, [openTabRecords]);
   const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(readCollapsedNavSectionIds);
-  const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
+  const [expandedPrimaryNavSectionId, setExpandedPrimaryNavSectionId] = useState<string | null | undefined>(
+    readExpandedPrimaryNavSectionId,
+  );
+  const [draggingNavItem, setDraggingNavItem] = useState<{ sectionId: string; key: string } | null>(null);
+  const [dragOverNavItemKey, setDragOverNavItemKey] = useState<string | null>(null);
   const [creatingWorkspaceCustomPageSession, setCreatingWorkspaceCustomPageSession] = useState(false);
   const [socTitleDialogOpen, setSocTitleDialogOpen] = useState(false);
   const [socTitleDraft, setSocTitleDraft] = useState(readSocDashboardTitle);
-  const workspaceMenuCloseTimerRef = useRef<number | null>(null);
   const hasCustomDisplayName = Boolean(configuredDisplayName?.trim());
   const expandedSidebarWidth = sidebarWidth;
   const sidebarOffsetStyle = {
@@ -655,77 +745,168 @@ export default function Layout() {
   // stable as long as the language doesn't change. Without this, every route
   // switch rebuilt the whole nav structure and cascaded re-renders down to
   // every <Link>, contributing to perceptible navigation lag.
+  const { groups: settingsGroups } = useSettingsSectionGroups();
+
   const navigation = useMemo<LayoutNavSection[]>(
     () => {
-      const sceneWorkspaceItems = webuiContractWorkspaces
-        .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
-        .map((workspace) => ({
-          name: getLocalizedWebUIContractTitle(workspace, i18n.language),
-          href: workspace.route,
-          icon: resolveWebUIContractPageIcon(workspace.icon),
-          opensWorkspaceMenu: true,
-          workspaceId: workspace.id,
+      const enabledWorkspaces = webuiContractWorkspaces.filter((workspace) => workspace.enabled);
+      const workspacePageItems = (workspace: WebUIContractWorkspaceListItem): LayoutNavItem[] => (
+        workspacePageOrders
+          .apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language))
+          .map((page) => ({
+            pageId: page.id,
+            name: page.title,
+            href: `${workspace.route}/${page.id}`,
+            icon: resolveWebUIContractPageIcon(page.icon),
+          }))
+      );
+      const workbenchWorkspaceItems = enabledWorkspaces
+        .filter((workspace) => workspace.placement === 'aiWorkbench')
+        .flatMap(workspacePageItems);
+      // Built-in groups can be reordered by dragging too; the order is stored per group.
+      const navItemKey = (item: LayoutNavItem) => item.pageId ?? item.href;
+      const orderedGroup = (sectionId: string, items: LayoutNavItem[]) => workspacePageOrders.applyNav(sectionId, items, navItemKey);
+      // The SOC workspace partition has one flat menu: every enabled scene
+      // workspace contributes its pages at the same level, no group headings.
+      const sceneWorkspaces = enabledWorkspaces.filter((workspace) => workspace.placement === 'sceneWorkspace');
+      const scenePageItems = sceneWorkspaces.flatMap(workspacePageItems);
+      const soleSceneWorkspace = sceneWorkspaces.length === 1 ? sceneWorkspaces[0] : undefined;
+      const sceneWorkspaceSections: LayoutNavSection[] = scenePageItems.length > 0
+        ? [{
+          id: SCENE_NAV_SECTION_ID,
+          name: '',
+          partition: 'scene' as const,
+          // Nameless, so no heading renders; still "collapsible" so the entries
+          // stay drag-reorderable.
+          collapsible: true,
+          workspace: soleSceneWorkspace,
+          workspaceActions: Boolean(soleSceneWorkspace),
+          items: soleSceneWorkspace
+            ? scenePageItems
+            : orderedGroup(SCENE_NAV_SECTION_ID, scenePageItems),
+        }]
+        : [];
+      // Custom pages that do not belong to a workspace sit next to the scene
+      // workspaces rather than under the home entry.
+      const customPageItems: LayoutNavItem[] = webuiContractPages
+        .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
+        .map((page) => ({
+          name: getLocalizedWebUIContractTitle(page, i18n.language),
+          href: page.route,
+          icon: resolveWebUIContractPageIcon(page.icon),
         }));
+      // The system-settings partition reuses the settings page sections.
+      const settingsSections: LayoutNavSection[] = settingsGroups.map((group) => ({
+        id: `settings:${group.id}`,
+        name: group.name,
+        partition: 'settings' as const,
+        items: [
+          ...group.items.map((item) => ({
+            name: item.name,
+            href: `/settings/${item.id}`,
+            icon: item.icon,
+          })),
+          // The usage portal lives outside the app but belongs to this menu.
+          ...(group.id === 'system'
+            ? [{ name: t('flocksLlmUsageQuota'), href: FLOCKS_LLM_USAGE_URL, icon: Gauge, external: true }]
+            : []),
+        ],
+      }));
 
       return [
         {
           name: '',
-          items: [
-            { name: t('flocksHome'), href: '/', icon: Home },
-            ...webuiContractPages
-              .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
-              .map((page) => ({
-                name: getLocalizedWebUIContractTitle(page, i18n.language),
-                href: page.route,
-                icon: resolveWebUIContractPageIcon(page.icon),
-              })),
-          ],
+          partition: 'agent',
+          items: [{ name: t('flocksHome'), href: '/', icon: Home }],
         },
         {
-          id: 'aiWorkbench',
+          id: AI_WORKBENCH_NAV_SECTION_ID,
           name: t('aiWorkbench'),
+          partition: 'agent',
           collapsible: true,
-          items: [
+          accordionGroup: 'primary',
+          items: orderedGroup(AI_WORKBENCH_NAV_SECTION_ID, [
             { name: t('sessions'), href: '/sessions', icon: MessageSquare },
             { name: t('workspace'), href: '/workspace', icon: FolderOpen },
             { name: t('tasks'), href: '/tasks', icon: ListTodo },
             { name: t('workflows'), href: '/workflows', icon: Workflow },
-          ],
-        },
-        {
-          id: 'sceneWorkspaces',
-          name: t('sceneWorkspaces'),
-          collapsible: true,
-          items: [
-            ...sceneWorkspaceItems,
-            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
-          ],
+            ...workbenchWorkspaceItems,
+          ]),
         },
         {
           id: 'agentHub',
           name: t('agentHub'),
+          partition: 'agent',
           collapsible: true,
-          items: [
+          items: orderedGroup('agentHub', [
             { name: t('agents'), href: '/agents', icon: Bot },
             { name: t('skills'), href: '/skills', icon: BookOpen },
             { name: t('tools'), href: '/tools', icon: Wrench },
+            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
             { name: t('hub', { productName }), href: '/hub', icon: Archive },
             { name: t('models'), href: '/models', icon: Brain },
             { name: t('channels'), href: '/channels', icon: Radio },
-          ],
+          ]),
         },
+        ...sceneWorkspaceSections,
+        ...(customPageItems.length > 0
+          ? [{ id: 'customPages', name: t('customPages'), partition: 'scene' as const, collapsible: true, items: customPageItems }]
+          : []),
+        ...settingsSections,
       ];
     },
-    [i18n.language, productName, webuiContractPages, webuiContractWorkspaces, t],
+    [i18n.language, productName, settingsGroups, webuiContractPages, webuiContractWorkspaces, workspacePageOrders, t],
   );
 
-  const isFullScreenPage =
-    matchPath('/workflows/create', location.pathname) ||
-    matchPath('/workflows/:id/edit', location.pathname) ||
-    matchPath('/workflows/:id', location.pathname) ||
-    matchPath('/sessions', location.pathname) ||
-    matchPath('/devices', location.pathname) ||
-    matchPath('/contracts/webui/*', location.pathname);
+  // Which of the three top-bar partitions is showing. It follows the route, but
+  // a partition with no page yet (SOC not installed) can still be selected to
+  // show its own — empty — menu.
+  const routePartition = resolveNavPartition(location.pathname);
+  const [selectedPartition, setSelectedPartition] = useState<NavPartitionId>(routePartition);
+  useEffect(() => {
+    setSelectedPartition(routePartition);
+  }, [routePartition]);
+
+  const visibleNavigation = useMemo(
+    () => navigation.filter((section) => section.partition === selectedPartition),
+    [navigation, selectedPartition],
+  );
+
+  const partitionItems = useMemo<PartitionTopBarItem[]>(() => [
+    { id: 'agent', name: t('partitionAgent'), icon: Sparkles },
+    { id: 'scene', name: t('partitionScene'), icon: LayoutGrid },
+    { id: 'settings', name: t('partitionSettings'), icon: Settings },
+  ], [t]);
+
+  // Remember where each partition was left so the top bar returns to it.
+  const partitionPathsRef = useRef<NavPartitionPaths>(readPartitionPaths());
+  useEffect(() => {
+    const next = { ...partitionPathsRef.current, [routePartition]: `${location.pathname}${location.search}` };
+    partitionPathsRef.current = next;
+    savePartitionPaths(next);
+  }, [location.pathname, location.search, routePartition]);
+
+  const partitionTargetPath = useCallback((id: NavPartitionId): string | null => {
+    const hrefs = navigation
+      .filter((section) => section.partition === id)
+      .flatMap((section) => section.items)
+      .map((item) => item.href);
+    const stored = partitionPathsRef.current[id];
+    // Only reuse the stored page while it still exists in that partition.
+    if (stored && findActiveTabHref(hrefs, stored.split('?')[0])) return stored;
+    if (id === 'agent') return AGENT_PARTITION_DEFAULT_PATH;
+    if (id === 'settings') return SETTINGS_PARTITION_DEFAULT_PATH;
+    return hrefs[0] ?? null;
+  }, [navigation]);
+
+  const selectPartition = useCallback((id: NavPartitionId) => {
+    setSelectedPartition(id);
+    setSidebarOpen(false);
+    if (id === routePartition) return;
+    const target = partitionTargetPath(id);
+    if (target) navigate(target);
+  }, [navigate, partitionTargetPath, routePartition]);
+
   const displayVersion = isFlocksproActive
     ? updateInfo?.edition === 'flockspro'
       ? formatProVersion(currentProductVersion(updateInfo, true))
@@ -746,54 +927,114 @@ export default function Layout() {
       hash: location.hash,
     },
   };
-  const activeWorkspaceMenu = useMemo(
-    () => webuiContractWorkspaces.find((workspace) => workspace.id === openWorkspaceMenuId && workspace.enabled) ?? null,
-    [openWorkspaceMenuId, webuiContractWorkspaces],
+  const isNavItemActive = useCallback((href: string) => (
+    location.pathname === href || (href !== '/' && location.pathname.startsWith(`${href}/`))
+  ), [location.pathname]);
+
+  // Browser-style tabs above the content: every sidebar entry visited becomes
+  // a tab (home, AI workbench pages, agent studio pages, SOC pages alike).
+  const navItemsFlat = useMemo(() => navigation.flatMap((section) => section.items), [navigation]);
+  const activeTabHref = useMemo(
+    () => findActiveTabHref(navItemsFlat.map((item) => item.href), location.pathname),
+    [location.pathname, navItemsFlat],
   );
-  const ActiveWorkspaceMenuIcon = activeWorkspaceMenu
-    ? resolveWebUIContractPageIcon(activeWorkspaceMenu.icon)
-    : null;
-  const activeWorkspaceSections = useMemo(
-    () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu, i18n.language) : []),
-    [activeWorkspaceMenu, i18n.language],
-  );
-  const activeWorkspaceMenuTitle = activeWorkspaceMenu
-    ? getLocalizedWebUIContractTitle(activeWorkspaceMenu, i18n.language)
-    : '';
-  const showWorkspaceCustomPageAction = canCreateWorkspaceCustomPage && isSocWorkspace(activeWorkspaceMenu);
-  const showSocDashboardTitleAction = isSocWorkspace(activeWorkspaceMenu);
-
-  const cancelWorkspaceMenuClose = useCallback(() => {
-    if (workspaceMenuCloseTimerRef.current === null) return;
-    window.clearTimeout(workspaceMenuCloseTimerRef.current);
-    workspaceMenuCloseTimerRef.current = null;
-  }, []);
-
-  const openWorkspaceMenu = useCallback((workspaceId?: string) => {
-    if (!workspaceId) return;
-    cancelWorkspaceMenuClose();
-    setOpenWorkspaceMenuId(workspaceId);
-  }, [cancelWorkspaceMenuClose]);
-
-  const scheduleWorkspaceMenuClose = useCallback(() => {
-    cancelWorkspaceMenuClose();
-    workspaceMenuCloseTimerRef.current = window.setTimeout(() => {
-      setOpenWorkspaceMenuId(null);
-      workspaceMenuCloseTimerRef.current = null;
-    }, 120);
-  }, [cancelWorkspaceMenuClose]);
-
-  useEffect(() => () => cancelWorkspaceMenuClose(), [cancelWorkspaceMenuClose]);
+  const currentLocationPath = `${location.pathname}${location.search}`;
 
   useEffect(() => {
-    setCollapsedWorkspaceSectionIds(new Set());
-  }, [openWorkspaceMenuId]);
+    if (!activeTabHref) return;
+    const stored = openTabRecordsRef.current;
+    const existing = stored.find((record) => record.href === activeTabHref);
+    if (existing && existing.path === currentLocationPath) return;
+    setOpenTabRecords(existing
+      ? stored.map((record) => (record.href === activeTabHref ? { ...record, path: currentLocationPath } : record))
+      : [...stored, { href: activeTabHref, path: currentLocationPath }]);
+  }, [activeTabHref, currentLocationPath, setOpenTabRecords]);
 
-  useEffect(() => {
-    if (openWorkspaceMenuId && !activeWorkspaceMenu) {
-      setOpenWorkspaceMenuId(null);
+  // Every menu entry that has been visited keeps its own pane, in any
+  // partition, so coming back to it restores the page as it was left.
+  const openTabs = useMemo(() => {
+    const tabs = resolveOpenTabs(navItemsFlat, openTabRecords)
+      .map((tab) => ({ href: tab.href, path: tab.path, name: tab.name, icon: tab.icon }));
+    if (activeTabHref && !tabs.some((tab) => tab.href === activeTabHref)) {
+      const item = navItemsFlat.find((entry) => entry.href === activeTabHref);
+      if (item) tabs.push({ href: item.href, path: currentLocationPath, name: item.name, icon: item.icon });
     }
-  }, [activeWorkspaceMenu, openWorkspaceMenuId]);
+    return tabs;
+  }, [activeTabHref, currentLocationPath, navItemsFlat, openTabRecords]);
+
+  // One pane per visited entry stays mounted; a route that is not a menu entry
+  // gets a transient pane that goes away when it is left.
+  const keepAlivePanes = useMemo(() => {
+    const panes = openTabs.map((tab) => ({ href: tab.href }));
+    return activeTabHref ? panes : [...panes, { href: TRANSIENT_PANE_HREF }];
+  }, [activeTabHref, openTabs]);
+  const activePaneHref = activeTabHref ?? TRANSIENT_PANE_HREF;
+
+  const openTabPathByHref = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const tab of openTabs) map.set(tab.href, tab.path);
+    return map;
+  }, [openTabs]);
+  const navItemPath = useCallback(
+    (href: string) => openTabPathByHref.get(href) ?? href,
+    [openTabPathByHref],
+  );
+
+  const primaryNavSectionIds = useMemo(
+    () => visibleNavigation
+      .filter((section) => section.accordionGroup === 'primary' && section.id)
+      .map((section) => section.id as string),
+    [visibleNavigation],
+  );
+
+  // The accordion section that owns the current route (null for home, settings, agent studio...).
+  const routePrimaryNavSectionId = useMemo(() => {
+    const owner = visibleNavigation.find((section) => (
+      section.accordionGroup === 'primary'
+      && section.id
+      && section.items.some((item) => isNavItemActive(item.href))
+    ));
+    return owner?.id ?? null;
+  }, [isNavItemActive, visibleNavigation]);
+
+  const effectiveExpandedPrimaryNavSectionId = useMemo(() => {
+    if (expandedPrimaryNavSectionId === null) return null;
+    if (expandedPrimaryNavSectionId !== undefined) {
+      if (primaryNavSectionIds.includes(expandedPrimaryNavSectionId)) return expandedPrimaryNavSectionId;
+      // A stored workspace section that has not loaded yet: keep everything
+      // collapsed instead of flashing the AI workbench open.
+      if (webuiContractNavLoading && expandedPrimaryNavSectionId.startsWith(WORKSPACE_NAV_SECTION_PREFIX)) return null;
+    }
+    // Fall back to the first accordion section of the partition on screen, so
+    // switching partitions never lands on an all-collapsed menu.
+    return routePrimaryNavSectionId ?? primaryNavSectionIds[0] ?? null;
+  }, [expandedPrimaryNavSectionId, primaryNavSectionIds, routePrimaryNavSectionId, webuiContractNavLoading]);
+
+  // Mirrors the explicit (stored) choice so the route effect below can compare
+  // against it without re-running on every render.
+  const explicitExpandedPrimaryNavSectionRef = useRef(expandedPrimaryNavSectionId);
+  useEffect(() => {
+    explicitExpandedPrimaryNavSectionRef.current = expandedPrimaryNavSectionId;
+  }, [expandedPrimaryNavSectionId]);
+
+  // Entering a route owned by one accordion section opens that section and
+  // closes the other: people work in either the AI workbench or a scene
+  // workspace such as SOC, rarely both at once. The choice is persisted so
+  // leaving for the home page keeps the last group open.
+  useEffect(() => {
+    if (!routePrimaryNavSectionId) return;
+    if (explicitExpandedPrimaryNavSectionRef.current === routePrimaryNavSectionId) return;
+    explicitExpandedPrimaryNavSectionRef.current = routePrimaryNavSectionId;
+    setExpandedPrimaryNavSectionId(routePrimaryNavSectionId);
+    saveExpandedPrimaryNavSectionId(routePrimaryNavSectionId);
+  }, [routePrimaryNavSectionId]);
+
+  const togglePrimaryNavSection = useCallback((sectionId: string) => {
+    const next = effectiveExpandedPrimaryNavSectionId === sectionId ? null : sectionId;
+    explicitExpandedPrimaryNavSectionRef.current = next;
+    setExpandedPrimaryNavSectionId(next);
+    saveExpandedPrimaryNavSectionId(next);
+  }, [effectiveExpandedPrimaryNavSectionId]);
 
   const toggleNavSection = useCallback((sectionId: string) => {
     setCollapsedNavSectionIds((current) => {
@@ -808,34 +1049,88 @@ export default function Layout() {
     });
   }, []);
 
-  const toggleWorkspaceSection = useCallback((sectionId: string) => {
-    setCollapsedWorkspaceSectionIds((current) => {
-      const next = new Set(current);
-      if (next.has(sectionId)) {
-        next.delete(sectionId);
-      } else {
-        next.add(sectionId);
-      }
-      return next;
-    });
+  // Second-level menu order is customisable in every group: workspace pages are
+  // keyed by page id, built-in entries by href, each stored per group.
+  const sectionItemKeys = (section: LayoutNavSection) => section.items.map((item) => item.pageId ?? item.href);
+
+  const reorderSectionItems = useCallback((section: LayoutNavSection, fromKey: string, toKey: string) => {
+    if (fromKey === toKey) return;
+    const keys = sectionItemKeys(section);
+    const fromIndex = keys.indexOf(fromKey);
+    const toIndex = keys.indexOf(toKey);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const nextKeys = moveItem(keys, fromIndex, toIndex);
+    if (section.workspace) {
+      saveWorkspacePageOrder(section.workspace.id, nextKeys);
+    } else if (section.id) {
+      saveNavItemOrder(section.id, nextKeys);
+    }
   }, []);
 
-  const handleCreateWorkspaceCustomPage = useCallback(async () => {
-    if (!activeWorkspaceMenu || creatingWorkspaceCustomPageSession) return;
+  const handleNavItemDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, sectionId: string, key: string) => {
+    setDraggingNavItem({ sectionId, key });
+    setDragOverNavItemKey(null);
+    try {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', key);
+    } catch {
+      // Some environments restrict dataTransfer; dragging still works through state.
+    }
+  }, []);
+
+  const handleNavItemDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, sectionId: string, key: string) => {
+    if (!draggingNavItem || draggingNavItem.sectionId !== sectionId) return;
+    event.preventDefault();
+    try {
+      event.dataTransfer.dropEffect = 'move';
+    } catch {
+      // Ignore dataTransfer restrictions.
+    }
+    if (dragOverNavItemKey !== key) {
+      setDragOverNavItemKey(key);
+    }
+  }, [dragOverNavItemKey, draggingNavItem]);
+
+  const handleNavItemDrop = useCallback((event: ReactDragEvent<HTMLDivElement>, section: LayoutNavSection, key: string) => {
+    if (!draggingNavItem || draggingNavItem.sectionId !== (section.id ?? '')) return;
+    event.preventDefault();
+    reorderSectionItems(section, draggingNavItem.key, key);
+    setDraggingNavItem(null);
+    setDragOverNavItemKey(null);
+  }, [draggingNavItem, reorderSectionItems]);
+
+  const handleNavItemDragEnd = useCallback(() => {
+    setDraggingNavItem(null);
+    setDragOverNavItemKey(null);
+  }, []);
+
+  // Keyboard alternative to dragging: Alt+ArrowUp / Alt+ArrowDown moves the focused entry.
+  const handleNavItemReorderKeyDown = useCallback((event: ReactKeyboardEvent<HTMLAnchorElement>, section: LayoutNavSection, key: string) => {
+    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+    const keys = sectionItemKeys(section);
+    const index = keys.indexOf(key);
+    const targetIndex = index + (event.key === 'ArrowUp' ? -1 : 1);
+    if (index < 0 || targetIndex < 0 || targetIndex >= keys.length) return;
+    event.preventDefault();
+    reorderSectionItems(section, key, keys[targetIndex]);
+  }, [reorderSectionItems]);
+
+  const handleCreateWorkspaceCustomPage = useCallback(async (workspace: WebUIContractWorkspaceListItem) => {
+    if (creatingWorkspaceCustomPageSession) return;
+    const workspaceTitle = getLocalizedWebUIContractTitle(workspace, i18n.language);
     setCreatingWorkspaceCustomPageSession(true);
     try {
       const session = await sessionApi.create({
         title: tWebUIContractPage('workspace.customPageSessionTitle', {
-          workspace: activeWorkspaceMenuTitle,
+          workspace: workspaceTitle,
         }),
       });
       const message = tWebUIContractPage('workspace.socCustomPageInitialMessage', {
-        workspaceId: activeWorkspaceMenu.id,
-        workspaceTitle: activeWorkspaceMenuTitle,
-        workspaceRoute: activeWorkspaceMenu.route,
+        workspaceId: workspace.id,
+        workspaceTitle,
+        workspaceRoute: workspace.route,
       });
       const displayLabel = tWebUIContractPage('workspace.socCustomPageDisplayLabel');
-      setOpenWorkspaceMenuId(null);
       setSidebarOpen(false);
       navigate(
         `/sessions?session=${session.id}&message=${encodeURIComponent(message)}&display=${encodeURIComponent(displayLabel)}`,
@@ -847,9 +1142,8 @@ export default function Layout() {
       setCreatingWorkspaceCustomPageSession(false);
     }
   }, [
-    activeWorkspaceMenu,
-    activeWorkspaceMenuTitle,
     creatingWorkspaceCustomPageSession,
+    i18n.language,
     navigate,
     tWebUIContractPage,
     toast,
@@ -858,7 +1152,6 @@ export default function Layout() {
   const openSocTitleDialog = useCallback(() => {
     setSocTitleDraft(readSocDashboardTitle());
     setSocTitleDialogOpen(true);
-    setOpenWorkspaceMenuId(null);
   }, []);
 
   const closeSocTitleDialog = useCallback(() => {
@@ -1049,10 +1342,20 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
-            {navigation.map((section, sectionIndex) => {
+            {visibleNavigation.map((section, sectionIndex) => {
               const sectionId = (section.id ?? section.name) || `section-${sectionIndex}`;
               const sectionContentId = `layout-nav-section-${sectionId}`;
-              const sectionCollapsed = Boolean(section.collapsible && collapsedNavSectionIds.has(sectionId));
+              const isPrimarySection = section.accordionGroup === 'primary';
+              // In icon-only mode there are no labels to declutter, so every
+              // section stays reachable regardless of the accordion state.
+              const sectionCollapsed = !collapsed && Boolean(section.collapsible) && (
+                isPrimarySection
+                  ? effectiveExpandedPrimaryNavSectionId !== sectionId
+                  : collapsedNavSectionIds.has(sectionId)
+              );
+              const sectionWorkspace = section.workspace ?? null;
+              const reorderable = Boolean(section.collapsible) && section.items.length > 1;
+              const showSocWorkspaceActions = !collapsed && section.workspaceActions === true && isSocWorkspace(sectionWorkspace);
               return (
                 <div key={sectionId} className="mb-6">
                   {!collapsed && section.name && (
@@ -1060,7 +1363,7 @@ export default function Layout() {
                       {section.collapsible ? (
                         <button
                           type="button"
-                          onClick={() => toggleNavSection(sectionId)}
+                          onClick={() => (isPrimarySection ? togglePrimaryNavSection(sectionId) : toggleNavSection(sectionId))}
                           className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-600 focus:outline-none focus-visible:text-zinc-600 dark:hover:text-zinc-300 dark:focus-visible:text-zinc-300"
                           aria-expanded={!sectionCollapsed}
                           aria-controls={sectionContentId}
@@ -1077,33 +1380,32 @@ export default function Layout() {
                   {!sectionCollapsed && (
                     <div id={sectionContentId} className="space-y-0.5">
                       {section.items.map((item) => {
-                        const isActive = location.pathname === item.href
-                          || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
-                        return (
+                        const isActive = isNavItemActive(item.href);
+                        const itemKey = reorderable ? (item.pageId ?? item.href) : undefined;
+                        const isDragging = Boolean(itemKey && draggingNavItem?.sectionId === sectionId && draggingNavItem.key === itemKey);
+                        const isDropTarget = Boolean(itemKey && !isDragging && draggingNavItem?.sectionId === sectionId && dragOverNavItemKey === itemKey);
+                        const link = item.external ? (
+                          <a
+                            href={item.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => setSidebarOpen(false)}
+                            title={collapsed ? item.name : undefined}
+                            className={`
+                              flex items-center rounded-lg transition-all duration-150
+                              ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
+                              text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50
+                            `}
+                          >
+                            <item.icon className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} text-zinc-400 dark:text-zinc-500`} />
+                            {!collapsed && <span className="min-w-0 flex-1 truncate">{item.name}</span>}
+                          </a>
+                        ) : (
                           <Link
-                            key={item.href}
-                            to={item.href}
-                            onMouseEnter={() => {
-                              if (item.opensWorkspaceMenu) {
-                                openWorkspaceMenu(item.workspaceId);
-                              } else {
-                                scheduleWorkspaceMenuClose();
-                              }
-                            }}
-                            onMouseLeave={() => {
-                              if (item.opensWorkspaceMenu) {
-                                scheduleWorkspaceMenuClose();
-                              }
-                            }}
-                            onClick={(event) => {
-                              if (item.opensWorkspaceMenu) {
-                                event.preventDefault();
-                                openWorkspaceMenu(item.workspaceId);
-                                return;
-                              }
-                              setOpenWorkspaceMenuId(null);
-                              setSidebarOpen(false);
-                            }}
+                            to={navItemPath(item.href)}
+                            draggable={itemKey ? false : undefined}
+                            onClick={() => setSidebarOpen(false)}
+                            onKeyDown={itemKey ? (event) => handleNavItemReorderKeyDown(event, section, itemKey) : undefined}
                             title={collapsed ? item.name : undefined}
                             className={`
                               flex items-center rounded-lg transition-all duration-150
@@ -1120,16 +1422,64 @@ export default function Layout() {
                             {!collapsed && (
                               <>
                                 <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                                {item.opensWorkspaceMenu && (
-                                  <ChevronRight
-                                    className={`ml-2 h-4 w-4 flex-shrink-0 ${openWorkspaceMenuId === item.workspaceId ? 'text-zinc-500 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`}
+                                {itemKey && (
+                                  <GripVertical
+                                    aria-hidden="true"
+                                    className="ml-2 h-4 w-4 flex-shrink-0 text-zinc-300 opacity-0 transition-opacity group-hover:opacity-100 dark:text-zinc-600"
                                   />
                                 )}
                               </>
                             )}
                           </Link>
                         );
+                        if (!itemKey) {
+                          return <div key={item.href}>{link}</div>;
+                        }
+                        return (
+                          <div
+                            key={item.href}
+                            draggable
+                            data-nav-item-key={itemKey}
+                            data-nav-page-id={item.pageId}
+                            onDragStart={(event) => handleNavItemDragStart(event, sectionId, itemKey)}
+                            onDragOver={(event) => handleNavItemDragOver(event, sectionId, itemKey)}
+                            onDragLeave={() => {
+                              if (dragOverNavItemKey === itemKey) setDragOverNavItemKey(null);
+                            }}
+                            onDrop={(event) => handleNavItemDrop(event, section, itemKey)}
+                            onDragEnd={handleNavItemDragEnd}
+                            className={`group rounded-lg ${collapsed ? '' : 'cursor-grab active:cursor-grabbing'} ${isDragging ? 'opacity-50' : ''} ${isDropTarget ? 'ring-2 ring-inset ring-zinc-400/70 dark:ring-zinc-500/70' : ''}`}
+                          >
+                            {link}
+                          </div>
+                        );
                       })}
+                      {showSocWorkspaceActions && sectionWorkspace && (
+                        <div className="space-y-0.5 pt-1">
+                          {canCreateWorkspaceCustomPage && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCreateWorkspaceCustomPage(sectionWorkspace)}
+                              disabled={creatingWorkspaceCustomPageSession}
+                              className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                            >
+                              <Plus className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
+                              <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
+                              {creatingWorkspaceCustomPageSession ? (
+                                <Loader2 className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin" />
+                              ) : null}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={openSocTitleDialog}
+                            className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                          >
+                            <Pencil className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
+                            <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customTitle')}</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1168,19 +1518,6 @@ export default function Layout() {
                   <RefreshCw className="h-4 w-4 text-zinc-400" />
                   {t('checkUpdate')}
                 </button>
-                <a
-                  href={FLOCKS_LLM_USAGE_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={() => {
-                    setAccountMenuOpen(false);
-                    setSidebarOpen(false);
-                  }}
-                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-                >
-                  <Gauge className="h-4 w-4 flex-shrink-0 text-zinc-400" />
-                  {t('flocksLlmUsageQuota')}
-                </a>
                 <Link
                   to="/settings/preferences"
                   state={settingsReturnState}
@@ -1286,152 +1623,11 @@ export default function Layout() {
         </button>
       </aside>
 
-      {activeWorkspaceMenu && (
-        <nav
-          aria-label={tWebUIContractPage('workspace.sectionNavigation')}
-          onMouseEnter={cancelWorkspaceMenuClose}
-          onMouseLeave={scheduleWorkspaceMenuClose}
-          className={`fixed inset-y-0 z-[60] flex w-52 max-w-[calc(100vw-4rem)] flex-col border-r border-zinc-200 bg-zinc-100 text-zinc-600 shadow-2xl shadow-zinc-900/10 transition-[left] duration-300 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:shadow-black/30 ${
-            collapsed ? 'left-16' : 'left-52 lg:left-[var(--layout-sidebar-width)]'
-          }`}
-          style={sidebarOffsetStyle}
-        >
-          <div className="flex h-16 items-center gap-3 border-b border-zinc-200 px-4 dark:border-white/10">
-            {ActiveWorkspaceMenuIcon && (
-              <ActiveWorkspaceMenuIcon className="h-5 w-5 shrink-0 text-zinc-500 dark:text-zinc-300" />
-            )}
-            <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenuTitle}>
-              {activeWorkspaceMenuTitle}
-            </div>
-            <button
-              type="button"
-              onClick={() => setOpenWorkspaceMenuId(null)}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/70 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:hover:bg-white/10 dark:hover:text-white dark:focus:ring-zinc-700"
-              title={tWebUIContractPage('workspace.collapseSidebar')}
-              aria-label={tWebUIContractPage('workspace.collapseSidebar')}
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-          </div>
-
-          <div className="flex-1 space-y-2 overflow-y-auto px-3 py-4">
-            {activeWorkspaceSections.length > 0 ? (
-              activeWorkspaceSections.map((workspaceSection) => {
-                const sectionActive = workspaceSection.pages.some((page) => location.pathname === `${activeWorkspaceMenu.route}/${page.id}`);
-                const showPageChildren = workspaceSection.pages.length > 1;
-                const sectionCollapsed = collapsedWorkspaceSectionIds.has(workspaceSection.id);
-                return (
-                  <div key={workspaceSection.id} className="space-y-1">
-                    <div
-                      className={`flex h-8 items-center rounded-md px-3 text-xs font-semibold uppercase tracking-wider transition-colors ${
-                        sectionActive
-                          ? 'text-zinc-500 dark:text-zinc-400'
-                          : 'text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300'
-                      }`}
-                    >
-                      {showPageChildren ? (
-                        <button
-                          type="button"
-                          onClick={() => toggleWorkspaceSection(workspaceSection.id)}
-                          className="min-w-0 flex-1 truncate text-left"
-                        >
-                          {workspaceSection.label}
-                        </button>
-                      ) : (
-                        <Link
-                          to={`${activeWorkspaceMenu.route}/${workspaceSection.defaultPageId}`}
-                          onClick={() => {
-                            setOpenWorkspaceMenuId(null);
-                            setSidebarOpen(false);
-                          }}
-                          title={workspaceSection.label}
-                          className="min-w-0 flex-1 truncate"
-                        >
-                          {workspaceSection.label}
-                        </Link>
-                      )}
-                      {showPageChildren ? (
-                        <button
-                          type="button"
-                          onClick={() => toggleWorkspaceSection(workspaceSection.id)}
-                          className="ml-2 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-white/10 dark:hover:text-zinc-200"
-                          aria-label={sectionCollapsed ? tWebUIContractPage('workspace.expandSidebar') : tWebUIContractPage('workspace.collapseSidebar')}
-                          title={sectionCollapsed ? tWebUIContractPage('workspace.expandSidebar') : tWebUIContractPage('workspace.collapseSidebar')}
-                        >
-                          <ChevronRight className={`h-3.5 w-3.5 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
-                        </button>
-                      ) : null}
-                    </div>
-
-                    {showPageChildren && !sectionCollapsed ? (
-                      <div className="space-y-1">
-                        {workspaceSection.pages.map((page) => {
-                          const pageActive = location.pathname === `${activeWorkspaceMenu.route}/${page.id}`;
-                          return (
-                            <Link
-                              key={page.id}
-                              to={`${activeWorkspaceMenu.route}/${page.id}`}
-                              onClick={() => {
-                                setOpenWorkspaceMenuId(null);
-                                setSidebarOpen(false);
-                              }}
-                              className={`flex h-10 items-center rounded-md px-3 text-sm font-semibold transition-colors ${
-                                pageActive
-                                  ? 'bg-white text-zinc-950 shadow-sm dark:bg-white/10 dark:text-white'
-                                  : 'text-zinc-500 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100'
-                              }`}
-                            >
-                              <span className="truncate">{page.title}</span>
-                            </Link>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })
-            ) : (
-              <div className="px-3 py-2 text-sm text-zinc-400 dark:text-zinc-500">
-                {tWebUIContractPage('workspace.empty')}
-              </div>
-            )}
-
-            {showWorkspaceCustomPageAction ? (
-              <div className="space-y-1">
-                <button
-                  type="button"
-                  onClick={() => void handleCreateWorkspaceCustomPage()}
-                  disabled={creatingWorkspaceCustomPageSession}
-                  className="flex h-8 w-full items-center rounded-md px-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:text-zinc-300"
-                >
-                  <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
-                  {creatingWorkspaceCustomPageSession ? (
-                    <Loader2 className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin" />
-                  ) : null}
-                </button>
-              </div>
-            ) : null}
-
-            {showSocDashboardTitleAction ? (
-              <div className="space-y-1">
-                <button
-                  type="button"
-                  onClick={openSocTitleDialog}
-                  className="flex h-8 w-full items-center rounded-md px-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300"
-                >
-                  <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customTitle')}</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </nav>
-      )}
-
       {/* Mobile top menu button */}
-      <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-16 px-4 ${sidebarOpen ? 'hidden' : ''}`}>
+      <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-11 px-3 pointer-events-none ${sidebarOpen ? 'hidden' : ''}`}>
         <button
           onClick={() => setSidebarOpen(true)}
-          className="p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"
+          className="pointer-events-auto p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"
         >
           <Menu className="w-5 h-5" />
         </button>
@@ -1442,16 +1638,26 @@ export default function Layout() {
         className={`flex flex-col h-screen ${resizingSidebar ? '' : 'transition-all duration-300'} ${collapsed ? 'lg:pl-16' : 'lg:pl-[var(--layout-sidebar-width)]'}`}
         style={sidebarOffsetStyle}
       >
-        <main className="flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
-          {isFullScreenPage ? (
-            <Outlet />
-          ) : (
-            <div className="h-full overflow-y-auto">
-              <div className="min-h-full p-6">
-                <Outlet />
-              </div>
-            </div>
-          )}
+        <PartitionTopBar
+          items={partitionItems}
+          activeId={selectedPartition}
+          onSelect={selectPartition}
+          action={selectedPartition === 'scene'
+            ? {
+              href: '/scenes/suites',
+              name: t('sceneSuiteManager'),
+              icon: Boxes,
+              active: location.pathname.startsWith('/scenes/'),
+            }
+            : undefined}
+        />
+        <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
+          <KeepAlivePanes
+            panes={keepAlivePanes}
+            activeHref={activePaneHref}
+            location={location}
+            routes={contentRoutes}
+          />
         </main>
       </div>
     </div>
