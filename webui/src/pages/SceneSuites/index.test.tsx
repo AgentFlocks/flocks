@@ -8,6 +8,7 @@ const { hubAPI, webuiContractPagesAPI, flocksproUsersApi, toast } = vi.hoisted((
   hubAPI: {
     sceneSuites: vi.fn(),
     install: vi.fn(),
+    installStream: vi.fn(),
     update: vi.fn(),
     uninstall: vi.fn(),
   },
@@ -110,9 +111,52 @@ describe('SceneSuitesPage', () => {
     const install = await within(audit).findByRole('button', { name: '安装' });
     await user.click(install);
 
-    await waitFor(() => expect(hubAPI.install).toHaveBeenCalledWith('component', 'code-audit-workspace'));
+    // Installing a suite streams per-component progress, so it goes through
+    // installStream rather than the plain install call.
+    await waitFor(() => expect(hubAPI.installStream).toHaveBeenCalledWith(
+      'component', 'code-audit-workspace', expect.any(Function),
+    ));
+    expect(hubAPI.install).not.toHaveBeenCalled();
     // The list is reloaded so the card reflects the new state.
     await waitFor(() => expect(hubAPI.sceneSuites).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows per-component install progress while a suite installs', async () => {
+    flocksproUsersApi.hasCapability.mockResolvedValue(true);
+    // Drive the progress callback the way the server stream would.
+    hubAPI.installStream.mockImplementation(async (_type, _id, onProgress) => {
+      onProgress({
+        event: 'start',
+        id: 'code-audit-workspace',
+        type: 'component',
+        name: 'Code Audit Workspace',
+        total: 2,
+        items: [
+          { type: 'webui', id: 'code_audit_ui', status: 'pending' },
+          { type: 'tool', id: 'code_audit_tool', status: 'pending' },
+        ],
+      });
+      onProgress({
+        event: 'item',
+        id: 'code-audit-workspace',
+        type: 'component',
+        name: 'Code Audit Workspace',
+        total: 2,
+        item: { type: 'webui', id: 'code_audit_ui', status: 'installed' },
+      });
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    await user.click(await within(audit).findByRole('button', { name: '安装' }));
+
+    // The panel lists the suite's own components, not just a spinner.
+    // 面板逐个列出套件的子件（显示名与「类型 · id」各一处，故用 All 变体）。
+    expect((await screen.findAllByText(/code_audit_ui/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/code_audit_tool/).length).toBeGreaterThan(0);
+    // 走的是流式接口，不是普通 install。
+    expect(hubAPI.install).not.toHaveBeenCalled();
   });
 
   it('disables a workspace through the contract API', async () => {

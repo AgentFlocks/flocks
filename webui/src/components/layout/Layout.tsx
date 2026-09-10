@@ -838,17 +838,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
       return [
         {
-          name: '',
-          partition: 'agent',
-          items: [{ name: t('flocksHome'), href: '/', icon: Home }],
-        },
-        {
           id: AI_WORKBENCH_NAV_SECTION_ID,
           name: t('aiWorkbench'),
           partition: 'agent',
           collapsible: true,
           accordionGroup: 'primary',
+          // 首页归 Agent 分区并算作本组入口之一（xlsx D01 + TC-02 的 5 个入口）。
           items: orderedGroup(AI_WORKBENCH_NAV_SECTION_ID, [
+            { name: t('flocksHome'), href: '/', icon: Home },
             { name: t('sessions'), href: '/sessions', icon: MessageSquare },
             { name: t('workspace'), href: '/workspace', icon: FolderOpen },
             { name: t('tasks'), href: '/tasks', icon: ListTodo },

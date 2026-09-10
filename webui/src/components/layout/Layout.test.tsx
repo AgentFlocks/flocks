@@ -1651,7 +1651,7 @@ describe('Layout WebUI contract pages navigation', () => {
       const section = within(container).getByRole('button', { name: sectionName }).closest('div.mb-6') as HTMLElement;
       return Array.from(section.querySelectorAll('[data-nav-item-key]')).map((element) => element.getAttribute('data-nav-item-key'));
     };
-    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/sessions', '/workspace', '/tasks', '/workflows']);
+    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/', '/sessions', '/workspace', '/tasks', '/workflows']);
     expect(keysIn(first.container, 'agentHub')).toEqual(['/agents', '/skills', '/tools', '/devices', '/hub', '/models', '/channels']);
 
     const itemFor = (key: string) => first.container.querySelector(`[data-nav-item-key="${key}"]`) as HTMLElement;
@@ -1660,20 +1660,20 @@ describe('Layout WebUI contract pages navigation', () => {
     fireEvent.drop(itemFor('/sessions'));
     fireEvent.dragEnd(itemFor('/workflows'));
 
-    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/workflows', '/sessions', '/workspace', '/tasks']);
+    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/', '/workflows', '/sessions', '/workspace', '/tasks']);
     expect(JSON.parse(localStorage.getItem('flocks_layout_nav_item_order:aiWorkbench') ?? '[]'))
-      .toEqual(['/workflows', '/sessions', '/workspace', '/tasks']);
+      .toEqual(['/', '/workflows', '/sessions', '/workspace', '/tasks']);
     // Other groups are untouched.
     expect(keysIn(first.container, 'agentHub')).toEqual(['/agents', '/skills', '/tools', '/devices', '/hub', '/models', '/channels']);
 
     // Keyboard works for built-in entries as well.
     fireEvent.keyDown(within(first.container).getByRole('link', { name: 'tasks' }), { key: 'ArrowUp', altKey: true });
-    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/workflows', '/sessions', '/tasks', '/workspace']);
+    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/', '/workflows', '/sessions', '/tasks', '/workspace']);
 
     first.unmount();
     const second = renderHomeWithLayout();
     await screen.findByRole('button', { name: 'aiWorkbench' });
-    expect(keysIn(second.container, 'aiWorkbench')).toEqual(['/workflows', '/sessions', '/tasks', '/workspace']);
+    expect(keysIn(second.container, 'aiWorkbench')).toEqual(['/', '/workflows', '/sessions', '/tasks', '/workspace']);
   });
 
   it('shows one scene at a time in a flat menu and switches scenes from the top bar', async () => {

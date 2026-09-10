@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, ArrowUpCircle, Download, Loader2, Power, RefreshCw, Trash2 } from 'lucide-react';
-import { hubAPI, type HubSceneSuite } from '@/api/hub';
+import { hubAPI, type HubInstallProgressEvent, type HubSceneSuite } from '@/api/hub';
+import SuiteInstallProgressPanel, {
+  applySuiteInstallProgressEvent,
+  createSuiteInstallProgressState,
+  failSuiteInstallProgress,
+  type SuiteInstallProgressState,
+} from '@/components/hub/SuiteInstallProgressPanel';
 import { webuiContractPagesAPI } from '@/api/webuiContractPages';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useToast } from '@/components/common/Toast';
@@ -72,6 +78,11 @@ const TEXT = {
 
 type SuiteAction = 'install' | 'update' | 'uninstall' | 'enable' | 'disable';
 
+/** The progress panel takes a catalog-shaped entry, whose nameCn is not nullable. */
+function progressEntry(suite: HubSceneSuite) {
+  return { id: suite.id, name: suite.name, nameCn: suite.nameCn ?? undefined };
+}
+
 function suiteName(suite: HubSceneSuite, zh: boolean): string {
   return (zh && suite.nameCn) ? suite.nameCn : suite.name;
 }
@@ -90,6 +101,9 @@ export default function SceneSuitesPage() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [hasPro, setHasPro] = useState(false);
+  // Installing a suite pulls in its pages, tool and workflows one by one; show
+  // the same per-component progress the hub used to show.
+  const [installProgress, setInstallProgress] = useState<SuiteInstallProgressState | null>(null);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -112,7 +126,12 @@ export default function SceneSuitesPage() {
   const runAction = useCallback(async (suite: HubSceneSuite, action: SuiteAction) => {
     setBusyId(suite.id);
     try {
-      if (action === 'install') await hubAPI.install('component', suite.id);
+      if (action === 'install') {
+        setInstallProgress(createSuiteInstallProgressState(progressEntry(suite)));
+        await hubAPI.installStream('component', suite.id, (event: HubInstallProgressEvent) => {
+          setInstallProgress((current) => applySuiteInstallProgressEvent(current, event));
+        });
+      }
       // Updating the suite carries its pages along (the installer updates an
       // outdated child), so one call is enough.
       if (action === 'update') await hubAPI.update('component', suite.id);
@@ -125,6 +144,9 @@ export default function SceneSuitesPage() {
       await load(true);
     } catch (err: unknown) {
       const detail = err instanceof Error ? err.message : '';
+      if (action === 'install') {
+        setInstallProgress((current) => failSuiteInstallProgress(current, progressEntry(suite), detail || text.actionFailed));
+      }
       toast.error(`${text.actionFailed}: ${suiteName(suite, zh)}`, detail);
     } finally {
       setBusyId(null);
@@ -150,6 +172,15 @@ export default function SceneSuitesPage() {
 
   return (
     <div className="mx-auto w-full max-w-4xl">
+      {installProgress && (
+        <div className="mb-4">
+          <SuiteInstallProgressPanel
+            progress={installProgress}
+            language={i18n.language}
+            onClose={() => setInstallProgress(null)}
+          />
+        </div>
+      )}
       <div className="mb-5 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-50">{text.title}</h1>
