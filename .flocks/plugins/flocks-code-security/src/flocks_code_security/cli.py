@@ -433,22 +433,23 @@ class AuditOrchestrator:
             )
             return status
         while remaining > 0:
-            batch, status = await _run_phase(
-                self.ctx,
-                scan_id,
-                "poc_generation",
-                self.progress,
-                scan_observation,
+            available = await asyncio.to_thread(
+                get_runtime().store.list_confirmed_without_poc_record, scan_id,
             )
-            if batch.get("status") != "completed":
+            if not available:
+                break
+            batch, status = await _run_phase(
+                self.ctx, scan_id, "poc_generation", self.progress, scan_observation,
+            )
+            if batch.get("status") not in {"completed", "partial", "failed"}:
                 raise RuntimeError("PoC-generation worker batch did not complete successfully")
             current = int(status.get("counts", {}).get("confirmed_without_poc_bundle", 0))
-            if current >= remaining:
+            if batch.get("status") == "completed" and current >= remaining:
                 raise RuntimeError("PoC-generation phase made no progress")
             remaining = current
         _emit(
             self.progress,
-            "poc_generation.completed",
+            "poc_generation.incomplete" if remaining else "poc_generation.completed",
             {"scan_id": scan_id, "counts": status.get("counts", {})},
             observation_parent=scan_observation,
         )

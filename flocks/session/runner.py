@@ -1567,6 +1567,7 @@ class SessionRunner:
         # Check if we've reached max steps (matching Flocks logic)
         max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
         is_last_step = self._step >= max_steps
+        self.max_steps_reached = is_last_step
         
         # Get provider
         provider = Provider.get(self.provider_id)

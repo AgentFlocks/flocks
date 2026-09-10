@@ -53,7 +53,7 @@
           }
         },
         "status": {
-          "const": "completed"
+          "enum": ["completed", "failed"]
         },
         "startedAt": {
           "type": "string",

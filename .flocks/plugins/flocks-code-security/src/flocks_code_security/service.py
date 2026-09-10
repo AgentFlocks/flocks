@@ -420,7 +420,9 @@ class _ProgressRecorder:
             phase_run_id = self.phase_runs.get("finalization")
             if phase_run_id:
                 self.store.finish_phase_run(phase_run_id, "completed", summary=payload)
-            event_type = "scan.completed"
+            event_type = "scan.failed" if payload.get("status") == "failed" else "scan.completed"
+            if payload.get("status") == "failed":
+                level = "warning"
         elif event == "scan.coverage_blocked":
             phase_run_id = self.phase_runs.get("finalization")
             if phase_run_id:
@@ -2248,7 +2250,7 @@ class AuditService:
         expected_digest = status.get("integrity_artifacts", {}).get(path.name)
         actual_digest = hashlib.sha256(contents).hexdigest()
         if not (
-            scan["status"] == "completed"
+            scan["status"] in {"completed", "failed"}
             and status.get("integrity_status") == "valid"
             and isinstance(expected_digest, str)
             and hmac.compare_digest(actual_digest, expected_digest)

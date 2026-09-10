@@ -651,9 +651,11 @@ def test_background_task_timestamps_are_projected_as_utc() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("exit_kind", ["no_facts", "max_steps", "unknown_error"])
 async def test_transient_worker_failure_resumes_same_session_and_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    exit_kind: str,
 ) -> None:
     from flocks.session.message import Message
     from flocks.session.session import Session
@@ -739,7 +741,15 @@ async def test_transient_worker_failure_resumes_same_session_and_attempt(
     assert fresh_worker["attempt_ordinal"] == 2
     assert manager.calls[2]["session_id"] == "worker-2"
 
-    manager.tasks["task-3"].status = "completed"
+    task = manager.tasks["task-3"]
+    task.status = "error" if exit_kind == "unknown_error" else "completed"
+    task.error = "unexpected provider failure" if exit_kind == "unknown_error" else None
+    task.execution_metadata = {"steps": 200 if exit_kind == "max_steps" else 4,
+                               "max_steps_reached": exit_kind == "max_steps"}
+    with runtime.store._connect() as connection:
+        connection.execute("INSERT INTO submission_rejections VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           ("rejection-test", fresh_worker["attempt_id"], "audit_submit_poc",
+                            "INVALID_INPUT", '["missing entrypoint"]', 1, "2026-09-10T00:00:00+00:00"))
     exhausted = await audit_wait_workers(
         coordinator,
         launched.output["batch_id"],
@@ -750,7 +760,17 @@ async def test_transient_worker_failure_resumes_same_session_and_attempt(
         exhausted.output["workers"][0]["work_unit_id"]
     )
     assert [attempt["status"] for attempt in attempts] == ["failed", "failed"]
-    assert attempts[-1]["failure_class"] == "agent_exited_no_facts"
+    expected = {"no_facts": "agent_exited_no_facts", "max_steps": "max_steps_reached",
+                "unknown_error": "unclassified_execution_error"}[exit_kind]
+    assert attempts[-1]["failure_class"] == expected
+    with runtime.store._connect() as connection:
+        diagnostic = json.loads(connection.execute(
+            "SELECT payload_json FROM scan_events WHERE event_type = 'worker.execution_failed' "
+            "ORDER BY seq DESC LIMIT 1"
+        ).fetchone()[0])
+    assert diagnostic["failure_class"] == expected
+    assert diagnostic["steps"] == task.execution_metadata["steps"]
+    assert diagnostic["submission_rejections"][0]["error_code"] == "INVALID_INPUT"
 
 
 @pytest.mark.asyncio
@@ -1235,10 +1255,12 @@ async def test_large_repository_threat_model_needs_summary_not_inventory_paginat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_enabled", [False, True])
+@pytest.mark.parametrize("poc_failed", [False, True])
 async def test_prepare_candidate_verify_finalize_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cleanup_enabled: bool,
+    poc_failed: bool,
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -1420,9 +1442,45 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     adjudication = _submit_final_adjudication(runtime, scan_id)
     assert adjudication["dynamic_assessments"] is None
 
+    if poc_failed:
+        with runtime.store._connect() as connection:
+            connection.execute("UPDATE scans SET poc_enabled = 1 WHERE scan_id = ?", (scan_id,))
+        # Unassigned or active work must still block finalization.
+        with pytest.raises(ValueError, match="PoC generation"):
+            runtime.store.ensure_ready_to_finalize(scan_id)
+        poc_batch = runtime.store.create_worker_batch(
+            scan_id=scan_id, phase="poc_generation",
+            units=[{"role": "poc_generator", "paths": ["."],
+                    "subject_id": candidate.output["candidate_id"]}],
+        )
+        poc_unit = runtime.store.get_worker_batch(poc_batch["batch_id"])["units"][0]
+        with pytest.raises(ValueError, match="still active"):
+            runtime.store.ensure_ready_to_finalize(scan_id)
+        runtime.store.update_work_unit_status(poc_unit["work_unit_id"], "failed")
+        runtime.store.record_worker_failure(poc_unit, SimpleNamespace(
+            status="completed", error=None, output="unfinished" * 1000,
+            execution_metadata={"steps": 200, "trace_step": 200, "max_steps_reached": True},
+        ), "max_steps_reached")
+
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
-    assert finalized.output["status"] == "completed"
+    assert finalized.output["status"] == ("failed" if poc_failed else "completed")
+    if poc_failed:
+        assert finalized.output["failure_code"] == "poc_generation_incomplete"
+        output = Path(finalized.output["output_dir"])
+        manifest = json.loads((output / "scan-manifest.json").read_text())
+        assert manifest["scan"]["status"] == "failed"
+        assert manifest["scan"]["pocGeneration"]["missingCandidateIds"] == [candidate.output["candidate_id"]]
+        assert "PoC generation incomplete" in (output / "report.md").read_text()
+        with runtime.store._connect() as connection:
+            events = connection.execute("SELECT payload_json FROM scan_events WHERE event_type = 'worker.execution_failed'").fetchall()
+        assert len(events) == 1
+        diagnostic = json.loads(events[0][0])
+        assert diagnostic["steps"] == 200
+        assert len(diagnostic["last_message"]) == 2000
+        # Sealed failed reports remain downloadable through the same integrity guard.
+        service = AuditService(runtime=runtime)
+        assert service._read_verified_artifact(runtime.store.get_scan(scan_id), output / "report.md")
     completed_status = runtime.store.scan_status(scan_id)
     assert completed_status["integrity_status"] == "valid"
     snapshot_path = Path(runtime.store.get_snapshot(snapshot_id).root_path)
@@ -1459,7 +1517,7 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     validate_document("findings", findings_document)
     validate_document("coverage", coverage_document)
     assert manifest["documentType"] == "codex-security.scan-manifest"
-    assert manifest["scan"]["status"] == "completed"
+    assert manifest["scan"]["status"] == ("failed" if poc_failed else "completed")
     assert manifest["scan"]["sealedAt"] == manifest["scan"]["completedAt"]
     assert manifest["scan"]["threatModel"]["trustBoundaries"]
     assert any(artifact["path"] == "adjudication.json" for artifact in manifest["scan"]["artifacts"])
@@ -1477,6 +1535,9 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     }
     assert "result_status" not in manifest["scan"]
     assert (output_path / ".scan-manifest.final").exists() is False
+
+    if poc_failed:
+        return
 
     legacy_manifest = json.loads(json.dumps(manifest))
     legacy_manifest["scan"]["artifacts"] = [

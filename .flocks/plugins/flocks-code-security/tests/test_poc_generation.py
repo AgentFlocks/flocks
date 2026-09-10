@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import flocks_code_security.tools as tools_module
 from flocks_code_security.models import SnapshotRef
 from flocks_code_security.orchestration import plan_poc_units, poc_generator_prompt
@@ -99,3 +101,18 @@ def test_store_poc_flag_and_empty_generation_queue(tmp_path: Path) -> None:
 
     assert store.get_scan(scan_id)["poc_enabled"] is True
     assert store.list_confirmed_without_poc_record(scan_id) == []
+
+
+@pytest.mark.asyncio
+async def test_background_retains_loop_diagnostics(monkeypatch):
+    from unittest.mock import AsyncMock
+    from flocks.session.session_loop import LoopResult
+    from flocks.task import background
+
+    metadata = {"steps": 200, "trace_step": 200, "max_steps_reached": True}
+    result = LoopResult(action="stop", metadata=metadata)
+    monkeypatch.setattr(background.SessionLoop, "run", AsyncMock(return_value=result))
+    task = background.BackgroundTask(id="test", status="running", description="test", prompt="", agent="test")
+    manager = background.BackgroundManager()
+    assert await manager._run_session_with_watchdog(task, "session-test", None) is result
+    assert task.execution_metadata == metadata

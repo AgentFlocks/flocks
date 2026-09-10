@@ -79,4 +79,4 @@ def classify_execution_failure(error: str | None) -> str:
         )
     ):
         return "transient_execution_failure"
-    return "agent_exited_no_facts"
+    return "unclassified_execution_error" if message else "agent_exited_no_facts"

@@ -2680,7 +2680,7 @@ class ScanStore:
                     JOIN work_units wu ON wu.work_unit_id = assigned.work_unit_id
                     WHERE assigned.subject_id = c.candidate_id
                       AND wu.role = 'poc_generator'
-                      AND wu.status IN ('pending', 'running')
+                      AND wu.status IN ('pending', 'running', 'failed')
                   )
                 ORDER BY c.created_at, c.candidate_id
                 LIMIT ?
@@ -4604,7 +4604,9 @@ class ScanStore:
                     """,
                     (scan_id,),
                 ).fetchone()[0]
-                if missing_poc:
+                # Active workers were rejected above. Exhausted PoC failures may
+                # be sealed by ReportWriter, which keeps the scan failed.
+                if missing_poc and self.list_confirmed_without_poc_record(scan_id):
                     raise ValueError(
                         "PoC generation must produce one bundle for every confirmed candidate "
                         f"before finalization ({missing_poc} remaining)"
@@ -5002,6 +5004,36 @@ class ScanStore:
             ).fetchall()
         return [self._decode_phase_run(row) for row in rows]
 
+    def record_worker_failure(self, unit: dict[str, Any], task: Any, failure_class: str) -> None:
+        """Keep a compact terminal diagnostic after sessions and attempts are pruned."""
+        with self._connect() as connection:
+            rejections = connection.execute(
+                "SELECT tool_name, error_code, violations_json FROM submission_rejections "
+                "WHERE attempt_id = ? ORDER BY created_at DESC, rejection_id DESC LIMIT 3",
+                (unit.get("attempt_id"),),
+            ).fetchall()
+        metadata = getattr(task, "execution_metadata", {}) or {}
+        self.append_scan_event(
+            unit["scan_id"], "worker.execution_failed", "Worker did not submit required facts",
+            {
+                "work_unit_id": unit["work_unit_id"],
+                "attempt_id": unit.get("attempt_id"),
+                "candidate_id": unit.get("subject_id"),
+                "role": unit["role"],
+                "failure_class": failure_class,
+                "task_status": task.status,
+                "steps": metadata.get("steps"),
+                "trace_step": metadata.get("trace_step"),
+                "max_steps_reached": metadata.get("max_steps_reached"),
+                "error": str(getattr(task, "error", None) or metadata.get("stop_reason") or "")[:1000],
+                "last_message": str(getattr(task, "output", None) or "")[-2000:],
+                "submission_rejections": [
+                    {"tool_name": row["tool_name"], "error_code": row["error_code"],
+                     "summary": row["violations_json"][:1000]} for row in rejections
+                ],
+            }, level="warning",
+        )
+
     def append_scan_event(
         self,
         scan_id: str,
@@ -5309,6 +5341,8 @@ class ScanStore:
             ):
                 if self.retain_ui_history and table in {"scan_events", "scan_phase_runs", "cybergym_runs"}:
                     continue
+                if table == "scan_events":
+                    scope += " AND event_type != 'worker.execution_failed'"
                 counts[table] = connection.execute(f"DELETE FROM {table} WHERE {scope}", (scan_id,)).rowcount
             counts["work_attempts"] = connection.execute(
                 f"DELETE FROM work_attempts WHERE work_unit_id IN ({unit_scope}) "
@@ -6740,7 +6774,7 @@ class ScanStore:
                 "Threat model failed contract validation"
                 + (f": {threat_model_validation_error}" if threat_model_validation_error else "")
             )
-        elif scan["status"] == "completed":
+        elif scan["status"] == "completed" or (scan["status"] == "failed" and scan.get("output_dir")):
             if threat_model_status == "completed":
                 from flocks_code_security.artifact_integrity import (
                     verify_artifact_bundle,

@@ -8,7 +8,7 @@ tags:
   - code-security
   - internal
 temperature: 0.0
-steps: 48
+steps: 200
 skills: []
 prompt_profile: isolated
 session_directory: ~/.flocks/workspace/code-security/runtime

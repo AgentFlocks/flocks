@@ -83,6 +83,7 @@ class LoopContext:
     model_id: str
     agent_name: str
     step: int = 0
+    max_steps_reached: bool = False
     abort_event: asyncio.Event = field(default_factory=asyncio.Event)
     # SessionContext interface for decoupled session access
     session_ctx: Optional[Any] = None  # Type: Optional[SessionContext]
@@ -1240,6 +1241,7 @@ class SessionLoop:
             runner._step = ctx.trace_step
 
             step_result = await runner._process_step(messages, last_user)
+            ctx.max_steps_reached |= bool(getattr(runner, "max_steps_reached", False))
             if runner._session_start_fired:
                 ctx.session_start_pending = False
             failure = step_result.failure
@@ -2299,6 +2301,8 @@ class SessionLoop:
             model_id=ctx.model_id,
             metadata={
                 "steps": ctx.step,
+                "trace_step": ctx.trace_step,
+                "max_steps_reached": ctx.max_steps_reached,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
                 **({"stop_reason": loop_error} if loop_error else {}),

@@ -98,6 +98,11 @@ class ReportWriter:
             if not adjudications or adjudications[-1]["action"] != "finalize":
                 raise ValueError("A final parent-agent adjudication is required")
             accepted_candidate_ids = set(adjudications[-1]["accepted_candidate_ids"])
+            missing_poc_ids = sorted(accepted_candidate_ids - {
+                item["candidate_id"] for item in data.get("poc_bundles", [])
+            }) if scan.get("poc_enabled") else []
+            final_status = "failed" if missing_poc_ids else "completed"
+            failure_summary = f"PoC generation incomplete: {len(missing_poc_ids)} candidate(s) missing a bundle"
             dynamic_runs = {item["candidate_id"]: item for item in data["dynamic_runs"]}
             poc_bundles = {
                 item["candidate_id"]: item for item in data.get("poc_bundles", [])
@@ -350,6 +355,8 @@ class ReportWriter:
                     "schemaVersion": "1.0",
                     "scanId": scan_id,
                     "bundles": poc_entries,
+                    "status": ("partial" if poc_entries else "failed") if missing_poc_ids else "completed",
+                    "missingCandidateIds": missing_poc_ids,
                 }
                 supplemental_contents["poc-generation.json"] = canonical_json_bytes(poc_document)
             artifact_contents = {
@@ -373,6 +380,9 @@ class ReportWriter:
                 cybergym=cybergym_document,
                 poc_generation=poc_document,
             )
+            manifest["scan"]["status"] = final_status
+            if missing_poc_ids:
+                manifest["scan"]["scope"].setdefault("limitations", []).append(failure_summary)
             artifact_contents.update(
                 {
                     "report.md": self._markdown(
@@ -404,15 +414,22 @@ class ReportWriter:
             staging.replace(target)
             published = True
             self.store.set_scan_output_dir(scan_id, target)
-            self.store.transition_scan_status(
-                scan_id,
-                from_statuses={"reducing"},
-                to_status="completed",
-            )
+            if missing_poc_ids:
+                if not self.store.mark_scan_terminal(
+                    scan_id, "failed", failure_code="poc_generation_incomplete",
+                    failure_summary=failure_summary,
+                ):
+                    raise ValueError("Scan status changed during report finalization")
+            else:
+                self.store.transition_scan_status(
+                    scan_id, from_statuses={"reducing"}, to_status="completed",
+                )
             status_committed = True
             return {
                 "scan_id": scan_id,
-                "status": "completed",
+                "status": final_status,
+                "failure_code": "poc_generation_incomplete" if missing_poc_ids else None,
+                "missing_poc_candidate_ids": missing_poc_ids,
                 "finding_count": len(findings),
                 "finding_summaries": [
                     {
@@ -1274,6 +1291,8 @@ class ReportWriter:
             manifest_scan["pocGeneration"] = {
                 "enabled": True,
                 "bundleCount": len(poc_generation.get("bundles", [])),
+                "status": poc_generation.get("status", "completed"),
+                "missingCandidateIds": poc_generation.get("missingCandidateIds", []),
                 "resultRef": "poc-generation.json",
             }
         return {
@@ -1392,7 +1411,7 @@ class ReportWriter:
             "# Code Security Audit Report",
             "",
             f"- Scan: `{ReportWriter._markdown_text(scan['id'])}`",
-            "- Status: `completed` (sealed)",
+            f"- Status: `{scan['status']}` (sealed)",
             f"- Target: `{ReportWriter._markdown_text(target['displayName'])}`",
             f"- Target kind: `{target['kind']}`",
             f"- Revision: `{ReportWriter._markdown_text(target.get('revision', 'not recorded'))}`",
@@ -1412,6 +1431,11 @@ class ReportWriter:
             f"- Deferred work: **{len(coverage['deferred'])}**",
             f"- Static validation limitations: **{len(limitations)}**",
         ]
+        missing_pocs = (scan.get("pocGeneration") or {}).get("missingCandidateIds", [])
+        if missing_pocs:
+            lines.append("- PoC generation incomplete; missing candidates: " + ", ".join(
+                f"`{ReportWriter._markdown_text(candidate_id)}`" for candidate_id in missing_pocs
+            ))
         knowledge_base = scan.get("knowledgeBase")
         if knowledge_base is not None:
             lines.extend(
@@ -1676,6 +1700,7 @@ class ReportWriter:
                         }
                     },
                     "automationDetails": {"id": scan["id"]},
+                    "invocations": [{"executionSuccessful": scan["status"] == "completed"}],
                     "results": results,
                     "properties": {
                         "codexSecuritySchemaVersion": manifest["schemaVersion"],

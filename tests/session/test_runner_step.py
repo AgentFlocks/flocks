@@ -3341,6 +3341,7 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
 
     assert result.action == "stop"
     assert captured["tools"] == []
+    assert runner.max_steps_reached is True
 
 
 @pytest.mark.asyncio
@@ -3390,6 +3391,7 @@ async def test_process_step_respects_explicit_agent_steps_over_default(monkeypat
 
     assert result.action == "stop"
     assert captured["tools"] == sentinel_tools
+    assert runner.max_steps_reached is False
 
 
 @pytest.mark.asyncio

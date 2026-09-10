@@ -1290,3 +1290,27 @@ async def test_wait_for_batch_only_observes_status_changes(
     assert result["status"] == "completed"
     assert len(progress_events) == 3
     assert len(observed) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_status", ["completed", "failed"])
+async def test_poc_partial_batch_drains_unassigned_candidates(tmp_path, monkeypatch, last_status):
+    # More than one worker batch: exhausted candidates must not block later work.
+    queue = iter([[{"candidate_id": "first"}], [{"candidate_id": "later"}], []])
+    store = SimpleNamespace(list_confirmed_without_poc_record=lambda scan_id: next(queue))
+    monkeypatch.setattr(audit_cli, "get_runtime", lambda: SimpleNamespace(store=store))
+    phase = AsyncMock(side_effect=[
+        ({"status": "partial"}, {"counts": {"confirmed_without_poc_bundle": 2}}),
+        ({"status": last_status}, {"counts": {"confirmed_without_poc_bundle": 1 if last_status == "completed" else 2}}),
+    ])
+    monkeypatch.setattr(audit_cli, "_run_phase", phase)
+    events = []
+    orchestrator = audit_cli.AuditOrchestrator(
+        SimpleNamespace(), tmp_path, lambda event, payload: events.append(event), poc_enabled=True,
+    )
+    result = await orchestrator._run_poc_generation(
+        "scan-test", {"counts": {"confirmed_without_poc_bundle": 3}}, None,
+    )
+    assert phase.await_count == 2
+    assert result["counts"]["confirmed_without_poc_bundle"] > 0
+    assert "poc_generation.incomplete" in events

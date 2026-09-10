@@ -54,6 +54,7 @@ class BackgroundTask:
     model_id: Optional[str] = None
     execution_capsule: Optional[dict] = None
     completion_injected: bool = False
+    execution_metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -593,6 +594,7 @@ class BackgroundManager:
         watchdog_task = asyncio.create_task(_watchdog())
         try:
             result = await loop_task
+            task.execution_metadata = dict(getattr(result, "metadata", {}) or {})
             return result
         except asyncio.CancelledError:
             if question_blocked[0]:

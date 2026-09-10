@@ -2436,6 +2436,14 @@ async def _refresh_worker_batch(
         failure_class = failure_class or classify_execution_failure(
             getattr(task, "error", None)
         )
+        metadata = getattr(task, "execution_metadata", {}) or {}
+        if metadata.get("stop_reason") and not getattr(task, "error", None):
+            failure_class = classify_execution_failure(str(metadata["stop_reason"]))
+        if metadata.get("max_steps_reached") and not getattr(task, "error", None) and not metadata.get("stop_reason"):
+            failure_class = "max_steps_reached"
+        await asyncio.to_thread(
+            runtime.store.record_worker_failure, unit, task, failure_class,
+        )
         if (
             task.status == "error"
             and failure_class == "transient_execution_failure"
