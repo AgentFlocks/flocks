@@ -21,6 +21,18 @@ from flocks.utils.log import Log
 log = Log.create(service="provider.anthropic")
 
 
+def _map_stop_reason(stop_reason: Optional[str]) -> str:
+    """Map an Anthropic stop_reason onto the OpenAI-style finish_reason that the
+    rest of the pipeline speaks. ``max_tokens`` must survive as ``length`` --
+    that is the signal the tool-argument truncation guard keys on.
+    """
+    if stop_reason == "max_tokens":
+        return "length"
+    if stop_reason == "tool_use":
+        return "tool_calls"
+    return "stop"
+
+
 class AnthropicProvider(BaseProvider):
     """Anthropic (Claude) provider with tool support."""
 
@@ -483,6 +495,10 @@ class AnthropicProvider(BaseProvider):
         output_tokens: int = 0
         cache_read_tokens: int = 0
         cache_write_tokens: int = 0
+        # Anthropic reports why generation ended on message_delta only; without
+        # keeping it, message_stop below always said "stop" and a max_tokens cut
+        # was indistinguishable from a clean finish downstream.
+        stream_stop_reason: Optional[str] = None
         
         try:
             stream_target = client.messages
@@ -603,6 +619,11 @@ class AnthropicProvider(BaseProvider):
                         usage = getattr(event, 'usage', None)
                         if usage:
                             output_tokens = getattr(usage, 'output_tokens', output_tokens) or output_tokens
+                        delta_obj = getattr(event, 'delta', None)
+                        if delta_obj is not None:
+                            stop_reason = getattr(delta_obj, 'stop_reason', None)
+                            if stop_reason:
+                                stream_stop_reason = stop_reason
                     
                     elif event.type == "message_stop":
                         # Build usage metadata from captured token counts.
@@ -626,7 +647,7 @@ class AnthropicProvider(BaseProvider):
                             })
                         yield StreamChunk(
                             delta="",
-                            finish_reason="stop",
+                            finish_reason=_map_stop_reason(stream_stop_reason),
                             usage=usage_meta if usage_meta else None,
                         )
         
