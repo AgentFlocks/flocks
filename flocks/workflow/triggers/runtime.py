@@ -11,7 +11,7 @@ from flocks.hooks.execution import current_execution_context, execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
-    ExecutionStepRecorder,
+    compact_history_for_storage,
     compact_outputs_for_storage,
     create_execution_record,
     record_execution_result,
@@ -250,7 +250,6 @@ class TriggerRuntime:
             input_params=mapped_inputs,
         )
         exec_id = exec_data["id"]
-        step_recorder = ExecutionStepRecorder()
         started_at = time.time()
         tool_context = None
         try:
@@ -267,15 +266,10 @@ class TriggerRuntime:
                 run_workflow,
                 workflow=workflow_json,
                 inputs=mapped_inputs,
-                run_id=exec_id,
                 trace=False,
-                execution_profile="high_frequency",
-                on_step_complete=step_recorder.on_step_complete,
                 tool_context=tool_context,
             )
             status_value, error_message = resolve_execution_outcome(result)
-            step_count = step_recorder.step_count or result.steps
-            exec_data.update(step_recorder.summary)
             exec_data.update(
                 {
                     "status": status_value,
@@ -283,11 +277,10 @@ class TriggerRuntime:
                     "finishedAt": _now_ms(),
                     "duration": time.time() - started_at,
                     "errorMessage": error_message,
-                    "executionLog": [],
-                    "stepCount": step_count,
+                    "executionLog": compact_history_for_storage(result.history),
                     "currentNodeId": result.last_node_id,
                     "currentPhase": status_value,
-                    "currentStepIndex": step_count,
+                    "currentStepIndex": result.steps,
                     "triggerId": trigger.id,
                     "triggerType": trigger.type,
                     "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
@@ -296,18 +289,12 @@ class TriggerRuntime:
                 }
             )
         except Exception as exc:
-            step_count = step_recorder.step_count
-            exec_data.update(step_recorder.summary)
             exec_data.update(
                 {
                     "status": "error",
                     "finishedAt": _now_ms(),
                     "duration": time.time() - started_at,
                     "errorMessage": str(exc),
-                    "executionLog": [],
-                    "stepCount": step_count,
-                    "currentPhase": "error",
-                    "currentStepIndex": step_count,
                     "triggerId": trigger.id,
                     "triggerType": trigger.type,
                     "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
@@ -317,12 +304,7 @@ class TriggerRuntime:
             )
         finally:
             await cleanup_workflow_tool_context(tool_context)
-        await record_execution_result(
-            workflow_id,
-            exec_id,
-            exec_data,
-            steps=step_recorder.take_steps(),
-        )
+        await record_execution_result(workflow_id, exec_id, exec_data)
         return exec_data
 
     async def dispatch_event(
