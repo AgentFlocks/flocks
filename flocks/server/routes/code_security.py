@@ -101,6 +101,21 @@ async def get_batch(request: Request, batch_id: str):
         raise HTTPException(404, detail="Batch not found") from exc
 
 
+@router.delete("/batches/{batch_id}/tasks/{task_id}", status_code=204)
+async def delete_batch_task(request: Request):
+    import asyncio
+    from flocks.security.batch import delete_batch_task as delete_task
+
+    task_dir = _batch_task(request)
+    try:
+        await asyncio.to_thread(delete_task, task_dir)
+    except (BlockingIOError, ValueError) as exc:
+        raise HTTPException(409, detail={"code": "task_delete_conflict", "message": str(exc)}) from exc
+    except OSError as exc:
+        raise HTTPException(500, detail={"code": "task_delete_failed", "message": str(exc)}) from exc
+    return Response(status_code=204)
+
+
 @router.post("/batches/{batch_id}/tasks/{task_id}/cancel")
 async def cancel_batch_task(request: Request):
     from flocks.security.batch import request_cancel

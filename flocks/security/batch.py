@@ -231,6 +231,8 @@ def batch_status(root: Path) -> dict:
     items = []
     for task_id in config["tasks"]:
         task_dir = resolve_task(root, task_id, config=config)
+        if (task_dir / "deleted.json").exists() and read_json(task_dir / "deleted.json").get("status") == "deleted":
+            continue
         item = dict(state["tasks"].get(task_id, {"status": "pending"}))
         result = task_result(task_dir) if (task_dir / "current.json").exists() else None
         if result:
@@ -251,6 +253,57 @@ def batch_status(root: Path) -> dict:
         "counts": dict(Counter(item["status"] for item in items)),
         "tasks": items,
     }
+
+
+def delete_batch_task(task_dir: Path) -> None:
+    """Delete only a terminal task under its worker lock; never modify batch inputs."""
+    from flocks.security.batch_cleanup import remove_owned_tree
+    from flocks.security.batch_worker import cleanup_work
+    from flocks_code_security.store import ScanStore
+    from flocks_code_security.paths import outputs_root
+    from flocks_code_security.service import _remove_owned_tree
+
+    with file_lock(task_dir / "task.lock"):
+        marker = task_dir / "deleted.json"
+        if marker.exists() and read_json(marker).get("status") == "deleted":
+            return
+        current = read_json(task_dir / "current.json") if (task_dir / "current.json").exists() else {}
+        result = task_result(task_dir) if current else None
+        if result is None:
+            result = read_json(task_dir.parents[1] / "state.json")["tasks"].get(task_dir.name, {})
+        if result.get("status") not in {"completed", "failed", "cancelled", "interrupted", "timed_out"}:
+            raise ValueError("Cancel the task and wait for it to stop before deleting it")
+        try:
+            with file_lock(task_dir.parents[1] / "run.lock"):
+                pass
+        except BlockingIOError:
+            state = read_json(task_dir.parents[1] / "state.json")["tasks"].get(task_dir.name, {})
+            if state.get("status") not in {"completed", "failed", "cancelled", "interrupted", "timed_out"}:
+                raise ValueError("Task cleanup is still running; wait before deleting") from None
+        database = task_dir / "data/code-security/data/code-security.db"
+        if database.resolve() != database.absolute():
+            raise ValueError("Refusing deletion through a symbolic database path")
+        scans = []
+        if database.exists():
+            with ScanStore(database, read_only=True)._connect() as connection:
+                scans = connection.execute("SELECT scan_id, status, output_dir FROM scans").fetchall()
+            if any(scan["status"] not in {"completed", "failed", "cancelled", "interrupted"} for scan in scans):
+                raise ValueError("Audit scan has not stopped; cancel it before deleting")
+        # A durable intent prevents resume --retry-failed from restarting a half-deleted task.
+        atomic_json(marker, {"status": "deleting"})
+        config = read_json(task_dir.parents[1] / "batch.json")
+        if config.get("dynamic") and result.get("cleanup_status") != "completed":
+            from flocks.security.batch_dynamic import owner, remove_containers
+            remove_containers(owner(task_dir))
+        for work in {current.get("work_dir"), current.get("previous", {}).get("work_dir")} - {None}:
+            cleanup_work(work, task_dir)
+        for scan in scans:
+            if scan["output_dir"]:
+                _remove_owned_tree(Path(scan["output_dir"]), root=outputs_root(), expected_name=scan["scan_id"])
+        remove_owned_tree(task_dir, "data")
+        atomic_json(marker, {"status": "deleted"})
+        for name in ("current.json", "result.json", "source-exclusions.json", "stdout.log", "stderr.log", "cleanup.log", "cancel.json"):
+            (task_dir / name).unlink(missing_ok=True)
 
 
 def request_cancel(task_dir: Path) -> None:
@@ -351,6 +404,8 @@ async def clean_batch(root: Path) -> dict:
             task_dir = resolve_task(root, task_id, config=config)
             try:
                 with file_lock(task_dir / "task.lock"):
+                    if (task_dir / "deleted.json").exists():
+                        continue
                     if not (task_dir / "current.json").exists():
                         continue
                     current = read_json(task_dir / "current.json")
@@ -434,6 +489,8 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                     raise
                 try:
                     with file_lock(task_dir / "task.lock"):
+                        if (task_dir / "deleted.json").exists():
+                            return
                         if cancel_file.exists() and read_json(cancel_file).get("attempt") == "pending":
                             attempt = uuid4().hex
                             atomic_json(task_dir / "current.json", {"attempt": attempt})

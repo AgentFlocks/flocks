@@ -258,7 +258,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("button", { name: /任务 1065.*运行中/ });
     expect(
-      screen.getByRole("button", { name: /任务 1066/ }),
+      screen.getByRole("button", { name: /^任务 1066/ }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /flocks.*运行中/ }),
@@ -269,7 +269,7 @@ describe("code security workspace contract page", () => {
     await user.click(screen.getByRole("button", { name: /任务 1065.*运行中/ }));
     await screen.findByRole("heading", { name: "source-1065" });
     expect(window.location.search).toContain("task_id=1065");
-    await user.click(await screen.findByRole("button", { name: /任务 1066/ }));
+    await user.click(await screen.findByRole("button", { name: /^任务 1066/ }));
     await screen.findByRole("heading", { name: "任务 1066" });
     expect(
       apiGet.mock.calls.some(([url]) => url.includes("/scans/batch_a")),
@@ -1176,6 +1176,76 @@ describe("code security workspace contract page", () => {
     }
     expect(screen.getByText("0 个漏洞")).toBeInTheDocument();
     expect(screen.queryByText("1 个候选")).not.toBeInTheDocument();
+  });
+
+  it("restores batch deletion inside task scope and keeps running tasks protected", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    let deleted = false;
+    apiGet.mockImplementation((path: string, options?: any) => {
+      if (path === "/api/code-security/v1/batch-records")
+        return Promise.resolve({
+          data: {
+            items: [
+              ...(!deleted
+                ? [
+                    {
+                      scan_id: "batch_a:1",
+                      batch_id: "batch_a",
+                      task_id: "1",
+                      audit_scan_id: "scan_demo",
+                      display_name: "1",
+                      lifecycle_status: "failed",
+                      dynamic_enabled: false,
+                      created_at: "2026-09-10T00:00:00Z",
+                    },
+                  ]
+                : []),
+              {
+                scan_id: "batch_a:2",
+                batch_id: "batch_a",
+                task_id: "2",
+                display_name: "2",
+                lifecycle_status: "running",
+                dynamic_enabled: false,
+                created_at: "2026-09-10T00:00:00Z",
+              },
+            ],
+          },
+        });
+      return baseGet(path.replace("/batches/batch_a/tasks/1", ""), options);
+    });
+    apiDelete.mockImplementation(async () => {
+      deleted = true;
+      return { data: null };
+    });
+    window.history.replaceState(
+      {},
+      "",
+      "/?batch_id=batch_a&task_id=1&scan_id=scan_demo",
+    );
+    render(<Page />);
+    const button = await screen.findByRole("button", {
+      name: "删除审计 任务 1",
+    });
+    expect(
+      screen.getByRole("button", {
+        name: "审计 任务 2 仍在运行，需先取消后才能删除",
+      }),
+    ).toBeDisabled();
+    await userEvent.click(button);
+    expect(apiDelete).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    await waitFor(() =>
+      expect(apiDelete).toHaveBeenCalledWith(
+        "/api/code-security/v1/batches/batch_a/tasks/1",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "删除审计 任务 1" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(window.location.search).not.toContain("task_id=1");
   });
 
   it("confirms and deletes a terminal audit from the history list", async () => {

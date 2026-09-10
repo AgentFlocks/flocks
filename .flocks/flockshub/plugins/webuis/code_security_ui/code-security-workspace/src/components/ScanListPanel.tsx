@@ -16,6 +16,7 @@ export function ScanListPanel({
   onSelect,
   onNewAudit,
   canCreate,
+  canManage = canCreate,
   open,
   onClose,
   hasMore,
@@ -29,6 +30,7 @@ export function ScanListPanel({
   onSelect: (scanId: string) => void;
   onNewAudit: () => void;
   canCreate: boolean;
+  canManage?: boolean;
   open: boolean;
   onClose: () => void;
   hasMore: boolean;
@@ -318,7 +320,7 @@ export function ScanListPanel({
                 </button>
                 <span className="cs-scan-item__actions">
                   <StatusBadge status={scan.lifecycle_status} />
-                  {canCreate && !scan.batch_id && (
+                  {canManage && (
                     <button
                       type="button"
                       className="cs-scan-item__delete"

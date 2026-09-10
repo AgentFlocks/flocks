@@ -272,3 +272,59 @@ async def test_unified_batch_records_include_unprepared_tasks_without_reading_sh
     with pytest.raises(HTTPException) as error:
         await routes.list_batch_records(SimpleNamespace())
     assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_only_terminal_task_and_its_outputs(isolated_batch, monkeypatch, tmp_path):
+    from flocks_code_security import paths
+    root, batch_id, stores = isolated_batch
+    task = root / 'tasks/1'
+    store, scan = stores['1']
+    store.mark_scan_terminal(scan, 'failed')
+    output = tmp_path / 'outputs' / scan
+    output.mkdir(parents=True)
+    (output / 'report.md').write_text('report')
+    store.set_scan_output_dir(scan, output)
+    monkeypatch.setattr(paths, 'outputs_root', lambda: tmp_path / 'outputs')
+    batch.atomic_json(task / 'result.json', {'attempt': '1', 'status': 'failed', 'cleanup_status': 'completed'})
+    result = await routes.delete_batch_task(request(batch_id, '1'))
+    assert result.status_code == 204
+    assert not (task / 'data').exists()
+    assert not output.exists()
+    assert stores['2'][0].get_scan(stores['2'][1]) is not None
+    assert batch.read_json(task / 'deleted.json')['status'] == 'deleted'
+    assert (await routes.delete_batch_task(request(batch_id, '1'))).status_code == 204
+    with pytest.raises(HTTPException) as error:
+        await routes.get_scan(request(batch_id, '1'), scan)
+    assert error.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_live_or_locked_task(isolated_batch):
+    root, batch_id, stores = isolated_batch
+    task = root / 'tasks/1'
+    batch.atomic_json(task / 'result.json', {'attempt': '1', 'status': 'running'})
+    with pytest.raises(HTTPException) as error:
+        await routes.delete_batch_task(request(batch_id, '1'))
+    assert error.value.status_code == 409
+    stores['1'][0].mark_scan_terminal(stores['1'][1], 'failed')
+    batch.atomic_json(task / 'result.json', {'attempt': '1', 'status': 'failed'})
+    with batch.file_lock(task / 'task.lock'):
+        with pytest.raises(HTTPException) as error:
+            await routes.delete_batch_task(request(batch_id, '1'))
+    assert error.value.status_code == 409
+    assert not (task / 'deleted.json').exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_waits_for_scheduler_cleanup(isolated_batch):
+    root, batch_id, stores = isolated_batch
+    task = root / 'tasks/1'
+    stores['1'][0].mark_scan_terminal(stores['1'][1], 'failed')
+    batch.atomic_json(task / 'result.json', {'attempt': '1', 'status': 'failed'})
+    batch.atomic_json(root / 'state.json', {'tasks': {'1': {'status': 'running'}}})
+    with batch.file_lock(root / 'run.lock'):
+        with pytest.raises(HTTPException) as error:
+            await routes.delete_batch_task(request(batch_id, '1'))
+    assert error.value.status_code == 409
+    assert not (task / 'deleted.json').exists()

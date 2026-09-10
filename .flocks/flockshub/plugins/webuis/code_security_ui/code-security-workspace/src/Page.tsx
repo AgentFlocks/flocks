@@ -10,8 +10,10 @@ import {
 import { BatchContext, useAuditApi } from "./BatchContext";
 import {
   listScans as listGlobalScans,
+  deleteScan as deleteGlobalScan,
   listBatchRecords,
   cancelBatchTask,
+  deleteBatchTask,
 } from "./api";
 import { ArtifactInspector } from "./components/ArtifactInspector";
 import { DeleteScanDialog } from "./components/DeleteScanDialog";
@@ -102,7 +104,6 @@ function WorkspacePage() {
   const scope = useContext(BatchContext);
   const {
     cancelScan,
-    deleteScan,
     getEarlierEvents,
     getEvents,
     getRecentEvents,
@@ -423,10 +424,12 @@ function WorkspacePage() {
       user?.role === "admin" ? listBatchRecords() : Promise.resolve([]);
     const [visibleItems, batchItems] = await Promise.all([ordinary, batches]);
     setBatchRecords(
-      batchItems.map((item) => ({
-        ...item,
-        display_name: `${t("任务")} ${item.task_id}`,
-      })),
+      batchItems
+        .filter((item) => !deletedScanIdsRef.current.has(item.scan_id))
+        .map((item) => ({
+          ...item,
+          display_name: `${t("任务")} ${item.task_id}`,
+        })),
     );
     return scope
       ? batchItems
@@ -740,7 +743,37 @@ function WorkspacePage() {
     setDeleting(true);
     setDeleteError("");
     try {
-      await deleteScan(target.scan_id);
+      if (target.batch_id && target.task_id) {
+        await deleteBatchTask(target.batch_id, target.task_id);
+        deletedScanIdsRef.current.add(target.scan_id);
+        setBatchRecords((items) =>
+          items.filter((item) => item.scan_id !== target.scan_id),
+        );
+        setDeleteTarget(null);
+        setLiveMessage(
+          t("已删除 {{name}} 的审计记录。", { name: target.display_name }),
+        );
+        if (
+          scope?.batchId === target.batch_id &&
+          scope?.taskId === target.task_id
+        ) {
+          const next = records.find((item) => item.scan_id !== target.scan_id);
+          if (next) selectRecord(next.scan_id);
+          else {
+            window.history.replaceState({}, "", window.location.pathname);
+            window.dispatchEvent(new PopStateEvent("popstate"));
+          }
+        } else
+          window.setTimeout(
+            () =>
+              document
+                .querySelector<HTMLElement>(".cs-scan-item__select")
+                ?.focus(),
+            0,
+          );
+        return;
+      }
+      await deleteGlobalScan(target.scan_id);
       deletedScanIdsRef.current.add(target.scan_id);
       authoritativeDetailsRef.current.delete(target.scan_id);
       scanViewCacheRef.current.delete(target.scan_id);
@@ -752,7 +785,7 @@ function WorkspacePage() {
         t("已删除 {{name}} 的审计记录。", { name: target.display_name }),
       );
 
-      if (selectedIdRef.current === target.scan_id) {
+      if (!scope && selectedIdRef.current === target.scan_id) {
         refreshQueuedRef.current.delete(target.scan_id);
         queuedScanRefreshRef.current.delete(target.scan_id);
         const nextScan = remaining[0];
@@ -853,6 +886,7 @@ function WorkspacePage() {
         onSelect={selectRecord}
         onNewAudit={openDrawer}
         canCreate={canCreate}
+        canManage={user?.role === "admin"}
         open={scanPanelOpen}
         onClose={closeScanPanel}
         hasMore={Boolean(scanCursor)}

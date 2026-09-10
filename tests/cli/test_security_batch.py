@@ -625,3 +625,15 @@ def test_batch_freezes_exact_link_policy_and_cli_exposes_option(tmp_path, monkey
 def test_invalid_link_exclusion_rules_are_rejected(rule):
     with pytest.raises(ValueError):
         batch.parse_link_exclusions([rule])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deletion_status", ["deleted", "deleting"])
+async def test_deleted_tasks_are_not_restarted_or_listed(tmp_path, monkeypatch, deletion_status):
+    root = make_batch(tmp_path, monkeypatch)
+    task = batch.resolve_task(root, '0')
+    batch.atomic_json(task / 'deleted.json', {'status': deletion_status})
+    monkeypatch.setattr(batch, '_worker_command', lambda *_: pytest.fail('Deleted task restarted'))
+    result = await batch.run_batch(root, retry_failed=True, progress=lambda _: None)
+    assert len(result['tasks']) == (0 if deletion_status == 'deleted' else 1)
+    assert len((await batch.clean_batch(root))['tasks']) == len(result['tasks'])

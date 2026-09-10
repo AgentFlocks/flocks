@@ -171,6 +171,15 @@ export const {
   deleteScan,
 } = createAuditApi();
 
+export async function deleteBatchTask(
+  batchId: string,
+  taskId: string,
+): Promise<void> {
+  await getApi().delete(
+    `${BASE}/batches/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(taskId)}`,
+  );
+}
+
 export async function cancelBatchTask(batchId: string, taskId: string) {
   return (
     await getApi().post(
