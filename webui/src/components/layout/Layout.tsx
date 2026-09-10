@@ -255,8 +255,10 @@ interface LayoutNavSection {
   accordionGroup?: 'primary';
   /** Set for sections that mirror a WebUI contract workspace (e.g. SOC). */
   workspace?: WebUIContractWorkspaceListItem;
-  /** Only the first group of a workspace carries its actions (自定义页面 …). */
-  workspaceActions?: boolean;
+  /** Workspace the section's own actions belong to (自定义页面 / 自定义标题).
+   *  Kept separate from `workspace`: that one decides where a drag-reorder is
+   *  persisted, and it is unset once several scenes share the flat menu. */
+  actionsWorkspace?: WebUIContractWorkspaceListItem;
 }
 
 function formatProVersion(version?: string | null): string | null {
@@ -771,6 +773,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       const sceneWorkspaces = enabledWorkspaces.filter((workspace) => workspace.placement === 'sceneWorkspace');
       const scenePageItems = sceneWorkspaces.flatMap(workspacePageItems);
       const soleSceneWorkspace = sceneWorkspaces.length === 1 ? sceneWorkspaces[0] : undefined;
+      // The SOC actions stay put however many scenes share the menu.
+      const socWorkspace = sceneWorkspaces.find((workspace) => isSocWorkspace(workspace));
       const sceneWorkspaceSections: LayoutNavSection[] = scenePageItems.length > 0
         ? [{
           id: SCENE_NAV_SECTION_ID,
@@ -780,7 +784,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           // stay drag-reorderable.
           collapsible: true,
           workspace: soleSceneWorkspace,
-          workspaceActions: Boolean(soleSceneWorkspace),
+          actionsWorkspace: socWorkspace,
           items: soleSceneWorkspace
             ? scenePageItems
             : orderedGroup(SCENE_NAV_SECTION_ID, scenePageItems),
@@ -1355,7 +1359,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
               );
               const sectionWorkspace = section.workspace ?? null;
               const reorderable = Boolean(section.collapsible) && section.items.length > 1;
-              const showSocWorkspaceActions = !collapsed && section.workspaceActions === true && isSocWorkspace(sectionWorkspace);
+              const actionsWorkspace = section.actionsWorkspace ?? null;
+              const showSocWorkspaceActions = !collapsed && isSocWorkspace(actionsWorkspace);
               return (
                 <div key={sectionId} className="mb-6">
                   {!collapsed && section.name && (
@@ -1454,12 +1459,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                           </div>
                         );
                       })}
-                      {showSocWorkspaceActions && sectionWorkspace && (
+                      {showSocWorkspaceActions && actionsWorkspace && (
                         <div className="space-y-0.5 pt-1">
                           {canCreateWorkspaceCustomPage && (
                             <button
                               type="button"
-                              onClick={() => void handleCreateWorkspaceCustomPage(sectionWorkspace)}
+                              onClick={() => void handleCreateWorkspaceCustomPage(actionsWorkspace)}
                               disabled={creatingWorkspaceCustomPageSession}
                               className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
                             >

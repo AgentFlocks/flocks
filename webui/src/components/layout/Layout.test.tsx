@@ -314,6 +314,35 @@ function makeSocPage(id: string, title: string, icon: string, order: number) {
   };
 }
 
+function makeSceneWorkspace(id: string, title: string, pages: Array<{ id: string; title: string }>) {
+  return {
+    id,
+    title,
+    titleEn: title,
+    route: `/contracts/webui/workspaces/${id}`,
+    icon: 'ShieldCheck',
+    order: 20,
+    enabled: true,
+    placement: 'sceneWorkspace',
+    defaultPageId: pages[0].id,
+    sections: [],
+    pages: pages.map((page, index) => ({
+      id: page.id,
+      title: page.title,
+      route: `/contracts/webui/${page.id}`,
+      icon: 'LayoutDashboard',
+      order: 10 + index,
+      enabled: true,
+      placement: 'home.after',
+      buildHash: 'ready',
+      buildStatus: 'ready' as const,
+      workspaceId: id,
+      workspaceTitle: title,
+      workspaceRoute: `/contracts/webui/workspaces/${id}`,
+    })),
+  };
+}
+
 function mockSocWorkspaceNav() {
   const socPages = [
     makeSocPage('soc-dashboard', '态势', 'Activity', 10),
@@ -1642,6 +1671,35 @@ describe('Layout WebUI contract pages navigation', () => {
     const second = renderHomeWithLayout();
     await screen.findByRole('button', { name: 'aiWorkbench' });
     expect(keysIn(second.container, 'aiWorkbench')).toEqual(['/workflows', '/sessions', '/tasks', '/workspace']);
+  });
+
+  it('keeps every scene in one flat menu and keeps the SOC actions when several are installed', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const socPages = mockSocWorkspaceNav();
+    const previous = useWebUIContractPages();
+    const codeAudit = makeSceneWorkspace('code_audit_ui', '代码审计', [
+      { id: 'code-audit-overview', title: '审计总览' },
+    ]);
+    useWebUIContractPages.mockReturnValue({
+      pages: [...socPages, ...codeAudit.pages],
+      workspaces: [...previous.workspaces, codeAudit],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+    await screen.findByRole('link', { name: '告警调查' });
+
+    // One level, every scene's pages side by side, no group headings.
+    expect(sectionHeadings(document.body)).toEqual([]);
+    expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查', '审计总览']);
+    // The workspace actions belong to SOC and must survive a second scene.
+    const menu = sceneMenuSection();
+    expect(within(menu).getByRole('button', { name: 'workspace.customPage' })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: 'workspace.customTitle' })).toBeInTheDocument();
+    expect(user).toBeDefined();
   });
 
   it('keeps a page mounted with its state across a partition switch', async () => {
