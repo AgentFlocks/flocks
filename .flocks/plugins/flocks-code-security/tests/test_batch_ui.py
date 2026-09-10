@@ -242,3 +242,33 @@ async def test_recovered_completed_scan_is_not_reaudited(isolated_batch, monkeyp
     assert result["counts"] == {"completed": 1}
     assert result["tasks"][0]["poc_count"] == 2
     assert batch.read_json(task / "current.json")["scan_id"] == scan_id
+
+
+@pytest.mark.asyncio
+async def test_unified_batch_records_include_unprepared_tasks_without_reading_shared_database(isolated_batch, monkeypatch):
+    root, batch_id, stores = isolated_batch
+    config = batch.read_json(root / "batch.json")
+    config.update(created_at="2026-09-10T00:00:00Z", concurrency=30)
+    config["tasks"]["3"] = {}
+    batch.atomic_json(root / "batch.json", config)
+    batch.atomic_json(root / "state.json", {"tasks": {
+        "1": {"status": "running"}, "2": {"status": "completed"}, "3": {"status": "pending"},
+    }})
+    before = dict(os.environ)
+    monkeypatch.setattr(routes, "_service_types", lambda *_: pytest.fail("Index must not open shared or task databases"))
+    result = await routes.list_batch_records(SimpleNamespace())
+    assert len(result["items"]) == 3
+    assert len({item["scan_id"] for item in result["items"]}) == 3
+    first, _, pending = result["items"]
+    assert first["audit_scan_id"] == stores["1"][1]
+    assert pending["audit_scan_id"] is None
+    assert pending["batch_id"] == batch_id and pending["task_id"] == "3"
+    assert pending["lifecycle_status"] == "preparing"
+    assert dict(os.environ) == before
+
+    def denied(_request):
+        raise HTTPException(403, "admin only")
+    monkeypatch.setattr(routes, "require_admin", denied)
+    with pytest.raises(HTTPException) as error:
+        await routes.list_batch_records(SimpleNamespace())
+    assert error.value.status_code == 403

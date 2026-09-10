@@ -27,6 +27,9 @@ export interface ProjectSummary {
 }
 
 export interface ScanSummary {
+  batch_id?: string;
+  task_id?: string;
+  audit_scan_id?: string | null;
   scan_id: string;
   display_name: string;
   lifecycle_status: LifecycleStatus;

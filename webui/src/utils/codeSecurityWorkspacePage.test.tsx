@@ -205,31 +205,84 @@ const scanDetail = {
 };
 
 describe("code security workspace contract page", () => {
-  it("clears the previous batch's task choices while the next batch loads", async () => {
-    const late = deferred<any>();
-    apiGet.mockImplementation((path: string) => {
-      if (path === "/api/code-security/v1/batches")
-        return Promise.resolve({ data: { items: [
-          { batch_id: "batch_a", created_at: "A", task_count: 1 },
-          { batch_id: "batch_b", created_at: "B", task_count: 1 },
-        ] } });
-      if (path === "/api/code-security/v1/batches/batch_a")
-        return Promise.resolve({ data: { tasks: [{ task_id: "101", status: "pending" }] } });
-      if (path === "/api/code-security/v1/batches/batch_b") return late.promise;
-      return Promise.reject(new Error(`Unexpected request ${path}`));
+  it("shows concurrent and queued tasks in history and scopes detail requests on selection", async () => {
+    const original = apiGet.getMockImplementation()!;
+    let prepared = false;
+    apiGet.mockImplementation((path: string, options?: any) => {
+      if (path === "/api/code-security/v1/batch-records")
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                scan_id: "batch_a:1065",
+                batch_id: "batch_a",
+                task_id: "1065",
+                audit_scan_id: "scan_demo",
+                display_name: "1065",
+                lifecycle_status: "running",
+                dynamic_enabled: false,
+                created_at: "2026-09-10T00:00:00Z",
+              },
+              {
+                scan_id: "batch_a:1066",
+                batch_id: "batch_a",
+                task_id: "1066",
+                audit_scan_id: prepared ? "scan_demo" : null,
+                display_name: "1066",
+                lifecycle_status: prepared ? "running" : "preparing",
+                dynamic_enabled: false,
+                created_at: "2026-09-10T00:00:00Z",
+              },
+            ],
+          },
+        });
+      const match = path.match(
+        /^\/api\/code-security\/v1\/batches\/batch_a\/tasks\/(1065|1066)(\/.*)$/,
+      );
+      if (match) {
+        if (match[2] === "/scans/scan_demo")
+          return Promise.resolve({
+            data: {
+              ...scanDetail,
+              target: {
+                ...scanDetail.target,
+                display_name: `source-${match[1]}`,
+              },
+            },
+          });
+        return original(`/api/code-security/v1${match[2]}`, options);
+      }
+      return original(path, options);
     });
-    window.history.replaceState({}, "", "/?batch_id=batch_a");
+    const user = userEvent.setup();
     render(<Page />);
-    await screen.findByRole("option", { name: /101/ });
-    act(() => {
-      window.history.pushState({}, "", "/?batch_id=batch_b");
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-    expect(screen.queryByRole("option", { name: /101/ })).not.toBeInTheDocument();
-    await act(async () => {
-      late.resolve({ data: { tasks: [{ task_id: "202", status: "pending" }] } });
-    });
-    expect(screen.getByRole("option", { name: /202/ })).toBeInTheDocument();
+    await screen.findByRole("button", { name: /任务 1065.*运行中/ });
+    expect(
+      screen.getByRole("button", { name: /任务 1066/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /flocks.*运行中/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "批量审计" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /任务 1065.*运行中/ }));
+    await screen.findByRole("heading", { name: "source-1065" });
+    expect(window.location.search).toContain("task_id=1065");
+    await user.click(await screen.findByRole("button", { name: /任务 1066/ }));
+    await screen.findByRole("heading", { name: "任务 1066" });
+    expect(
+      apiGet.mock.calls.some(([url]) => url.includes("/scans/batch_a")),
+    ).toBe(false);
+    prepared = true;
+    await screen.findByRole(
+      "heading",
+      { name: "source-1066" },
+      { timeout: 4000 },
+    );
+    await user.click(screen.getByRole("button", { name: /flocks.*运行中/ }));
+    await screen.findByRole("heading", { name: "flocks" });
+    expect(window.location.search).not.toContain("batch_id");
   });
 
   it("keeps task selection scoped when a previous task response arrives late", async () => {
@@ -320,6 +373,8 @@ describe("code security workspace contract page", () => {
     codeSecurityLanguage = "zh-CN";
     apiDelete.mockResolvedValue({ data: null });
     apiGet.mockImplementation((path: string) => {
+      if (path === "/api/code-security/v1/batch-records")
+        return Promise.resolve({ data: { items: [] } });
       if (path === "/api/project/") {
         return Promise.resolve({
           data: [

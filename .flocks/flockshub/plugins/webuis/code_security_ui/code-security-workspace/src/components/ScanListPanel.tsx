@@ -307,7 +307,9 @@ export function ScanListPanel({
                   </span>
                   <span className="cs-scan-item__bottom">
                     <code title={scan.scan_id}>
-                      {scan.scan_id.slice(0, 16)}
+                      {scan.batch_id
+                        ? scan.batch_id.slice(0, 14)
+                        : scan.scan_id.slice(0, 16)}
                     </code>
                     <time dateTime={scan.created_at}>
                       {relativeTime(scan.created_at, t)}
@@ -316,7 +318,7 @@ export function ScanListPanel({
                 </button>
                 <span className="cs-scan-item__actions">
                   <StatusBadge status={scan.lifecycle_status} />
-                  {canCreate && (
+                  {canCreate && !scan.batch_id && (
                     <button
                       type="button"
                       className="cs-scan-item__delete"

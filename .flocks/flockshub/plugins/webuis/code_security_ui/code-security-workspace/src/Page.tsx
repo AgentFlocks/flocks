@@ -8,7 +8,11 @@ import {
 } from "react";
 
 import { BatchContext, useAuditApi } from "./BatchContext";
-import { BatchSelector } from "./components/BatchSelector";
+import {
+  listScans as listGlobalScans,
+  listBatchRecords,
+  cancelBatchTask,
+} from "./api";
 import { ArtifactInspector } from "./components/ArtifactInspector";
 import { DeleteScanDialog } from "./components/DeleteScanDialog";
 import { ElapsedTime } from "./components/ElapsedTime";
@@ -77,7 +81,6 @@ export function deriveFinalFindingMetric(
 
 export default function Page() {
   const [search, setSearch] = useState(window.location.search);
-  const user = useSdkUser();
   useWorkspaceStyles();
   useEffect(() => {
     const changed = () => setSearch(window.location.search);
@@ -90,10 +93,7 @@ export default function Page() {
   const scope = batchId && taskId ? { batchId, taskId } : null;
   return (
     <BatchContext.Provider value={scope}>
-      {user?.role === "admin" && (
-        <BatchSelector key={batchId} batchId={batchId} taskId={taskId} />
-      )}
-      {(!batchId || taskId) && <WorkspacePage key={`${batchId}:${taskId}`} />}
+      <WorkspacePage key={`${batchId}:${taskId}`} />
     </BatchContext.Provider>
   );
 }
@@ -108,7 +108,6 @@ function WorkspacePage() {
     getRecentEvents,
     getScan,
     listProjects,
-    listScans,
     downloadUrl,
   } = useAuditApi();
   const { t } = useCodeSecurityI18n();
@@ -116,6 +115,7 @@ function WorkspacePage() {
   const canCreate = user?.role === "admin" && !scope;
   const initialParams = new URLSearchParams(window.location.search);
   const [scans, setScans] = useState<ScanSummary[]>([]);
+  const [batchRecords, setBatchRecords] = useState<ScanSummary[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(
     initialParams.get("scan_id"),
@@ -276,7 +276,7 @@ function WorkspacePage() {
         const detailRequest = getScan(scanId).then((nextDetail) => {
           const displayDetail =
             authoritativeDetailsRef.current.get(scanId) || nextDetail;
-          if (!deletedScanIdsRef.current.has(scanId)) {
+          if (!scope && !deletedScanIdsRef.current.has(scanId)) {
             setScans((current) =>
               mergeScans(current, [summaryFromDetail(displayDetail)]),
             );
@@ -411,13 +411,33 @@ function WorkspacePage() {
   );
 
   const reloadList = useCallback(async () => {
-    const page = await listScans();
-    const visibleItems = page.items.filter(
-      (scan) => !deletedScanIdsRef.current.has(scan.scan_id),
+    const ordinary = listGlobalScans().then((page) => {
+      const items = page.items.filter(
+        (scan) => !deletedScanIdsRef.current.has(scan.scan_id),
+      );
+      setScans((current) => mergeScans(current, items));
+      setScanCursor(page.nextCursor);
+      return items;
+    });
+    const batches =
+      user?.role === "admin" ? listBatchRecords() : Promise.resolve([]);
+    const [visibleItems, batchItems] = await Promise.all([ordinary, batches]);
+    setBatchRecords(
+      batchItems.map((item) => ({
+        ...item,
+        display_name: `${t("任务")} ${item.task_id}`,
+      })),
     );
-    setScans((current) => mergeScans(current, visibleItems));
-    setScanCursor(page.nextCursor);
-    return visibleItems;
+    return scope
+      ? batchItems
+          .filter(
+            (item) =>
+              item.batch_id === scope.batchId &&
+              item.task_id === scope.taskId &&
+              item.audit_scan_id,
+          )
+          .map((item) => ({ ...item, scan_id: item.audit_scan_id! }))
+      : visibleItems;
   }, []);
 
   const loadMoreScans = useCallback(async () => {
@@ -425,7 +445,7 @@ function WorkspacePage() {
     loadingMoreScansRef.current = true;
     setLoadingMoreScans(true);
     try {
-      const page = await listScans(scanCursor);
+      const page = await listGlobalScans(scanCursor);
       const visibleItems = page.items.filter(
         (scan) => !deletedScanIdsRef.current.has(scan.scan_id),
       );
@@ -473,7 +493,13 @@ function WorkspacePage() {
 
   useEffect(() => {
     const onPopState = () => {
-      const scanId = new URLSearchParams(window.location.search).get("scan_id");
+      const params = new URLSearchParams(window.location.search);
+      if (
+        (params.get("batch_id") || "") !== (scope?.batchId || "") ||
+        (params.get("task_id") || "") !== (scope?.taskId || "")
+      )
+        return;
+      const scanId = params.get("scan_id");
       if (scanId && scanId !== selectedIdRef.current)
         applySelection(scanId, false);
     };
@@ -581,7 +607,7 @@ function WorkspacePage() {
   }, [refreshChangedScan, scheduleListRefresh]);
 
   useEffect(() => {
-    if (!scope) return;
+    if (!scope && user?.role !== "admin") return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -783,6 +809,32 @@ function WorkspacePage() {
     );
   }
 
+  const batchScanIds = new Set(batchRecords.map((item) => item.scan_id));
+  const records = mergeScans(scans, batchRecords);
+  const selectedRecord = scope
+    ? batchRecords.find(
+        (item) =>
+          item.batch_id === scope.batchId && item.task_id === scope.taskId,
+      )
+    : undefined;
+  const selectedRecordId = selectedRecord?.scan_id || selectedId;
+  const selectRecord = (recordId: string) => {
+    const record = records.find((item) => item.scan_id === recordId);
+    if (!record) return;
+    if (!record.batch_id && !scope) {
+      selectScan(recordId);
+      return;
+    }
+    const params = new URLSearchParams();
+    if (record.batch_id && record.task_id) {
+      params.set("batch_id", record.batch_id);
+      params.set("task_id", record.task_id);
+      if (record.audit_scan_id) params.set("scan_id", record.audit_scan_id);
+    } else params.set("scan_id", recordId);
+    window.history.pushState({}, "", `${window.location.pathname}?${params}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  };
+
   const finalFindingMetric = detail ? deriveFinalFindingMetric(detail) : null;
 
   return (
@@ -796,9 +848,9 @@ function WorkspacePage() {
         {liveMessage}
       </div>
       <ScanListPanel
-        scans={scans}
-        selectedId={selectedId}
-        onSelect={selectScan}
+        scans={records}
+        selectedId={selectedRecordId}
+        onSelect={selectRecord}
         onNewAudit={openDrawer}
         canCreate={canCreate}
         open={scanPanelOpen}
@@ -807,7 +859,9 @@ function WorkspacePage() {
         loadingMore={loadingMoreScans}
         onLoadMore={loadMoreScans}
         onDelete={openDeleteDialog}
-        onPrefetch={prefetchScan}
+        onPrefetch={(id) => {
+          if (!scope && !batchScanIds.has(id)) prefetchScan(id);
+        }}
       />
       {scanPanelOpen && (
         <button
@@ -851,6 +905,42 @@ function WorkspacePage() {
         {!detail ? (
           loading ? (
             <ScanDetailSkeleton />
+          ) : scope ? (
+            <section className="cs-empty" role="status">
+              <h2>
+                {t("任务")} {scope.taskId}
+              </h2>
+              <p>
+                {t(
+                  lifecycleLabels[
+                    selectedRecord?.lifecycle_status || "preparing"
+                  ] || "准备中",
+                )}
+              </p>
+              {selectedRecord?.failure_summary && (
+                <p>{selectedRecord.failure_summary}</p>
+              )}
+              {selectedRecord &&
+                ["preparing", "running"].includes(
+                  selectedRecord.lifecycle_status,
+                ) && (
+                  <button
+                    className="cs-button"
+                    disabled={cancelling}
+                    onClick={async () => {
+                      setCancelling(true);
+                      try {
+                        await cancelBatchTask(scope.batchId, scope.taskId);
+                      } catch (reason: any) {
+                        setError(reason.message);
+                        setCancelling(false);
+                      }
+                    }}
+                  >
+                    {t(cancelling ? "正在取消" : "取消任务")}
+                  </button>
+                )}
+            </section>
           ) : (
             <EmptyWorkspace canCreate={canCreate} onNewAudit={openDrawer} />
           )
@@ -861,10 +951,10 @@ function WorkspacePage() {
                 <label htmlFor="mobile-scan-select">{t("切换审计")}</label>
                 <select
                   id="mobile-scan-select"
-                  value={detail.scan.scan_id}
-                  onChange={(event) => selectScan(event.target.value)}
+                  value={selectedRecordId || ""}
+                  onChange={(event) => selectRecord(event.target.value)}
                 >
-                  {scans.map((scan) => (
+                  {records.map((scan) => (
                     <option key={scan.scan_id} value={scan.scan_id}>
                       {scan.display_name} ·{" "}
                       {t(lifecycleLabels[scan.lifecycle_status] || "未知状态")}

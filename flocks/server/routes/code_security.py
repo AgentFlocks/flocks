@@ -59,6 +59,37 @@ async def list_batches(request: Request):
     return {"items": items}
 
 
+@router.get("/batch-records")
+async def list_batch_records(request: Request):
+    """Read only batch indexes; detail requests still use each task's isolated store."""
+    require_admin(request)
+    import asyncio
+    from flocks.security.batch import registry_root, resolve_batch, read_json, batch_status
+
+    def collect():
+        items = []
+        for path in registry_root().glob("batch_*.json"):
+            try:
+                root = resolve_batch(path.stem)
+                config = read_json(root / "batch.json")
+                for task in batch_status(root)["tasks"]:
+                    status = task["status"]
+                    items.append({
+                        "scan_id": f"{config['batch_id']}:{task['task_id']}",
+                        "batch_id": config["batch_id"], "task_id": task["task_id"],
+                        "audit_scan_id": task.get("scan_id"),
+                        "display_name": task["task_id"],
+                        "lifecycle_status": {"pending": "preparing", "timed_out": "failed"}.get(status, status),
+                        "dynamic_enabled": False, "created_at": config["created_at"],
+                        "failure_summary": task.get("error") or task.get("cleanup_error"),
+                    })
+            except (OSError, ValueError, KeyError):
+                continue
+        return {"items": items}
+
+    return await asyncio.to_thread(collect)
+
+
 @router.get("/batches/{batch_id}")
 async def get_batch(request: Request, batch_id: str):
     require_admin(request)

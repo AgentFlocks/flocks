@@ -171,9 +171,6 @@ export const {
   deleteScan,
 } = createAuditApi();
 
-export async function listBatches() {
-  return (await getApi().get(`${BASE}/batches`)).data.items;
-}
 export async function cancelBatchTask(batchId: string, taskId: string) {
   return (
     await getApi().post(
@@ -181,11 +178,6 @@ export async function cancelBatchTask(batchId: string, taskId: string) {
     )
   ).data;
 }
-export async function getBatch(batchId: string) {
-  return (await getApi().get(`${BASE}/batches/${encodeURIComponent(batchId)}`))
-    .data;
-}
-
 function splitLines(value: string, fallback: string[] = []): string[] {
   const items = value
     .split(/\r?\n|,/)
@@ -215,4 +207,8 @@ export function readApiFailure(reason: any, fallback: string): ApiFailure {
     requestId:
       typeof detail?.requestId === "string" ? detail.requestId : undefined,
   };
+}
+
+export async function listBatchRecords(): Promise<ScanSummary[]> {
+  return (await getApi().get(`${BASE}/batch-records`)).data.items;
 }
