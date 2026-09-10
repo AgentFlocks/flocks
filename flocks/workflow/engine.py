@@ -14,6 +14,7 @@ import json
 from typing import Any, Callable, Deque, Dict, List, Literal, NamedTuple, Optional, Set, Tuple, TypeVar
 
 from .code_gen import CodeGen, SimpleCodeGen, LLMCodeGen
+from flocks.diagnostics.memory import observe
 from .edge_resolver import EdgeResolver
 from .errors import MaxStepsExceededError, NodeExecutionError, NodeTimeoutError, RunCancelledError, RunTimeoutError
 from .execution_plan import WorkflowExecutionPlan
@@ -834,6 +835,7 @@ class WorkflowEngine:
                 duration_ms=(time.perf_counter() - t0) * 1000.0,
             )
 
+    @observe("node")
     def _execute_node(
         self,
         node: Node,

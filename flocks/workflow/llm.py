@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from flocks.config.config import Config
+from flocks.diagnostics.memory import observe
 from flocks.provider.provider import ChatMessage, Provider, ProviderConfig
 from flocks.provider.sdk.openai_base import LLMResponseSafetyError
 from flocks.workflow._async_runtime import (
@@ -363,6 +364,7 @@ class LLMClient:
             + (" 详细信息: " + "；".join(details) if details else "")
         )
 
+    @observe("llm")
     def ask(
         self,
         prompt: str,

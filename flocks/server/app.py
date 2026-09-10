@@ -22,6 +22,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from flocks.utils.log import Log, LogLevel
+from flocks.diagnostics.memory import diagnostic_lifespan, observe
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
@@ -109,6 +110,7 @@ def _schedule_startup_phase(
     app.state.startup_background_tasks.append(task)
 
 
+@diagnostic_lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle application lifecycle"""
@@ -925,6 +927,7 @@ class _RequestLoggingMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
+    @observe("http")
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)

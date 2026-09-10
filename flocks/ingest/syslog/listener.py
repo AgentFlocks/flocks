@@ -6,6 +6,7 @@ import asyncio
 from typing import Awaitable, Callable, Union
 
 from flocks.ingest.syslog.parser import parse_syslog
+from flocks.diagnostics.memory import count_syslog
 
 OnSyslogMessage = Callable[[dict], Union[None, Awaitable[None]]]
 
@@ -27,6 +28,7 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
         self._format_hint = format_hint
 
     def datagram_received(self, data: bytes, _addr) -> None:  # noqa: ANN001
+        count_syslog(len(data))
         text = data.decode("utf-8", errors="replace")
         parsed = parse_syslog(text, self._format_hint)
         try:
@@ -80,6 +82,7 @@ async def _handle_tcp_client(
             line = await reader.readline()
             if not line:
                 break
+            count_syslog(len(line))
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
                 continue

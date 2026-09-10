@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Literal, Optional, Union
 
 from flocks.config.config import Config
+from flocks.diagnostics.memory import observe
 from flocks.sandbox.context import resolve_sandbox_context
 from .errors import FlocksWorkflowError, RunCancelledError, RunTimeoutError, WorkflowValidationError
 from .io import dump_workflow, load_workflow
@@ -312,6 +313,7 @@ def _validate_lint_results(lint_results: tuple[Dict[str, Any], ...]) -> None:
         _logger.warning(f"workflow lint 检查发现 {len(lint_warnings)} 个警告: {lint_warnings[:5]}")
 
 
+@observe("workflow")
 def run_workflow(
     *,
     workflow: WorkflowSource,

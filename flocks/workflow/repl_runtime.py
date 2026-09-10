@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict, Optional, TextIO, Tuple
 
 from .errors import NodeExecutionError, RunCancelledError
+from flocks.diagnostics.memory import observe
 from .llm import get_lazy_llm
 from .tools import ToolFacade, get_tool_registry
 
@@ -829,6 +830,7 @@ sys.stdout.flush()
             return None
         return obj if isinstance(obj, dict) else None
 
+    @observe("rpc")
     def _handle_rpc_request(
         self,
         *,
