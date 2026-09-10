@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 
-import { getArtifact, getEvidence, readApiFailure } from "../api";
+import { readApiFailure } from "../api";
+import { useAuditApi } from "../BatchContext";
 import { useCodeSecurityI18n } from "../i18n";
 import {
   formatDuration,
@@ -413,6 +414,7 @@ function AdjudicationSummary({
   phase: PhaseRun;
   workers: WorkerRun[];
 }) {
+  const { getArtifact, getEvidence } = useAuditApi();
   const { t } = useCodeSecurityI18n();
   const summary = phase.summary || {};
   const round = numberValue(summary.adjudication_round);

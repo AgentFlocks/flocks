@@ -18,6 +18,66 @@ from flocks.server.auth import require_admin, require_user
 router = APIRouter(prefix="/code-security/v1")
 
 
+def _batch_task(request: Request) -> Path:
+    from flocks.security.batch import resolve_batch, resolve_task
+    # Local CLI batches have no user ownership binding. Expose only to administrators.
+    require_admin(request)
+    try:
+        return resolve_task(resolve_batch(request.path_params["batch_id"]), request.path_params["task_id"])
+    except (OSError, ValueError, KeyError) as exc:
+        raise HTTPException(404, detail="Batch task not found") from exc
+
+
+def _scope_links(value: Any, request: Request | None) -> Any:
+    if request is None or not getattr(request, "path_params", {}).get("batch_id"):
+        return value
+    batch_id, task_id = request.path_params["batch_id"], request.path_params["task_id"]
+    if isinstance(value, dict):
+        return {key: _scope_links(item, request) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scope_links(item, request) for item in value]
+    if isinstance(value, str) and value.startswith("/api/code-security/v1/scans/"):
+        return value.replace("/v1/scans/", f"/v1/batches/{batch_id}/tasks/{task_id}/scans/", 1)
+    if isinstance(value, str) and value.startswith("/contracts/webui/workspaces/code_security/"):
+        return value + f"&batch_id={batch_id}&task_id={task_id}"
+    return value
+
+
+@router.get("/batches")
+async def list_batches(request: Request):
+    require_admin(request)
+    from flocks.security.batch import registry_root, resolve_batch, read_json
+    items = []
+    for path in sorted(registry_root().glob("batch_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:50]:
+        try:
+            root = resolve_batch(path.stem)
+            config = read_json(root / "batch.json")
+            items.append({"batch_id": config["batch_id"], "created_at": config["created_at"],
+                          "task_count": len(config["tasks"])})
+        except (OSError, ValueError, KeyError):
+            continue
+    return {"items": items}
+
+
+@router.get("/batches/{batch_id}")
+async def get_batch(request: Request, batch_id: str):
+    require_admin(request)
+    from flocks.security.batch import batch_status, resolve_batch
+    import asyncio
+    try:
+        return await asyncio.to_thread(batch_status, resolve_batch(batch_id))
+    except (OSError, ValueError, KeyError) as exc:
+        raise HTTPException(404, detail="Batch not found") from exc
+
+
+@router.post("/batches/{batch_id}/tasks/{task_id}/cancel")
+async def cancel_batch_task(request: Request):
+    from flocks.security.batch import request_cancel
+    task_dir = _batch_task(request)
+    request_cancel(task_dir)
+    return {"status": "cancellation_requested"}
+
+
 class CreateScanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -44,7 +104,7 @@ class CreateScanRequest(BaseModel):
     idempotency_key: str | None = Field(None, alias="idempotencyKey", max_length=256)
 
 
-def _service_types() -> tuple[Any, Any, Any, Any]:
+def _service_types(request: Request | None = None) -> tuple[Any, Any, Any, Any]:
     try:
         module = importlib.import_module("flocks_code_security.service")
     except ModuleNotFoundError as exc:
@@ -52,8 +112,23 @@ def _service_types() -> tuple[Any, Any, Any, Any]:
             status_code=503,
             detail={"code": "code_security_unavailable", "message": "Code security plugin is unavailable"},
         ) from exc
+    if request is not None and getattr(request, "path_params", {}).get("batch_id"):
+        # Never switch process-wide environment or the plugin singleton for an HTTP request.
+        from types import SimpleNamespace
+        from flocks_code_security.store import ScanStore
+        from flocks_code_security.source import AuditSourceRepository
+        task_dir = _batch_task(request)
+        database = task_dir / "data/code-security/data/code-security.db"
+        if not database.is_file() or database.resolve() != database.absolute():
+            raise HTTPException(404, detail={"code": "task_not_prepared", "message": "Task scan is not prepared yet"})
+        store = ScanStore(database, read_only=True)
+        service = module.AuditService(
+            SimpleNamespace(store=store, source=AuditSourceRepository(store)), read_only=True,
+        )
+    else:
+        service = module.get_audit_service()
     return (
-        module.get_audit_service(),
+        service,
         module.AuditCaller,
         module.StartScanRequest,
         module.AuditServiceError,
@@ -66,9 +141,9 @@ def _caller(
     source: str = "webui",
     workspace_ref: str | None = None,
     authorized_root: Path | None = None,
+    caller_type: Any,
 ) -> Any:
-    _service, AuditCaller, _StartScanRequest, _AuditServiceError = _service_types()
-    return AuditCaller(
+    return caller_type(
         subject=str(user.id),
         source=source,
         is_admin=user.role == "admin",
@@ -78,6 +153,8 @@ def _caller(
 
 
 def _map_service_error(exc: Exception, service_error_type: type[Exception]) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
     request_id = f"req_{uuid4().hex}"
     if isinstance(exc, service_error_type):
         return HTTPException(
@@ -98,10 +175,10 @@ def _map_service_error(exc: Exception, service_error_type: type[Exception]) -> H
     )
 
 
-def _web_detail(detail: dict[str, Any]) -> dict[str, Any]:
+def _web_detail(detail: dict[str, Any], request: Request | None = None) -> dict[str, Any]:
     """Adapt the shared snake-case service model to the WebUI DTO."""
     scan = detail["scan"]
-    return {
+    return _scope_links({
         "schemaVersion": detail["schema_version"],
         "scan": scan,
         "target": detail["target"],
@@ -122,7 +199,7 @@ def _web_detail(detail: dict[str, Any]) -> dict[str, Any]:
         "latestEventSeq": scan["latest_event_seq"],
         "serverTime": detail["server_time"],
         "workspaceUrl": detail["workspace_url"],
-    }
+    }, request)
 
 
 def _resolve_target(root: Path, relative_path: str) -> Path:
@@ -167,7 +244,7 @@ async def create_scan(request: Request, payload: CreateScanRequest):
         )
     root = Path(project.worktree).expanduser().resolve()
     target = _resolve_target(root, payload.target_path)
-    service, _AuditCaller, StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, StartScanRequest, AuditServiceError = _service_types(request)
     try:
         detail = await service.start_scan(
             StartScanRequest(
@@ -187,13 +264,14 @@ async def create_scan(request: Request, payload: CreateScanRequest):
                 verification_votes=payload.verification_votes,
                 idempotency_key=payload.idempotency_key,
             ),
-            _caller(user, workspace_ref=project.id, authorized_root=root),
+            _caller(user, workspace_ref=project.id, authorized_root=root, caller_type=_AuditCaller),
         )
-        return _web_detail(detail)
+        return _web_detail(detail, request)
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans")
 @router.get("/scans")
 async def list_scans(
     request: Request,
@@ -202,10 +280,14 @@ async def list_scans(
     limit: int = Query(20, ge=1, le=100),
 ):
     user = require_user(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    if getattr(request, "path_params", {}).get("batch_id"):
+        task_dir = _batch_task(request)
+        if not (task_dir / "data/code-security/data/code-security.db").is_file():
+            return {"items": [], "next_cursor": None}
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
         return await service.list_scans(
-            _caller(user),
+            _caller(user, caller_type=_AuditCaller),
             statuses=set(status_filter or []),
             cursor=cursor,
             limit=limit,
@@ -214,16 +296,18 @@ async def list_scans(
         raise _map_service_error(exc, AuditServiceError) from exc
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}")
 @router.get("/scans/{scan_id}")
 async def get_scan(request: Request, scan_id: str):
     user = require_user(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
-        return _web_detail(await service.get_scan(scan_id, _caller(user)))
+        return _web_detail(await service.get_scan(scan_id, _caller(user, caller_type=_AuditCaller)), request)
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/events")
 @router.get("/scans/{scan_id}/events")
 async def get_events(
     request: Request,
@@ -234,11 +318,11 @@ async def get_events(
     recent: bool = False,
 ):
     user = require_user(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
         return await service.list_events(
             scan_id,
-            _caller(user),
+            _caller(user, caller_type=_AuditCaller),
             after_seq=after_seq,
             before_seq=before_seq,
             limit=limit,
@@ -248,44 +332,59 @@ async def get_events(
         raise _map_service_error(exc, AuditServiceError) from exc
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/phases")
 @router.get("/scans/{scan_id}/phases")
 async def get_phases(request: Request, scan_id: str):
     detail = await get_scan(request, scan_id)
     return {"items": detail["phaseRuns"], "serverTime": detail["serverTime"]}
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/artifacts")
 @router.get("/scans/{scan_id}/artifacts")
 async def get_artifacts(request: Request, scan_id: str):
     detail = await get_scan(request, scan_id)
     return {"items": detail["artifacts"]}
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/artifacts/{kind}")
 @router.get("/scans/{scan_id}/artifacts/{kind}")
 async def get_artifact(request: Request, scan_id: str, kind: str):
     user = require_user(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
-        return await service.get_artifact(scan_id, kind, _caller(user))
+        return _scope_links(await service.get_artifact(scan_id, kind, _caller(user, caller_type=_AuditCaller)), request)
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/evidence/{evidence_id}")
 @router.get("/scans/{scan_id}/evidence/{evidence_id}")
 async def get_evidence(request: Request, scan_id: str, evidence_id: str):
     user = require_user(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
-        return await service.get_evidence(scan_id, evidence_id, _caller(user))
+        return await service.get_evidence(scan_id, evidence_id, _caller(user, caller_type=_AuditCaller))
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
 
 
+@router.post("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/cancel")
 @router.post("/scans/{scan_id}/cancel")
 async def cancel_scan(request: Request, scan_id: str):
     user = require_user(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
-        return _web_detail(await service.cancel_scan(scan_id, _caller(user)))
+        if getattr(request, "path_params", {}).get("batch_id"):
+            from flocks.security.batch import request_cancel, read_json, task_running
+            task_dir = _batch_task(request)
+            current = read_json(task_dir / "current.json")
+            if current.get("scan_id") != scan_id or not task_running(task_dir):
+                raise HTTPException(409, detail="This task attempt is no longer running")
+            request_cancel(task_dir)
+            detail = await service.get_scan(scan_id, _caller(user, caller_type=_AuditCaller))
+            detail["scan"]["can_cancel"] = False
+            return _web_detail(detail, request)
+        return _web_detail(await service.cancel_scan(scan_id, _caller(user, caller_type=_AuditCaller)), request)
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
 
@@ -293,23 +392,24 @@ async def cancel_scan(request: Request, scan_id: str):
 @router.delete("/scans/{scan_id}", status_code=204)
 async def delete_scan(request: Request, scan_id: str):
     user = require_admin(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
-        await service.delete_scan(scan_id, _caller(user))
+        await service.delete_scan(scan_id, _caller(user, caller_type=_AuditCaller))
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
     return Response(status_code=204)
 
 
+@router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/downloads/{artifact_name}")
 @router.get("/scans/{scan_id}/downloads/{artifact_name}")
 async def download_artifact(request: Request, scan_id: str, artifact_name: str):
     user = require_user(request)
-    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types()
+    service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
         filename, contents = await service.download_artifact(
             scan_id,
             artifact_name,
-            _caller(user),
+            _caller(user, caller_type=_AuditCaller),
         )
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc

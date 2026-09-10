@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { getArtifact, getEvidence } from "../api";
+import { useAuditApi } from "../BatchContext";
 import { Icon } from "../icons";
 import { useCodeSecurityI18n, type Translator } from "../i18n";
 import {
@@ -38,6 +38,7 @@ export function ArtifactInspector({
   open: boolean;
   onClose: () => void;
 }) {
+  const { getArtifact } = useAuditApi();
   const { t } = useCodeSecurityI18n();
   const [content, setContent] = useState<{
     scanId: string;
@@ -499,6 +500,7 @@ function CandidateList({
   content: unknown;
   scanId: string;
 }) {
+  const { getEvidence } = useAuditApi();
   const { t } = useCodeSecurityI18n();
   const candidates = Array.isArray(content) ? content : [];
   const [evidence, setEvidence] = useState<EvidenceContent | null>(null);

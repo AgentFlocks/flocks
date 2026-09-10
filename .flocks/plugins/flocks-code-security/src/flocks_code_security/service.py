@@ -537,8 +537,11 @@ class _ProgressRecorder:
 class AuditService:
     """Single execution and read-model boundary for code-security audits."""
 
-    def __init__(self) -> None:
-        self.runtime = get_runtime()
+    read_only = False
+
+    def __init__(self, runtime=None, *, read_only: bool = False) -> None:
+        self.runtime = runtime if runtime is not None else get_runtime()
+        self.read_only = read_only
         self.store = self.runtime.store
         self._active: dict[str, _ActiveScan] = {}
         self._start_lock = asyncio.Lock()
@@ -880,7 +883,7 @@ class AuditService:
     def _build_scan_detail(self, scan_id: str, caller: AuditCaller) -> dict[str, Any]:
         scan = self._require_visible_scan(scan_id, caller)
         status = self.store.scan_status(scan_id)
-        if scan["status"] == "completed" and status.get("integrity_status") == "invalid":
+        if not self.read_only and scan["status"] == "completed" and status.get("integrity_status") == "invalid":
             repaired = self._reseal_legacy_bundle(scan_id)
             if repaired:
                 status = self.store.scan_status(scan_id)
@@ -1423,6 +1426,21 @@ class AuditService:
         snapshot = self.store.get_snapshot(scan["snapshot_id"])
         if snapshot is None:
             raise AuditServiceError("scan_invalid", "Scan snapshot is unavailable", status_code=500)
+        if scan["status"] == "completed" and not Path(snapshot.root_path).exists():
+            # Cleanup may remove source; final findings already contain sealed code excerpts.
+            path = self._artifact_file(scan_id, "findings")
+            if path is not None:
+                document = json.loads(await asyncio.to_thread(self._read_verified_artifact, scan, path))
+                for finding in document.get("findings", []):
+                    for item in finding.get("codeEvidence", []):
+                        if (item.get("path"), item.get("startLine"), item.get("endLine")) == (
+                            evidence["relative_path"], evidence["start_line"], evidence["end_line"],
+                        ):
+                            return {
+                                "evidence_id": evidence_id, "relative_path": item["path"],
+                                "start_line": item["startLine"], "end_line": item["endLine"],
+                                "excerpt": item["code"], "truncated": False,
+                            }
         try:
             context = await asyncio.to_thread(
                 self.runtime.source.evidence_context,

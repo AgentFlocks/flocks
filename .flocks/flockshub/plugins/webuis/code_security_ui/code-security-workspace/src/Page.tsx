@@ -1,21 +1,14 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useInsertionEffect,
   useRef,
   useState,
 } from "react";
 
-import {
-  cancelScan,
-  deleteScan,
-  getEarlierEvents,
-  getEvents,
-  getRecentEvents,
-  getScan,
-  listProjects,
-  listScans,
-} from "./api";
+import { BatchContext, useAuditApi } from "./BatchContext";
+import { BatchSelector } from "./components/BatchSelector";
 import { ArtifactInspector } from "./components/ArtifactInspector";
 import { DeleteScanDialog } from "./components/DeleteScanDialog";
 import { ElapsedTime } from "./components/ElapsedTime";
@@ -83,10 +76,44 @@ export function deriveFinalFindingMetric(
 }
 
 export default function Page() {
+  const [search, setSearch] = useState(window.location.search);
+  const user = useSdkUser();
   useWorkspaceStyles();
+  useEffect(() => {
+    const changed = () => setSearch(window.location.search);
+    window.addEventListener("popstate", changed);
+    return () => window.removeEventListener("popstate", changed);
+  }, []);
+  const params = new URLSearchParams(search);
+  const batchId = params.get("batch_id") || "";
+  const taskId = params.get("task_id") || "";
+  const scope = batchId && taskId ? { batchId, taskId } : null;
+  return (
+    <BatchContext.Provider value={scope}>
+      {user?.role === "admin" && (
+        <BatchSelector key={batchId} batchId={batchId} taskId={taskId} />
+      )}
+      {(!batchId || taskId) && <WorkspacePage key={`${batchId}:${taskId}`} />}
+    </BatchContext.Provider>
+  );
+}
+
+function WorkspacePage() {
+  const scope = useContext(BatchContext);
+  const {
+    cancelScan,
+    deleteScan,
+    getEarlierEvents,
+    getEvents,
+    getRecentEvents,
+    getScan,
+    listProjects,
+    listScans,
+    downloadUrl,
+  } = useAuditApi();
   const { t } = useCodeSecurityI18n();
   const user = useSdkUser();
-  const canCreate = user?.role === "admin";
+  const canCreate = user?.role === "admin" && !scope;
   const initialParams = new URLSearchParams(window.location.search);
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -525,7 +552,7 @@ export default function Page() {
   }, [loadSelected, refreshChangedScan, selectedId, t]);
 
   useEffect(() => {
-    if (typeof EventSource === "undefined") return undefined;
+    if (scope || typeof EventSource === "undefined") return undefined;
     const source = new EventSource("/api/event", { withCredentials: true });
     source.onopen = () => setConnection("connected");
     source.onmessage = (message) => {
@@ -552,6 +579,37 @@ export default function Page() {
     source.onerror = () => setConnection("reconnecting");
     return () => source.close();
   }, [refreshChangedScan, scheduleListRefresh]);
+
+  useEffect(() => {
+    if (!scope) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const next = await reloadList();
+        if (disposed) return;
+        const id = selectedIdRef.current;
+        if (id) await refreshChangedScan(id);
+        else if (next[0]) replaceSelection(next[0].scan_id);
+        if (!disposed) setConnection("connected");
+      } catch {
+        if (!disposed) setConnection("reconnecting");
+      } finally {
+        if (!disposed) timer = setTimeout(poll, 2000);
+      }
+    };
+    timer = setTimeout(poll, 2000);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [
+    scope?.batchId,
+    scope?.taskId,
+    reloadList,
+    refreshChangedScan,
+    replaceSelection,
+  ]);
 
   const loadOlderEvents = async () => {
     const scanId = selectedIdRef.current;
@@ -892,7 +950,7 @@ export default function Page() {
                   detail.scan.integrity_status === "valid" && (
                     <a
                       className="cs-button cs-button--secondary"
-                      href={`/api/code-security/v1/scans/${detail.scan.scan_id}/downloads/report.md`}
+                      href={downloadUrl(detail.scan.scan_id, "report.md")}
                     >
                       <Icon name="download" />
                       {t("下载报告")}

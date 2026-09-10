@@ -7,6 +7,14 @@ interface ContractRuntime {
 }
 
 const englishMessages: Record<string, string> = {
+  批量审计: "Batch audits",
+  普通审计: "Single audits",
+  个任务: "tasks",
+  选择任务: "Select a task",
+  无法加载批次: "Unable to load batch",
+  取消任务: "Cancel task",
+  取消失败: "Cancellation failed",
+  已超时: "Timed out",
   准备源码快照: "Prepare source snapshot",
   威胁建模: "Threat modeling",
   威胁模型: "Threat model",

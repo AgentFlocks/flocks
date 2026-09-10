@@ -24,119 +24,166 @@ function getApi(): any {
   return sdk.api;
 }
 
-export async function listProjects(): Promise<ProjectSummary[]> {
-  const response = await getApi().get("/api/project/");
-  return response.data;
-}
+export function createAuditApi(base = BASE) {
+  async function listProjects(): Promise<ProjectSummary[]> {
+    const response = await getApi().get("/api/project/");
+    return response.data;
+  }
 
-export async function listScans(
-  cursor?: string | null,
-  limit = 20,
-): Promise<ScanPage> {
-  const response = await getApi().get(`${BASE}/scans`, {
-    params: { limit, ...(cursor ? { cursor } : {}) },
-  });
+  async function listScans(
+    cursor?: string | null,
+    limit = 20,
+  ): Promise<ScanPage> {
+    const response = await getApi().get(`${base}/scans`, {
+      params: { limit, ...(cursor ? { cursor } : {}) },
+    });
+    return {
+      items: response.data.items,
+      nextCursor: response.data.next_cursor || null,
+    };
+  }
+
+  async function getScan(scanId: string): Promise<ScanDetail> {
+    const response = await getApi().get(
+      `${base}/scans/${encodeURIComponent(scanId)}`,
+    );
+    return response.data;
+  }
+
+  async function getEvents(
+    scanId: string,
+    afterSeq = 0,
+  ): Promise<{ items: AuditEvent[]; latestSeq: number; hasMore: boolean }> {
+    const response = await getApi().get(
+      `${base}/scans/${encodeURIComponent(scanId)}/events`,
+      {
+        params: { after_seq: afterSeq, limit: 200 },
+      },
+    );
+    return response.data;
+  }
+
+  async function getRecentEvents(
+    scanId: string,
+  ): Promise<{ items: AuditEvent[]; latestSeq: number; hasMore: boolean }> {
+    const response = await getApi().get(
+      `${base}/scans/${encodeURIComponent(scanId)}/events`,
+      {
+        params: { recent: true, limit: 200 },
+      },
+    );
+    return response.data;
+  }
+
+  async function getEarlierEvents(
+    scanId: string,
+    beforeSeq: number,
+  ): Promise<{ items: AuditEvent[]; latestSeq: number; hasMore: boolean }> {
+    const response = await getApi().get(
+      `${base}/scans/${encodeURIComponent(scanId)}/events`,
+      {
+        params: { before_seq: beforeSeq, limit: 200 },
+      },
+    );
+    return response.data;
+  }
+
+  async function getArtifact(
+    scanId: string,
+    kind: string,
+  ): Promise<ArtifactContent> {
+    const response = await getApi().get(
+      `${base}/scans/${encodeURIComponent(scanId)}/artifacts/${encodeURIComponent(kind)}`,
+    );
+    return response.data;
+  }
+
+  async function getEvidence(
+    scanId: string,
+    evidenceId: string,
+  ): Promise<EvidenceContent> {
+    const response = await getApi().get(
+      `${base}/scans/${encodeURIComponent(scanId)}/evidence/${encodeURIComponent(evidenceId)}`,
+    );
+    return response.data;
+  }
+
+  async function createScan(
+    values: NewAuditValues,
+    idempotencyKey: string,
+  ): Promise<ScanDetail> {
+    const response = await getApi().post(`${base}/scans`, {
+      workspaceId: values.workspaceId,
+      targetPath: values.targetPath.trim() || ".",
+      model: values.model.trim() || null,
+      includePaths: splitLines(values.includePaths, ["."]),
+      excludePatterns: splitLines(values.excludePatterns),
+      maxFileBytes: values.maxFileBytes,
+      copySource: values.copySource,
+      dynamicEnabled: values.dynamicEnabled,
+      dynamicConfirmed: values.dynamicConfirmed,
+      coveragePolicy: values.coveragePolicy,
+      verificationVotes: values.verificationVotes,
+      idempotencyKey,
+    });
+    return response.data;
+  }
+
+  async function cancelScan(scanId: string): Promise<ScanDetail> {
+    const response = await getApi().post(
+      `${base}/scans/${encodeURIComponent(scanId)}/cancel`,
+    );
+    return response.data;
+  }
+
+  async function deleteScan(scanId: string): Promise<void> {
+    await getApi().delete(`${base}/scans/${encodeURIComponent(scanId)}`);
+  }
+
   return {
-    items: response.data.items,
-    nextCursor: response.data.next_cursor || null,
+    listProjects,
+    listScans,
+    getScan,
+    getEvents,
+    getRecentEvents,
+    getEarlierEvents,
+    getArtifact,
+    getEvidence,
+    createScan,
+    cancelScan,
+    deleteScan,
+    downloadUrl: (scanId: string, name: string) =>
+      `${base}/scans/${encodeURIComponent(scanId)}/downloads/${encodeURIComponent(name)}`,
   };
 }
 
-export async function getScan(scanId: string): Promise<ScanDetail> {
-  const response = await getApi().get(
-    `${BASE}/scans/${encodeURIComponent(scanId)}`,
-  );
-  return response.data;
-}
+export const {
+  listProjects,
+  listScans,
+  getScan,
+  getEvents,
+  getRecentEvents,
+  getEarlierEvents,
+  getArtifact,
+  getEvidence,
+  createScan,
+  cancelScan,
+  deleteScan,
+} = createAuditApi();
 
-export async function getEvents(
-  scanId: string,
-  afterSeq = 0,
-): Promise<{ items: AuditEvent[]; latestSeq: number; hasMore: boolean }> {
-  const response = await getApi().get(
-    `${BASE}/scans/${encodeURIComponent(scanId)}/events`,
-    {
-      params: { after_seq: afterSeq, limit: 200 },
-    },
-  );
-  return response.data;
+export async function listBatches() {
+  return (await getApi().get(`${BASE}/batches`)).data.items;
 }
-
-export async function getRecentEvents(
-  scanId: string,
-): Promise<{ items: AuditEvent[]; latestSeq: number; hasMore: boolean }> {
-  const response = await getApi().get(
-    `${BASE}/scans/${encodeURIComponent(scanId)}/events`,
-    {
-      params: { recent: true, limit: 200 },
-    },
-  );
-  return response.data;
+export async function cancelBatchTask(batchId: string, taskId: string) {
+  return (
+    await getApi().post(
+      `${BASE}/batches/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(taskId)}/cancel`,
+    )
+  ).data;
 }
-
-export async function getEarlierEvents(
-  scanId: string,
-  beforeSeq: number,
-): Promise<{ items: AuditEvent[]; latestSeq: number; hasMore: boolean }> {
-  const response = await getApi().get(
-    `${BASE}/scans/${encodeURIComponent(scanId)}/events`,
-    {
-      params: { before_seq: beforeSeq, limit: 200 },
-    },
-  );
-  return response.data;
-}
-
-export async function getArtifact(
-  scanId: string,
-  kind: string,
-): Promise<ArtifactContent> {
-  const response = await getApi().get(
-    `${BASE}/scans/${encodeURIComponent(scanId)}/artifacts/${encodeURIComponent(kind)}`,
-  );
-  return response.data;
-}
-
-export async function getEvidence(
-  scanId: string,
-  evidenceId: string,
-): Promise<EvidenceContent> {
-  const response = await getApi().get(
-    `${BASE}/scans/${encodeURIComponent(scanId)}/evidence/${encodeURIComponent(evidenceId)}`,
-  );
-  return response.data;
-}
-
-export async function createScan(
-  values: NewAuditValues,
-  idempotencyKey: string,
-): Promise<ScanDetail> {
-  const response = await getApi().post(`${BASE}/scans`, {
-    workspaceId: values.workspaceId,
-    targetPath: values.targetPath.trim() || ".",
-    model: values.model.trim() || null,
-    includePaths: splitLines(values.includePaths, ["."]),
-    excludePatterns: splitLines(values.excludePatterns),
-    maxFileBytes: values.maxFileBytes,
-    copySource: values.copySource,
-    dynamicEnabled: values.dynamicEnabled,
-    dynamicConfirmed: values.dynamicConfirmed,
-    coveragePolicy: values.coveragePolicy,
-    verificationVotes: values.verificationVotes,
-    idempotencyKey,
-  });
-  return response.data;
-}
-
-export async function cancelScan(scanId: string): Promise<ScanDetail> {
-  const response = await getApi().post(
-    `${BASE}/scans/${encodeURIComponent(scanId)}/cancel`,
-  );
-  return response.data;
-}
-
-export async function deleteScan(scanId: string): Promise<void> {
-  await getApi().delete(`${BASE}/scans/${encodeURIComponent(scanId)}`);
+export async function getBatch(batchId: string) {
+  return (await getApi().get(`${BASE}/batches/${encodeURIComponent(batchId)}`))
+    .data;
 }
 
 function splitLines(value: string, fallback: string[] = []): string[] {

@@ -1,4 +1,9 @@
 const styles = String.raw`
+.cs-batch-selector { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 20px; }
+.cs-batch-selector label { display: flex; align-items: center; gap: 8px; }
+.cs-batch-selector select { min-height: 44px; max-width: 100%; padding: 6px; color: inherit; background: var(--bg-primary, white); border: 1px solid var(--border-color, #888); border-radius: 6px; }
+.cs-batch-selector [role=alert] { color: var(--error-color, #b91c1c); }
+
 .code-security-workspace {
   --cs-surface: #f4f6f8;
   --cs-surface-elevated: #ffffff;

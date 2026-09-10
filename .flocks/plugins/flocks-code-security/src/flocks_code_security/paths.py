@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -12,8 +13,13 @@ def ensure_private_directory(path: Path) -> Path:
     return path
 
 
+def plugin_root() -> Path:
+    override = os.environ.get("FLOCKS_CODE_SECURITY_ROOT")
+    return Path(override).expanduser().resolve() if override else Path.home() / ".flocks/workspace/code-security"
+
+
 def data_dir() -> Path:
-    return Path.home() / ".flocks" / "workspace" / "code-security" / "data"
+    return plugin_root() / "data"
 
 
 def snapshots_dir() -> Path:
@@ -21,7 +27,7 @@ def snapshots_dir() -> Path:
 
 
 def runtime_dir() -> Path:
-    return Path.home() / ".flocks" / "workspace" / "code-security" / "runtime"
+    return plugin_root() / "runtime"
 
 
 def docker_runtime_dir(scan_id: str) -> Path:

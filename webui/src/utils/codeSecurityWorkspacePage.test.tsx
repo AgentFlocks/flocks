@@ -205,6 +205,101 @@ const scanDetail = {
 };
 
 describe("code security workspace contract page", () => {
+  it("clears the previous batch's task choices while the next batch loads", async () => {
+    const late = deferred<any>();
+    apiGet.mockImplementation((path: string) => {
+      if (path === "/api/code-security/v1/batches")
+        return Promise.resolve({ data: { items: [
+          { batch_id: "batch_a", created_at: "A", task_count: 1 },
+          { batch_id: "batch_b", created_at: "B", task_count: 1 },
+        ] } });
+      if (path === "/api/code-security/v1/batches/batch_a")
+        return Promise.resolve({ data: { tasks: [{ task_id: "101", status: "pending" }] } });
+      if (path === "/api/code-security/v1/batches/batch_b") return late.promise;
+      return Promise.reject(new Error(`Unexpected request ${path}`));
+    });
+    window.history.replaceState({}, "", "/?batch_id=batch_a");
+    render(<Page />);
+    await screen.findByRole("option", { name: /101/ });
+    act(() => {
+      window.history.pushState({}, "", "/?batch_id=batch_b");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(screen.queryByRole("option", { name: /101/ })).not.toBeInTheDocument();
+    await act(async () => {
+      late.resolve({ data: { tasks: [{ task_id: "202", status: "pending" }] } });
+    });
+    expect(screen.getByRole("option", { name: /202/ })).toBeInTheDocument();
+  });
+
+  it("keeps task selection scoped when a previous task response arrives late", async () => {
+    const original = apiGet.getMockImplementation()!;
+    const late = deferred<any>();
+    const prefix = "/api/code-security/v1/batches/batch_a/tasks/";
+    apiGet.mockImplementation((path: string, options?: any) => {
+      if (path === "/api/code-security/v1/batches")
+        return Promise.resolve({ data: { items: [] } });
+      if (path === "/api/code-security/v1/batches/batch_a")
+        return Promise.resolve({ data: { tasks: [] } });
+      if (path.startsWith(prefix)) {
+        const taskId = path.slice(prefix.length).split("/")[0];
+        const localPath = path.replace(
+          `${prefix}${taskId}`,
+          "/api/code-security/v1",
+        );
+        if (localPath === "/api/code-security/v1/scans/scan_demo") {
+          if (taskId === "1") return late.promise;
+          return Promise.resolve({
+            data: {
+              ...scanDetail,
+              target: { ...scanDetail.target, display_name: "second-task" },
+            },
+          });
+        }
+        return original(localPath, options);
+      }
+      return original(path, options);
+    });
+    window.history.replaceState(
+      {},
+      "",
+      "/?batch_id=batch_a&task_id=1&scan_id=scan_demo",
+    );
+    render(<Page />);
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith(`${prefix}1/scans/scan_demo`),
+    );
+    act(() => {
+      window.history.pushState(
+        {},
+        "",
+        "/?batch_id=batch_a&task_id=2&scan_id=scan_demo",
+      );
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "second-task" }),
+      ).toBeInTheDocument(),
+    );
+    await act(async () => {
+      late.resolve({
+        data: {
+          ...scanDetail,
+          target: { ...scanDetail.target, display_name: "first-task" },
+        },
+      });
+    });
+    expect(
+      screen.queryByRole("heading", { name: "first-task" }),
+    ).not.toBeInTheDocument();
+    expect(
+      apiGet.mock.calls.some(
+        ([path]) => path === "/api/code-security/v1/scans/scan_demo",
+      ),
+    ).toBe(false);
+  });
+
   beforeEach(() => {
     (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__ = {
       React,

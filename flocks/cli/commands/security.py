@@ -23,6 +23,9 @@ security_app = typer.Typer(
     help="Run and inspect trusted code-security audits",
     no_args_is_help=True,
 )
+from flocks.cli.commands.security_batch import batch_app
+
+security_app.add_typer(batch_app, name="batch")
 console = Console()
 
 AuditRunner = Callable[..., Any]

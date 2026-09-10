@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import threading
 import uuid
@@ -17,6 +16,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
+
+from flocks.utils.process_identity import process_identity
 
 from flocks_code_security.coverage import (
     CoverageBlockedError,
@@ -173,75 +174,6 @@ def _pid_is_running(value: Any) -> bool:
     return True
 
 
-def process_identity(value: Any) -> str | None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    if sys.platform.startswith("linux"):
-        try:
-            stat_text = Path(f"/proc/{value}/stat").read_text(encoding="utf-8")
-            start_ticks = stat_text.rsplit(")", 1)[1].split()[19]
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-        except (IndexError, OSError):
-            return None
-        return f"linux:{boot_id}:{start_ticks}"
-    if sys.platform == "win32":
-        return _windows_process_identity(value)
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(value)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    started_at = " ".join(result.stdout.split())
-    return f"posix:{started_at}" if result.returncode == 0 and started_at else None
-
-
-def _windows_process_identity(pid: int) -> str | None:
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.GetProcessTimes.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-        ]
-        kernel32.GetProcessTimes.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return None
-        creation = wintypes.FILETIME()
-        exit_time = wintypes.FILETIME()
-        kernel = wintypes.FILETIME()
-        user = wintypes.FILETIME()
-        try:
-            if not kernel32.GetProcessTimes(
-                handle,
-                ctypes.byref(creation),
-                ctypes.byref(exit_time),
-                ctypes.byref(kernel),
-                ctypes.byref(user),
-            ):
-                return None
-        finally:
-            kernel32.CloseHandle(handle)
-        created = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
-        return f"windows:{created}"
-    except (AttributeError, OSError):
-        return None
-
-
 def _scan_owner_is_running(
     pid: Any,
     owner_token: Any,
@@ -259,16 +191,23 @@ def _scan_owner_is_running(
 
 
 class ScanStore:
-    def __init__(self, database_path: Path):
+    def __init__(self, database_path: Path, *, read_only: bool = False):
+        self.read_only = read_only
+        self.retain_ui_history = os.environ.get("FLOCKS_CODE_SECURITY_RETAIN_UI_HISTORY") == "1"
         self.database_path = database_path
         self._lock = threading.RLock()
+        self.worker_limit = int(os.environ.get("FLOCKS_CODE_SECURITY_WORKERS", MAX_GLOBAL_ACTIVE_WORKERS))
+        if self.worker_limit < 1:
+            raise ValueError("Worker limit must be positive")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
-            self.database_path,
+            self.database_path.as_uri() + "?mode=ro" if self.read_only else self.database_path,
+            uri=self.read_only,
             timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
         )
-        self.database_path.chmod(0o600)
+        if not self.read_only:
+            self.database_path.chmod(0o600)
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -2179,8 +2118,8 @@ class ScanStore:
             raise ValueError("Work attempt was not persisted")
         return attempt
 
-    @staticmethod
     def _reserve_worker_capacity(
+        self,
         connection: sqlite3.Connection,
         work_unit_id: str,
         acquired_at: str,
@@ -2209,8 +2148,8 @@ class ScanStore:
                 "AND s.status IN ('running', 'reducing', 'cancelling')"
             ).fetchone()[0]
         )
-        if active >= MAX_GLOBAL_ACTIVE_WORKERS:
-            raise WorkerCapacityUnavailable(f"Global code-audit worker capacity is {MAX_GLOBAL_ACTIVE_WORKERS}")
+        if active >= self.worker_limit:
+            raise WorkerCapacityUnavailable(f"Global code-audit worker capacity is {self.worker_limit}")
         connection.execute(
             "INSERT INTO worker_capacity_leases (work_unit_id, acquired_at) VALUES (?, ?)",
             (work_unit_id, acquired_at),
@@ -5368,6 +5307,8 @@ class ScanStore:
                 ("scan_events", "scan_id = ?"),
                 ("scan_phase_runs", "scan_id = ?"),
             ):
+                if self.retain_ui_history and table in {"scan_events", "scan_phase_runs"}:
+                    continue
                 counts[table] = connection.execute(f"DELETE FROM {table} WHERE {scope}", (scan_id,)).rowcount
             counts["work_attempts"] = connection.execute(
                 f"DELETE FROM work_attempts WHERE work_unit_id IN ({unit_scope}) "

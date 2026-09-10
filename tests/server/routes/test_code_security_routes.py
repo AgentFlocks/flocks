@@ -129,7 +129,7 @@ async def test_delete_scan_requires_admin_and_returns_no_content(monkeypatch) ->
     monkeypatch.setattr(
         code_security,
         "_service_types",
-        lambda: (FakeService(), FakeCaller, object, FakeServiceError),
+        lambda _request=None: (FakeService(), FakeCaller, object, FakeServiceError),
     )
 
     response = await code_security.delete_scan(SimpleNamespace(), "scan_demo")
