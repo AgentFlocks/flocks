@@ -49,6 +49,10 @@ def start(
     task_timeout: int = typer.Option(7200, min=1, help="Total seconds allowed per task, including preparation."),
     max_snapshot_bytes: int = typer.Option(4 * 1024**3, min=1),
     run_dir: Optional[Path] = typer.Option(None),
+    auto_exclude_external_symlinks: bool = typer.Option(
+        False, "--auto-exclude-external-symlinks",
+        help="Omit absolute symlinks without reading targets; marks source coverage partial. Default: reject.",
+    ),
     skip_external_symlink: Optional[list[str]] = typer.Option(
         None, "--skip-external-symlink",
         help="Skip only this exact archive symlink PATH=/absolute/target; repeatable. Never reads the target.",
@@ -75,6 +79,7 @@ def start(
             task_timeout=task_timeout,
             max_snapshot_bytes=max_snapshot_bytes,
             skip_external_symlinks=skip_external_symlink,
+            auto_exclude_external_symlinks=auto_exclude_external_symlinks,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         typer.echo(str(exc), err=True)

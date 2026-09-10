@@ -387,7 +387,7 @@ class ReportWriter:
             manifest["scan"]["status"] = final_status
             if data.get("source_exclusions"):
                 manifest["scan"]["scope"].setdefault("limitations", []).append(
-                    f"{len(data['source_exclusions'])} external archive symlink(s) were explicitly excluded; "
+                    f"{len(data['source_exclusions'])} external archive symlink(s) were excluded; "
                     "coverage describes the remaining source only. See source-exclusions.json."
                 )
             if missing_poc_ids:
@@ -1099,7 +1099,7 @@ class ReportWriter:
         def exclusion_reason(pattern: str) -> str:
             if pattern in archive_exclusions:
                 item = archive_exclusions[pattern]
-                return f"external_symlink: target {item['target']} was not read; explicitly excluded from archive"
+                return f"{item['reason']}: target {item['target']} was not read; excluded from archive"
             if pattern in DEFAULT_EXCLUDES:
                 return "Excluded by the deterministic snapshot safety policy"
             return "Excluded by the requested audit scope"
@@ -1125,6 +1125,7 @@ class ReportWriter:
             and merged_coverage["completeness"] == "complete"
             and not uncovered
             and not failed_files
+            and not any(item["reason"] == "external_symlink_auto" for item in data.get("source_exclusions", []))
             else "partial"
         )
         total_files = len(snapshot_files)

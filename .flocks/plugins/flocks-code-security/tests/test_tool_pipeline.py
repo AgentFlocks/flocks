@@ -1256,11 +1256,13 @@ async def test_large_repository_threat_model_needs_summary_not_inventory_paginat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_enabled", [False, True])
 @pytest.mark.parametrize("poc_failed", [False, True])
+@pytest.mark.parametrize("automatic_exclusion", [False, True])
 async def test_prepare_candidate_verify_finalize_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cleanup_enabled: bool,
     poc_failed: bool,
+    automatic_exclusion: bool,
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -1284,11 +1286,11 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     monkeypatch.setattr(cleanup_module, "_owned_worker_sessions", AsyncMock(return_value=[]))
     monkeypatch.setattr(cleanup_module, "runtime_dir", lambda: tmp_path / "runtime")
     prepared = await audit_prepare(coordinator, str(target), cleanup_intermediates=cleanup_enabled,
-                                   exclude_patterns=["install-sh"] if poc_failed else None)
+                                   exclude_patterns=["install-sh"] if poc_failed or automatic_exclusion else None)
     assert prepared.success is True
     scan_id = prepared.output["scan_id"]
-    if poc_failed:
-        source_exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink"}]
+    if poc_failed or automatic_exclusion:
+        source_exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink_auto" if automatic_exclusion else "external_symlink"}]
         runtime.store.append_scan_event(scan_id, "source.archive_exclusions", "Archive scope",
                                         {"exclusions": source_exclusions}, level="warning")
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
@@ -1467,6 +1469,16 @@ async def test_prepare_candidate_verify_finalize_pipeline(
             execution_metadata={"steps": 200, "trace_step": 200, "max_steps_reached": True},
         ), "max_steps_reached")
 
+    if automatic_exclusion:
+        from flocks_code_security.store import CoverageBlockedError
+        assert runtime.store.analysis_coverage_summary(scan_id)["completeness"] == "partial"
+        with runtime.store._connect() as connection:
+            connection.execute("UPDATE scans SET coverage_policy = 'exhaustive' WHERE scan_id = ?", (scan_id,))
+        with pytest.raises(CoverageBlockedError):
+            runtime.store.ensure_ready_to_finalize(scan_id)
+        with runtime.store._connect() as connection:
+            connection.execute("UPDATE scans SET coverage_policy = 'evidence_backed_partial' WHERE scan_id = ?", (scan_id,))
+
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
     assert finalized.output["status"] == ("failed" if poc_failed else "completed")
@@ -1532,7 +1544,7 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert manifest["scan"]["sealedAt"] == manifest["scan"]["completedAt"]
     assert manifest["scan"]["threatModel"]["trustBoundaries"]
     assert any(artifact["path"] == "adjudication.json" for artifact in manifest["scan"]["artifacts"])
-    assert coverage_document["completeness"] == "complete"
+    assert coverage_document["completeness"] == ("partial" if automatic_exclusion else "complete")
     for artifact in manifest["scan"]["artifacts"]:
         contents = (output_path / artifact["path"]).read_bytes()
         assert hashlib.sha256(contents).hexdigest() == artifact["sha256"]
@@ -1547,7 +1559,10 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert "result_status" not in manifest["scan"]
     assert (output_path / ".scan-manifest.final").exists() is False
 
-    if poc_failed:
+    if automatic_exclusion:
+        assert runtime.store.analysis_coverage_summary(scan_id)["completeness"] == "partial"
+        assert json.loads((output_path / "source-exclusions.json").read_text())["exclusions"] == source_exclusions
+    if poc_failed or automatic_exclusion:
         return
 
     legacy_manifest = json.loads(json.dumps(manifest))

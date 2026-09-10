@@ -6543,6 +6543,15 @@ class ScanStore:
             raise ValueError("Scan not found")
         attestations = self.list_latest_coverage(scan_id)
         with self._connect() as connection:
+            automatic_exclusions = [
+                item
+                for row in connection.execute(
+                    "SELECT payload_json FROM scan_events WHERE scan_id = ? "
+                    "AND event_type = 'source.archive_exclusions'", (scan_id,),
+                )
+                for item in json.loads(row["payload_json"])["exclusions"]
+                if item["reason"] == "external_symlink_auto"
+            ]
             unit_rows = connection.execute(
                 "SELECT work_unit_id, phase, role, paths_json FROM work_units "
                 "WHERE scan_id = ? AND role IN ('baseline', 'investigator') "
@@ -6591,6 +6600,8 @@ class ScanStore:
             )
         elif units and covered_units == set(units):
             completeness = "complete"
+        if automatic_exclusions:
+            completeness = "blocked" if scan["coverage_policy"] == "exhaustive" else "partial"
         counts = {
             "assigned": len(snapshot_paths),
             "read_complete": sum(
@@ -6608,6 +6619,7 @@ class ScanStore:
         }
         return {
             **merged,
+            **({"source_exclusions": automatic_exclusions} if automatic_exclusions else {}),
             "policy": scan["coverage_policy"],
             "completeness": completeness,
             "counts": counts,

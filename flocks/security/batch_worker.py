@@ -22,8 +22,9 @@ from flocks.utils.process_identity import process_identity
 def extract_source(
     archive: Path, destination: Path, limit: int,
     *, skip_external_symlinks: dict[str, str] | None = None,
+    auto_exclude_external_symlinks: bool = False,
 ) -> list[dict[str, str]]:
-    """Validate all entries; omit only explicitly approved external symlinks."""
+    """Validate all entries; never follow an omitted absolute symlink target."""
     from flocks.security.batch import parse_link_exclusions
 
     policy = parse_link_exclusions([f"{name}={target}" for name, target in (skip_external_symlinks or {}).items()])
@@ -41,10 +42,17 @@ def extract_source(
                 raise ValueError("Archive exceeds --max-snapshot-bytes")
             name = PurePosixPath(member.name)
             if (member.issym() and not name.is_absolute() and ".." not in name.parts
-                    and policy.get(name.as_posix()) == member.linkname):
+                    and (policy.get(name.as_posix()) == member.linkname
+                         or (auto_exclude_external_symlinks and member.linkname.startswith("/")))):
+                previous = exclusions.get(name.as_posix())
+                if previous and previous["target"] != member.linkname:
+                    raise ValueError(f"Conflicting external symlinks: {name}")
                 exclusions[name.as_posix()] = {
-                    "path": name.as_posix(), "target": member.linkname, "reason": "external_symlink",
+                    "path": name.as_posix(), "target": member.linkname,
+                    "reason": "external_symlink_auto" if auto_exclude_external_symlinks else "external_symlink",
                 }
+                # Bound persistent metadata and validate paths, including automatically discovered names.
+                parse_link_exclusions([f"{item['path']}={item['target']}" for item in exclusions.values()])
                 continue
             # data_filter rejects traversal and external links, and strips unsafe permissions.
             checked = tarfile.data_filter(member, str(destination))
@@ -160,6 +168,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
         exclusions = extract_source(
             archive, source, config["max_snapshot_bytes"],
             skip_external_symlinks=config.get("skip_external_symlinks"),
+            auto_exclude_external_symlinks=config.get("auto_exclude_external_symlinks", False),
         )
         result["source_exclusions"] = exclusions
         atomic_json(task_dir / "source-exclusions.json", {"exclusions": exclusions})

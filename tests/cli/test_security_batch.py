@@ -637,3 +637,46 @@ async def test_deleted_tasks_are_not_restarted_or_listed(tmp_path, monkeypatch, 
     result = await batch.run_batch(root, retry_failed=True, progress=lambda _: None)
     assert len(result['tasks']) == (0 if deletion_status == 'deleted' else 1)
     assert len((await batch.clean_batch(root))['tasks']) == len(result['tasks'])
+
+
+@pytest.mark.parametrize('auto', [False, True])
+def test_automatic_exclusion_handles_all_five_build_links(tmp_path, auto):
+    names = ['install-sh', 'depcomp', 'missing', 'ylwrap', 'compile']
+    archive, source = _archive_with_link(tmp_path, [
+        (name, '/usr/share/automake-1.15/' + name, tarfile.SYMTYPE) for name in names
+    ])
+    if not auto:
+        with pytest.raises(tarfile.AbsoluteLinkError):
+            extract_source(archive, source, 100)
+        assert not list(source.iterdir())
+        return
+    exclusions = extract_source(archive, source, 100, auto_exclude_external_symlinks=True)
+    assert {item['path'] for item in exclusions} == set(names)
+    assert all(item['reason'] == 'external_symlink_auto' for item in exclusions)
+    assert list(source.iterdir()) == [source / 'main.c']
+    assert (source / 'main.c').read_bytes() == b'code'
+
+
+@pytest.mark.parametrize('entries', [
+    [('link', '../escape', tarfile.SYMTYPE)],
+    [('link', '/etc/passwd', tarfile.LNKTYPE)],
+    [('../escape', '/etc/passwd', tarfile.SYMTYPE)],
+    [('link', '/etc/passwd', tarfile.SYMTYPE), ('alias', 'link', tarfile.SYMTYPE)],
+    [('link', '/one', tarfile.SYMTYPE), ('link', '/two', tarfile.SYMTYPE)],
+])
+def test_automatic_mode_keeps_other_rejections(tmp_path, entries):
+    archive, source = _archive_with_link(tmp_path, entries)
+    with pytest.raises((ValueError, tarfile.FilterError)):
+        extract_source(archive, source, 100, auto_exclude_external_symlinks=True)
+    assert not list(source.iterdir())
+
+
+def test_automatic_mode_is_frozen_by_cli(tmp_path, monkeypatch):
+    make_batch(tmp_path, monkeypatch)
+    from flocks.cli.commands import security_batch
+    monkeypatch.setattr(security_batch, '_run', lambda *_: None)
+    result = CliRunner().invoke(security_app, ['batch', 'run', str(tmp_path / 'input'),
+        '--run-dir', str(tmp_path / 'auto'), '--auto-exclude-external-symlinks'])
+    assert result.exit_code == 0, result.stdout
+    assert batch.read_json(tmp_path / 'auto/batch.json')['auto_exclude_external_symlinks'] is True
+    assert batch.read_json(tmp_path / 'run/batch.json')['auto_exclude_external_symlinks'] is False

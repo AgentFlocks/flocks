@@ -144,6 +144,7 @@ def prepare_batch(
     dynamic: bool = False,
     dynamic_concurrency: int = 2,
     skip_external_symlinks: list[str] | None = None,
+    auto_exclude_external_symlinks: bool = False,
 ) -> Path:
     if concurrency < 1 or task_timeout < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
         raise ValueError("Concurrency, timeout and size limit must be positive")
@@ -208,6 +209,7 @@ def prepare_batch(
                 "dynamic_concurrency": dynamic_concurrency,
                 "max_snapshot_bytes": max_snapshot_bytes,
                 "skip_external_symlinks": link_exclusions,
+                "auto_exclude_external_symlinks": auto_exclude_external_symlinks,
                 "tasks": tasks,
             },
         )

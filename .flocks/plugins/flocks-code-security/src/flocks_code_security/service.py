@@ -1658,7 +1658,7 @@ class AuditService:
         for item in values:
             if (not isinstance(item, dict) or set(item) != {"path", "target", "reason"}
                     or not all(isinstance(value, str) for value in item.values())
-                    or item["reason"] != "external_symlink"
+                    or item["reason"] not in {"external_symlink", "external_symlink_auto"}
                     or not item["target"].startswith("/")
                     or glob.escape(item["path"]) not in patterns):
                 raise AuditServiceError("invalid_parameter", "Source exclusions must match explicit audit scope")

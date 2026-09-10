@@ -2151,7 +2151,8 @@ async def test_batch_crash_cleanup_stops_containers_before_terminalizing_runs(tm
 
 
 @pytest.mark.asyncio
-async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp_path, monkeypatch):
+@pytest.mark.parametrize("automatic_exclusion", [False, True])
+async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp_path, monkeypatch, automatic_exclusion):
     import io
     import tarfile
     import time
@@ -2178,7 +2179,8 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
     monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
     root = batch.prepare_batch(source.parent, run_dir=tmp_path / "run", concurrency=30,
         task_timeout=60, model="test/model", poc=False, max_snapshot_bytes=1024, dynamic=True,
-        skip_external_symlinks=["install-sh=/usr/share/automake/install-sh"])
+        skip_external_symlinks=[] if automatic_exclusion else ["install-sh=/usr/share/automake/install-sh"],
+        auto_exclude_external_symlinks=automatic_exclusion)
     task = batch.resolve_task(root, "1")
     batch.atomic_json(task / "current.json", {"attempt": "one", "started_at": time.time()})
     captured = {}
@@ -2196,7 +2198,7 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
     await batch.cleanup_child_work(task, result)
     assert result["status"] == "completed"
     assert captured["exclude_patterns"] == ["install-sh"]
-    exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink"}]
+    exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink_auto" if automatic_exclusion else "external_symlink"}]
     assert captured["source_exclusions"] == exclusions
     assert result["source_exclusions"] == exclusions
     assert batch.read_json(task / "source-exclusions.json")["exclusions"] == exclusions
