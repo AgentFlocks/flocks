@@ -87,6 +87,7 @@ def collect(directory):
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     target = directory.parent / f"flocks-memory-evidence-{stamp}.tar.gz"
     allowed = {"runtime.jsonl", "runtime.jsonl.1", "runtime.jsonl.2",
+               "events.jsonl", "events.jsonl.1", "events.jsonl.2", "capture.json",
                "allocations.jsonl", "allocations.jsonl.1", "allocations.jsonl.2",
                "os.jsonl", "os.jsonl.1", "os.jsonl.2", "gc-state.bin", "collection.json", "markers.jsonl"}
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -158,6 +159,9 @@ def main(argv=None):
         else:
             result = {**value, "configured": json.loads(read_small(config_path(), 8192)),
                       "source": fingerprint(), "stop_requested": (directory / "STOP").exists()}
+            capture = directory / "capture.json"
+            if capture.exists():
+                result["capture_start"] = json.loads(read_small(capture, 16384))
             for name in ("runtime.jsonl", "os.jsonl", "allocations.jsonl"):
                 path = directory / name
                 if path.exists():

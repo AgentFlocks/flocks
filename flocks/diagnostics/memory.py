@@ -303,6 +303,7 @@ class Recorder:
         self.directory = Path(directory)
         self.options = options
         self.journal = Journal(self.directory / "runtime.jsonl")
+        self.event_journal = Journal(self.directory / "events.jsonl")
         self.allocations = Journal(self.directory / "allocations.jsonl")
         self.events = queue.Queue(maxsize=1024)
         self.lock = threading.Lock()
@@ -494,6 +495,13 @@ class Recorder:
                     "limits": {"event_queue": 1024, "active": MAX_ACTIVE, "keys": MAX_KEYS + 1,
                                "trace_metadata_bytes": TRACE_METADATA_LIMIT,
                                "trace_heap_bytes": TRACE_HEAP_LIMIT, "trace_rss_kib": TRACE_RSS_LIMIT_KIB}}
+        metadata["diagnostic_module"] = __file__
+        metadata["loaded_source_modules"] = {
+            name: getattr(sys.modules.get(name), "__file__", None) for name in (
+                "flocks.server.app", "flocks.workflow.runner", "flocks.workflow.engine",
+                "flocks.workflow.repl_runtime", "flocks.workflow.llm", "flocks.workflow.store",
+                "flocks.provider.provider", "flocks.provider.sdk.openai_base", "flocks.storage.storage")}
+        Journal(self.directory / "capture.json").write(metadata)
         self.journal.write(metadata)
         if sys.platform == "linux":
             sample = process_sample(os.getpid())
@@ -681,7 +689,9 @@ class Recorder:
                         batch.append(self.events.get_nowait())
                     except queue.Empty:
                         break
-                self.journal.write_many(batch)
+                # High-frequency starts/ends must not rotate away the long-term
+                # queue, memory, heartbeat and lifecycle-counter trends.
+                self.event_journal.write_many(batch)
                 if now >= next_sample:
                     process = self.sample()
                     next_sample = now + 5
