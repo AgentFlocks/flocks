@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 
@@ -112,3 +112,100 @@ def test_run_sync_from_inside_the_loop_thread_raises_instead_of_deadlocking():
     future = asyncio.run_coroutine_threadsafe(_trigger_from_loop(), loop)
     with pytest.raises(RuntimeError, match="self-deadlock"):
         future.result(timeout=2.0)
+
+
+@pytest.mark.parametrize("use_wait_for", [False, True])
+def test_cancellable_propagates_coroutine_timeout_without_traceback_growth(monkeypatch, use_wait_for):
+    """A failed Future must not be polled forever as if it were unfinished."""
+    submitted = []
+    submit = asyncio.run_coroutine_threadsafe
+
+    def capture_submission(coro, loop):
+        future = submit(coro, loop)
+        submitted.append(future)
+        return future
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", capture_submission)
+    polls = 0
+
+    def never_cancel():
+        nonlocal polls
+        polls += 1
+        # Bound failures on old code: do not let a regression OOM the test host.
+        assert polls < 1000, "completed timeout Future was polled repeatedly"
+        return False
+
+    async def timed_out():
+        if use_wait_for:
+            await asyncio.wait_for(asyncio.sleep(60), timeout=0.005)
+        else:
+            raise TimeoutError("upstream timed out")
+
+    with pytest.raises(TimeoutError):
+        _async_runtime.run_sync_cancellable(timed_out(), never_cancel, poll_interval_s=0.001)
+
+    traceback = submitted[0].exception().__traceback__
+    depth = 0
+    while traceback is not None:
+        depth += 1
+        traceback = traceback.tb_next
+    assert depth < 30
+    assert _async_runtime.run_sync(_echo("loop still usable")) == "loop still usable"
+
+
+def test_cancellable_keeps_polling_an_unfinished_future():
+    polls = 0
+
+    def never_cancel():
+        nonlocal polls
+        polls += 1
+        assert polls < 1000
+        return False
+
+    async def delayed_result():
+        await asyncio.sleep(0.025)
+        return "done"
+
+    assert _async_runtime.run_sync_cancellable(
+        delayed_result(), never_cancel, poll_interval_s=0.001,
+    ) == "done"
+    assert polls > 1
+
+
+@pytest.mark.parametrize("outcome", ["success", "cancelled", "error"])
+def test_cancellable_resolves_completion_racing_a_poll_timeout(monkeypatch, outcome):
+    class RacingFuture(Future):
+        def result(self, timeout=None):
+            if not self.done():
+                if outcome == "success":
+                    self.set_result("done")
+                elif outcome == "cancelled":
+                    self.cancel()
+                else:
+                    self.set_exception(ValueError("upstream failure"))
+                raise TimeoutError("poll expired immediately before completion")
+            return super().result(timeout=timeout)
+
+    future = RacingFuture()
+
+    def submit(coro, loop):
+        coro.close()
+        return future
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", submit)
+    if outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            _async_runtime.run_sync_cancellable(_echo(None), lambda: False)
+    elif outcome == "error":
+        with pytest.raises(ValueError, match="upstream failure"):
+            _async_runtime.run_sync_cancellable(_echo(None), lambda: False)
+    else:
+        assert _async_runtime.run_sync_cancellable(_echo(None), lambda: False) == "done"
+
+
+def test_cancellable_propagates_coroutine_cancellation():
+    async def cancelled():
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        _async_runtime.run_sync_cancellable(cancelled(), lambda: False)
