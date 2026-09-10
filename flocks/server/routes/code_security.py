@@ -80,7 +80,7 @@ async def list_batch_records(request: Request):
                         "audit_scan_id": task.get("scan_id"),
                         "display_name": task["task_id"],
                         "lifecycle_status": {"pending": "preparing", "timed_out": "failed"}.get(status, status),
-                        "dynamic_enabled": False, "created_at": config["created_at"],
+                        "dynamic_enabled": bool(config.get("dynamic")), "created_at": config["created_at"],
                         "failure_summary": task.get("error") or task.get("cleanup_error"),
                     })
             except (OSError, ValueError, KeyError):

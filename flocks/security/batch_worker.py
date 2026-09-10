@@ -146,6 +146,8 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 progress=progress,
                 knowledge_base=_read_knowledge_base(description, audited_target=source),
                 poc_enabled=config["poc"],
+                scan_mode="cybergym_level1" if config.get("dynamic") else "standard",
+                cybergym_manifest=task.get("cybergym_manifest"),
                 copy_source=False,
                 cleanup_intermediates=True,
                 max_total_bytes=config["max_snapshot_bytes"],

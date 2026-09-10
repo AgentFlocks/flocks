@@ -8,9 +8,17 @@ import shutil
 import sys
 
 
+def read_batch_config(task_dir: Path) -> dict:
+    from flocks.security.batch import read_json
+
+    return read_json(task_dir.parents[1] / "batch.json")
+
+
 def task_environment(task_dir: Path) -> dict[str, str]:
+    config = read_batch_config(task_dir)
     return {
         **os.environ,
+        "FLOCKS_CODE_SECURITY_BATCH_TASK": str(task_dir) if config.get("dynamic") else "",
         "FLOCKS_DATA_DIR": str(task_dir / "data/flocks"),
         "FLOCKS_CODE_SECURITY_ROOT": str(task_dir / "data/code-security"),
         "FLOCKS_CODE_SECURITY_WORKERS": "1",
@@ -54,13 +62,25 @@ def reconcile(task_dir: Path, result: dict) -> None:
     store.initialize()
     with store._connect() as connection:
         scans = connection.execute("SELECT scan_id, status FROM scans").fetchall()
+    dynamic = read_batch_config(task_dir).get("dynamic", False)
     for scan in scans:
         scan_id = scan["scan_id"]
         if scan["status"] == "completed" and store.scan_status(scan_id)["integrity_status"] != "valid":
             raise ValueError("Final artifact bundle is invalid; retaining execution data")
         if scan["status"] not in {"completed", "failed", "cancelled", "interrupted"}:
             store.mark_scan_terminal(scan_id, "interrupted", failure_code="batch_interrupted")
-        # Batch audits do not enable CyberGym. Do not silently discard an unexpected live run.
+        # The caller has already confirmed removal of this task's containers.
+        if dynamic:
+            for run in store.list_cybergym_runs(scan_id):
+                if run["status"] == "running":
+                    store.finish_cybergym_run(
+                        run["run_id"],
+                        "cancelled",
+                        {
+                            "status": "cancelled",
+                            "cancel_source": "batch_recovery",
+                        },
+                    )
         store.assert_cybergym_runs_terminal(scan_id)
         store.cancel_scan_work(scan_id)
         summary = store.prune_scan_execution_history(scan_id)

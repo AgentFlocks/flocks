@@ -15,10 +15,11 @@ import os
 import re
 import sqlite3
 import subprocess
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Protocol
+
+from flocks.security.batch_dynamic import docker_container_name, scratch_directory
 
 from flocks_code_security.poc import (
     materialize_bit_recipe,
@@ -443,6 +444,13 @@ class CommandExecutor(Protocol):
 
 class DockerCommandExecutor:
     async def run(
+        self, command: list[str], *, timeout_seconds: int, stdin_bytes: bytes | None = None,
+    ) -> CommandResult:
+        from flocks.security.batch_dynamic import container_slot
+        async with container_slot(command) as scoped_command:
+            return await self._run(scoped_command, timeout_seconds=timeout_seconds, stdin_bytes=stdin_bytes)
+
+    async def _run(
         self,
         command: list[str],
         *,
@@ -598,7 +606,7 @@ class OfficialCyberGymJudgeAdapter:
                     else "invalid_official_task_id"
                 ),
             }
-        with tempfile.TemporaryDirectory(prefix="cybergym-judge-") as temporary:
+        with scratch_directory(prefix="cybergym-judge-") as temporary:
             poc_path = Path(temporary) / "poc"
             poc_path.write_bytes(raw)
             poc_path.chmod(0o600)
@@ -1501,7 +1509,7 @@ class CyberGymRuntime:
         return CyberGymTargetManifest.from_dict(task["manifest"])
 
     async def _execute_replay(self, manifest: CyberGymTargetManifest, raw: bytes) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="cybergym-replay-") as temporary:
+        with scratch_directory(prefix="cybergym-replay-") as temporary:
             scratch = Path(temporary)
             input_file = scratch / PurePosixPath(manifest.input_path).name
             input_file.write_bytes(raw)
@@ -1537,7 +1545,7 @@ class CyberGymRuntime:
         breakpoints: list[dict[str, str]],
         variables: list[str],
     ) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="cybergym-gdb-") as temporary:
+        with scratch_directory(prefix="cybergym-gdb-") as temporary:
             scratch = Path(temporary)
             (scratch / PurePosixPath(manifest.input_path).name).write_bytes(raw)
             command = self._container_command(manifest, scratch, gdb=True)
@@ -1595,7 +1603,7 @@ class CyberGymRuntime:
     ) -> dict[str, Any]:
         if manifest.engine != "libfuzzer":
             return {"status": "skipped", "reason": "engine_preflight_not_available", "engine": manifest.engine}
-        with tempfile.TemporaryDirectory(prefix="cybergym-fuzz-preflight-") as temporary:
+        with scratch_directory(prefix="cybergym-fuzz-preflight-") as temporary:
             scratch = Path(temporary)
             corpus = scratch / "corpus"
             corpus.mkdir(mode=0o700)
@@ -1650,7 +1658,7 @@ class CyberGymRuntime:
     ) -> None:
         payload: dict[str, Any] | None = None
         try:
-            with tempfile.TemporaryDirectory(prefix="cybergym-fuzz-") as temporary:
+            with scratch_directory(prefix="cybergym-fuzz-") as temporary:
                 scratch = Path(temporary)
                 corpus = scratch / "corpus"
                 findings = scratch / "findings"
@@ -1852,7 +1860,7 @@ class CyberGymRuntime:
         return output
 
     async def _execute_minimize(self, manifest: CyberGymTargetManifest, raw: bytes) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="cybergym-minimize-") as temporary:
+        with scratch_directory(prefix="cybergym-minimize-") as temporary:
             scratch = Path(temporary)
             crash = scratch / "crash"
             minimized = scratch / "minimized"
@@ -2309,17 +2317,12 @@ def _docker_user_args() -> list[str]:
 
 
 def _docker_run_container_name(command: list[str]) -> str | None:
-    if len(command) < 2 or command[0:2] != ["docker", "run"]:
-        return None
-    for index, value in enumerate(command[:-1]):
-        if value == "--name":
-            return command[index + 1]
-        if value.startswith("--name=") and len(value) > len("--name="):
-            return value.removeprefix("--name=")
-    return None
+    return docker_container_name(command)
 
 
 def _fuzz_container_name(idempotency_key: str) -> str:
+    if task := os.environ.get("FLOCKS_CODE_SECURITY_BATCH_TASK"):
+        idempotency_key = f"{task}:{idempotency_key}"
     digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
     return f"cybergym-fuzz-{digest}"
 

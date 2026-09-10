@@ -21,7 +21,7 @@ def _run(root: Path, retry_failed: bool = False) -> None:
     except KeyboardInterrupt:
         typer.echo("Batch stopped. Use security batch resume to continue.")
         raise typer.Exit(130) from None
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         typer.echo(f"Batch error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
@@ -40,11 +40,25 @@ def start(
     concurrency: int = typer.Option(30, min=1, max=128),
     model: Optional[str] = typer.Option(None),
     poc: bool = typer.Option(False, "--poc"),
+    dynamic: bool = typer.Option(
+        False, "--dynamic", help="Enable local fuzz/GDB validation using each task's cybergym.json; implies --poc."
+    ),
+    dynamic_concurrency: int = typer.Option(
+        2, min=1, max=128, help="Maximum active dynamic containers per batch; each uses 1 CPU and 1024 MiB."
+    ),
     task_timeout: int = typer.Option(7200, min=1, help="Total seconds allowed per task, including preparation."),
     max_snapshot_bytes: int = typer.Option(4 * 1024**3, min=1),
     run_dir: Optional[Path] = typer.Option(None),
 ) -> None:
-    """Discover numeric task folders containing repo-vul.tar.gz and description.txt."""
+    """Discover numeric task folders containing repo-vul.tar.gz and description.txt.
+
+    With --dynamic, each folder must also contain a trusted cybergym.json with
+    a prebuilt vulnerable_runner image, target_binary, fuzzer_target,
+    input_contract, gdb_supported=true, fuzzer_supported=true and limits.
+    Images must already be available locally. Execution is local validation;
+    official CyberGym grading is not dispatched. Static concurrency and
+    --dynamic-concurrency (active containers) are independent limits.
+    """
     try:
         root = prepare_batch(
             source,
@@ -52,10 +66,12 @@ def start(
             concurrency=concurrency,
             model=model,
             poc=poc,
+            dynamic=dynamic,
+            dynamic_concurrency=dynamic_concurrency,
             task_timeout=task_timeout,
             max_snapshot_bytes=max_snapshot_bytes,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     _run(root)
@@ -75,7 +91,7 @@ def status(run_dir: Path = typer.Argument(..., exists=True, file_okay=False, res
     """Print durable task status and task-specific WebUI links."""
     try:
         typer.echo(json.dumps(batch_status(run_dir), ensure_ascii=False, indent=2))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
 
@@ -85,7 +101,7 @@ def clean(run_dir: Path = typer.Argument(..., exists=True, file_okay=False, reso
     """Remove stopped tasks' intermediate data, retaining reports, PoCs and the task UI."""
     try:
         result = asyncio.run(clean_batch(run_dir))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))

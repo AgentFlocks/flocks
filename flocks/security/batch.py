@@ -120,8 +120,10 @@ def prepare_batch(
     model: str | None,
     poc: bool,
     max_snapshot_bytes: int,
+    dynamic: bool = False,
+    dynamic_concurrency: int = 2,
 ) -> Path:
-    if concurrency < 1 or task_timeout < 1 or max_snapshot_bytes < 1:
+    if concurrency < 1 or task_timeout < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
         raise ValueError("Concurrency, timeout and size limit must be positive")
     source = source.expanduser().resolve(strict=True)
     tasks = {}
@@ -146,6 +148,12 @@ def prepare_batch(
             raise ValueError(f"Task {directory.name}: description must contain 1–32768 bytes")
     if not tasks:
         raise ValueError("No Arvo tasks containing repo-vul.tar.gz and description.txt were found")
+    if dynamic:
+        from flocks.security.batch_dynamic import load_manifest, preflight
+
+        for key, task in tasks.items():
+            task["cybergym_manifest"] = load_manifest(source / key / "cybergym.json")
+        preflight([task["cybergym_manifest"] for task in tasks.values()])
     batch_id = f"batch_{uuid4().hex}"
     root = (
         (
@@ -172,7 +180,9 @@ def prepare_batch(
                 "concurrency": concurrency,
                 "task_timeout": task_timeout,
                 "model": model,
-                "poc": poc,
+                "poc": poc or dynamic,
+                "dynamic": dynamic,
+                "dynamic_concurrency": dynamic_concurrency,
                 "max_snapshot_bytes": max_snapshot_bytes,
                 "tasks": tasks,
             },
@@ -274,6 +284,13 @@ def _cleanup_child_work(task_dir: Path, result: dict) -> None:
         result.setdefault("scan_id", scan_id)
     atomic_json(task_dir / "result.json", result)
     try:
+        config = read_json(task_dir.parents[1] / "batch.json")
+        if config.get("dynamic") and not (
+            result.get("cleanup_status") == "completed" and result.get("source_cleanup_status") == "completed"
+        ):
+            from flocks.security.batch_dynamic import owner, remove_containers
+
+            remove_containers(owner(task_dir))
         database = task_dir / "data/code-security/data/code-security.db"
         if (
             database.is_symlink()

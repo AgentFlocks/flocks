@@ -5307,7 +5307,7 @@ class ScanStore:
                 ("scan_events", "scan_id = ?"),
                 ("scan_phase_runs", "scan_id = ?"),
             ):
-                if self.retain_ui_history and table in {"scan_events", "scan_phase_runs"}:
+                if self.retain_ui_history and table in {"scan_events", "scan_phase_runs", "cybergym_runs"}:
                     continue
                 counts[table] = connection.execute(f"DELETE FROM {table} WHERE {scope}", (scan_id,)).rowcount
             counts["work_attempts"] = connection.execute(

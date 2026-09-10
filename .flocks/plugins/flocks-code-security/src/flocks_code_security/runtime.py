@@ -42,7 +42,9 @@ def build_runtime(root: Path) -> PluginRuntime:
         store,
         protected_roots=(root, runtime_dir(), outputs_root()),
     )
-    official_judge = OfficialCyberGymJudgeAdapter.from_environment()
+    # Batch dynamic mode performs local validation only. Official grading owns
+    # a separate execution lifecycle and is not dispatched by the batch runner.
+    official_judge = None if os.environ.get("FLOCKS_CODE_SECURITY_BATCH_TASK") else OfficialCyberGymJudgeAdapter.from_environment()
     task_data_dir = Path(os.environ.get("FLOCKS_CYBERGYM_DATA_DIR", "/home/cybergym/cybergym-server-data"))
     configured_data_dir = getattr(official_judge, "data_dir", None)
     if isinstance(configured_data_dir, Path):

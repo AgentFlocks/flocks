@@ -360,3 +360,202 @@ async def test_cancel_during_cleanup_keeps_ownership_until_filesystem_work_stops
         with pytest.raises(asyncio.CancelledError):
             await cleaning
     assert not batch.task_running(task)
+
+
+def dynamic_manifest():
+    return {
+        "task_id": "arvo:0",
+        "task_kind": "arvo",
+        "vulnerable_runner": "fixture:latest",
+        "target_binary": "/out/target",
+        "argv_template": ["{input}"],
+        "input_path": "/scratch/input",
+        "fuzzer_supported": True,
+        "fuzzer_target": "/out/target",
+        "input_contract": {},
+        "gdb_supported": True,
+        "limits": {"fuzz_seconds": 10, "gdb_seconds": 5},
+    }
+
+
+def test_dynamic_batch_freezes_validated_manifest_and_checks_images(tmp_path, monkeypatch):
+    from flocks.security import batch_dynamic
+
+    root = make_batch(tmp_path, monkeypatch)
+    source = tmp_path / "input"
+    manifest_file = source / "0/cybergym.json"
+    manifest_file.write_text(json.dumps(dynamic_manifest()))
+    checked = []
+    monkeypatch.setattr(batch_dynamic, "preflight", lambda manifests: checked.extend(manifests))
+    dynamic_root = batch.prepare_batch(
+        source,
+        run_dir=tmp_path / "dynamic",
+        concurrency=30,
+        model=None,
+        poc=False,
+        task_timeout=60,
+        max_snapshot_bytes=1024,
+        dynamic=True,
+        dynamic_concurrency=2,
+    )
+    manifest_file.write_text("changed")
+    config = batch.read_json(dynamic_root / "batch.json")
+    assert config["dynamic"] and config["poc"]
+    assert config["dynamic_concurrency"] == 2
+    assert config["tasks"]["0"]["cybergym_manifest"]["limits"]["fuzz_seconds"] == 10
+    assert checked[0]["gdb_supported"]
+    assert not batch.read_json(root / "batch.json")["dynamic"]
+
+
+@pytest.mark.parametrize("change", [{"gdb_supported": False}, {"limits": {"fuzz_seconds": 99999}}])
+def test_dynamic_manifest_rejects_disabled_capabilities_and_unbounded_execution(tmp_path, change):
+    from flocks.security.batch_dynamic import load_manifest
+
+    path = tmp_path / "cybergym.json"
+    path.write_text(json.dumps({**dynamic_manifest(), **change}))
+    with pytest.raises(ValueError):
+        load_manifest(path)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_slots_bound_real_worker_processes_and_reclaim_crashed_leases(tmp_path, monkeypatch):
+    from flocks.security import batch_dynamic
+
+    root = make_batch(tmp_path, monkeypatch, 8, concurrency=8)
+    config = batch.read_json(root / "batch.json")
+    config.update(dynamic=True, dynamic_concurrency=2)
+    batch.atomic_json(root / "batch.json", config)
+    monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
+    script = tmp_path / "dynamic_worker.py"
+    script.write_text("""
+import asyncio, json, os, sys, time
+from pathlib import Path
+from flocks.security import batch_dynamic
+from flocks.security.batch import atomic_json, file_lock
+root, key, attempt = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+task = root / "tasks" / key
+
+def event(kind, name):
+ while True:
+  try:
+   with file_lock(root / "events.lock"):
+    with (root / "dynamic.events").open("a") as stream:
+     stream.write(json.dumps([kind, name, key]) + "\\n")
+   return
+  except BlockingIOError: time.sleep(.005)
+
+def remove(owner, name=None): event("remove", name)
+batch_dynamic.remove_containers = remove
+async def run():
+ async with batch_dynamic.container_slot(["docker", "run", "--rm", "fixture:latest"]) as command:
+  assert "--label" in command and "--name" in command
+  name = command[command.index("--name") + 1]
+  event("start", name)
+  if key == "0": os._exit(9)
+  await asyncio.sleep(.1)
+with file_lock(task / "task.lock"):
+ asyncio.run(run())
+ atomic_json(task / "result.json", {"attempt": attempt, "status": "completed", "cleanup_status": "completed"})
+""")
+    monkeypatch.setattr(
+        batch, "_worker_command", lambda root, key, attempt: [sys.executable, str(script), str(root), key, attempt]
+    )
+    result = await batch.run_batch(root, progress=lambda _: None)
+    assert result["counts"] == {"interrupted": 1, "completed": 7}
+    # Acquire again even if the crashing worker happened to run last.
+    monkeypatch.setenv("FLOCKS_CODE_SECURITY_BATCH_TASK", str(root / "tasks/1"))
+    removed = []
+    monkeypatch.setattr(batch_dynamic, "remove_containers", lambda owner, name=None: removed.append(name))
+    async with batch_dynamic.container_slot(["docker", "run", "fixture:latest"]):
+        pass
+    active, peak, crashed = set(), 0, None
+    for kind, name, key in map(json.loads, (root / "dynamic.events").read_text().splitlines()):
+        if kind == "start":
+            active.add(name)
+            peak = max(peak, len(active))
+            if key == "0":
+                crashed = name
+        else:
+            active.discard(name)
+    assert peak <= 2
+    assert crashed not in active or crashed in removed
+
+
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        (["--rm", "image", "target", "--name", "input"], None),
+        (["--name=owned", "image", "--name", "input"], "owned"),
+        (["--network", "none", "--user", "1000:1000", "--name", "owned", "image", "--name", "input"], "owned"),
+    ],
+)
+def test_container_name_ignores_target_arguments(arguments, expected):
+    from flocks.security.batch_dynamic import docker_container_name
+
+    assert docker_container_name(["docker", "run", *arguments]) == expected
+
+
+@pytest.mark.asyncio
+async def test_failed_container_removal_retains_scratch_until_task_cleanup(tmp_path, monkeypatch):
+    from flocks.security import batch_dynamic
+
+    root = make_batch(tmp_path, monkeypatch)
+    task = batch.resolve_task(root, "0")
+    config = batch.read_json(root / "batch.json")
+    config.update(dynamic=True, dynamic_concurrency=1)
+    batch.atomic_json(root / "batch.json", config)
+    batch.atomic_json(task / "current.json", {"attempt": "one"})
+    monkeypatch.setenv("FLOCKS_CODE_SECURITY_BATCH_TASK", str(task))
+
+    def unavailable(*_):
+        raise RuntimeError("Docker cleanup unavailable")
+
+    monkeypatch.setattr(batch_dynamic, "remove_containers", unavailable)
+    with pytest.raises(RuntimeError, match="cleanup unavailable"):
+        with batch_dynamic.scratch_directory(prefix="cybergym-fuzz-") as directory:
+            scratch = Path(directory)
+            (scratch / "crash").write_bytes(b"crashing input")
+            async with batch_dynamic.container_slot(["docker", "run", "image", "target", "--name", "input"]) as command:
+                assert batch_dynamic.docker_container_name(command).startswith("flocks-batch-")
+    assert (scratch / "crash").exists()
+    assert (root / "dynamic-slots/0").exists()
+    monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
+    result = {"attempt": "one", "status": "failed"}
+    await batch.cleanup_child_work(task, result)
+    assert result["cleanup_status"] == "completed"
+    assert not scratch.exists()
+
+
+@pytest.mark.asyncio
+async def test_clean_completed_dynamic_task_does_not_require_docker(tmp_path, monkeypatch):
+    from flocks.security import batch_dynamic
+
+    root = make_batch(tmp_path, monkeypatch)
+    task = batch.resolve_task(root, "0")
+    config = batch.read_json(root / "batch.json")
+    config["dynamic"] = True
+    batch.atomic_json(root / "batch.json", config)
+    batch.atomic_json(task / "current.json", {"attempt": "one"})
+    result = {
+        "attempt": "one",
+        "status": "completed",
+        "cleanup_status": "completed",
+        "source_cleanup_status": "completed",
+    }
+    batch.atomic_json(task / "result.json", result)
+    monkeypatch.setattr(
+        batch_dynamic, "remove_containers", lambda *_: pytest.fail("Completed cleanup must work offline")
+    )
+    cleaned = await batch.clean_batch(root)
+    assert cleaned["counts"] == {"completed": 1}
+    assert cleaned["tasks"][0]["cleanup_status"] == "completed"
+
+
+def test_named_container_cleanup_escapes_name_filter(tmp_path, monkeypatch):
+    from flocks.security import batch_dynamic
+
+    calls = []
+    monkeypatch.setattr(batch_dynamic, "docker", lambda *args: calls.append(args) or "")
+    batch_dynamic.remove_containers("batch:0", "runner.v1")
+    assert "name=^/runner\\.v1$" in calls[0]
+    assert "label=flocks.batch.task=batch:0" in calls[0]

@@ -2086,3 +2086,112 @@ def test_legacy_corpus_cannot_block_crash_collection_or_refinement(tmp_path, mon
     assert sum(item["kind"] == "corpus" for item in store.list_cybergym_artifacts(scan_id)) == 300
     with pytest.raises(ValueError, match="budget exhausted"):
         runtime.artifact_create(scan_id, kind="crash", raw=b"x" * 64, parent_id=seed["artifact_id"])
+
+
+@pytest.mark.asyncio
+async def test_batch_executor_tags_gdb_and_fuzz_and_scopes_scratch(tmp_path, monkeypatch):
+    from flocks.security import batch, batch_dynamic
+    root = tmp_path / "batch"
+    task = root / "tasks/1"
+    batch.atomic_json(root / "batch.json", {"batch_id": "batch_test", "dynamic_concurrency": 1})
+    monkeypatch.setenv("FLOCKS_CODE_SECURITY_BATCH_TASK", str(task))
+    monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
+    commands = []
+    executor = DockerCommandExecutor()
+
+    async def run(command, **kwargs):
+        commands.append(command)
+        return CommandResult(0, "ok", "")
+    monkeypatch.setattr(executor, "_run", run)
+    await executor.run(["docker", "run", "--rm", "image", "gdb"], timeout_seconds=5)
+    await executor.run(["docker", "run", "--name", "cybergym-fuzz-test", "image"], timeout_seconds=5)
+    assert all("flocks.batch.task=batch_test:1" in command for command in commands)
+    assert commands[0][commands[0].index("--name") + 1].startswith("flocks-batch-")
+    assert commands[1][commands[1].index("--name") + 1] == "cybergym-fuzz-test"
+    assert Path(batch_dynamic.scratch_root()).is_relative_to(task)
+    first = cybergym_runtime._fuzz_container_name("same-key")
+    monkeypatch.setenv("FLOCKS_CODE_SECURITY_BATCH_TASK", str(root / "tasks/2"))
+    assert cybergym_runtime._fuzz_container_name("same-key") != first
+
+
+@pytest.mark.asyncio
+async def test_batch_crash_cleanup_stops_containers_before_terminalizing_runs(tmp_path, monkeypatch):
+    from flocks.security import batch, batch_dynamic
+    root = tmp_path / "batch"
+    task = root / "tasks/1"
+    batch.atomic_json(root / "batch.json", {"batch_id": "batch_test", "dynamic": True})
+    store, scan = _store(tmp_path / "store")
+    target = task / "data/code-security/data/code-security.db"
+    target.parent.mkdir(parents=True)
+    with store._connect() as db:
+        db.execute("UPDATE scans SET cleanup_intermediates = 1 WHERE scan_id = ?", (scan,))
+    run = store.start_cybergym_run(scan, "gdb", {})
+    # SQLite backup includes WAL contents and gives the task its own database.
+    import sqlite3
+    with store._connect() as source, sqlite3.connect(target) as destination:
+        source.backup(destination)
+    batch.atomic_json(task / "current.json", {"attempt": "1", "scan_id": scan})
+    scratch = task / "data/code-security/runtime/dynamic"
+    scratch.mkdir(parents=True)
+    (scratch / "input").write_text("scratch")
+    def fail(*_): raise RuntimeError("Docker daemon unavailable")
+    monkeypatch.setattr(batch_dynamic, "remove_containers", fail)
+    result = {"attempt": "1", "status": "interrupted"}
+    await batch.cleanup_child_work(task, result)
+    assert result["cleanup_status"] == "failed" and scratch.exists()
+    task_store = ScanStore(target)
+    assert task_store.list_cybergym_runs(scan)[0]["status"] == "running"
+    monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
+    await batch.cleanup_child_work(task, result)
+    assert result["cleanup_status"] == "completed", result
+    assert not scratch.exists()
+    persisted = task_store.list_cybergym_runs(scan)
+    assert persisted[0]["run_id"] == run["run_id"]
+    assert persisted[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp_path, monkeypatch):
+    import io
+    import tarfile
+    import time
+    from types import SimpleNamespace
+    from flocks.cli.commands import security
+    from flocks.security import batch, batch_dynamic, batch_worker
+    from flocks_code_security import runtime
+
+    source = tmp_path / "input/1"
+    source.mkdir(parents=True)
+    archive = source / "repo-vul.tar.gz"
+    with tarfile.open(archive, "w:gz") as stream:
+        entry = tarfile.TarInfo("main.c")
+        entry.size = 4
+        stream.addfile(entry, io.BytesIO(b"code"))
+    (source / "description.txt").write_text("Review the target")
+    (source / "cybergym.json").write_text(json.dumps(_manifest()))
+    monkeypatch.setattr(batch, "registry_root", lambda: tmp_path / "registry")
+    monkeypatch.setattr(batch_dynamic, "preflight", lambda *_: None)
+    monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
+    root = batch.prepare_batch(source.parent, run_dir=tmp_path / "run", concurrency=30,
+        task_timeout=60, model="test/model", poc=False, max_snapshot_bytes=1024, dynamic=True)
+    task = batch.resolve_task(root, "1")
+    batch.atomic_json(task / "current.json", {"attempt": "one", "started_at": time.time()})
+    captured = {}
+    async def audit(target, **kwargs):
+        captured.update(kwargs)
+        assert (target / "main.c").read_text() == "code"
+        kwargs["progress"]("scan.prepared", {"scan_id": "scan_test"})
+    monkeypatch.setattr(security, "_load_plugin_cli", lambda: (audit, None))
+    store = SimpleNamespace(scan_status=lambda _: {
+        "status": "completed", "integrity_status": "valid", "counts": {"poc_bundles": 1},
+        "cleanup_summary_json": '{"status":"completed"}',
+    })
+    monkeypatch.setattr(runtime, "get_runtime", lambda: SimpleNamespace(store=store))
+    result = await batch_worker.execute(root, "1", "one")
+    await batch.cleanup_child_work(task, result)
+    assert result["status"] == "completed"
+    assert captured["scan_mode"] == "cybergym_level1"
+    assert captured["poc_enabled"] is True
+    assert captured["cybergym_manifest"]["gdb_supported"] is True
+    assert not captured.get("dynamic_enabled", False)  # Generic probes are a different mode.
+    assert "work_dir" not in batch.read_json(task / "current.json")
