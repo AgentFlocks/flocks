@@ -38,10 +38,10 @@ _WORKFLOW_TABLE_PREFIXES = (
 )
 _WORKFLOW_PREFIXES = _WORKFLOW_KV_PREFIXES + _WORKFLOW_TABLE_PREFIXES
 _SOC_DENOISE_WORKFLOW_ID = "stream_alert_denoise"
-# Version 4 also requires syslog ingestion to preserve an independently
-# decoded alert count. Older v3 rollups could accept a successful zero output
-# after a vendor-prefixed RFC3164 payload failed inside the receive node.
-_SOC_METRIC_ROLLUP_SCHEMA_VERSION = 4
+# Version 3 means the persisted contribution was validated against the
+# independently counted workflow input. Older v2 rollups may contain false
+# zero ingress values and must not be treated as authoritative by the UI.
+_SOC_METRIC_ROLLUP_SCHEMA_VERSION = 3
 _METRIC_RETENTION_MS = 35 * 24 * 60 * 60 * 1000
 # Idempotency keys only need to cover realistic completion retries. Keeping
 # this table bounded avoids growth proportional to high-volume syslog traffic.
@@ -402,13 +402,6 @@ class WorkflowStore:
             if not isinstance(inputs, dict):
                 return None
 
-            # The syslog manager decodes the transport envelope before the
-            # execution summary is compacted. This marker remains verifiable
-            # even when a multi-kilobyte message is replaced by a preview.
-            marker = cls._as_int(inputs.get("_soc_alert_count"))
-            if marker is not None and marker >= 0:
-                return marker
-
             # Match the workflow's actual input priority. A syslog message is
             # an alert only when its JSON payload can be decoded by the receive
             # node; malformed/non-empty text must not be counted as accepted.
@@ -559,18 +552,15 @@ class WorkflowStore:
             return
         await db.execute(
             """
-            INSERT INTO workflow_metric_meta
+            INSERT OR IGNORE INTO workflow_metric_meta
             (workflow_id, coverage_started_at, updated_at)
             VALUES (?, ?, ?)
-            ON CONFLICT(workflow_id) DO UPDATE SET
-              coverage_started_at = MIN(coverage_started_at, excluded.coverage_started_at),
-              updated_at = excluded.updated_at
             """,
             (contribution["workflow_id"], now_ms, now_ms),
         )
-        # An older bucket may already contain counts produced under a weaker
-        # validation contract in the same minute. Do not upgrade that mixed
-        # bucket in place; replace it before adding the v4 contribution.
+        # A v2 bucket may already contain pre-reconciliation counts from the
+        # same minute. Do not let ON CONFLICT upgrade that mixed bucket to v3;
+        # replace only that obsolete derived bucket before adding verified data.
         await db.execute(
             "DELETE FROM workflow_metric_rollups "
             "WHERE workflow_id = ? AND bucket_start = ? AND schema_version < ?",

@@ -73,24 +73,3 @@ def test_existing_rfc3164_parsing_is_unchanged() -> None:
     assert parsed["hostname"] == "host-a"
     assert parsed["app_name"] == "sshd"
     assert parsed["message"] == "login accepted"
-
-
-def test_forced_rfc3164_recovers_vendor_wrapped_json_with_suffix() -> None:
-    payload = '{"net":{"real_src_ip":"192.0.2.1","dest_ip":"198.51.100.2"}}'
-    raw = f"<134>2026-09-09 14:00:00 appliance audit stream {payload}|!vendor-tail"
-
-    parsed = parse_syslog(raw, "rfc3164")
-
-    assert parsed["format"] == "rfc3164"
-    assert parsed["message"] == payload
-    assert "data" not in parsed
-
-
-def test_rfc3164_minified_json_is_not_mistaken_for_tag() -> None:
-    payload = '{"id":"alert-1","uri":"/login"}'
-
-    parsed = parse_syslog(f"<34>Oct 11 22:14:15 host-a {payload}")
-
-    assert parsed["app_name"] == ""
-    assert parsed["message"] == payload
-    assert "data" not in parsed

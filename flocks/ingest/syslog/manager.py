@@ -30,7 +30,6 @@ from flocks.workflow.tool_context import (
 
 from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.ingest.syslog.listener import run_tcp_syslog_server, run_udp_syslog_server
-from flocks.ingest.syslog.parser import extract_embedded_json_payload
 from flocks.workflow.triggers.compat import legacy_syslog_trigger_from_config
 from flocks.workflow.triggers.dispatcher import EventDispatcher, TriggerDispatchError, build_trigger_event
 from flocks.workflow.triggers.models import (
@@ -55,145 +54,6 @@ _BIND_WAIT_TIMEOUT_S = 3.0
 # Minimum interval between two ``syslog.queue_full_dropped`` warnings; a
 # sustained queue overflow is aggregated into a single warning per window.
 _DROP_LOG_WINDOW_S = 1.0
-_SOC_DENOISE_WORKFLOW_ID = "stream_alert_denoise"
-
-
-def _syslog_alert_items(value: Any) -> Optional[List[Dict[str, Any]]]:
-    """Decode the alert object(s) carried by a parsed syslog message."""
-    if not isinstance(value, dict):
-        return None
-    payload = value.get("data")
-    message = value.get("message")
-    # Some parsers expose an empty ``data`` placeholder while retaining the
-    # actual vendor envelope in ``message``. Prefer a non-empty decoded value,
-    # otherwise recover the first complete object/array from the message.
-    if payload in (None, {}, []) and isinstance(message, str) and message.strip():
-        recovered = extract_embedded_json_payload(message)
-        if recovered is not None:
-            payload = recovered[1]
-    if not isinstance(payload, (dict, list)):
-        return None
-    if isinstance(payload, dict):
-        # Match the receive node's current contract: one decoded JSON object
-        # is one syslog alert, even when one of its business fields is a list.
-        return [payload]
-    return [item for item in payload if isinstance(item, dict)]
-
-
-def _first_recursive(record: Dict[str, Any], *keys: str) -> Any:
-    """Find the first scalar field in a bounded nested vendor payload."""
-    priority = tuple(dict.fromkeys(key.lower() for key in keys))
-    wanted = set(priority)
-    found: dict[str, Any] = {}
-    queue: list[tuple[Any, int]] = [(record, 0)]
-    visited = 0
-    while queue and visited < 256:
-        value, depth = queue.pop(0)
-        visited += 1
-        if isinstance(value, dict):
-            for key, item in value.items():
-                normalized_key = str(key).lower()
-                usable_scalar = (
-                    not isinstance(item, (dict, list))
-                    and item is not None
-                    and str(item).strip().lower()
-                    not in {"", "none", "null", "unknown", "待识别"}
-                )
-                if normalized_key in wanted and normalized_key not in found and usable_scalar:
-                    found[normalized_key] = item
-            if depth < 6:
-                queue.extend(
-                    (item, depth + 1)
-                    for item in value.values()
-                    if isinstance(item, (dict, list))
-                )
-        elif isinstance(value, list) and depth < 6:
-            queue.extend(
-                (item, depth + 1)
-                for item in value[:32]
-                if isinstance(item, (dict, list))
-            )
-    return next((found[key] for key in priority if key in found), None)
-
-
-def _soc_source_type(alert: Dict[str, Any], syslog_value: Any) -> str:
-    explicit = str(
-        _first_recursive(
-            alert,
-            "_source_type",
-            "source_type",
-            "device_type",
-            "product_type",
-        )
-        or ""
-    ).strip().lower()
-    metadata = ""
-    if isinstance(syslog_value, dict):
-        metadata = " ".join(
-            str(syslog_value.get(key) or "").lower()
-            for key in ("app_name", "hostname", "log_type")
-        )
-    hint = f"{explicit} {metadata}"
-    if any(token in hint for token in ("skyeye", "ids", "ips")) or _first_recursive(
-        alert,
-        "uri",
-        "vuln_name",
-        "attack_result",
-        "attack_flag",
-    ) is not None:
-        return "skyeye"
-    # Match stream_alert_denoise's source resolution contract: nested/pre-
-    # flattened TDP signatures resolve to TDP and otherwise the workflow's
-    # documented fallback is also TDP.
-    return "tdp"
-
-
-def _soc_alert_preview(value: Any) -> tuple[Optional[int], Dict[str, Any]]:
-    """Build a bounded dashboard preview without persisting the full alert."""
-    alerts = _syslog_alert_items(value)
-    if alerts is None:
-        return None, {}
-    if not alerts:
-        return 0, {}
-    alert = alerts[0]
-    source_type = _soc_source_type(alert, value)
-    preview = {
-        "id": _first_recursive(alert, "id", "event_id", "alert_id", "uuid"),
-        "_source_type": source_type,
-        "threat_name": _first_recursive(
-            alert,
-            "threat_name",
-            "vuln_name",
-            "alert_name",
-            "rule_name",
-            "name",
-        ),
-        "sip": _first_recursive(
-            alert,
-            "sip",
-            "src_ip",
-            "source_ip",
-            "source_address",
-            "src_address",
-            "real_src_ip",
-            "net_real_src_ip",
-            "attacker_ip",
-            "client_ip",
-        ),
-        "dip": _first_recursive(
-            alert,
-            "dip",
-            "dst_ip",
-            "dest_ip",
-            "destination_ip",
-            "destination_address",
-            "dst_address",
-            "net_dest_ip",
-            "victim_ip",
-            "server_ip",
-        ),
-    }
-    return len(alerts), {key: item for key, item in preview.items() if item not in (None, "")}
 
 
 def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
@@ -755,30 +615,6 @@ class SyslogManager:
         async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
             summarized_inputs = {"_trigger": trigger.type}
             summarized_inputs.update(mapped_inputs)
-            if workflow_id == _SOC_DENOISE_WORKFLOW_ID:
-                syslog_input = (
-                    mapped_inputs.get("syslog_message")
-                    or mapped_inputs.get("syslog")
-                    or mapped_inputs.get(input_key)
-                )
-                alert_count, alert_preview = _soc_alert_preview(syslog_input)
-                if alert_count is not None:
-                    summarized_inputs["_soc_alert_count"] = alert_count
-                if alert_preview:
-                    summarized_inputs["_soc_alert_preview"] = alert_preview
-                if alert_count == 0:
-                    # A decoded empty batch cannot produce a SOC denoise
-                    # result. Do not create a doomed execution whose failure
-                    # would pollute operational health and dashboard rollups.
-                    log.info(
-                        "syslog.soc_empty_alert_skipped",
-                        {"workflow_id": workflow_id, "trigger_id": trigger.id},
-                    )
-                    return {
-                        "status": "skipped",
-                        "reason": "empty_soc_alert_input",
-                        "inputCount": 0,
-                    }
 
             exec_data = await create_execution_record(
                 workflow_id,

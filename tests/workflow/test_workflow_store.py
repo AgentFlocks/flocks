@@ -161,7 +161,7 @@ async def test_workflow_store_rolls_up_denoise_metrics_idempotently() -> None:
     assert tuple(row[:6]) == (10, 10, 6, 2, 4, 4)
     assert row["source_counts"] == '{"tdp": 8, "skyeye": 2}'
     assert row["source_covered_count"] == 10
-    assert tuple(row[8:12]) == (1, 0, 0, 4)
+    assert tuple(row[8:12]) == (1, 0, 0, 3)
     assert contribution_count == 1
 
 
@@ -213,7 +213,7 @@ async def test_workflow_store_replaces_legacy_counts_in_the_first_verified_bucke
         row = await cursor.fetchone()
 
     assert row is not None
-    assert tuple(row) == (1, '{"tdp": 1}', 4)
+    assert tuple(row) == (1, '{"tdp": 1}', 3)
 
 
 @pytest.mark.asyncio
@@ -425,49 +425,6 @@ async def test_workflow_store_does_not_accept_unverified_zero_for_file_input() -
 
     assert row is not None
     assert tuple(row) == (0, 1)
-
-
-@pytest.mark.asyncio
-async def test_workflow_store_rejects_zero_output_for_decoded_syslog_alert() -> None:
-    await WorkflowStore.init()
-    now_ms = WorkflowStore._now_ms()
-
-    await WorkflowStore.complete_execution(
-        {
-            "id": "denoise-decoded-syslog-zero",
-            "workflowId": "stream_alert_denoise",
-            "status": "success",
-            "startedAt": now_ms,
-            "inputParams": {
-                "_soc_alert_count": 1,
-                "_soc_alert_preview": {"_source_type": "tdp"},
-                "syslog_message": {
-                    "message": {"_type": "string", "chars": 23047, "preview": "2026"}
-                },
-            },
-            "outputResults": {
-                "stats": {
-                    "metric_schema_version": 2,
-                    "raw_count": 0,
-                    "normalized_count": 0,
-                    "after_filter_count": 0,
-                    "after_dedup_count": 0,
-                }
-            },
-        },
-        [],
-    )
-
-    db = await WorkflowStore.raw_db()
-    async with db.execute(
-        "SELECT raw_count, normalized_count, invalid_count, schema_version "
-        "FROM workflow_metric_rollups WHERE workflow_id = ?",
-        ("stream_alert_denoise",),
-    ) as cursor:
-        row = await cursor.fetchone()
-
-    assert row is not None
-    assert tuple(row) == (1, 0, 1, 4)
 
 
 @pytest.mark.asyncio
