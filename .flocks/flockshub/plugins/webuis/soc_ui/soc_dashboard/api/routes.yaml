@@ -2,20 +2,20 @@ routes:
   - method: GET
     path: /stats
     handler: handlers.get_stats
-    timeoutMs: 30000
+    timeoutMs: 3500
     description: Alert denoise and triage dashboard statistics
   - method: GET
     path: /activity
     handler: handlers.get_activity
-    timeoutMs: 5000
+    timeoutMs: 3500
     description: Incremental alert denoise and triage activity
   - method: GET
     path: /ai-tasks
     handler: handlers.get_ai_tasks
-    timeoutMs: 5000
+    timeoutMs: 3500
     description: Authoritative SOC workflow execution task snapshot
   - method: GET
     path: /task-center
     handler: handlers.get_task_center
-    timeoutMs: 5000
+    timeoutMs: 3500
     description: Task center scheduler and workflow execution statistics

@@ -1255,7 +1255,7 @@ def test_soc_dashboard_keeps_real_zero_for_healthy_empty_soc_database(tmp_path: 
     assert refreshed["triage"]["totalRecords"] is None
 
 
-def test_soc_dashboard_rejects_incomplete_soc_fact_schema(tmp_path: Path):
+def test_soc_dashboard_reads_legacy_records_without_rebuilding_fact_schema(tmp_path: Path):
     soc_db = tmp_path / "soc.db"
     with sqlite3.connect(soc_db) as conn:
         conn.execute(
@@ -1277,8 +1277,10 @@ def test_soc_dashboard_rejects_incomplete_soc_fact_schema(tmp_path: Path):
     )
 
     assert sources == []
-    assert quality["metricsAvailable"] is False
-    assert quality["unavailableReason"] == "soc_dashboard_schema_unavailable"
+    assert quality["metricsAvailable"] is True
+    assert quality["dataSource"] == "soc.db.alert_records"
+    with sqlite3.connect(soc_db) as conn:
+        assert len(conn.execute("PRAGMA table_info(soc_dashboard_alert_facts)").fetchall()) == 2
 
 
 def test_soc_dashboard_reads_persisted_denoise_metric_rollups(tmp_path: Path):
@@ -1516,7 +1518,7 @@ def test_soc_dashboard_uses_soc_facts_when_rollups_lack_source_dimension(
     assert sources["ndr"] == 1
     assert sources["edr"] == 0
     assert quality["sourceMetricsAvailable"] is True
-    assert quality["sourceMetricDataSource"] == "soc.db.soc_dashboard_alert_facts"
+    assert quality["sourceMetricDataSource"] == "soc.db.alert_records"
     assert quality["metricsAvailable"] is True
     assert quality["errorExecutionCount"] == 13312
     assert quality["unprocessedInputCount"] == 51

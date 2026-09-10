@@ -119,7 +119,7 @@ describe('SOC dashboard contract page runtime', () => {
         });
       }
       if (path === '/ai-tasks') {
-        return Promise.resolve({ data: { connection: 'online', summary: {}, tasks: [] } });
+        return Promise.resolve({ data: { connection: 'online', summary: { active: 3, running: 2, waiting: 1 }, tasks: [] } });
       }
       if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
       return Promise.reject(new Error(`unexpected path: ${path}`));
@@ -133,6 +133,9 @@ describe('SOC dashboard contract page runtime', () => {
     expect(ndrSource.querySelector('b')).toHaveAttribute('title', '7');
     expect(container.querySelector('.command-source b')).not.toHaveAttribute('title', '数据不可用');
     expect(container.querySelector('.quality-banner')).not.toBeInTheDocument();
+    await waitFor(() => expect(container.querySelector('.command-live b')).toHaveAttribute('title', '3 个任务'));
+    expect(within(container.querySelector('.command-live') as HTMLElement).getByText('AI任务处理中')).toBeInTheDocument();
+    expect(container.querySelector('.adtd-root')).toHaveAttribute('data-soc-revision', '1.1.6-readonly');
   });
 
   it('shows verified partial-window metrics without a yellow coverage warning', async () => {
@@ -141,11 +144,12 @@ describe('SOC dashboard contract page runtime', () => {
         return Promise.resolve({
           data: {
             generatedAt: new Date().toISOString(),
-            denoise: { totalRaw: 62, totalUnique: 9, duplicateRate: 2 / 62, duplicates: 2 },
+            denoise: { totalRaw: 62, totalNormalized: 62, totalUnique: 9, duplicateRate: 2 / 62, duplicates: 2 },
             timeline: { denoiseRaw: [62], denoiseUnique: [9] },
             sources: [
               { key: 'ndr', label: 'NDR', value: 50, rate: 1, active: true },
               { key: 'edr', label: 'HIDS', value: 0, rate: 0, active: false },
+              { key: 'waf', label: 'WAF', value: 9000, rate: 1, active: true },
             ],
             sourceStatus: {
               metricQuality: {
@@ -188,6 +192,7 @@ describe('SOC dashboard contract page runtime', () => {
     const hidsSource = screen.getByText('HIDS').closest('.command-source') as HTMLElement;
     expect(ndrSource.querySelector('b')).toHaveAttribute('title', '50');
     expect(hidsSource.querySelector('b')).toHaveAttribute('title', '0');
+    expect(screen.getByText('汇聚告警').closest('.merge-node')?.querySelector('b')).toHaveAttribute('title', '62');
     expect(screen.queryByText(/精确降噪指标尚未覆盖当前时间范围/)).not.toBeInTheDocument();
     expect(screen.queryByText(/降噪指标部分可用/)).not.toBeInTheDocument();
     expect(screen.queryByText(/降噪指标存在异常/)).not.toBeInTheDocument();

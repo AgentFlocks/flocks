@@ -6,10 +6,12 @@ import re
 import sqlite3
 import time
 from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import RLock
+from threading import BoundedSemaphore, RLock, local
 
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -81,6 +83,78 @@ _cache_lock = RLock()
 _schema_lock = RLock()
 _schema_ready: set = set()
 _activity_pruned_at: float = 0
+
+# Page reads have their own small pool. A timed-out client must not release
+# capacity while its SQLite work is still running, or refreshes can pile up.
+_READ_BUDGET_SECONDS = 2.0
+_read_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="soc-dashboard")
+_read_slots = BoundedSemaphore(2)
+_read_state = local()
+_read_guard = RLock()
+_read_pending = {}
+_read_cache = OrderedDict()
+
+
+@contextmanager
+def _read_db(path):
+    deadline = getattr(_read_state, "deadline", time.monotonic() + _READ_BUDGET_SECONDS)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("SOC read budget exhausted")
+    conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        yield conn
+    finally:
+        conn.close()
+
+
+def _run_read(function, args):
+    _read_state.deadline = time.monotonic() + _READ_BUDGET_SECONDS
+    try:
+        result = function(*args)
+        if time.monotonic() >= _read_state.deadline:
+            raise TimeoutError("SOC read budget exhausted")
+        return result
+    finally:
+        del _read_state.deadline
+
+
+async def _page_read(function, *args):
+    key = (function.__name__, json.dumps(args, sort_keys=True))
+    with _read_guard:
+        cached = _read_cache.get(key)
+        if cached and time.monotonic() - cached[0] < 2.0:
+            return cached[1]
+        future = _read_pending.get(key)
+        if future is None:
+            if not _read_slots.acquire(blocking=False):
+                if cached:
+                    return {**cached[1], "stale": True}
+                raise RuntimeError("SOC reads busy; retry later")
+            try:
+                future = _read_pool.submit(_run_read, function, args)
+            except Exception:
+                _read_slots.release()
+                raise
+            _read_pending[key] = future
+
+            def completed(done):
+                with _read_guard:
+                    _read_pending.pop(key, None)
+                    if not done.cancelled() and done.exception() is None:
+                        _read_cache[key] = (time.monotonic(), done.result())
+                        _read_cache.move_to_end(key)
+                        while len(_read_cache) > 16:
+                            _read_cache.popitem(last=False)
+                    _read_slots.release()
+
+            future.add_done_callback(completed)
+    # Shield keeps the slot occupied until the actual worker exits, including
+    # when the outer page runtime cancels an HTTP request.
+    return await asyncio.wait_for(
+        asyncio.shield(asyncio.wrap_future(future)), _READ_BUDGET_SECONDS + 0.5
+    )
 
 
 @dataclass(frozen=True)
@@ -637,7 +711,7 @@ def _read_token_usage():
     }
 
     try:
-        with sqlite3.connect(f"file:{USAGE_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+        with _read_db(USAGE_DB) as conn:
             conn.execute("PRAGMA query_only = ON")
             if not _table_exists(conn, "usage_records"):
                 return {**empty, "dailyLabels": labels, "dailySeries": [0] * 7}
@@ -680,103 +754,59 @@ def _read_token_usage():
 
 
 def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0):
-    stats_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_stats'"
-    ).fetchone()
-    if not stats_exists:
+    """Read existing samples and the current counter; never write on a poll."""
+    if not _table_exists(conn, "workflow_stats"):
         return None
-    columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
-    }
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(workflow_stats)")}
     success_expr = "success_count" if "success_count" in columns else "0"
     error_expr = "error_count" if "error_count" in columns else "0"
     updated_expr = "updated_at" if "updated_at" in columns else "0"
     current = conn.execute(
         f"SELECT call_count, {success_expr}, {error_expr}, {updated_expr} "
-        "FROM workflow_stats WHERE workflow_id = ?",
-        (workflow_name,),
+        "FROM workflow_stats WHERE workflow_id = ?", (workflow_name,),
     ).fetchone()
     if current is None:
         return None
-
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {WORKFLOW_SNAPSHOT_TABLE} (
-            workflow_id   TEXT NOT NULL,
-            sampled_at    INTEGER NOT NULL,
-            call_count    INTEGER NOT NULL,
-            success_count INTEGER NOT NULL DEFAULT 0,
-            error_count   INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (workflow_id, sampled_at)
-        )
-        """
-    )
-    last = conn.execute(
-        f"SELECT sampled_at, call_count, success_count, error_count "
-        f"FROM {WORKFLOW_SNAPSHOT_TABLE} WHERE workflow_id = ? "
-        "ORDER BY sampled_at DESC LIMIT 1",
-        (workflow_name,),
-    ).fetchone()
-    current_count = max(_safe_int(current[0]), 0)
-    success_count = max(_safe_int(current[1]), 0)
-    error_count = max(_safe_int(current[2]), 0)
-    if last is None or (current_count, success_count, error_count) != tuple(last[1:4]):
-        stats_updated_at = _safe_int(current[3]) or int(time.time() * 1000)
-        sampled_at = stats_updated_at - (stats_updated_at % 60000)
-        if last is not None and sampled_at <= _safe_int(last[0]):
-            sampled_at = _safe_int(last[0])
-            conn.execute(
-                f"UPDATE {WORKFLOW_SNAPSHOT_TABLE} "
-                "SET call_count = ?, success_count = ?, error_count = ? "
-                "WHERE workflow_id = ? AND sampled_at = ?",
-                (current_count, success_count, error_count, workflow_name, sampled_at),
-            )
-        else:
-            conn.execute(
-                f"INSERT INTO {WORKFLOW_SNAPSHOT_TABLE} "
-                "(workflow_id, sampled_at, call_count, success_count, error_count) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (workflow_name, sampled_at, current_count, success_count, error_count),
-            )
-        conn.commit()
-        last = (sampled_at, current_count, success_count, error_count)
-
+    counts = tuple(max(_safe_int(value), 0) for value in current[:3])
+    updated_at = _safe_int(current[3])
     if not (start_time > 0 and end_time > 0):
-        sampled_at = max(_safe_int(current[3]), _safe_int(last[0] if last else 0))
-        return [(current_count, success_count, error_count, sampled_at)] if current_count else []
-
-    start_ms = int(start_time * 1000)
-    end_ms = int(end_time * 1000)
-    previous = conn.execute(
-        f"SELECT call_count, success_count, error_count "
-        f"FROM {WORKFLOW_SNAPSHOT_TABLE} "
-        "WHERE workflow_id = ? AND sampled_at < ? "
-        "ORDER BY sampled_at DESC LIMIT 1",
-        (workflow_name, start_ms),
-    ).fetchone()
-    rows = conn.execute(
-        f"SELECT sampled_at, call_count, success_count, error_count "
-        f"FROM {WORKFLOW_SNAPSHOT_TABLE} "
-        "WHERE workflow_id = ? AND sampled_at >= ? AND sampled_at <= ? "
-        "ORDER BY sampled_at",
-        (workflow_name, start_ms, end_ms),
-    ).fetchall()
-    previous_counts = tuple(previous) if previous is not None else (0, 0, 0)
+        return [(*counts, updated_at)] if counts[0] else []
+    start_ms, end_ms = int(start_time * 1000), int(end_time * 1000)
+    previous_counts = (0, 0, 0)
+    rows = []
+    if _table_exists(conn, WORKFLOW_SNAPSHOT_TABLE):
+        sample_columns = {
+            row[1] for row in conn.execute(f"PRAGMA table_info({WORKFLOW_SNAPSHOT_TABLE})")
+        }
+        success_sample = "success_count" if "success_count" in sample_columns else "0"
+        error_sample = "error_count" if "error_count" in sample_columns else "0"
+        selected = f"call_count, {success_sample}, {error_sample}"
+        previous = conn.execute(
+            f"SELECT {selected} FROM {WORKFLOW_SNAPSHOT_TABLE} "
+            "WHERE workflow_id = ? AND sampled_at < ? ORDER BY sampled_at DESC LIMIT 1",
+            (workflow_name, start_ms),
+        ).fetchone()
+        previous_counts = tuple(previous) if previous else previous_counts
+        rows = conn.execute(
+            f"SELECT sampled_at, {selected} FROM {WORKFLOW_SNAPSHOT_TABLE} "
+            "WHERE workflow_id = ? AND sampled_at >= ? AND sampled_at <= ? "
+            "ORDER BY sampled_at", (workflow_name, start_ms, end_ms),
+        ).fetchall()
+    # Legacy installations may only retain a cumulative counter, with no
+    # timestamp. Keep the original dashboard cumulative semantics in that case.
+    if not updated_at:
+        updated_at = end_ms
+    if start_ms <= updated_at <= end_ms and (not rows or tuple(rows[-1][1:]) != counts):
+        rows.append((updated_at, *counts))
     deltas = []
-    for sampled_at, call_count, sample_success, sample_error in rows:
-        current_counts = (
-            max(_safe_int(call_count), 0),
-            max(_safe_int(sample_success), 0),
-            max(_safe_int(sample_error), 0),
+    for sampled_at, call_count, success_count, error_count in rows:
+        current_counts = tuple(max(_safe_int(v), 0) for v in (call_count, success_count, error_count))
+        delta = tuple(
+            value - previous if value >= previous else value
+            for value, previous in zip(current_counts, previous_counts)
         )
-        delta_counts = tuple(
-            current_value - previous_value
-            if current_value >= previous_value
-            else current_value
-            for current_value, previous_value in zip(current_counts, previous_counts)
-        )
-        if delta_counts[0] > 0:
-            deltas.append((*delta_counts, _safe_int(sampled_at)))
+        if delta[0] > 0:
+            deltas.append((*delta, _safe_int(sampled_at)))
         previous_counts = current_counts
     return deltas
 
@@ -1060,17 +1090,18 @@ def _get_legacy_dashboard_metric_stats(workflow_name, start_time, end_time):
         execution_params.extend((start_seconds * 1000, end_seconds * 1000))
     execution_query += " GROUP BY bucket_index ORDER BY bucket_index"
     try:
-        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             conn.execute("PRAGMA query_only = ON")
-            if not _table_exists(conn, "workflow_executions"):
-                return None
-            rows = conn.execute(execution_query, execution_params).fetchall()
             original_total = _legacy_workflow_call_count(
                 conn,
                 workflow_name,
                 start_seconds,
                 end_seconds,
             )
+            has_executions = _table_exists(conn, "workflow_executions")
+            if original_total is None and not has_executions:
+                return None
+            rows = conn.execute(execution_query, execution_params).fetchall() if has_executions else []
     except Exception:
         return None
 
@@ -1104,55 +1135,11 @@ def _get_legacy_dashboard_metric_stats(workflow_name, start_time, end_time):
 
 
 def _legacy_workflow_call_count(conn, workflow_name, start_time, end_time):
-    """Read the original workflow counter without mutating its snapshot table."""
-    if not _table_exists(conn, "workflow_stats"):
+    """Read the original counter, including old schemas without timestamps."""
+    samples = _workflow_stats_sample_deltas(conn, workflow_name, start_time, end_time)
+    if samples is None or not samples:
         return None
-    columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
-    }
-    updated_expr = "updated_at" if "updated_at" in columns else "0"
-    current = conn.execute(
-        f"SELECT call_count, {updated_expr} FROM workflow_stats WHERE workflow_id = ?",
-        (workflow_name,),
-    ).fetchone()
-    if current is None:
-        return None
-    current_count = max(_safe_int(current[0]), 0)
-    if not (start_time > 0 and end_time > 0):
-        return current_count
-    if not _table_exists(conn, WORKFLOW_SNAPSHOT_TABLE):
-        updated_at = _safe_int(current[1])
-        return current_count if start_time * 1000 <= updated_at <= end_time * 1000 else None
-
-    start_ms = start_time * 1000
-    end_ms = end_time * 1000
-    previous = conn.execute(
-        f"SELECT call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
-        "WHERE workflow_id = ? AND sampled_at < ? "
-        "ORDER BY sampled_at DESC LIMIT 1",
-        (workflow_name, start_ms),
-    ).fetchone()
-    samples = conn.execute(
-        f"SELECT sampled_at, call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
-        "WHERE workflow_id = ? AND sampled_at >= ? AND sampled_at <= ? "
-        "ORDER BY sampled_at",
-        (workflow_name, start_ms, end_ms),
-    ).fetchall()
-    current_updated_at = _safe_int(current[1])
-    if (
-        start_ms <= current_updated_at <= end_ms
-        and (not samples or max(_safe_int(samples[-1][1]), 0) != current_count)
-    ):
-        samples.append((current_updated_at, current_count))
-    if not samples:
-        return None
-    previous_count = max(_safe_int(previous[0]), 0) if previous else 0
-    total = 0
-    for _, sample_count in samples:
-        next_count = max(_safe_int(sample_count), 0)
-        total += next_count - previous_count if next_count >= previous_count else next_count
-        previous_count = next_count
-    return total
+    return sum(row[0] for row in samples)
 
 
 def _distribute_metric_total(total, weights):
@@ -1194,7 +1181,7 @@ def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
     start_ms = max(_safe_int(start_time), 0) * 1000
     end_ms = max(_safe_int(end_time), 0) * 1000
     try:
-        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
             if not (
@@ -1416,7 +1403,7 @@ def _get_workflow_denoise_stats(
         return rollup_result
 
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             sample_deltas = _workflow_stats_sample_deltas(
                 conn,
                 workflow_name,
@@ -1425,23 +1412,23 @@ def _get_workflow_denoise_stats(
             )
             if sample_deltas is None:
                 query = (
-                    "SELECT status, started_at FROM workflow_executions "
+                    "SELECT status, MIN(started_at), COUNT(*) FROM workflow_executions "
                     "WHERE workflow_id = ?"
                 )
                 query_params = [workflow_name]
                 if start_time > 0 and end_time > 0:
                     query += " AND started_at >= ? AND started_at <= ?"
                     query_params.extend((int(start_time * 1000), int(end_time * 1000)))
-                query += " ORDER BY started_at"
+                query += " GROUP BY status, CAST(started_at / 60000 AS INTEGER) ORDER BY MIN(started_at)"
                 execution_rows = conn.execute(query, query_params).fetchall()
                 samples = [
                     (
-                        1,
-                        1 if str(status).lower() == "success" else 0,
-                        0 if str(status).lower() == "success" else 1,
+                        count,
+                        count if str(status).lower() in WORKFLOW_SUCCESS_STATUSES else 0,
+                        0 if str(status).lower() in WORKFLOW_SUCCESS_STATUSES else count,
                         _safe_int(started_at),
                     )
-                    for status, started_at in execution_rows
+                    for status, started_at, count in execution_rows
                 ]
             else:
                 samples = sample_deltas
@@ -1522,7 +1509,7 @@ def _get_workflow_progress(
         return unavailable
 
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             if start_time > 0 and end_time > 0:
                 sample_deltas = _workflow_stats_sample_deltas(
                     conn,
@@ -1542,7 +1529,7 @@ def _get_workflow_progress(
                         "SELECT COALESCE(MAX(started_at), 0) FROM workflow_executions "
                         "WHERE workflow_id = ? AND started_at >= ? AND started_at <= ?",
                         (workflow_name, int(start_time * 1000), int(end_time * 1000)),
-                    ).fetchone()
+                    ).fetchone() if _table_exists(conn, "workflow_executions") else None
                     latest_sample = sample_deltas[-1][3] if sample_deltas else 0
                     row = (
                         sum(max(_safe_int(item[0]), 0) for item in sample_deltas),
@@ -1575,7 +1562,7 @@ def _get_workflow_recent_events(
     workflow_stage = "triage" if workflow_name in TRIAGE_WORKFLOW_IDS else "denoise"
     query_params = [workflow_name]
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             execution_columns = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
@@ -1600,7 +1587,7 @@ def _get_workflow_recent_events(
     query += " ORDER BY started_at DESC LIMIT ?"
     query_params.append(max(1, min(_safe_int(limit), 10)))
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             conn.row_factory = sqlite3.Row
             trigger_state = _workflow_trigger_state(conn, workflow_name)
             rows = conn.execute(query, query_params).fetchall()
@@ -1784,17 +1771,17 @@ def _triage_attack_success_value(record):
 
 async def get_activity(ctx, request):
     params = dict(request.query_params)
-    return await asyncio.to_thread(_get_activity, params)
+    return await _page_read(_get_activity, params)
 
 
 async def get_task_center(ctx, request):
     params = dict(request.query_params)
     include_mock = _truthy(params.get("mockActivity")) or _truthy(params.get("mockTaskCenter"))
-    return await asyncio.to_thread(_get_task_center, include_mock)
+    return await _page_read(_get_task_center, include_mock)
 
 
 async def get_ai_tasks(ctx, request):
-    return await asyncio.to_thread(_get_ai_tasks)
+    return await _page_read(_get_ai_tasks)
 
 
 def _table_exists(conn, table_name):
@@ -1844,7 +1831,7 @@ def _task_center_task_rows(limit=12):
     if not TASK_DB.is_file():
         return 0, [], 0, 0, 0
     try:
-        with sqlite3.connect(f"file:{TASK_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+        with _read_db(TASK_DB) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
             if not (
@@ -2178,7 +2165,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
     if not WORKFLOW_DB.is_file():
         return [], 0, 0, 0
     try:
-        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
             if not (
@@ -2679,7 +2666,7 @@ def _get_ai_tasks():
         }
     workflow_ids = tuple(SOC_PINNED_WORKFLOW_NAMES)
     try:
-        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+        with _read_db(WORKFLOW_DB) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
             if not _table_exists(conn, "workflow_executions"):
@@ -2811,8 +2798,6 @@ def _get_ai_tasks():
 
 
 def _get_activity(params):
-    _ensure_sqlite_schema()
-    _maybe_prune_activity()
     settings = _sqlite_settings()
     db_path = settings["db_path"]
     time_window = _normalize_time_window(
@@ -2847,7 +2832,7 @@ def _get_activity(params):
     cursor_reset = bool(raw_cursor and cursor is None)
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _read_db(db_path) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
             if not (
@@ -3312,17 +3297,10 @@ def _stats_cache_put(cache_key, value):
 
 async def get_stats(ctx, request):
     params = dict(request.query_params)
-    return await asyncio.to_thread(_get_stats, params)
+    return await _page_read(_get_stats, params)
 
 
 def _get_stats(params):
-    try:
-        _ensure_sqlite_schema()
-    except Exception:
-        # Source quality is resolved by the read-only query below. Keeping the
-        # endpoint alive lets the UI distinguish an unavailable SOC database
-        # from a healthy database whose selected window genuinely has zero rows.
-        pass
     time_window = _normalize_time_window(
         params.get("startTime"),
         params.get("endTime"),
@@ -3473,11 +3451,15 @@ def _get_stats(params):
         workflow_stats.get("dataSource") == "workflow.db.workflow_stats.call_count"
         and any(workflow_source_counter.values())
     )
-    if workflow_source_metrics_available or legacy_call_count_source:
+    persisted_sources_identified = any(
+        item["value"] > 0 and item["key"] != "unknown"
+        for item in _build_sources(persisted_source_counter)
+    )
+    if workflow_source_metrics_available or (legacy_call_count_source and not persisted_sources_identified):
         source_counter = workflow_source_counter
         source_metrics_available = True
         source_coverage_rate = workflow_stats.get("sourceCoverageRate", 0)
-        source_metric_data_source = "workflow.db.workflow_metric_rollups"
+        source_metric_data_source = workflow_stats["dataSource"]
     elif triage_quality.get("dataAvailable"):
         # Source is an independently persisted SOC fact dimension. It remains
         # authoritative for source cards even when old workflow rollups did
@@ -3486,7 +3468,7 @@ def _get_stats(params):
         source_counter = persisted_source_counter
         source_metrics_available = True
         source_coverage_rate = 1
-        source_metric_data_source = "soc.db.soc_dashboard_alert_facts"
+        source_metric_data_source = triage_quality["dataSource"]
     else:
         source_counter = Counter()
         source_metrics_available = False
@@ -3768,10 +3750,32 @@ def _active_data_source():
 
 
 def _sqlite_settings():
+    facts_table = f'"{FACTS_TABLE}"'
+    # Old installations need no migration just to display their existing
+    # records. Project the fact columns in a SELECT, under the same deadline.
+    if DEFAULT_SQLITE_DB.is_file():
+        with _read_db(DEFAULT_SQLITE_DB) as conn:
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({FACTS_TABLE})")}
+            if not set(_FACT_COLUMNS).issubset(columns):
+                record_columns = {
+                    row[1] for row in conn.execute(f"PRAGMA table_info({DEFAULT_SQLITE_TABLE})")
+                }
+                expressions = list(_fact_expressions("source"))
+                for column in ("row_id", "source_type", "threat_name", "is_duplicate"):
+                    if column not in record_columns:
+                        expressions = [
+                            expression.replace(f"source.{column}", _json_value("source", column))
+                            for expression in expressions
+                        ]
+                projection = ", ".join(
+                    f'{expression} AS "{column}"'
+                    for column, expression in zip(_FACT_COLUMNS, expressions)
+                )
+                facts_table = f"(SELECT {projection} FROM {DEFAULT_SQLITE_TABLE} AS source)"
     return {
         "db_path": DEFAULT_SQLITE_DB,
         "table": f'"{DEFAULT_SQLITE_TABLE}"',
-        "facts_table": f'"{FACTS_TABLE}"',
+        "facts_table": facts_table,
         "activity_table": f'"{ACTIVITY_TABLE}"',
         "record_column": f'"{DEFAULT_SQLITE_RECORD_COLUMN}"',
         "date_column": f'"{DEFAULT_SQLITE_DATE_COLUMN}"',
@@ -3828,18 +3832,9 @@ def _find_sqlite_sources_with_quality(start_date, end_date, start_time=0, end_ti
         f"ORDER BY {settings['date_column']}"
     )
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _read_db(db_path) as conn:
             conn.execute("PRAGMA query_only = ON")
-            required_tables = (DEFAULT_SQLITE_TABLE, FACTS_TABLE, META_TABLE)
-            if not all(_table_exists(conn, table_name) for table_name in required_tables):
-                return [], _soc_source_quality(
-                    available=False,
-                    reason="soc_dashboard_schema_unavailable",
-                )
-            schema_row = conn.execute(
-                f"SELECT meta_value FROM {META_TABLE} WHERE meta_key='schema_version'"
-            ).fetchone()
-            if not schema_row or str(schema_row[0]) != SCHEMA_VERSION:
+            if not _table_exists(conn, DEFAULT_SQLITE_TABLE):
                 return [], _soc_source_quality(
                     available=False,
                     reason="soc_dashboard_schema_unavailable",
@@ -3864,10 +3859,13 @@ def _find_sqlite_sources_with_quality(start_date, end_date, start_time=0, end_ti
                 end_time=end_time,
             )
         )
-    return sources, _soc_source_quality(
+    quality = _soc_source_quality(
         available=True,
         record_count=sum(source.record_count for source in sources),
     )
+    if settings["facts_table"].startswith("(SELECT"):
+        quality["dataSource"] = "soc.db.alert_records"
+    return sources, quality
 
 
 def _available_sqlite_dates():
@@ -3882,7 +3880,7 @@ def _available_sqlite_dates():
         f"ORDER BY {settings['date_column']}"
     )
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _read_db(db_path) as conn:
             rows = conn.execute(query).fetchall()
     except Exception:
         return []
@@ -3947,6 +3945,7 @@ def _read_denoise(paths, workflow_call_count: int = 0):
         optimized = _read_sqlite_denoise(paths, workflow_call_count)
         if optimized is not None:
             return optimized
+        raise RuntimeError("SOC denoise query unavailable")
 
     total_raw = 0
     duplicates = 0
@@ -4023,7 +4022,7 @@ def _read_sqlite_denoise(paths, workflow_call_count):
         where_clause += f" AND {event_time_column} BETWEEN ? AND ?"
         query_params.extend((start_time, end_time))
     try:
-        with sqlite3.connect(settings["db_path"]) as conn:
+        with _read_db(settings["db_path"]) as conn:
             rows = conn.execute(
                 f"SELECT {date_column}, COUNT(*), "
                 f"COALESCE(SUM(CASE WHEN \"is_duplicate\" = 1 THEN 1 ELSE 0 END), 0), "
@@ -4256,7 +4255,7 @@ def _read_sqlite_triage(paths):
         f"NOT {cache_condition} AND NOT {follower_condition} AND NOT ({failed_condition})"
     )
     try:
-        with sqlite3.connect(settings["db_path"]) as conn:
+        with _read_db(settings["db_path"]) as conn:
             row = conn.execute(
                 f"SELECT COUNT(*), "
                 f"COALESCE(SUM(CASE WHEN {cache_condition} THEN 1 ELSE 0 END), 0), "
@@ -4379,6 +4378,7 @@ def _read_triage(paths):
         optimized = _read_sqlite_triage(paths)
         if optimized is not None:
             return optimized
+        raise RuntimeError("SOC triage query unavailable")
     total_records = 0
     parse_errors = 0
     headers = []
@@ -4712,7 +4712,7 @@ def _iter_sqlite_records(source, *, triage_only=False):
         f"ORDER BY {settings['event_time_column']}, rowid"
     )
     try:
-        with sqlite3.connect(settings["db_path"]) as conn:
+        with _read_db(settings["db_path"]) as conn:
             cursor = conn.execute(query, query_params)
             for row in cursor:
                 try:

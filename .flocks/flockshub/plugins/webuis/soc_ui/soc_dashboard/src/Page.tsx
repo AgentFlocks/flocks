@@ -1743,14 +1743,13 @@ function TimeRefreshPopover({ value, refreshValue, open, onToggle, onApply, onCl
   ]);
 }
 
-function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
-  const active = activity.denoise.current || activity.triage.current;
+function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity, aiTasks }) {
+  const taskCount = aiTasks.connection === 'online'
+    ? Math.max(Number(aiTasks.summary?.active || 0), 0)
+    : null;
   const loadActive = activity.mode !== 'normal' && activity.batch?.receivedCount > 0;
-  const status = activity.connection === 'error'
-    ? '活动通道重连中'
-    : activity.mode === 'surge' ? '降噪洪峰处理中'
-      : activity.mode === 'burst' ? '告警批量处理中'
-        : active ? 'AI任务处理中' : 'AI运营处理';
+  const status = taskCount === null ? 'AI任务同步中'
+    : taskCount > 0 ? 'AI任务处理中' : 'AI运营待命';
   return h('header', { className: 'command-header' }, [
     h('div', { className: 'command-brand', key: 'brand' }, [
       h('div', { className: 'command-logo', key: 'logo' }, 'AI'),
@@ -1764,9 +1763,9 @@ function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMen
       h('span', { key: 'text' }, status),
       h(AnimatedNumber, {
         tag: 'b',
-        value: loadActive ? activity.batch.ratePerSecond : stats.denoise.totalRaw,
-        format: (value) => loadActive ? `${trim(value)} 条/秒` : `${compactNumber(Math.round(value))} 条告警`,
-        key: loadActive ? 'rate' : 'count',
+        value: taskCount,
+        format: (value) => `${compactNumber(Math.round(value))} 个任务`,
+        key: 'task-count',
       }),
     ]),
     h('div', { className: 'command-tools', key: 'tools' }, [
@@ -1965,8 +1964,10 @@ function CommandGraph({ stats, activity }) {
   };
   const activeSeverityTone = severityToneFor(activity.triage.current);
   const recentSeverityTone = severityToneFor(activity.triage.last);
-  const activeSources = [...(stats.sources || [])].sort((a, b) => Number(b.value || 0) - Number(a.value || 0)).slice(0, 2);
-  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: null });
+  const activeSources = [{ key: 'ndr', label: 'NDR' }, { key: 'edr', label: 'HIDS' }].map((source) => ({
+    ...source,
+    value: (stats.sources || []).find((item) => item.key === source.key)?.value ?? null,
+  }));
   const triageMetricsAvailable = Boolean(stats.generatedAt)
     && stats.sourceStatus?.triageQuality?.metricsAvailable !== false;
   const severities = severityRows(stats, triageMetricsAvailable);
@@ -3161,6 +3162,7 @@ export default function Page() {
   return h('div', {
     className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
     'data-animations': 'on',
+    'data-soc-revision': '1.1.6-readonly',
     style: { '--event-rail-width': `${eventRailWidth}px` },
   }, [
     h('style', { key: 'style' }, CSS),
@@ -3176,6 +3178,7 @@ export default function Page() {
       loading,
       refresh,
       activity: displayActivity,
+      aiTasks: displayAiTasks,
     }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
     h('main', {
@@ -3252,7 +3255,7 @@ const CSS = `
   overflow: hidden;
   border: 1px solid rgba(43,231,255,.55);
   border-radius: 8px;
-  color: #ffd166;
+  color: #aadeff;
   font-weight: 900;
   font-size: 18px;
   background: linear-gradient(145deg, rgba(43,231,255,.18), rgba(255,177,32,.12));
@@ -3513,7 +3516,7 @@ const CSS = `
 .metric-cyan .metric-value { color: #2be7ff; }
 .metric-green .metric-value { color: #2ee6a6; }
 .metric-violet .metric-value { color: #9b8cff; }
-.metric-amber .metric-value { color: #ffb020; }
+.metric-amber .metric-value { color: #aadeff; }
 .metric-red .metric-value { color: #ff4d6d; }
 .side-summary {
   display: grid;
@@ -3560,7 +3563,7 @@ const CSS = `
 .summary-cyan b { color: #2be7ff; }
 .summary-green b { color: #2ee6a6; }
 .summary-violet b { color: #9b8cff; }
-.summary-amber b { color: #ffb020; }
+.summary-amber b { color: #aadeff; }
 .summary-red b { color: #ff4d6d; }
 .ai-stage {
   min-height: clamp(300px, 34vh, 344px);
@@ -3741,7 +3744,7 @@ const CSS = `
   box-shadow: 0 0 10px rgba(46,230,166,.72);
 }
 .core-live-status b { color: #2be7ff; font-size: 9px; }
-.core-live-status.status-error { border-color: rgba(255,176,32,.36); color: #ffd166; }
+.core-live-status.status-error { border-color: rgba(255,176,32,.36); color: #aadeff; }
 .core-live-status.status-error i { background: #ffb020; box-shadow: 0 0 10px rgba(255,176,32,.68); }
 .core-processing .ai-sphere {
   border-color: rgba(43,231,255,.62);
@@ -3762,7 +3765,7 @@ const CSS = `
   padding: 4px 7px;
   transform: translateX(-50%);
   border-radius: 5px;
-  color: #ffd166;
+  color: #aadeff;
   background: rgba(255,176,32,.08);
   font-size: 9px;
   overflow: hidden;
@@ -3824,7 +3827,7 @@ const CSS = `
 .ai-sphere span {
   position: relative;
   z-index: 2;
-  color: #ffd166;
+  color: #aadeff;
   font-size: clamp(52px, 7vw, 78px);
   font-weight: 900;
   text-shadow: 0 0 22px rgba(255,209,102,.5);
@@ -4320,7 +4323,7 @@ const CSS = `
 .loop-node span { color: rgba(170,222,255,.7); font-size: 12px; }
 .loop-node.primary { border-color: rgba(43,231,255,.45); animation: loopNodePulse 3s ease-in-out infinite; }
 .loop-node.primary b { color: #2be7ff; }
-.loop-node.warn b { color: #ffb020; }
+.loop-node.warn b { color: #aadeff; }
 .loop-node.hot b { color: #ff4d6d; }
 .gauge-wrap { position: relative; display: grid; place-items: center; margin-top: 2px; }
 .gauge { width: 152px; height: 88px; overflow: visible; }
@@ -4346,7 +4349,7 @@ const CSS = `
   border-radius: 6px;
   background: rgba(88,166,255,.08);
 }
-.rank-row span { color: #ffd166; font-size: 11px; }
+.rank-row span { color: #aadeff; font-size: 11px; }
 .rank-row b { color: rgba(217,247,255,.88); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rank-row em { color: #ffffff; font-size: 12px; font-style: normal; }
 .rank-summary {
@@ -5861,7 +5864,7 @@ const CSS = `
 .event-queue-kind.kind-triage { color: #c3baff; background: rgba(83,67,151,.45); }
 .event-stage { color: #83aef1; background: rgba(52,86,143,.5); }
 .event-rail-item.state-processing .event-stage { color: #57e1b5; background: rgba(23,111,83,.48); }
-.event-rail-item.state-waiting .event-stage { color: #d6a95e; background: rgba(120,81,23,.38); }
+.event-rail-item.state-waiting .event-stage { color: #aadeff; background: rgba(45,82,135,.24); }
 .event-rail-item > strong,
 .event-rail-item > span,
 .event-rail-item > small {
@@ -5992,7 +5995,7 @@ const CSS = `
 }
 .command-logo {
   border-color: rgba(43,231,255,.56);
-  color: #ffd166;
+  color: #aadeff;
   background: linear-gradient(145deg, rgba(43,231,255,.22), rgba(6,27,44,.9));
   box-shadow: inset 0 0 18px rgba(43,231,255,.15), 0 0 18px rgba(43,231,255,.12);
   animation: commandLogoPulse 3.6s ease-in-out infinite;
@@ -6745,7 +6748,7 @@ const CSS = `
   border-color: rgba(255,209,102,.38);
   box-shadow: 0 0 22px rgba(255,209,102,.11), inset 0 0 14px rgba(43,231,255,.07);
 }
-.core-load-surge .core-batched b { color: #ffd166; }
+.core-load-surge .core-batched b { color: #aadeff; }
 .command-live.load-burst,
 .command-live.load-surge { border-color: rgba(43,231,255,.48); box-shadow: inset 0 0 24px rgba(43,231,255,.1), 0 0 16px rgba(43,231,255,.08); }
 .command-live.load-surge { border-color: rgba(255,209,102,.42); }

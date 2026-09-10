@@ -9,6 +9,7 @@ Run it from a Flocks checkout containing the candidate SOC dashboard changes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -56,9 +57,11 @@ class _ReadOnlySQLiteProxy:
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.1)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only = ON")
+    deadline = time.monotonic() + 2.0
+    connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
     return connection
 
 
@@ -99,7 +102,12 @@ def _load_handlers(repo: Path) -> ModuleType:
         raise RuntimeError(f"cannot import dashboard handler: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
@@ -111,8 +119,9 @@ def _git_revision(repo: Path) -> str:
             check=True,
             capture_output=True,
             text=True,
+            timeout=2,
         ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 
@@ -210,6 +219,7 @@ def main() -> int:
         help="Flocks data directory (default: ~/.flocks/data)",
     )
     parser.add_argument("--sample", type=int, default=30, help="recent rows to inspect")
+    parser.add_argument("--page-dir", type=Path, help="installed soc_dashboard page directory")
     args = parser.parse_args()
     repo = args.repo.expanduser().resolve()
     data_dir = args.data_dir.expanduser().resolve()
@@ -224,8 +234,6 @@ def main() -> int:
 
     try:
         sys.path.insert(0, str(repo))
-        from flocks.ingest.syslog import manager as syslog_manager
-
         handlers = _load_handlers(repo)
         handlers.sqlite3 = _ReadOnlySQLiteProxy
     except Exception as exc:
@@ -233,9 +241,8 @@ def main() -> int:
         return 1
 
     results.check(
-        hasattr(syslog_manager, "_first_recursive")
-        and hasattr(syslog_manager, "extract_embedded_json_payload"),
-        "candidate recursive vendor parser is present",
+        hasattr(handlers, "_read_db") and hasattr(handlers, "_page_read"),
+        "dashboard uses bounded read-only queries",
     )
     results.check(
         hasattr(handlers, "_workflow_preview_value"),
@@ -254,6 +261,27 @@ def main() -> int:
         in page_source,
         "source cards are independent from denoise metric availability",
     )
+    bundled = repo / ".flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard"
+    candidates = [args.page_dir] if args.page_dir else [
+        Path.home() / ".flocks/plugins/contracts/webui/soc_ui/soc_dashboard",
+        Path.home() / ".flocks/plugins/contracts/webui/soc-dashboard",
+        Path.home() / ".flocks/plugins/user_defined_pages/soc_ui/soc_dashboard",
+        repo / ".flocks/plugins/contracts/webui/soc_ui/soc_dashboard",
+    ]
+    installed = next((path.expanduser().resolve() for path in candidates if path and path.expanduser().is_dir()), None)
+    if installed is None:
+        results.warn("installed dashboard not found; specify --page-dir to verify deployed files")
+    else:
+        print(f"installed_page={installed}")
+        for relative in ("src/Page.tsx", "src/severityValues.ts", "api/handlers.py", "api/routes.yaml"):
+            path = installed / relative
+            matches = path.is_file() and hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256((bundled / relative).read_bytes()).digest()
+            results.check(matches, f"installed {relative} matches candidate", "update SOC Workspace WebUI to 1.1.6 if mismatched")
+        bundle = installed / "dist/page.js"
+        results.check(
+            bundle.is_file() and "1.1.6-readonly" in bundle.read_text(encoding="utf-8"),
+            "installed page bundle contains the new dashboard revision",
+        )
     results.check(soc_db.is_file(), "soc.db exists", str(soc_db))
     results.check(workflow_db.is_file(), "workflow.db exists", str(workflow_db))
     if not soc_db.is_file() or not workflow_db.is_file():
@@ -276,57 +304,34 @@ def main() -> int:
         identified_facts = []
         results.check(False, "recent SOC records can be read", str(exc))
 
-    if fact_rows:
-        try:
-            sample_record = json.loads(fact_rows[0]["record_json"])
-            wrapped = {
-                "format": "rfc3164",
-                "data": [],
-                "message": f"vendor-prefix {json.dumps(sample_record, ensure_ascii=False)} vendor-tail",
-            }
-            count, preview = syslog_manager._soc_alert_preview(wrapped)
-            parser_ok = bool(
-                count
-                and _usable(preview.get("_source_type"))
-                and _usable(preview.get("sip"))
-                and _usable(preview.get("dip"))
-            )
-            results.check(
-                parser_ok,
-                "actual SOC record survives vendor-envelope preview parsing",
-                "source={} src={} dst={}".format(
-                    preview.get("_source_type") or "missing",
-                    _masked(preview.get("sip")),
-                    _masked(preview.get("dip")),
-                ),
-            )
-        except Exception as exc:
-            results.check(False, "vendor-envelope preview parsing", str(exc))
-
     handlers.WORKFLOW_DB = workflow_db
     handlers.DEFAULT_SQLITE_DB = soc_db
+    handlers.USAGE_DB = data_dir / "flocks.db"
+    handlers.TASK_DB = data_dir / "tasks.db"
     try:
         end_time = int(time.time())
-        rollup = handlers._get_workflow_metric_rollups(
-            "stream_alert_denoise", end_time - 7 * 86400, end_time
+        stats = handlers._run_read(handlers._get_stats, ({
+            "startTime": str(end_time - 7 * 86400),
+            "endTime": str(end_time),
+            "force": "1",
+        },))
+        quality = stats["sourceStatus"]["metricQuality"]
+        results.check(
+            quality.get("metricsAvailable") is True,
+            "legacy dashboard metrics are available",
+            "raw={} merged={} unique={} reduction={}".format(
+                stats["denoise"]["totalRaw"], stats["denoise"]["totalNormalized"],
+                stats["denoise"]["totalUnique"], stats["denoise"]["duplicateRate"],
+            ),
         )
         results.check(
-            isinstance(rollup, dict),
-            "recent seven-day denoise rollups can be read",
+            quality.get("sourceMetricsAvailable") is True,
+            "NDR/HIDS sources are available",
+            json.dumps({item["label"]: item["value"] for item in stats["sources"]}, ensure_ascii=False),
         )
-        if isinstance(rollup, dict):
-            results.check(
-                rollup.get("metricsAvailable") is True,
-                "failed executions do not hide valid denoise aggregates",
-                "raw={} reduced={} errors={} unprocessed={}".format(
-                    rollup.get("rawCount"),
-                    rollup.get("reducedCount"),
-                    rollup.get("errorCount"),
-                    rollup.get("unprocessedInputCount"),
-                ),
-            )
     except Exception as exc:
-        results.check(False, "denoise rollup visibility can be evaluated", str(exc))
+        results.check(False, "dashboard statistics can be read within budget", str(exc))
+
 
     try:
         shapes = _latest_workflow_shapes(handlers, workflow_db, sample_limit)
@@ -353,7 +358,12 @@ def main() -> int:
         results.check(False, "workflow event identity can be evaluated", str(exc))
 
     try:
-        tasks_payload = handlers._get_ai_tasks()
+        tasks_payload = handlers._run_read(handlers._get_ai_tasks, ())
+        results.check(
+            tasks_payload.get("connection") == "online",
+            "header AI task count is available",
+            f"active={tasks_payload.get('summary', {}).get('active')}",
+        )
         tasks = tasks_payload.get("tasks", [])
         empty_visible = [task for task in tasks if task.get("emptyInput")]
         results.check(
