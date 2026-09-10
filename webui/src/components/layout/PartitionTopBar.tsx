@@ -9,10 +9,19 @@ export interface PartitionTopBarItem {
   icon: LucideIcon;
 }
 
+export interface PartitionTopBarScene {
+  id: string;
+  name: string;
+}
+
 interface PartitionTopBarProps {
   items: PartitionTopBarItem[];
   activeId: NavPartitionId;
   onSelect: (id: NavPartitionId) => void;
+  /** Scenes of the active partition; only rendered when there is more than one. */
+  scenes?: PartitionTopBarScene[];
+  activeSceneId?: string | null;
+  onSelectScene?: (id: string) => void;
   /** Optional right-aligned entry for the active partition (suite manager). */
   action?: { href: string; name: string; icon: LucideIcon; active?: boolean };
 }
@@ -22,15 +31,25 @@ interface PartitionTopBarProps {
  * sidebar menu and lands on the page that partition was left on; the panes of
  * the other partitions stay alive underneath.
  */
-export default function PartitionTopBar({ items, activeId, onSelect, action }: PartitionTopBarProps) {
+export default function PartitionTopBar({
+  items,
+  activeId,
+  onSelect,
+  scenes,
+  activeSceneId,
+  onSelectScene,
+  action,
+}: PartitionTopBarProps) {
   const { t } = useTranslation('nav');
+  // One scene needs no switcher: the sidebar already shows only its pages.
+  const showScenes = Boolean(scenes && scenes.length > 1 && onSelectScene);
 
   return (
-    <div className="relative z-20 flex h-11 shrink-0 items-center gap-1 border-b border-zinc-200 bg-zinc-100 pl-20 pr-3 lg:pl-3 dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="relative z-20 flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-zinc-200 bg-zinc-100 pl-20 pr-3 lg:pl-3 [scrollbar-width:none] dark:border-zinc-800 dark:bg-zinc-900 [&::-webkit-scrollbar]:hidden">
       <div
         role="tablist"
         aria-label={t('partitions')}
-        className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="flex shrink-0 items-center gap-1"
       >
         {items.map((item) => {
           const active = item.id === activeId;
@@ -56,6 +75,34 @@ export default function PartitionTopBar({ items, activeId, onSelect, action }: P
           );
         })}
       </div>
+      {showScenes && (
+        <div
+          role="tablist"
+          aria-label={t('scenes')}
+          className="ml-4 flex shrink-0 items-center gap-1 rounded-lg bg-zinc-200/60 p-0.5 dark:bg-zinc-800/60"
+        >
+          {scenes?.map((scene) => {
+            const active = scene.id === activeSceneId;
+            return (
+              <button
+                key={scene.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => onSelectScene?.(scene.id)}
+                title={scene.name}
+                className={`flex h-7 shrink-0 items-center rounded-md px-2.5 text-xs font-semibold transition-colors ${
+                  active
+                    ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-50'
+                    : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                }`}
+              >
+                <span className="min-w-0 truncate">{scene.name}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
       {action && (
         <Link
           to={action.href}

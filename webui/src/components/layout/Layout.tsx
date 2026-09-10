@@ -749,6 +749,28 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   // every <Link>, contributing to perceptible navigation lag.
   const { groups: settingsGroups } = useSettingsSectionGroups();
 
+  // Scenes of the SOC workspace partition. The sidebar shows one scene at a
+  // time so the menu never mixes two scenes' pages (xlsx TC-09); the switcher
+  // lives in the top bar, keeping the sidebar itself a single flat level.
+  const sceneWorkspaces = useMemo(
+    () => webuiContractWorkspaces.filter((workspace) => workspace.enabled && workspace.placement === 'sceneWorkspace'),
+    [webuiContractWorkspaces],
+  );
+  const routeSceneId = useMemo(() => {
+    const match = /^\/contracts\/webui\/workspaces\/([^/]+)/.exec(location.pathname);
+    return match ? match[1] : null;
+  }, [location.pathname]);
+  const [pickedSceneId, setPickedSceneId] = useState<string | null>(null);
+  useEffect(() => {
+    if (routeSceneId) setPickedSceneId(routeSceneId);
+  }, [routeSceneId]);
+  const activeSceneId = useMemo(() => {
+    const ids = sceneWorkspaces.map((workspace) => workspace.id);
+    if (routeSceneId && ids.includes(routeSceneId)) return routeSceneId;
+    if (pickedSceneId && ids.includes(pickedSceneId)) return pickedSceneId;
+    return ids[0] ?? null;
+  }, [pickedSceneId, routeSceneId, sceneWorkspaces]);
+
   const navigation = useMemo<LayoutNavSection[]>(
     () => {
       const enabledWorkspaces = webuiContractWorkspaces.filter((workspace) => workspace.enabled);
@@ -768,14 +790,13 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       // Built-in groups can be reordered by dragging too; the order is stored per group.
       const navItemKey = (item: LayoutNavItem) => item.pageId ?? item.href;
       const orderedGroup = (sectionId: string, items: LayoutNavItem[]) => workspacePageOrders.applyNav(sectionId, items, navItemKey);
-      // The SOC workspace partition has one flat menu: every enabled scene
-      // workspace contributes its pages at the same level, no group headings.
-      const sceneWorkspaces = enabledWorkspaces.filter((workspace) => workspace.placement === 'sceneWorkspace');
-      const scenePageItems = sceneWorkspaces.flatMap(workspacePageItems);
-      const soleSceneWorkspace = sceneWorkspaces.length === 1 ? sceneWorkspaces[0] : undefined;
-      // The SOC actions stay put however many scenes share the menu.
-      const socWorkspace = sceneWorkspaces.find((workspace) => isSocWorkspace(workspace));
-      const sceneWorkspaceSections: LayoutNavSection[] = scenePageItems.length > 0
+      // One flat menu holding exactly one scene: no group headings, and no
+      // pages from the scenes that are not selected.
+      const activeScene = enabledWorkspaces.find(
+        (workspace) => workspace.placement === 'sceneWorkspace' && workspace.id === activeSceneId,
+      );
+      const scenePageItems = activeScene ? workspacePageItems(activeScene) : [];
+      const sceneWorkspaceSections: LayoutNavSection[] = scenePageItems.length > 0 && activeScene
         ? [{
           id: SCENE_NAV_SECTION_ID,
           name: '',
@@ -783,11 +804,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           // Nameless, so no heading renders; still "collapsible" so the entries
           // stay drag-reorderable.
           collapsible: true,
-          workspace: soleSceneWorkspace,
-          actionsWorkspace: socWorkspace,
-          items: soleSceneWorkspace
-            ? scenePageItems
-            : orderedGroup(SCENE_NAV_SECTION_ID, scenePageItems),
+          workspace: activeScene,
+          actionsWorkspace: isSocWorkspace(activeScene) ? activeScene : undefined,
+          items: scenePageItems,
         }]
         : [];
       // Custom pages that do not belong to a workspace sit next to the scene
@@ -859,7 +878,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         ...settingsSections,
       ];
     },
-    [i18n.language, productName, settingsGroups, webuiContractPages, webuiContractWorkspaces, workspacePageOrders, t],
+    [activeSceneId, i18n.language, productName, settingsGroups, webuiContractPages, webuiContractWorkspaces, workspacePageOrders, t],
   );
 
   // Which of the three top-bar partitions is showing. It follows the route, but
@@ -875,6 +894,23 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     () => navigation.filter((section) => section.partition === selectedPartition),
     [navigation, selectedPartition],
   );
+
+  const sceneItems = useMemo(
+    () => sceneWorkspaces.map((workspace) => ({
+      id: workspace.id,
+      name: getLocalizedWebUIContractTitle(workspace, i18n.language),
+    })),
+    [i18n.language, sceneWorkspaces],
+  );
+
+  const selectScene = useCallback((sceneId: string) => {
+    setPickedSceneId(sceneId);
+    const workspace = sceneWorkspaces.find((item) => item.id === sceneId);
+    if (!workspace) return;
+    const pages = buildWebUIContractWorkspacePageList(workspace, i18n.language);
+    const target = pages.find((page) => page.id === workspace.defaultPageId) ?? pages[0];
+    if (target) navigate(`${workspace.route}/${target.id}`);
+  }, [i18n.language, navigate, sceneWorkspaces]);
 
   const partitionItems = useMemo<PartitionTopBarItem[]>(() => [
     { id: 'agent', name: t('partitionAgent'), icon: Sparkles },
@@ -1523,18 +1559,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                   <RefreshCw className="h-4 w-4 text-zinc-400" />
                   {t('checkUpdate')}
                 </button>
-                <Link
-                  to="/settings/preferences"
-                  state={settingsReturnState}
-                  onClick={() => {
-                    setAccountMenuOpen(false);
-                    setSidebarOpen(false);
-                  }}
-                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-                >
-                  <Settings className="h-4 w-4 text-zinc-400" />
-                  {t('settings')}
-                </Link>
                 <button
                   type="button"
                   onClick={() => {
@@ -1647,6 +1671,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           items={partitionItems}
           activeId={selectedPartition}
           onSelect={selectPartition}
+          scenes={selectedPartition === 'scene' ? sceneItems : undefined}
+          activeSceneId={activeSceneId}
+          onSelectScene={selectScene}
           action={selectedPartition === 'scene'
             ? {
               href: '/scenes/suites',

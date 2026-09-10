@@ -789,7 +789,8 @@ describe('Layout onboarding entry', () => {
 
     expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    // 系统设置是顶栏分区，账号菜单里不再重复给一个入口。
+    expect(screen.queryByRole('link', { name: 'settings' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
@@ -915,9 +916,11 @@ describe('Layout onboarding entry', () => {
 
     expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     const updateEntry = screen.getByRole('button', { name: 'checkUpdate' });
-    const settingsEntry = screen.getByRole('link', { name: 'settings' });
-    expect(settingsEntry).toHaveAttribute('href', '/settings/preferences');
-    expect(updateEntry.compareDocumentPosition(settingsEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // 系统设置是顶栏分区，账号菜单里不再重复给一个入口。
+    expect(screen.queryByRole('link', { name: 'settings' })).not.toBeInTheDocument();
+    // D02: 检查更新与退出登录都留在左下角，检查更新在前。
+    const logoutEntry = screen.getByRole('button', { name: 'logout' });
+    expect(updateEntry.compareDocumentPosition(logoutEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // D02: the usage portal moved into the system settings menu.
     expect(screen.queryByRole('link', { name: 'flocksLlmUsageQuota' })).not.toBeInTheDocument();
 
@@ -987,7 +990,7 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
     expect(container.querySelector('aside > div')).toHaveClass('overflow-visible');
-    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    expect(screen.queryByRole('link', { name: 'settings' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'logout' })).toBeInTheDocument();
   });
 
@@ -1673,13 +1676,14 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(keysIn(second.container, 'aiWorkbench')).toEqual(['/workflows', '/sessions', '/tasks', '/workspace']);
   });
 
-  it('keeps every scene in one flat menu and keeps the SOC actions when several are installed', async () => {
+  it('shows one scene at a time in a flat menu and switches scenes from the top bar', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     const socPages = mockSocWorkspaceNav();
     const previous = useWebUIContractPages();
     const codeAudit = makeSceneWorkspace('code_audit_ui', '代码审计', [
       { id: 'code-audit-overview', title: '审计总览' },
+      { id: 'code-audit-findings', title: '缺陷清单' },
     ]);
     useWebUIContractPages.mockReturnValue({
       pages: [...socPages, ...codeAudit.pages],
@@ -1692,14 +1696,39 @@ describe('Layout WebUI contract pages navigation', () => {
     renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
     await screen.findByRole('link', { name: '告警调查' });
 
-    // One level, every scene's pages side by side, no group headings.
+    // Flat, no group headings, and only the selected scene's pages.
     expect(sectionHeadings(document.body)).toEqual([]);
-    expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查', '审计总览']);
-    // The workspace actions belong to SOC and must survive a second scene.
-    const menu = sceneMenuSection();
-    expect(within(menu).getByRole('button', { name: 'workspace.customPage' })).toBeInTheDocument();
-    expect(within(menu).getByRole('button', { name: 'workspace.customTitle' })).toBeInTheDocument();
-    expect(user).toBeDefined();
+    expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查']);
+    expect(screen.queryByRole('link', { name: '审计总览' })).not.toBeInTheDocument();
+    // Workspace actions belong to the scene on screen.
+    const socMenu = sceneMenuSection();
+    expect(within(socMenu).getByRole('button', { name: 'workspace.customPage' })).toBeInTheDocument();
+
+    // The switcher lives in the top bar, so the sidebar stays a single level.
+    const scenePicker = screen.getByRole('tablist', { name: 'scenes' });
+    expect(within(scenePicker).getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['SOC 工作区', '代码审计']);
+
+    await user.click(within(scenePicker).getByRole('tab', { name: '代码审计' }));
+    await waitFor(() => expect(sceneMenuLinks()).toEqual(['审计总览', '缺陷清单']));
+    expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
+    expect(sectionHeadings(document.body)).toEqual([]);
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/code-audit-overview'));
+    // SOC-only actions do not follow into another scene.
+    expect(within(sceneMenuSection()).queryByRole('button', { name: 'workspace.customPage' })).not.toBeInTheDocument();
+
+    await user.click(within(screen.getByRole('tablist', { name: 'scenes' })).getByRole('tab', { name: 'SOC 工作区' }));
+    await waitFor(() => expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查']));
+  });
+
+  it('hides the scene switcher when only one scene is installed', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+    await screen.findByRole('link', { name: '告警调查' });
+
+    expect(screen.queryByRole('tablist', { name: 'scenes' })).not.toBeInTheDocument();
+    expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查']);
   });
 
   it('keeps a page mounted with its state across a partition switch', async () => {
