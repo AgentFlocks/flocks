@@ -49,6 +49,7 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(ws))
     monkeypatch.setenv("FLOCKS_DATA_DIR", str(data))
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
 
     # Reset both singletons so they re-read env vars
     from flocks.workspace.manager import WorkspaceManager
@@ -58,9 +59,21 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     # Build a minimal FastAPI app with only the workspace router
     from fastapi import FastAPI
+    from flocks.auth.context import AuthUser
     from flocks.server.routes.workspace import router
 
     app = FastAPI()
+
+    @app.middleware("http")
+    async def inject_auth_user(request, call_next):
+        request.state.auth_user = AuthUser(
+            id="usr_workspace",
+            username="workspace",
+            role="member",
+            status="active",
+        )
+        return await call_next(request)
+
     app.include_router(router, prefix="/api/workspace")
 
     client = TestClient(app, raise_server_exceptions=True)
@@ -115,6 +128,19 @@ class TestDirList:
         assert r.status_code == 200
         assert any(n["name"] == "sub.txt" for n in r.json())
 
+    def test_list_outputs_hides_hidden_entries_and_sorts_directories_descending(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "2026-09-06").mkdir()
+        (ws / "outputs" / "2026-09-07").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+        (ws / "outputs" / "report.md").write_text("visible")
+        (ws / "outputs" / ".DS_Store").write_text("hidden")
+
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert r.status_code == 200
+        assert [item["name"] for item in r.json()] == ["2026-09-07", "2026-09-06", "report.md"]
+
     def test_list_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/list?path=does_not_exist")
         assert r.status_code == 404
@@ -124,6 +150,33 @@ class TestDirList:
         (ws / "file.txt").write_text("x")
         r = _client(workspace_client).get("/api/workspace/list?path=file.txt")
         assert r.status_code == 400
+
+    def test_list_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "report.txt").write_text("ok")
+
+        root = _client(workspace_client).get("/api/workspace/list")
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert root.status_code == 200
+        assert any(item["name"] == "outputs" and item["path"] == "outputs" for item in root.json())
+        assert r.status_code == 200
+        assert any(
+            item["name"] == "report.txt"
+            and item["path"] == "outputs/report.txt"
+            and item["type"] == "file"
+            for item in r.json()
+        )
 
 
 class TestDirTree:
@@ -146,9 +199,45 @@ class TestDirTree:
         children_names = {c["name"] for c in (r.json().get("children") or [])}
         assert "a" in children_names
 
+    def test_tree_hides_hidden_entries(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / ".hidden").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+
+        r = _client(workspace_client).get("/api/workspace/tree?depth=2")
+
+        assert r.status_code == 200
+        assert all(child["name"] != ".hidden" for child in r.json()["children"])
+        outputs = next(child for child in r.json()["children"] if child["name"] == "outputs")
+        assert all(child["name"] != ".staging" for child in outputs["children"])
+
     def test_tree_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/tree?path=nope")
         assert r.status_code == 404
+
+    def test_tree_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "nested").mkdir()
+
+        root = _client(workspace_client).get("/api/workspace/tree?depth=1")
+        r = _client(workspace_client).get("/api/workspace/tree?path=outputs&depth=1")
+
+        assert root.status_code == 200
+        assert root.json()["path"] == ""
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs"
+        assert any(child["path"] == "outputs/nested" for child in data["children"])
 
 
 class TestDirCreate:
@@ -302,6 +391,66 @@ class TestUpload:
         )
         assert r.status_code == 200
         assert (_ws(workspace_client) / "new_folder" / "x.txt").exists()
+
+    @pytest.mark.parametrize("purpose", [None, "chat"])
+    def test_upload_to_dest_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+        purpose: str | None,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        url = "/api/workspace/upload?dest=uploads"
+        if purpose:
+            url += f"&purpose={purpose}"
+
+        response = _client(workspace_client).post(
+            url,
+            files=[("files", ("report.pdf", b"report", "application/pdf"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["path"] == "uploads/report.pdf"
+        assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
+        assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
+
+    def test_upload_to_root_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        response = _client(workspace_client).post(
+            "/api/workspace/upload",
+            files=[("files", ("root.txt", b"root", "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["path"] == "root.txt"
+        assert result["abs_path"] == str(link / "root.txt")
+        assert (ws / "root.txt").read_bytes() == b"root"
 
     def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client):
         client = _client(workspace_client)
@@ -697,10 +846,21 @@ class TestMemoryView:
         assert daily["type"] == "directory"
         assert daily["children"] == []
 
-    def test_list_memory_with_files(self, workspace_client):
+    def test_list_memory_with_files(self, workspace_client, monkeypatch):
+        from flocks.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_example"}),
+        )
         mem = _mem(workspace_client)
         (mem / "USER.md").write_text("# User")
         (mem / "MEMORY.md").write_text("# Memory")
+        (mem / "SHORT_MEMORY.md").write_text("# Short")
+        (mem / "bak.txt").write_text("backup")
+        (mem / "archive").mkdir()
+        (mem / "archive" / "2026-08-18.md").write_text("# Archived")
         (mem / "daily").mkdir()
         (mem / "daily" / "2026-03-14.md").write_text("## Daily")
         (mem / "projects" / "prj_example").mkdir(parents=True)
@@ -716,17 +876,29 @@ class TestMemoryView:
             "MEMORY.md",
             "projects",
             "daily",
+            "archive",
+            "bak.txt",
+            "SHORT_MEMORY.md",
         ]
         nodes = {node["name"]: node for node in r.json()}
-        assert set(nodes) == {"USER.md", "MEMORY.md", "daily", "projects"}
+        assert set(nodes) == {"USER.md", "MEMORY.md", "SHORT_MEMORY.md", "archive", "bak.txt", "daily", "projects"}
         assert nodes["USER.md"]["type"] == "file"
+        assert nodes["USER.md"]["editable"] is True
         assert nodes["MEMORY.md"]["type"] == "file"
+        assert nodes["MEMORY.md"]["editable"] is True
+        assert nodes["SHORT_MEMORY.md"]["editable"] is False
+        assert nodes["bak.txt"]["editable"] is False
+        assert nodes["archive"]["editable"] is False
+        assert nodes["archive"]["children"][0]["path"] == "archive/2026-08-18.md"
+        assert nodes["archive"]["children"][0]["editable"] is False
         assert nodes["daily"]["type"] == "directory"
         assert nodes["daily"]["children"][0]["path"] == "daily/2026-03-14.md"
+        assert nodes["daily"]["children"][0]["editable"] is True
         assert nodes["projects"]["type"] == "directory"
         project = nodes["projects"]["children"][0]
         assert project["path"] == "projects/prj_example"
         assert project["children"][0]["path"] == "projects/prj_example/MEMORY.md"
+        assert project["children"][0]["editable"] is True
 
     def test_read_memory_file(self, workspace_client):
         mem = _mem(workspace_client)
@@ -833,6 +1005,40 @@ class TestMemoryView:
             "written": True,
         }
         assert target.read_text() == "new content"
+
+    def test_write_non_editable_memory_file_returns_403(self, workspace_client):
+        mem = _mem(workspace_client)
+        target = mem / "SHORT_MEMORY.md"
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "SHORT_MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
+
+    def test_write_unreadable_project_memory_returns_403(self, workspace_client, monkeypatch):
+        from flocks.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_allowed"}),
+        )
+        mem = _mem(workspace_client)
+        target = mem / "projects" / "prj_stale" / "MEMORY.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "projects/prj_stale/MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
 
     def test_write_memory_traversal_rejected(self, workspace_client):
         r = _client(workspace_client).put(

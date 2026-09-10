@@ -74,6 +74,7 @@ class TestTestCredentialsNoToolsPath:
 
             # Setup: no tools match
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = []
             mock_tr._dynamic_tools_by_module = {}
 
@@ -108,6 +109,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [tool_info]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.threatbook": ["threatbook_ip_query"],
@@ -144,6 +146,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [tool_info]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.threatbook": ["threatbook_ip_query"],
@@ -205,6 +208,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             # Put upload first on purpose to prove sorting is stable.
             mock_tr.list_tools.return_value = [upload_tool, url_tool]
             mock_tr._dynamic_tools_by_module = {
@@ -283,6 +287,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [onesec_dns_tool, onesec_threat_tool]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.onesec": ["onesec_dns", "onesec_threat"],
@@ -392,6 +397,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [heuristic_tool]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.tdp_api": ["tdp_assets_domain_list"],
@@ -465,6 +471,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [login_business_tool, ip_query_tool]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.tdp_api": [
@@ -535,6 +542,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [assets_tool]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.qingteng": ["qingteng_assets"],
@@ -627,6 +635,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             # Put the assets tool first to prove the sort ranking promotes
             # the `_login` action-dispatch tool above other groups.
             mock_tr.list_tools.return_value = [assets_tool, login_tool]
@@ -677,6 +686,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [tool_info]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.threatbook_cn": ["threatbook_ip_query"],
@@ -713,6 +723,7 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [tool_info]
             mock_tr._dynamic_tools_by_module = {
                 "flocks.tool.generated.threatbook": ["threatbook_ip_query"],

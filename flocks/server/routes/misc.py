@@ -151,7 +151,6 @@ async def list_commands() -> List[Dict[str, Any]]:
                 "template": cmd.template,
                 "agent": cmd.agent,
                 "model": cmd.model,
-                "subtask": cmd.subtask,
                 "hidden": cmd.hidden,
                 "aliases": list(cmd.aliases),
                 "visible_surfaces": list(cmd.visible_surfaces),
@@ -192,7 +191,6 @@ async def get_command(name: str) -> Dict[str, Any]:
             "template": cmd.template,
             "agent": cmd.agent,
             "model": cmd.model,
-            "subtask": cmd.subtask,
             "hidden": cmd.hidden,
             "aliases": list(cmd.aliases),
             "visible_surfaces": list(cmd.visible_surfaces),
@@ -240,5 +238,4 @@ async def list_experimental_resources() -> Dict[str, Any]:
     """Get experimental resources"""
     # Return empty dict - resources are not implemented yet
     return {}
-
 

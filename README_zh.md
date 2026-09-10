@@ -261,6 +261,17 @@ flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
   curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
   ```
 
+  查询指定会话的实时运行状态：
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+    https://flocks.example.com/api/session/<sessionID>/status
+  ```
+
+  `status.type` 可能为 `idle`、`queued`、`busy`、`retry`、`compacting` 或
+  `dreaming`。自动化调用可通过 `isProcessing` 判断是否仍有已接收的工作正在执行或等待执行；
+  `idle` 只表示当前空闲，不代表上一次执行成功。
+
 反向代理部署：
 
 - 反代必须主动注入 `X-Forwarded-For`。若缺失该头，且前方存在代理，中间件会拒绝信任回环地址，避免任何直连本机的请求被自动提升为 `admin`。

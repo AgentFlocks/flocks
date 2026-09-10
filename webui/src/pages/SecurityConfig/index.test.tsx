@@ -197,6 +197,10 @@ describe('SecurityConfigPage', () => {
       expect(setNetworkRules).toHaveBeenCalledWith({
         allowlist: ['ssh://example.com:22'],
         blocklist: [],
+        personalAllowlist: [],
+        personalAllowlistSubjectId: null,
+        personalTrustedTools: [],
+        personalTrustedToolsSubjectId: null,
         trustedTools: [{ name: 'websearch' }],
         revision: 1,
       });

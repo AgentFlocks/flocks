@@ -16,8 +16,11 @@ from flocks.tool.credential_context import (
     _config_override,
     _config_override_service,
     _config_override_storage_key,
+    activate_credential_overrides,
     activate_device_credentials,
     get_config_override,
+    is_credential_probe_active,
+    is_temporary_credential_override_active,
 )
 
 _SAMPLE_CONFIG = {"base_url": "https://10.201.255.17", "enabled": True}
@@ -137,6 +140,23 @@ def test_identical_service_and_storage_key():
     )
     assert get_config_override("tdp_api") is _SAMPLE_CONFIG
     assert get_config_override("other") is None
+
+
+@pytest.mark.asyncio
+async def test_temporary_credentials_scope_probe_state_to_current_coroutine():
+    assert is_credential_probe_active() is False
+    assert is_temporary_credential_override_active() is False
+
+    async with activate_credential_overrides(
+        secret_values={"demo_api_key": "candidate"},
+        service_id="demo",
+        config_values={"enabled": True},
+    ):
+        assert is_credential_probe_active() is True
+        assert is_temporary_credential_override_active() is True
+
+    assert is_credential_probe_active() is False
+    assert is_temporary_credential_override_active() is False
 
 
 @pytest.mark.asyncio

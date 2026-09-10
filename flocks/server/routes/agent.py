@@ -29,6 +29,11 @@ from pydantic import BaseModel, Field
 
 import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.registry import Agent
+from flocks.agent.tool_permissions import (
+    normalize_permission_items,
+    permission_items_to_ruleset,
+    sync_question_permission_with_tools,
+)
 from flocks.agent.agent import AgentInfo as AgentInfoModel, AgentModel as AgentModelConfig
 from flocks.agent.agent_factory import find_yaml_agent, read_yaml_agent, update_yaml_agent, delete_yaml_agent
 from flocks.utils.log import Log
@@ -92,6 +97,7 @@ def agent_to_response(
     delegatable_override: Optional[bool] = None,
     skills: Optional[List[str]] = None,
     tools: Optional[List[str]] = None,
+    permission: Optional[List[Dict[str, Any]]] = None,
 ) -> AgentResponse:
     """Convert internal AgentInfo to API response format."""
     delegatable = (
@@ -124,7 +130,7 @@ def agent_to_response(
         topP=agent.top_p,
         temperature=temperature_override if temperature_override is not None else agent.temperature,
         color=agent.color,
-        permission=[],
+        permission=permission or [],
         model=model_info,
         prompt=agent.prompt,
         options=agent.options,
@@ -155,6 +161,8 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         temperature=agent_data.get("temperature"),
         color=agent_data.get("color"),
         mode=mode,
+        permission=permission_items_to_ruleset(agent_data.get("permission")),
+        tools=agent_data.get("tools", []),
         model=AgentModelConfig(
             model_id=model_data["modelID"],
             provider_id=model_data["providerID"],
@@ -163,7 +171,6 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         hidden=False,
         delegatable=delegatable,
         skills=agent_data.get("skills", []),
-        tools=agent_data.get("tools", []),
     )
 
 
@@ -187,7 +194,7 @@ def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
         model=model_info,
         native=agent_data.get("native", False),
         hidden=agent_data.get("hidden", False),
-        permission=[],
+        permission=normalize_permission_items(agent_data.get("permission")),
         options={},
         delegatable=delegatable,
         skills=agent_data.get("skills", []),
@@ -208,6 +215,26 @@ async def _load_model_overrides() -> Dict[str, Dict[str, Any]]:
 
 def _load_delegatable_overrides() -> Dict[str, bool]:
     return delegatable_settings.load_overrides()
+
+
+async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str], List[Dict[str, Any]]]:
+    """Load skills/tools/permission overlay for an agent from storage.
+
+    Works for both full Storage-based custom agents and YAML agents with
+    a skills/tools overlay (written by the YAML update path).
+    """
+    from flocks.storage.storage import Storage
+    try:
+        data = await Storage.read(f"agent/custom/{name}")
+        if not isinstance(data, dict):
+            return [], [], []
+        return (
+            data.get("skills", []),
+            data.get("tools", []),
+            normalize_permission_items(data.get("permission")),
+        )
+    except Exception:
+        return [], [], []
 
 
 def _get_all_tool_names() -> List[str]:
@@ -242,7 +269,9 @@ async def _build_single_agent_response(
     """Build AgentResponse for one agent, resolving model overrides and tools/skills."""
     if agent.native:
         tools = _compute_native_agent_tools(agent, all_tool_names)
+        permission: List[Dict[str, Any]] = []
     else:
+        _skills, _tools, permission = await _load_custom_agent_extras(agent.name)
         tools = list(agent.tools or [])
     override = overrides.get(agent.name, {})
     model_override = {k: override[k] for k in ("modelID", "providerID") if k in override} or None
@@ -254,6 +283,7 @@ async def _build_single_agent_response(
         delegatable_override=delegatable_overrides.get(agent.name),
         skills=list(agent.skills),
         tools=tools,
+        permission=permission,
     )
 
 
@@ -344,6 +374,7 @@ class AgentCreateRequest(BaseModel):
     mode: str = Field("primary", description="Agent mode")
     model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
+    permission: List[Dict[str, Any]] = Field(default_factory=list, description="Permission rules")
     skills: List[str] = Field(default_factory=list, description="Enabled skill names")
     tools: List[str] = Field(default_factory=list, description="Enabled tool names")
 
@@ -358,6 +389,7 @@ class AgentUpdateRequest(BaseModel):
     color: Optional[str] = Field(None, description="Color")
     model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
+    permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     skills: Optional[List[str]] = Field(None, description="Enabled skill names")
     tools: Optional[List[str]] = Field(None, description="Enabled tool names")
 
@@ -387,6 +419,11 @@ async def create_agent(req: AgentCreateRequest):
         if existing:
             raise HTTPException(status_code=409, detail=f"Agent {req.name} already exists")
 
+        permission = (
+            sync_question_permission_with_tools(req.permission, req.tools)
+            if "tools" in req.model_fields_set
+            else normalize_permission_items(req.permission)
+        )
         agent_data: Dict[str, Any] = {
             "name": req.name,
             "name_cn": req.nameCn,
@@ -400,6 +437,7 @@ async def create_agent(req: AgentCreateRequest):
             "delegatable": req.delegatable if req.delegatable is not None else req.mode != "primary",
             "native": False,
             "hidden": False,
+            "permission": permission,
             "skills": req.skills,
             "tools": req.tools,
         }
@@ -453,10 +491,16 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             if req.delegatable is not None:
                 agent_data["delegatable"] = req.delegatable
                 delegatable_settings.forget_override(name)
+            if req.permission is not None:
+                agent_data["permission"] = normalize_permission_items(req.permission)
             if req.skills is not None:
                 agent_data["skills"] = req.skills
             if req.tools is not None:
                 agent_data["tools"] = req.tools
+                agent_data["permission"] = sync_question_permission_with_tools(
+                    agent_data.get("permission"),
+                    req.tools,
+                )
 
             await Storage.write(agent_key, agent_data)
 
@@ -494,6 +538,23 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             if not update_yaml_agent(name, updates):
                 raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
 
+            # Persist skills/tools overlay for YAML agents in Storage.
+            # The entry intentionally omits "name" so it is not mistaken
+            # for a full Storage-based custom agent on subsequent updates.
+            if req.skills is not None or req.tools is not None or req.permission is not None:
+                extras: Dict[str, Any] = agent_data if isinstance(agent_data, dict) else {}
+                if req.permission is not None:
+                    extras["permission"] = normalize_permission_items(req.permission)
+                if req.skills is not None:
+                    extras["skills"] = req.skills
+                if req.tools is not None:
+                    extras["tools"] = req.tools
+                    extras["permission"] = sync_question_permission_with_tools(
+                        extras.get("permission"),
+                        req.tools,
+                    )
+                await Storage.write(agent_key, extras)
+
             # Sync: apply updates to the in-memory AgentInfo cache
             agent = await Agent.get(name)
             if agent:
@@ -519,7 +580,10 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 if req.skills is not None:
                     agent.skills = list(req.skills)
                 if req.tools is not None:
-                    agent.tools = list(req.tools)
+                    agent.tools = req.tools
+                    agent.permission = permission_items_to_ruleset(extras.get("permission"))
+                elif req.permission is not None:
+                    agent.permission = permission_items_to_ruleset(extras.get("permission"))
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
                 all_tool_names = await _get_all_tool_names_async()

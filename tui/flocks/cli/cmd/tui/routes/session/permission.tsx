@@ -217,7 +217,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
                       description={("$ " + input().command) as string}
                     />
                   </Match>
-                  <Match when={props.request.permission === "task"}>
+                  <Match when={["delegate_task", "task"].includes(props.request.permission)}>
                     <TextBody
                       icon="#"
                       title={`${Locale.titlecase((input().subagent_type as string) ?? "Unknown")} Task`}

@@ -1,5 +1,7 @@
 import { createPortal } from 'react-dom';
 import { useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Bell,
   CheckCircle,
@@ -144,7 +146,22 @@ export default function NotificationModal({
                     </div>
 
                     {notification.body && (
-                      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-600">{notification.body}</p>
+                      notification.kind === 'whats_new' ? (
+                        <div className="prose prose-sm mt-3 max-w-none break-words text-gray-600 prose-headings:my-3 prose-headings:text-gray-800 prose-p:my-2 prose-p:leading-6 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-a:break-all prose-a:text-amber-700 prose-pre:overflow-x-auto">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              a: ({ children, ...props }) => (
+                                <a {...props} target="_blank" rel="noopener noreferrer">{children}</a>
+                              ),
+                            }}
+                          >
+                            {notification.body}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-600">{notification.body}</p>
+                      )
                     )}
 
                     {notification.highlights.length > 0 && (

@@ -29,6 +29,7 @@ from defusedxml.common import DefusedXmlException
 from flocks.config.config import Config, GlobalConfig, ConfigInfo as ConfigInfoModel, UIConfig
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.provider import Provider
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
 
@@ -465,6 +466,7 @@ async def get_ui_display() -> UIDisplayResponse:
 
 
 @router.patch("/ui", response_model=UIDisplayResponse, summary="Update UI display preferences")
+@serialized_config_mutation
 async def update_ui_config(request: UIConfigUpdateRequest) -> UIDisplayResponse:
     """Update visible WebUI display preferences."""
     try:
@@ -501,6 +503,7 @@ async def get_ui_favicon() -> FileResponse:
 
 
 @router.post("/ui/favicon", response_model=UIDisplayResponse, summary="Upload UI favicon")
+@serialized_config_mutation
 async def upload_ui_favicon(file: UploadFile = File(...)) -> UIDisplayResponse:
     """Upload a custom favicon for visible WebUI branding."""
     filename = Path(file.filename or "").name
@@ -551,6 +554,7 @@ async def upload_ui_favicon(file: UploadFile = File(...)) -> UIDisplayResponse:
 
 
 @router.delete("/ui/favicon", response_model=UIDisplayResponse, summary="Reset UI favicon")
+@serialized_config_mutation
 async def reset_ui_favicon() -> UIDisplayResponse:
     """Remove the uploaded favicon and fall back to the default bundled favicon."""
     assets_dir = _ui_assets_dir()
@@ -591,6 +595,7 @@ async def get_tool_failure_preference() -> ToolFailurePreference:
     response_model=ToolFailurePreference,
     summary="Update repeated tool-failure preference",
 )
+@serialized_config_mutation
 async def update_tool_failure_preference(
     request: ToolFailurePreference,
 ) -> ToolFailurePreference:
@@ -630,6 +635,7 @@ async def get_config() -> Dict[str, Any]:
 
 
 @router.patch("/", summary="Update configuration")
+@serialized_config_mutation
 async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Update configuration

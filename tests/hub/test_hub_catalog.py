@@ -1003,6 +1003,39 @@ def test_hub_paginated_facets_exclude_their_own_filter():
     assert facets.category == {"security": 1}
 
 
+def test_hub_catalog_prioritizes_updateable_and_installed_entries():
+    from flocks.hub.models import HubCatalogEntry
+    from flocks.server.routes import hub as hub_routes
+
+    def entry(plugin_id: str, state: str) -> HubCatalogEntry:
+        return HubCatalogEntry(
+            id=plugin_id,
+            type="skill",
+            name=plugin_id,
+            category="security",
+            tags=[],
+            useCases=[],
+            trust="official",
+            riskLevel="low",
+            state=state,
+            manifestPath=f"skills/{plugin_id}.json",
+        )
+
+    prioritized = hub_routes._prioritize_installed_catalog_entries([
+        entry("available", "available"),
+        entry("installed", "installed"),
+        entry("updateable", "updateAvailable"),
+        entry("incompatible", "incompatible"),
+    ])
+
+    assert [item.id for item in prioritized] == [
+        "updateable",
+        "installed",
+        "available",
+        "incompatible",
+    ]
+
+
 def test_hub_refresh_clears_catalog_and_device_template_caches(monkeypatch):
     from flocks.server.routes import hub as hub_routes
 

@@ -55,13 +55,12 @@ from flocks.workflow.execution_store import (
     compact_step_for_storage,
     create_execution_record,
     derive_loop_progress,
+    ExecutionProgressWriter,
+    ExecutionStepRecorder,
     load_execution_steps,
     normalize_execution_status as _normalize_execution_status,
-    record_execution_step,
     record_execution_result as _record_execution_result,
     resolve_execution_outcome as _resolve_execution_outcome,
-    workflow_execution_key as _workflow_execution_key,
-    workflow_execution_step_prefix as _workflow_execution_step_prefix,
 )
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.workflow.store import WorkflowStore
@@ -99,7 +98,6 @@ router = APIRouter()
 webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
 
-_PROGRESS_FLUSH_EVERY_STEPS = 5
 _WORKFLOW_LIST_ENRICH_CONCURRENCY = 8
 _WORKFLOW_API_HEALTH_INTERVAL_S = 5.0
 _WORKFLOW_API_HEALTH_PROBE_CONCURRENCY = 4
@@ -146,6 +144,7 @@ class ActiveWorkflowExecution:
     workflow_id: str
     task: asyncio.Task[Any]
     cancel_event: threading.Event
+    progress_writer: ExecutionProgressWriter
 
 
 _active_workflow_executions: Dict[str, ActiveWorkflowExecution] = {}
@@ -1122,12 +1121,12 @@ async def _run_workflow_execution_task(
     req: WorkflowRunRequest,
     exec_id: str,
     cancel_event: threading.Event,
+    progress_writer: ExecutionProgressWriter,
     tool_context: Optional[ToolContext] = None,
 ) -> None:
     """Execute a workflow in the background and keep the execution record updated."""
     start_time = time.time()
-    step_count = 0
-    loop = asyncio.get_running_loop()
+    step_recorder = ExecutionStepRecorder()
     pending_step_index: Optional[int] = None
     pending_step: Optional[Dict[str, Any]] = None
     execution_summary: Dict[str, Any] = {
@@ -1150,21 +1149,6 @@ async def _run_workflow_execution_task(
             }
         )
 
-    def _write_progress(update_fields: Dict[str, Any]) -> None:
-        try:
-            execution_summary.update(update_fields)
-            asyncio.run_coroutine_threadsafe(
-                WorkflowStore.upsert_execution(compact_execution_summary(execution_summary)), loop
-            ).result(timeout=5)
-        except Exception as exc:
-            log.warning(
-                "workflow.step_progress.write_failed",
-                {
-                    "exec_id": exec_id,
-                    "error": str(exc),
-                },
-            )
-
     def _on_step_start(_run_id, step_index, node, _inputs):
         nonlocal pending_step_index, pending_step
         node_id = getattr(node, "id", None)
@@ -1185,161 +1169,123 @@ async def _run_workflow_execution_task(
                 "error": "Run cancelled before node completed",
             }
         )
-        _write_progress(
-            {
-                "currentNodeId": node_id,
-                "currentNodeType": node_type,
-                "currentPhase": "running",
-                "currentStepIndex": step_index,
-                "loopProgress": loop_progress,
-                "updatedAt": int(time.time() * 1000),
-            }
-        )
+        progress_update = {
+            "currentNodeId": node_id,
+            "currentNodeType": node_type,
+            "currentPhase": "cancelling" if cancel_event.is_set() else "running",
+            "currentStepIndex": step_index,
+            "loopProgress": loop_progress,
+            "updatedAt": int(time.time() * 1000),
+        }
+        execution_summary.update(progress_update)
+        progress_writer.submit(progress_update)
         return step_index
 
     def _on_step_complete(step_result) -> None:
-        nonlocal step_count, pending_step_index, pending_step
-        step_dict = compact_step_for_storage(step_result.model_dump(mode="json"))
-        step_count += 1
+        nonlocal pending_step_index, pending_step
+        step_recorder.on_step_complete(step_result)
         pending_step_index = None
         pending_step = None
-        loop_progress = derive_loop_progress(
-            node_id=step_dict.get("node_id"),
-            global_step_index=step_count,
-            inputs=step_dict.get("inputs"),
-            outputs=step_dict.get("outputs"),
-        )
-        execution_summary.update(
-            {
-                "stepCount": step_count,
-                "currentNodeId": step_dict.get("node_id"),
-                "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
-                "currentPhase": "running",
-                "currentStepIndex": step_count,
-                "loopProgress": loop_progress,
-                "updatedAt": int(time.time() * 1000),
-            }
-        )
+        progress_update = dict(step_recorder.summary)
+        if cancel_event.is_set():
+            progress_update["currentPhase"] = "cancelling"
+        execution_summary.update(progress_update)
+        progress_writer.submit(progress_update)
+
+    result: Optional[RunWorkflowResult] = None
+    execution_error: Optional[Exception] = None
+    try:
         try:
-            asyncio.run_coroutine_threadsafe(
-                record_execution_step(exec_id, step_count, step_dict),
-                loop,
-            ).result(timeout=5)
-        except Exception as exc:
-            log.warning(
-                "workflow.execution_step.write_failed",
-                {
-                    "exec_id": exec_id,
-                    "step_index": step_count,
-                    "error": str(exc),
-                },
+            result = await asyncio.to_thread(
+                run_workflow,
+                workflow=workflow_json,
+                inputs=req.inputs or {},
+                timeout_s=req.timeout_s,
+                trace=req.trace,
+                on_step_start=_on_step_start,
+                on_step_complete=_on_step_complete,
+                cancel=cancel_event.is_set,
+                tool_context=tool_context,
             )
-        if step_count % _PROGRESS_FLUSH_EVERY_STEPS == 0:
-            _write_progress(
+        except Exception as exc:
+            execution_error = exc
+
+        duration = time.time() - start_time
+        current_data = dict(execution_summary)
+        final_step_batch = step_recorder.take_steps()
+        if pending_step_index is not None and pending_step is not None:
+            final_step_batch.append((pending_step_index, pending_step))
+        final_step_batch.sort(key=lambda item: item[0])
+        final_steps = max(
+            max((step_index for step_index, _ in final_step_batch), default=0),
+            pending_step_index or 0,
+        )
+        final_history = [step for _, step in final_step_batch]
+
+        if execution_error is None:
+            assert result is not None
+            status_value, error_message = _resolve_execution_outcome(result)
+            if cancel_event.is_set() and status_value == "success":
+                status_value = "cancelled"
+                error_message = error_message or f"Run cancelled: run_id={result.run_id or exec_id}"
+            final_steps = max(result.steps, final_steps)
+            current_data.update(
                 {
-                    "stepCount": step_count,
-                    "currentNodeId": step_dict.get("node_id"),
-                    "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
-                    "currentPhase": "running",
-                    "currentStepIndex": step_count,
-                    "loopProgress": loop_progress,
+                    "outputResults": compact_outputs_for_storage(result.outputs),
+                    "status": status_value,
+                    "finishedAt": int(time.time() * 1000),
+                    "duration": duration,
+                    "executionLog": final_history,
+                    "stepCount": final_steps,
+                    "errorMessage": error_message,
+                    "currentNodeId": result.last_node_id,
+                    "currentNodeType": current_data.get("currentNodeType"),
+                    "currentPhase": status_value,
+                    "currentStepIndex": final_steps,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
+        else:
+            current_data.update(
+                {
+                    "status": "cancelled" if cancel_event.is_set() else "error",
+                    "finishedAt": int(time.time() * 1000),
+                    "duration": duration,
+                    "errorMessage": str(execution_error),
+                    "executionLog": final_history,
+                    "stepCount": final_steps,
+                    "currentPhase": "cancelled" if cancel_event.is_set() else "error",
+                    "currentStepIndex": final_steps,
                     "updatedAt": int(time.time() * 1000),
                 }
             )
 
-    async def _flush_pending_step() -> None:
-        if pending_step_index is None or pending_step is None:
-            return
-        try:
-            await record_execution_step(exec_id, pending_step_index, pending_step)
-        except Exception as exc:
-            log.warning(
-                "workflow.pending_step.write_failed",
+        await progress_writer.close_and_drain()
+        await _record_execution_result(
+            workflow_id,
+            exec_id,
+            current_data,
+            steps=final_step_batch,
+        )
+        if execution_error is None:
+            log.info(
+                "workflow.executed",
                 {
+                    "id": workflow_id,
                     "exec_id": exec_id,
-                    "step_index": pending_step_index,
-                    "error": str(exc),
+                    "status": current_data["status"],
+                    "duration": duration,
                 },
             )
-
-    try:
-        result: RunWorkflowResult = await asyncio.to_thread(
-            run_workflow,
-            workflow=workflow_json,
-            inputs=req.inputs or {},
-            timeout_s=req.timeout_s,
-            trace=req.trace,
-            on_step_start=_on_step_start,
-            on_step_complete=_on_step_complete,
-            cancel=cancel_event.is_set,
-            tool_context=tool_context,
-        )
-
-        duration = time.time() - start_time
-        current_data = dict(execution_summary)
-        status_value, error_message = _resolve_execution_outcome(result)
-        if cancel_event.is_set() and status_value == "success":
-            status_value = "cancelled"
-            error_message = error_message or f"Run cancelled: run_id={result.run_id or exec_id}"
-        # ``record_execution_result`` backfills this compacted history into
-        # append-only step rows, then stores only the summary row.
-        final_history = compact_history_for_storage(result.history)
-        if status_value == "cancelled" and not final_history:
-            await _flush_pending_step()
-        final_steps = result.steps
-        if pending_step_index is not None:
-            final_steps = max(final_steps, pending_step_index)
-        current_data.update(
-            {
-                "outputResults": compact_outputs_for_storage(result.outputs),
-                "status": status_value,
-                "finishedAt": int(time.time() * 1000),
-                "duration": duration,
-                "executionLog": final_history,
-                "stepCount": final_steps,
-                "errorMessage": error_message,
-                "currentNodeId": result.last_node_id,
-                "currentNodeType": current_data.get("currentNodeType"),
-                "currentPhase": status_value,
-                "currentStepIndex": final_steps,
-                "updatedAt": int(time.time() * 1000),
-            }
-        )
-
-        await _record_execution_result(workflow_id, exec_id, current_data)
-        log.info(
-            "workflow.executed",
-            {
-                "id": workflow_id,
-                "exec_id": exec_id,
-                "status": status_value,
-                "duration": duration,
-            },
-        )
-    except Exception as exc:
-        duration = time.time() - start_time
-        current_data = dict(execution_summary)
-        current_data.update(
-            {
-                "status": "cancelled" if cancel_event.is_set() else "error",
-                "finishedAt": int(time.time() * 1000),
-                "duration": duration,
-                "errorMessage": str(exc),
-                "executionLog": [],
-                "stepCount": step_count,
-                "currentPhase": "cancelled" if cancel_event.is_set() else "error",
-                "updatedAt": int(time.time() * 1000),
-            }
-        )
-        await _record_execution_result(workflow_id, exec_id, current_data)
-        log.error(
-            "workflow.execute.error",
-            {
-                "id": workflow_id,
-                "exec_id": exec_id,
-                "error": str(exc),
-            },
-        )
+        else:
+            log.error(
+                "workflow.execute.error",
+                {
+                    "id": workflow_id,
+                    "exec_id": exec_id,
+                    "error": str(execution_error),
+                },
+            )
     finally:
         _active_workflow_executions.pop(exec_id, None)
 
@@ -1521,19 +1467,13 @@ async def create_workflow(req: WorkflowCreateRequest):
         if strict_mapping_errors:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Workflow strict edge mapping failed: "
-                    f"{strict_mapping_errors[:5]}"
-                ),
+                detail=(f"Workflow strict edge mapping failed: {strict_mapping_errors[:5]}"),
             )
         schema_errors = _schema_lint_errors(workflow_model)
         if schema_errors:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Workflow schema lint failed: "
-                    f"{schema_errors[:5]}"
-                ),
+                detail=(f"Workflow schema lint failed: {schema_errors[:5]}"),
             )
 
         workflow_id = str(uuid.uuid4())
@@ -1632,19 +1572,13 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                 if strict_mapping_errors:
                     raise HTTPException(
                         status_code=400,
-                        detail=(
-                            "Workflow strict edge mapping failed: "
-                            f"{strict_mapping_errors[:5]}"
-                        ),
+                        detail=(f"Workflow strict edge mapping failed: {strict_mapping_errors[:5]}"),
                     )
                 schema_errors = _schema_lint_errors(workflow_model)
                 if schema_errors:
                     raise HTTPException(
                         status_code=400,
-                        detail=(
-                            "Workflow schema lint failed: "
-                            f"{schema_errors[:5]}"
-                        ),
+                        detail=(f"Workflow schema lint failed: {schema_errors[:5]}"),
                     )
                 workflow_json = req.workflow_json
             except Exception as e:
@@ -1761,6 +1695,7 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             )
             await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
         exec_id = str(exec_data["id"])
+        progress_writer = ExecutionProgressWriter(exec_data)
 
         cancel_event = threading.Event()
         task = asyncio.create_task(
@@ -1770,6 +1705,7 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
                 req=req,
                 exec_id=exec_id,
                 cancel_event=cancel_event,
+                progress_writer=progress_writer,
                 tool_context=tool_context,
             ),
             name=f"workflow-run-{exec_id}",
@@ -1778,6 +1714,7 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             workflow_id=workflow_id,
             task=task,
             cancel_event=cancel_event,
+            progress_writer=progress_writer,
         )
 
         # Guarantee cleanup of the registry entry even when the task is
@@ -1826,13 +1763,13 @@ async def cancel_workflow_execution(workflow_id: str, exec_id: str):
             raise HTTPException(status_code=404, detail="Execution not found for this workflow")
 
         active.cancel_event.set()
-        exec_data.update(
-            {
-                "currentPhase": "cancelling",
-                "errorMessage": exec_data.get("errorMessage") or "Cancellation requested",
-            }
-        )
-        await WorkflowStore.upsert_execution(exec_data)
+        progress_update = {
+            "currentPhase": "cancelling",
+            "errorMessage": exec_data.get("errorMessage") or "Cancellation requested",
+            "updatedAt": int(time.time() * 1000),
+        }
+        exec_data.update(progress_update)
+        await active.progress_writer.update(progress_update)
         log.info(
             "workflow.execution.cancel_requested",
             {
@@ -2455,9 +2392,7 @@ async def refresh_workflow_api_health_cache() -> Dict[str, int]:
     active_workflow_ids = [
         str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
         for key, service in zip(keys, services)
-        if isinstance(service, dict)
-        and service
-        and _summarize_capability_state(service.get("status")) == "running"
+        if isinstance(service, dict) and service and _summarize_capability_state(service.get("status")) == "running"
     ]
     semaphore = asyncio.Semaphore(_WORKFLOW_API_HEALTH_PROBE_CONCURRENCY)
 
@@ -2542,9 +2477,7 @@ async def _get_workflow_integration_status(
                 set_workflow_json_triggers(workflow_data.get("workflowJson") or {}, triggers),
             )
             statuses_by_id = {
-                item.get("triggerId"): item
-                for item in statuses
-                if isinstance(item, dict) and item.get("triggerId")
+                item.get("triggerId"): item for item in statuses if isinstance(item, dict) and item.get("triggerId")
             }
             trigger_items: List[WorkflowTriggerStatusItemResponse] = []
             for trigger in triggers:

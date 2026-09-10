@@ -6,6 +6,13 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Layout from './Layout';
 import Home from '@/pages/Home';
 import { UPDATE_DISMISSED_KEY } from '@/utils/updateDismissal';
+import { getTokenPolicyStatus, claimTokenPolicy, confirmTokenPolicyDisplay } from '@/api/tokenPolicy';
+
+vi.mock('@/api/tokenPolicy', () => ({
+  getTokenPolicyStatus: vi.fn(),
+  claimTokenPolicy: vi.fn(),
+  confirmTokenPolicyDisplay: vi.fn(),
+}));
 
 const {
   catalogAPI,
@@ -37,6 +44,7 @@ const {
     getCredentials: vi.fn(),
   },
   onboardingAPI: {
+    getStatus: vi.fn(),
     validate: vi.fn(),
     apply: vi.fn(),
   },
@@ -155,7 +163,8 @@ vi.mock('@/components/common/LanguageSwitcher', () => ({
 
 vi.mock('@/components/common/UpdateModal', () => ({
   UPDATE_DISMISSED_KEY: 'update-dismissed',
-  default: (props: Record<string, unknown>) => {
+  default: function MockUpdateModal(props: Record<string, unknown>) {
+    React.useEffect(() => { (props.onPresented as (() => void) | undefined)?.(); }, [props.onPresented]);
     updateModalMock(props);
     return <div role="dialog" aria-label="update-modal" />;
   },
@@ -203,6 +212,32 @@ function makeProvider(id: string, name: string, models: Array<{ id: string; name
         supports_streaming: true,
       },
     })),
+  };
+}
+
+function makeOnboardingStatus(overrides: Record<string, any> = {}) {
+  return {
+    completed: true,
+    has_default_model: true,
+    default_model: {
+      provider_id: 'threatbook-cn-llm',
+      model_id: 'minimax-m2.7',
+    },
+    threatbook_intel: {
+      configured: false,
+      region: null,
+      api_configured: false,
+      api_service_id: 'threatbook-cn',
+      mcp_configured: false,
+      mcp_connected: false,
+      mcp_status: 'not_configured',
+      mcp_name: 'threatbook_mcp',
+      service_matrix: {
+        cn: ['api', 'mcp'],
+        global: ['api'],
+      },
+    },
+    ...overrides,
   };
 }
 
@@ -258,6 +293,9 @@ describe('Layout onboarding entry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    vi.mocked(confirmTokenPolicyDisplay).mockResolvedValue(true);
+    vi.mocked(getTokenPolicyStatus).mockResolvedValue({ state: 'active', waiting_for_display: false, lease_expires_at: null, notice: null, server_now: new Date().toISOString(), next_check_at: null });
+    vi.mocked(claimTokenPolicy).mockResolvedValue({ state: 'active', waiting_for_display: false, lease_expires_at: null, notice: null, server_now: new Date().toISOString(), next_check_at: null });
     localStorage.clear();
     productNameContextValue.productName = 'Flocks';
     productNameContextValue.proProductName = 'Flocks Pro';
@@ -311,6 +349,9 @@ describe('Layout onboarding entry', () => {
         model_id: 'minimax-m2.7',
       },
     });
+    onboardingAPI.getStatus.mockResolvedValue({
+      data: makeOnboardingStatus(),
+    });
 
     catalogAPI.list.mockResolvedValue({
       data: {
@@ -353,6 +394,101 @@ describe('Layout onboarding entry', () => {
     sessionApi.create.mockResolvedValue({ id: 'session-1' });
   });
 
+  it.each(['gotIt', 'close'])('shows the policy before a pending update, then resumes the update on %s', async (action) => {
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(),
+      next_check_at: null,
+    };
+    const pending = deferred<typeof policyStatus>();
+    vi.mocked(getTokenPolicyStatus).mockReturnValueOnce(pending.promise);
+    vi.mocked(claimTokenPolicy).mockResolvedValueOnce(policyStatus);
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    await act(async () => pending.resolve(policyStatus));
+    expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: action }));
+    expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    expect(ackNotification).not.toHaveBeenCalled();
+    expect(localStorage.getItem(UPDATE_DISMISSED_KEY)).toBeNull();
+  });
+
+  it('does not replace an already presented upgrade when a policy becomes due', async () => {
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    const update = await screen.findByRole('dialog', { name: 'update-modal' });
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(), next_check_at: null,
+    };
+    vi.mocked(getTokenPolicyStatus).mockResolvedValue(policyStatus);
+    vi.mocked(claimTokenPolicy).mockResolvedValue(policyStatus);
+    fireEvent.focus(window);
+    await flushEffects();
+    expect(claimTokenPolicy).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBe(update);
+    const props = updateModalMock.mock.calls.at(-1)![0] as unknown as { onClose: () => void };
+    act(() => props.onClose());
+    expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+  });
+
+  it('keeps background upgrades pending and shows policy first on return', async () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(), next_check_at: null,
+    };
+    vi.mocked(getTokenPolicyStatus).mockResolvedValue(policyStatus);
+    vi.mocked(claimTokenPolicy).mockResolvedValue(policyStatus);
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    try {
+      renderHomeWithLayout();
+      await waitFor(() => expect(checkUpdate).toHaveBeenCalled());
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+      expect(getTokenPolicyStatus).not.toHaveBeenCalled();
+      visibility.mockReturnValue('visible');
+      fireEvent(document, new Event('visibilitychange'));
+      expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+      await userEvent.setup().click(screen.getByRole('button', { name: 'gotIt' }));
+      expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    } finally {
+      visibility.mockRestore();
+    }
+  });
+
+  it('waits for an abandoned reservation to expire before allowing an upgrade', async () => {
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(), next_check_at: null,
+    };
+    vi.mocked(getTokenPolicyStatus).mockResolvedValueOnce({
+      ...policyStatus, notice: null, lease_expires_at: null, waiting_for_display: true,
+      next_check_at: new Date(Date.now() + 600).toISOString(),
+    }).mockResolvedValue(policyStatus);
+    vi.mocked(claimTokenPolicy).mockResolvedValue(policyStatus);
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+  });
+
+  it('still displays an upgrade when the policy status request fails', async () => {
+    vi.mocked(getTokenPolicyStatus).mockRejectedValue(new Error('timeout'));
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+  });
+
   it('opens onboarding from the home entry and shows configured details for an existing default model', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
@@ -363,12 +499,46 @@ describe('Layout onboarding entry', () => {
 
     await screen.findByText('onboarding.bootstrap.primaryConfiguredSummary');
 
-    await user.click(screen.getByText('onboarding.bootstrap.primaryTitle'));
-
     expect(screen.getByText('onboarding.bootstrap.configuredDetailsTitle')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'onboarding.bootstrap.editPrimary' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'onboarding.bootstrap.savePrimary' })).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText('onboarding.bootstrap.tbPlaceholder')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder')).not.toBeInTheDocument();
+  });
+
+  it('allows member users to open onboarding from the home entry', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-2',
+        username: 'member',
+        role: 'member',
+        status: 'active',
+        must_reset_password: false,
+      },
+      logout: vi.fn(),
+    });
+
+    renderHomeWithLayout();
+    await user.click(screen.getByRole('button', { name: 'getStarted' }));
+
+    expect(await screen.findByText('onboarding.bootstrap.modelPageTitle')).toBeInTheDocument();
+  });
+
+  it('auto-opens onboarding from backend status even when the old dismissed flag exists', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    onboardingAPI.getStatus.mockResolvedValue({
+      data: makeOnboardingStatus({
+        completed: false,
+        has_default_model: false,
+        default_model: null,
+      }),
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('onboarding.bootstrap.modelPageTitle')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'onboarding.bootstrap.savePrimary' })).toBeInTheDocument();
   });
 
   it('keeps standard pages out of a flex column content wrapper', async () => {
@@ -687,7 +857,14 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
     expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
-    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    const updateEntry = screen.getByRole('button', { name: 'checkUpdate' });
+    const usageEntry = screen.getByRole('link', { name: 'flocksLlmUsageQuota' });
+    const settingsEntry = screen.getByRole('link', { name: 'settings' });
+    expect(usageEntry).toHaveAttribute('href', 'https://portal.agentflocks.com');
+    expect(usageEntry).toHaveAttribute('target', '_blank');
+    expect(settingsEntry).toHaveAttribute('href', '/settings/preferences');
+    expect(updateEntry.compareDocumentPosition(usageEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(usageEntry.compareDocumentPosition(settingsEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
     expect(logout).toHaveBeenCalledTimes(1);

@@ -33,7 +33,13 @@ from flocks.session.runner import (
     StepResult,
     ToolCall,
 )
-from flocks.session.prompt import SessionPrompt, get_prompt_flocks_config_guard
+from flocks.session.streaming.tool_accumulator import StreamToolArgumentsTruncatedError
+from flocks.session.prompt import (
+    SessionPrompt,
+    SystemPromptBlock,
+    TurnPromptContext,
+    get_prompt_flocks_config_guard,
+)
 from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
 from flocks.session.session import Session, SessionInfo
 from flocks.tool.registry import ToolCategory, ToolInfo
@@ -262,6 +268,24 @@ class TestExceptionToErrorDict:
         assert result["name"] == "APIError"
         assert result["data"]["isRetryable"] is True
         assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    def test_stream_tool_arguments_truncated_exception_is_retryable(self):
+        runner = _make_runner()
+        exc = StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+        result = runner._exception_to_error_dict(exc)
+
+        assert result["name"] == "StreamToolArgumentsTruncatedError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["streamToolArgumentsTruncated"] is True
+        assert result["data"]["toolCallID"] == "call_trunc"
+        assert result["data"]["toolName"] == "write"
 
     def test_incomplete_chunked_read_exception_is_retryable_connection_error(self):
         runner = _make_runner()
@@ -632,6 +656,47 @@ class TestBuildTools:
 
 class TestBuildSystemPrompts:
     @pytest.mark.asyncio
+    async def test_build_system_prompts_accepts_legacy_context_factories(self):
+        sandbox_mock = AsyncMock(return_value="legacy sandbox prompt")
+        channel_mock = AsyncMock(return_value="legacy channel prompt")
+        device_mock = AsyncMock(return_value="legacy device prompt")
+
+        with (
+            patch.object(
+                SessionPrompt,
+                "_is_builtin_system_subagent_session",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "flocks.session.prompt.SystemPrompt.custom",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses_legacy_prompt_context",
+                session_directory="/tmp",
+                agent_name="rex",
+                agent_prompt="agent prompt",
+                provider_id="openai",
+                model_id="gpt-5",
+                tool_revision=3,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: "legacy tool catalog",
+                device_asset_prompt_factory=device_mock,
+                device_revision=5,
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "legacy tool catalog" in combined
+        assert "legacy device prompt" in combined
+        assert "legacy sandbox prompt" in combined
+        assert "legacy channel prompt" in combined
+        sandbox_mock.assert_awaited_once()
+        channel_mock.assert_awaited_once()
+        device_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_build_system_prompts_reuses_loop_static_cache(self):
         shared_cache = {}
         session = _make_session("ses_prompts_cache")
@@ -643,14 +708,21 @@ class TestBuildSystemPrompts:
         env_mock = MagicMock(return_value=["env prompt"])
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
-        sandbox_mock = AsyncMock(return_value="sandbox prompt")
-        channel_mock = AsyncMock(return_value="channel prompt")
-        device_mock = AsyncMock(return_value="device prompt")
+        turn_context = TurnPromptContext(
+            sandbox_context="sandbox prompt",
+            channel_context="channel prompt",
+            tool_catalog="tool catalog",
+            device_asset_hint="device prompt",
+            tool_revision=1,
+            device_revision=7,
+        )
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -659,13 +731,8 @@ class TestBuildSystemPrompts:
                 provider_id=runner1.provider_id,
                 model_id=runner1.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: "tool catalog",
-                device_asset_prompt_factory=device_mock,
-                device_revision=7,
+                turn_context=turn_context,
             )
             prompts2 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
@@ -675,22 +742,14 @@ class TestBuildSystemPrompts:
                 provider_id=runner2.provider_id,
                 model_id=runner2.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: "tool catalog",
-                device_asset_prompt_factory=device_mock,
-                device_revision=7,
+                turn_context=turn_context,
             )
 
         assert prompts1 == prompts2
         env_mock.assert_called_once()
         runtime_mock.assert_called_once()
         custom_mock.assert_awaited_once()
-        sandbox_mock.assert_awaited_once()
-        channel_mock.assert_awaited_once()
-        device_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_orders_stable_prefix_before_runtime_tail(self):
@@ -706,15 +765,13 @@ class TestBuildSystemPrompts:
                 "inject": True,
             },
         }
-        sandbox_mock = AsyncMock(return_value="sandbox prompt")
-        channel_mock = AsyncMock(return_value="channel prompt")
-        device_mock = AsyncMock(return_value="device prompt")
-
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch.object(SessionPrompt, "_build_tool_guidance_prompt", return_value="tool protocol"), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch.object(SessionPrompt, "_build_tool_guidance_prompt", return_value="tool protocol"),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])),
+        ):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -732,11 +789,17 @@ class TestBuildSystemPrompts:
                     "write",
                 ),
                 memory_bootstrap_data=memory_bootstrap_data,
-                tool_catalog_prompt_factory=lambda: "tool catalog",
-                device_asset_prompt_factory=device_mock,
-                device_revision=3,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
+                turn_context=TurnPromptContext(
+                    tool_catalog="tool catalog",
+                    device_asset_hint="device prompt",
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    additional_context="additional prompt",
+                    text_tool_catalog="text tool catalog",
+                    tool_results_reminder="tool results reminder",
+                    repeated_tool_calls_reminder="tool loop reminder",
+                    device_revision=3,
+                ),
             )
 
         assert prompts == [
@@ -753,6 +816,10 @@ class TestBuildSystemPrompts:
             "sandbox prompt",
             "channel prompt",
             "runtime prompt",
+            "additional prompt",
+            "text tool catalog",
+            "tool results reminder",
+            "tool loop reminder",
         ]
 
     @pytest.mark.asyncio
@@ -766,16 +833,12 @@ class TestBuildSystemPrompts:
         env_mock = MagicMock(return_value=["env prompt"])
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
-        sandbox_mock = AsyncMock(return_value="sandbox prompt")
-        channel_mock = AsyncMock(return_value="channel prompt")
-        device_mock = AsyncMock(return_value="device prompt")
-
-        catalog_prompts = iter(["tool catalog v1", "tool catalog v2"])
-
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -784,13 +847,15 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: next(catalog_prompts),
-                device_asset_prompt_factory=device_mock,
-                device_revision=1,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog v1",
+                    device_asset_hint="device prompt",
+                    tool_revision=1,
+                    device_revision=1,
+                ),
             )
             agent.prompt = "agent prompt v2"
             prompts2 = await SessionPrompt.build_system_prompts(
@@ -801,13 +866,15 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=2,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: next(catalog_prompts),
-                device_asset_prompt_factory=device_mock,
-                device_revision=1,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog v2",
+                    device_asset_hint="device prompt",
+                    tool_revision=2,
+                    device_revision=1,
+                ),
             )
 
         assert prompts1 != prompts2
@@ -818,8 +885,6 @@ class TestBuildSystemPrompts:
         env_mock.assert_called_once()
         runtime_mock.assert_called_once()
         custom_mock.assert_awaited_once()
-        sandbox_mock.assert_awaited_once()
-        channel_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_reuses_static_device_hint_cache(self):
@@ -832,14 +897,20 @@ class TestBuildSystemPrompts:
         env_mock = MagicMock(return_value=["env prompt"])
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
-        sandbox_mock = AsyncMock(return_value="sandbox prompt")
-        channel_mock = AsyncMock(return_value="channel prompt")
-        device_mock = AsyncMock(return_value="device prompt")
+        turn_context = TurnPromptContext(
+            sandbox_context="sandbox prompt",
+            channel_context="channel prompt",
+            tool_catalog="tool catalog",
+            device_asset_hint="device prompt",
+            tool_revision=1,
+        )
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -848,12 +919,8 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: "tool catalog",
-                device_asset_prompt_factory=device_mock,
+                turn_context=turn_context,
             )
             prompts2 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
@@ -863,12 +930,8 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: "tool catalog",
-                device_asset_prompt_factory=device_mock,
+                turn_context=turn_context,
             )
 
         assert prompts1 == prompts2
@@ -876,9 +939,6 @@ class TestBuildSystemPrompts:
         env_mock.assert_called_once()
         runtime_mock.assert_called_once()
         custom_mock.assert_awaited_once()
-        sandbox_mock.assert_awaited_once()
-        channel_mock.assert_awaited_once()
-        device_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_rebuilds_when_device_revision_changes(self):
@@ -891,14 +951,12 @@ class TestBuildSystemPrompts:
         env_mock = MagicMock(return_value=["env prompt"])
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
-        sandbox_mock = AsyncMock(return_value="sandbox prompt")
-        channel_mock = AsyncMock(return_value="channel prompt")
-        device_prompts = iter(["device prompt v1", "device prompt v2"])
-
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -907,13 +965,15 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: "tool catalog",
-                device_asset_prompt_factory=AsyncMock(side_effect=lambda: next(device_prompts)),
-                device_revision=1,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog",
+                    device_asset_hint="device prompt v1",
+                    tool_revision=1,
+                    device_revision=1,
+                ),
             )
             prompts2 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
@@ -923,13 +983,15 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
-                sandbox_prompt_factory=sandbox_mock,
-                channel_context_prompt_factory=channel_mock,
-                tool_catalog_prompt_factory=lambda: "tool catalog",
-                device_asset_prompt_factory=AsyncMock(side_effect=lambda: next(device_prompts)),
-                device_revision=2,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog",
+                    device_asset_hint="device prompt v2",
+                    tool_revision=1,
+                    device_revision=2,
+                ),
             )
 
         assert prompts1 != prompts2
@@ -938,8 +1000,6 @@ class TestBuildSystemPrompts:
         env_mock.assert_called_once()
         runtime_mock.assert_called_once()
         custom_mock.assert_awaited_once()
-        sandbox_mock.assert_awaited_once()
-        channel_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_rebuilds_when_agent_prompt_changes(self):
@@ -953,10 +1013,12 @@ class TestBuildSystemPrompts:
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -965,8 +1027,8 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
             )
             agent.prompt = "agent prompt v2"
             prompts2 = await SessionPrompt.build_system_prompts(
@@ -977,8 +1039,8 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
             )
 
         assert prompts1 != prompts2
@@ -1111,10 +1173,12 @@ class TestBuildSystemPrompts:
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts_with_memory = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -1130,9 +1194,9 @@ class TestBuildSystemPrompts:
                     "read",
                     "write",
                 ),
-                tool_revision=1,
                 memory_bootstrap_data=runner._memory_bootstrap_data,
                 static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
             )
             prompts_without_memory = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
@@ -1142,9 +1206,9 @@ class TestBuildSystemPrompts:
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
                 prompt_tool_names=("read",),
-                tool_revision=1,
                 memory_bootstrap_data=runner._memory_bootstrap_data,
                 static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
             )
 
         assert prompts_with_memory != prompts_without_memory
@@ -1478,15 +1542,25 @@ async def test_to_chat_messages_uses_structured_anthropic_system_blocks(monkeypa
     monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hello"))
 
-    chat_messages = await runner._to_chat_messages(
-        [message],
-        ["provider prompt", "agent prompt", "context prompt", "runtime prompt"],
-    )
+    prompt_blocks = [
+        SystemPromptBlock(name, content, cache_scope)
+        for name, content, cache_scope in (
+            ("provider", "provider prompt", "global"),
+            ("agent", "agent prompt", "agent"),
+            ("context", "context prompt", "workspace"),
+            ("sandbox", "sandbox prompt", "runtime_tail"),
+            ("runtime", "runtime prompt", "runtime_tail"),
+            ("reminder", "reminder prompt", "runtime_tail"),
+        )
+    ]
+
+    chat_messages = await runner._to_chat_messages([message], prompt_blocks)
 
     assert chat_messages[0].role == "system"
     assert isinstance(chat_messages[0].content, list)
-    assert chat_messages[0].content[1]["cache_control"] == {"type": "ephemeral"}
-    assert chat_messages[0].content[-1]["text"] == "runtime prompt"
+    assert chat_messages[0].content[2]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in chat_messages[0].content[3]
+    assert chat_messages[0].content[-1]["text"] == "reminder prompt"
 
 
 @pytest.mark.asyncio
@@ -2248,7 +2322,7 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -2306,7 +2380,7 @@ async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypat
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_to_chat_messages", fake_to_chat_messages)
     monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="queued"))
@@ -2322,6 +2396,212 @@ async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypat
 
     assert result.action == "stop"
     assert result.content == "done"
+
+
+@pytest.mark.asyncio
+async def test_process_step_retries_truncated_tool_arguments_with_fresh_message(monkeypatch):
+    runner = _make_runner("ses_runner_stream_tool_args_retry")
+    events = []
+
+    async def capture_event(event_type, data):
+        events.append((event_type, data))
+
+    runner.callbacks = RunnerCallbacks(
+        on_error=AsyncMock(),
+        event_publish_callback=capture_event,
+    )
+
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_1 = SimpleNamespace(id="msg_assistant_truncated_1")
+    assistant_2 = SimpleNamespace(id="msg_assistant_truncated_2")
+    create_mock = AsyncMock(side_effect=[assistant_1, assistant_2])
+    delete_mock = AsyncMock(return_value=True)
+    update_mock = AsyncMock(return_value=None)
+    call_ids = []
+
+    async def fake_call_llm(*_args, **kwargs):
+        call_ids.append(kwargs["assistant_msg"].id)
+        if len(call_ids) == 1:
+            runner._attempt_state.observable_output_started = True
+            raise StreamToolArgumentsTruncatedError(
+                tool_call_id="call_trunc",
+                tool_name="write",
+                finish_reason="length",
+                arguments_len=42,
+                arguments_preview='{"path":',
+            )
+        assert runner._attempt_state.observable_output_started is False
+        return StepResult(action="stop", content="done")
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", create_mock)
+    monkeypatch.setattr(runner_mod.Message, "delete", delete_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    assert result.content == "done"
+    assert call_ids == [assistant_1.id, assistant_2.id]
+    delete_mock.assert_awaited_once_with(runner.session.id, assistant_1.id)
+    runner.callbacks.on_error.assert_not_awaited()
+    assert ("message.removed", {"sessionID": runner.session.id, "messageID": assistant_1.id}) in events
+    assert events[-1][0] == "message.updated"
+    assert events[-1][1]["info"]["id"] == assistant_2.id
+    assert update_mock.await_args_list[-1].args[1] == assistant_2.id
+    assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_process_step_does_not_retry_truncated_tool_arguments_after_tool_started(monkeypatch):
+    runner = _make_runner("ses_runner_stream_tool_args_no_retry_after_tool")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_no_retry_after_tool",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant = SimpleNamespace(id="msg_assistant_no_retry_after_tool")
+    update_mock = AsyncMock(return_value=None)
+    delete_mock = AsyncMock(return_value=True)
+    call_count = 0
+
+    async def fake_call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        runner._attempt_state.observable_output_started = True
+        runner._attempt_state.tool_execution_started = True
+        raise StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant))
+    monkeypatch.setattr(runner_mod.Message, "delete", delete_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 1
+    assert result.action == "stop"
+    assert "truncated" in result.error.lower()
+    delete_mock.assert_not_awaited()
+    runner.callbacks.on_error.assert_awaited_once()
+    assert update_mock.await_args_list[-1].args[1] == assistant.id
+    assert update_mock.await_args_list[-1].kwargs["finish"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_process_step_allows_fallback_after_truncated_tool_argument_retries_exhausted(monkeypatch):
+    runner = SessionRunner(
+        session=_make_session("ses_runner_stream_tool_args_fallback"),
+        provider_id="primary",
+        model_id="primary-model",
+        defer_step_errors=True,
+        failover_available=True,
+    )
+
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_fallback",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    create_count = 0
+
+    async def create_message(**_kwargs):
+        nonlocal create_count
+        create_count += 1
+        return SimpleNamespace(id=f"msg_assistant_fallback_{create_count}")
+
+    async def fake_call_llm(*_args, **_kwargs):
+        runner._attempt_state.observable_output_started = True
+        raise StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", create_message)
+    monkeypatch.setattr(runner_mod.Message, "delete", AsyncMock(return_value=True))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.failure is not None
+    assert result.failure.reason == "stream_truncated"
+    assert result.failure.allow_fallback is True
+    assert result.failure.attempt_state.observable_output_started is True
+    assert result.failure.attempt_state.tool_execution_started is False
 
 
 @pytest.mark.asyncio
@@ -2354,7 +2634,7 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -2430,7 +2710,7 @@ async def test_process_step_marks_aborted_llm_message_as_error(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -2663,7 +2943,7 @@ async def test_process_step_persists_visible_error_when_model_returns_empty_stre
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: EmptyProvider()))
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
 
@@ -2710,7 +2990,7 @@ async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(mo
     provider = MagicMock()
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_prompt_guidance")
-    build_system_prompts = AsyncMock(return_value=[])
+    build_system_prompt_blocks = AsyncMock(return_value=[])
     tool_schema = [
         {"type": "function", "function": {"name": "memory_search", "description": "", "parameters": {}}},
         {"type": "function", "function": {"name": "bash", "description": "", "parameters": {}}},
@@ -2719,7 +2999,7 @@ async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(mo
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", build_system_prompts)
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", build_system_prompt_blocks)
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=tool_schema))
     monkeypatch.setattr(
         runner,
@@ -2739,8 +3019,12 @@ async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(mo
     result = await runner._process_step([last_user], last_user)
 
     assert result.content == "done"
-    build_system_prompts.assert_awaited_once()
-    assert build_system_prompts.await_args.kwargs["prompt_tool_names"] == ("bash", "memory_search")
+    build_system_prompt_blocks.assert_awaited_once()
+    assert build_system_prompt_blocks.await_args.kwargs["prompt_tool_names"] == ("bash", "memory_search")
+    assert isinstance(
+        build_system_prompt_blocks.await_args.kwargs["turn_context"],
+        TurnPromptContext,
+    )
 
 
 @pytest.mark.asyncio
@@ -2768,7 +3052,7 @@ async def test_process_step_records_usage_after_success(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -2793,7 +3077,7 @@ async def test_process_step_records_usage_after_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_step_passes_device_hint_factory_into_build_system_prompts(monkeypatch):
+async def test_process_step_passes_resolved_device_hint_into_turn_context(monkeypatch):
     runner = _make_runner("ses_runner_device_hint_order")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
 
@@ -2810,12 +3094,12 @@ async def test_process_step_passes_device_hint_factory_into_build_system_prompts
     provider = MagicMock()
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_device_hint_order")
-    build_system_prompts = AsyncMock(return_value=["provider", "tool catalog awareness", "device hint"])
+    build_system_prompt_blocks = AsyncMock(return_value=["provider", "tool catalog awareness", "device hint"])
 
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", build_system_prompts)
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", build_system_prompt_blocks)
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     device_hint_mock = AsyncMock(return_value="device hint")
     monkeypatch.setattr(runner, "_build_device_asset_hint", device_hint_mock)
@@ -2838,11 +3122,11 @@ async def test_process_step_passes_device_hint_factory_into_build_system_prompts
     result = await runner._process_step([last_user], last_user)
 
     assert result.content == "done"
-    build_system_prompts.assert_awaited_once()
-    kwargs = build_system_prompts.await_args.kwargs
-    assert kwargs["device_revision"] == 9
-    assert kwargs["device_asset_prompt_factory"] is not None
-    assert await kwargs["device_asset_prompt_factory"]() == "device hint"
+    build_system_prompt_blocks.assert_awaited_once()
+    turn_context = build_system_prompt_blocks.await_args.kwargs["turn_context"]
+    assert turn_context.device_revision == 9
+    assert turn_context.device_asset_hint == "device hint"
+    device_hint_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2873,7 +3157,7 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -2935,7 +3219,7 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -2987,7 +3271,7 @@ async def test_process_step_does_not_retry_after_tool_execution_started(monkeypa
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
     monkeypatch.setattr(
         runner_mod.SessionPrompt,
-        "build_system_prompts",
+        "build_system_prompt_blocks",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -3035,7 +3319,7 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=sentinel_tools))
     monkeypatch.setattr(
         runner,
@@ -3084,7 +3368,7 @@ async def test_process_step_respects_explicit_agent_steps_over_default(monkeypat
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=sentinel_tools))
     monkeypatch.setattr(
         runner,
@@ -3138,7 +3422,7 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
     )))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
     monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner_mod.Message, "create", create_mock)

@@ -57,6 +57,9 @@ export function areChatMessagePartsRenderEqual(
       || prevPart.mime !== nextPart.mime
       || prevPart.filename !== nextPart.filename
       || prevPart.url !== nextPart.url
+      || prevPart.time?.start !== nextPart.time?.start
+      || prevPart.time?.end !== nextPart.time?.end
+      || prevPart.time?.compacted !== nextPart.time?.compacted
       || prevPart.image?.url !== nextPart.image?.url
       || prevPart.image?.alt !== nextPart.image?.alt
     ) {

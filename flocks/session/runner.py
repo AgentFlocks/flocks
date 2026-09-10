@@ -19,7 +19,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import httpcore
 import httpx
@@ -27,8 +27,16 @@ import httpx
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
-from flocks.session.message import Message, MessageInfo, MessageRole, TextPart
-from flocks.session.prompt import SessionPrompt
+from flocks.session.message import (
+    Message,
+    MessageInfo,
+    MessageRole,
+    TextPart,
+    ToolPart,
+    ToolStateCompleted,
+    ToolStateRunning,
+)
+from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
     DEFAULT_MAX_TOOL_STEPS,
@@ -596,19 +604,36 @@ class SessionRunner:
     ) -> Tuple[List[Any], Dict[str, Any]]:
         execution_mode = self._execution_mode_from_messages(messages)
         isolated_profile = getattr(agent, "prompt_profile", "standard") == "isolated"
+        from flocks.agent.tool_permissions import QUESTION_TOOL_NAME
+        from flocks.permission.next import PermissionNext
+
+        declared_tool_names = getattr(agent, "tools", None)
+        permission_ruleset = getattr(self, "_turn_permission_ruleset", None)
+        if permission_ruleset is None:
+            permission_ruleset = self._permission_ruleset_for_agent(agent)
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
-            declared_tool_names=getattr(agent, "tools", None),
+            declared_tool_names=declared_tool_names,
             strict_declared_tools=isolated_profile,
             agent=agent.name,
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
         )
-        tool_infos = [
-            tool_info
-            for tool_info in result.tool_infos
-            if is_tool_allowed(execution_mode, tool_info.name)
-        ]
+        permission_denied_tool_names: List[str] = []
+        tool_infos = []
+        for tool_info in result.tool_infos:
+            if not is_tool_allowed(execution_mode, tool_info.name):
+                continue
+            if tool_info.name == QUESTION_TOOL_NAME:
+                denied_by_permission = PermissionNext.evaluate_request(
+                    tool_info.name,
+                    ["*"],
+                    permission_ruleset,
+                ) == "deny"
+                if denied_by_permission:
+                    permission_denied_tool_names.append(tool_info.name)
+                    continue
+            tool_infos.append(tool_info)
         if (
             execution_mode == SessionExecutionMode.PLAN
             and all(tool_info.name != "plan_exit" for tool_info in tool_infos)
@@ -618,6 +643,7 @@ class SessionRunner:
                 tool_infos.append(plan_exit.info)
         metadata = dict(result.metadata)
         metadata["executionMode"] = execution_mode.value
+        metadata["permissionDeniedToolNames"] = sorted(permission_denied_tool_names)
         metadata["modeAllowedToolNames"] = sorted(
             tool_info.name for tool_info in tool_infos
         )
@@ -1121,6 +1147,9 @@ class SessionRunner:
         agent: str,
         command: str,
         model: Optional[Dict[str, str]] = None,
+        event_publish_callback: Optional[
+            Callable[[str, Dict[str, Any]], Awaitable[None]]
+        ] = None,
     ) -> Dict[str, Any]:
         """
         Execute a shell command in session context.
@@ -1140,24 +1169,89 @@ class SessionRunner:
         
         cwd = session.directory or os.getcwd()
 
+        async def _publish(event_type: str, payload: Dict[str, Any]) -> None:
+            if event_publish_callback is None:
+                return
+            try:
+                await event_publish_callback(event_type, payload)
+            except Exception as exc:
+                log.debug("runner.shell.publish_failed", {
+                    "session_id": session_id,
+                    "event_type": event_type,
+                    "error": str(exc),
+                })
+
         async def _effect(
             execution_command: str = command,
             execution_cwd: str = cwd,
         ) -> Dict[str, Any]:
+            started_at_ms = int(time.time() * 1000)
+            user_part_id = Identifier.create("part")
             user_msg = await Message.create(
                 session_id=session_id,
                 role=MessageRole.USER,
                 content="The following tool was executed by the user",
                 agent=agent,
+                time={"created": started_at_ms},
+                part_id=user_part_id,
             )
 
+            assistant_part_id = Identifier.create("part")
             assistant_msg = await Message.create(
                 session_id=session_id,
                 role=MessageRole.ASSISTANT,
                 content="",
                 agent=agent,
                 parent_id=user_msg.id,
+                providerID="builtin",
+                modelID="shell",
+                mode=agent,
+                path={"cwd": execution_cwd, "root": execution_cwd},
+                time={"created": started_at_ms},
+                part_id=assistant_part_id,
             )
+
+            call_id = Identifier.create("call")
+            tool_part_id = Identifier.create("part")
+            tool_input = {
+                "command": execution_command,
+                "workdir": execution_cwd,
+            }
+            running_part = ToolPart(
+                id=tool_part_id,
+                messageID=assistant_msg.id,
+                sessionID=session_id,
+                callID=call_id,
+                tool="bash",
+                metadata=None,
+                state=ToolStateRunning(
+                    input=tool_input,
+                    title="Shell",
+                    metadata={},
+                    time={"start": started_at_ms},
+                ),
+            )
+            await Message.store_part(session_id, assistant_msg.id, running_part)
+
+            await _publish("message.updated", {
+                "info": user_msg.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.part.updated", {
+                "part": {
+                    "id": user_part_id,
+                    "messageID": user_msg.id,
+                    "sessionID": session_id,
+                    "type": "text",
+                    "text": "The following tool was executed by the user",
+                    "time": {"start": started_at_ms},
+                },
+            })
+            await _publish("message.updated", {
+                "info": assistant_msg.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.part.updated", {
+                "part": running_part.model_dump(mode="json", by_alias=True),
+            })
 
             start_time = asyncio.get_event_loop().time()
             try:
@@ -1185,6 +1279,7 @@ class SessionRunner:
                 exit_code = -1
 
             end_time = asyncio.get_event_loop().time()
+            finished_at_ms = int(time.time() * 1000)
 
             log.info("runner.shell", {
                 "session_id": session_id,
@@ -1193,25 +1288,48 @@ class SessionRunner:
                 "duration_ms": int((end_time - start_time) * 1000),
             })
 
+            completed_part = ToolPart(
+                id=tool_part_id,
+                messageID=assistant_msg.id,
+                sessionID=session_id,
+                callID=call_id,
+                tool="bash",
+                metadata=None,
+                state=ToolStateCompleted(
+                    input=tool_input,
+                    output=output,
+                    title="Shell",
+                    metadata={"exitCode": exit_code},
+                    time={"start": started_at_ms, "end": finished_at_ms},
+                    attachments=None,
+                ),
+            )
+            stored_part = await Message.store_part(
+                session_id,
+                assistant_msg.id,
+                completed_part,
+            )
+            updated_assistant = await Message.update(
+                session_id,
+                assistant_msg.id,
+                finish="stop",
+                time={"completed": finished_at_ms},
+            )
+            if updated_assistant is None:
+                raise RuntimeError(
+                    f"Failed to finalize shell message {assistant_msg.id}"
+                )
+
+            await _publish("message.part.updated", {
+                "part": stored_part.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.updated", {
+                "info": updated_assistant.model_dump(mode="json", by_alias=True),
+            })
+
             return {
-                "info": {
-                    "id": assistant_msg.id,
-                    "sessionID": session_id,
-                    "role": "assistant",
-                    "agent": agent,
-                },
-                "parts": [{
-                    "id": Identifier.create("part"),
-                    "messageID": assistant_msg.id,
-                    "sessionID": session_id,
-                    "type": "tool",
-                    "tool": "bash",
-                    "state": {
-                        "status": "completed",
-                        "input": {"command": execution_command},
-                        "output": output,
-                    },
-                }],
+                "info": updated_assistant.model_dump(mode="json", by_alias=True),
+                "parts": [stored_part.model_dump(mode="json", by_alias=True)],
             }
 
         from flocks.session.tool_execution import (
@@ -1345,6 +1463,8 @@ class SessionRunner:
             "policy violation",
         )):
             return FailoverDecision(True, "content_policy")
+        if error_name == "StreamToolArgumentsTruncatedError":
+            return FailoverDecision(True, "stream_truncated")
         if error_name == "JSONDecodeError" or any(
             pattern in lowered for pattern in (
                 "malformed response", "invalid response", "empty choices",
@@ -1367,11 +1487,17 @@ class SessionRunner:
         assistant_message_id: Optional[str],
         decision: FailoverDecision,
         attempts: int,
+        allow_fallback_override: Optional[bool] = None,
     ) -> StepResult:
         state = LlmAttemptState(
             received_chunk=self._attempt_state.received_chunk,
             observable_output_started=self._attempt_state.observable_output_started,
             tool_execution_started=self._attempt_state.tool_execution_started,
+        )
+        allow_fallback = (
+            allow_fallback_override
+            if allow_fallback_override is not None
+            else decision.eligible and state.replay_safe
         )
         return StepResult(
             action="stop",
@@ -1381,11 +1507,15 @@ class SessionRunner:
                 error_data=error_data,
                 assistant_message_id=assistant_message_id,
                 reason=decision.reason,
-                allow_fallback=decision.eligible and state.replay_safe,
+                allow_fallback=allow_fallback,
                 attempt_state=state,
                 attempts=attempts,
             ),
         )
+
+    @staticmethod
+    def _is_stream_tool_arguments_truncated_error(error: Dict[str, Any]) -> bool:
+        return error.get("name") == "StreamToolArgumentsTruncatedError"
     
     async def _process_step(
         self,
@@ -1425,6 +1555,7 @@ class SessionRunner:
         # Resolve agent
         agent_name = last_user.agent or self.agent_name
         agent = await Agent.get(agent_name) or await Agent.get("rex")
+        self._turn_permission_ruleset = self._permission_ruleset_for_agent(agent)
 
         # Track session agent (Flocks compatibility)
         try:
@@ -1516,24 +1647,19 @@ class SessionRunner:
         self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
         prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
 
-        async def sandbox_prompt_factory() -> Optional[str]:
-            return await self._build_sandbox_prompt(agent)
-
-        async def channel_context_prompt_factory() -> Optional[str]:
-            return await self._build_channel_context_prompt()
-
-        async def device_asset_prompt_factory() -> Optional[str]:
-            return await self._build_device_asset_hint()
-
-        try:
-            from flocks.tool.device.store import device_revision as get_device_revision
-
-            current_device_revision = get_device_revision()
-        except Exception:
-            current_device_revision = None
-
         prompts_started_at = time.perf_counter()
-        system_prompts = await SessionPrompt.build_system_prompts(
+        minimal_prompt = await SessionPrompt._is_builtin_system_subagent_session(
+            session_id=self.session.id,
+            agent_name=agent.name,
+        )
+        turn_prompt_context = await self._build_turn_prompt_context(
+            agent=agent,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+            minimal_prompt=minimal_prompt,
+        )
+        system_prompts = await SessionPrompt.build_system_prompt_blocks(
             session_id=self.session.id,
             session_directory=self.session.directory,
             agent_name=agent.name,
@@ -1548,62 +1674,14 @@ class SessionRunner:
                 plan_file=self._turn_plan_file,
             ),
             prompt_tool_names=prompt_tool_names,
-            tool_revision=ToolRegistry.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
             static_cache=self._static_cache,
-            sandbox_prompt_factory=sandbox_prompt_factory,
-            channel_context_prompt_factory=channel_context_prompt_factory,
-            tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
-            device_asset_prompt_factory=device_asset_prompt_factory,
-            device_revision=current_device_revision,
+            turn_context=turn_prompt_context,
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
         self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
 
         await self._run_session_start_hook(agent)
-
-        # UserPromptBefore context is optional host context and is excluded by
-        # isolated prompt assembly. LLM_BEFORE/AFTER hooks remain trusted host
-        # controls for request policy and redaction.
-        if (
-            self._turn_additional_context
-            and getattr(agent, "prompt_profile", "standard") != "isolated"
-        ):
-            system_prompts.append(self._turn_additional_context)
-
-        if self._should_use_text_tool_call_mode() and tools:
-            text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
-            if text_tool_catalog:
-                system_prompts.append(text_tool_catalog)
-
-        # If the last assistant message only contains tool results and no text,
-        # force a direct answer to avoid repeated tool calls.
-        last_assistant_msg = None
-        for msg in reversed(messages):
-            if msg.role == MessageRole.ASSISTANT:
-                last_assistant_msg = msg
-                break
-        if last_assistant_msg:
-            parts = await Message.parts(last_assistant_msg.id, self.session.id)
-            has_text = any(getattr(p, "type", None) == "text" and getattr(p, "text", "").strip() for p in parts)
-            has_tool_result = any(
-                getattr(p, "type", None) == "tool" and
-                getattr(getattr(p, "state", None), "status", None) in ("completed", "error", "running")
-                for p in parts
-            )
-            if has_tool_result and not has_text:
-                from flocks.session.prompt_strings import PROMPT_TOOL_RESULTS_AVAILABLE
-                system_prompts.append(PROMPT_TOOL_RESULTS_AVAILABLE)
-            
-            if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
-                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
-                log.warn("runner.repeated_tool_calls_detected", {
-                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
-                    "exact_count": state.get("exact_count", 0),
-                    "step": self._step,
-                })
-                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
-                system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
 
         # Convert messages to chat format with error handling
         try:
@@ -1674,34 +1752,96 @@ class SessionRunner:
             # Disable tools when max steps reached
             tools = []
         
-        # Create assistant message (will be reused across retries)
-        assistant_msg = await Message.create(
-            session_id=self.session.id,
-            role=MessageRole.ASSISTANT,
-            content="",
-            agent=agent.name,
-            model_id=self.model_id,
-            provider_id=self.provider_id,
-            parent_id=last_user.id,
-        )
-        
-        # Publish assistant message SSE event so frontends can show the message card
-        if self.callbacks.event_publish_callback:
-            import time as _time
+        async def _publish_assistant_created(msg: MessageInfo) -> None:
+            if not self.callbacks.event_publish_callback:
+                return
             await self.callbacks.event_publish_callback("message.updated", {
                 "info": {
-                    "id": assistant_msg.id,
+                    "id": msg.id,
                     "sessionID": self.session.id,
                     "role": "assistant",
-                    "time": {"created": int(_time.time() * 1000)},
+                    "time": {"created": int(time.time() * 1000)},
                     "parentID": last_user.id,
                     "modelID": self.model_id,
                     "providerID": self.provider_id,
                     "agent": agent.name,
                     "mode": agent.name,
-                    "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                    "tokens": {
+                        "input": 0,
+                        "output": 0,
+                        "reasoning": 0,
+                        "cache": {"read": 0, "write": 0},
+                    },
                 }
             })
+
+        async def _create_attempt_assistant_message(*, publish: bool = True) -> MessageInfo:
+            msg = await Message.create(
+                session_id=self.session.id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=agent.name,
+                model_id=self.model_id,
+                provider_id=self.provider_id,
+                parent_id=last_user.id,
+            )
+            if publish:
+                await _publish_assistant_created(msg)
+            return msg
+
+        async def _replace_assistant_message_for_replay(reason: str) -> bool:
+            nonlocal assistant_msg
+            previous_msg = assistant_msg
+            try:
+                next_msg = await _create_attempt_assistant_message(publish=False)
+            except Exception as exc:
+                log.error("runner.step.replay_message_create_failed", {
+                    "session_id": self.session.id,
+                    "previous_message_id": previous_msg.id,
+                    "reason": reason,
+                    "error": str(exc),
+                })
+                return False
+
+            try:
+                deleted = await Message.delete(self.session.id, previous_msg.id)
+            except Exception as exc:
+                deleted = False
+                log.error("runner.step.replay_message_delete_failed", {
+                    "session_id": self.session.id,
+                    "previous_message_id": previous_msg.id,
+                    "next_message_id": next_msg.id,
+                    "reason": reason,
+                    "error": str(exc),
+                })
+            if not deleted:
+                try:
+                    await Message.delete(self.session.id, next_msg.id)
+                except Exception as exc:
+                    log.debug("runner.step.replay_message_cleanup_failed", {
+                        "session_id": self.session.id,
+                        "message_id": next_msg.id,
+                        "error": str(exc),
+                    })
+                return False
+
+            if self.callbacks.event_publish_callback:
+                await self.callbacks.event_publish_callback("message.removed", {
+                    "sessionID": self.session.id,
+                    "messageID": previous_msg.id,
+                })
+                await _publish_assistant_created(next_msg)
+            assistant_msg = next_msg
+            log.info("runner.step.replay_message_replaced", {
+                "session_id": self.session.id,
+                "previous_message_id": previous_msg.id,
+                "next_message_id": next_msg.id,
+                "reason": reason,
+            })
+            return True
+
+        # Create assistant message for the first attempt.
+        assistant_msg = await _create_attempt_assistant_message()
         
         # Retry loop matching Flocks' SessionProcessor.process()
         # MAX_ERROR_RETRIES caps exception-based retries so a permanently-failing
@@ -1889,6 +2029,9 @@ class SessionRunner:
                 # Check if retryable
                 retry_message = SessionRetry.retryable(error_dict)
                 failover_decision = self.classify_failover_error(error_dict)
+                is_stream_tool_args_truncated = (
+                    self._is_stream_tool_arguments_truncated_error(error_dict)
+                )
                 retry_limit = MAX_ERROR_RETRIES
                 will_retry = retry_message is not None and error_attempt <= retry_limit
                 retry_blocked_by_tool_execution = (
@@ -1902,7 +2045,18 @@ class SessionRunner:
                 elif self._defer_step_errors and not self._attempt_state.replay_safe:
                     # Retrying after text/reasoning/tool activity can duplicate
                     # visible output or execute a tool twice.
-                    will_retry = False
+                    will_retry = will_retry and is_stream_tool_args_truncated
+
+                if will_retry and is_stream_tool_args_truncated:
+                    # A truncated tool-argument stream already created a
+                    # partial assistant message (and usually a tool part). The
+                    # retry is only safe if that partial attempt can be removed
+                    # before the next provider call.
+                    replaced = await _replace_assistant_message_for_replay(
+                        reason="stream_tool_arguments_truncated"
+                    )
+                    if not replaced:
+                        will_retry = False
 
                 if will_retry:
                     # Error is retryable and we have budget left
@@ -1934,6 +2088,8 @@ class SessionRunner:
                     
                     # Wait before retry
                     await SessionRetry.sleep(delay_ms, self._abort)
+
+                    self._attempt_state = LlmAttemptState()
                     
                     # Continue to next retry attempt
                     continue
@@ -1963,12 +2119,19 @@ class SessionRunner:
                         error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
 
                     if self._defer_step_errors:
+                        allow_fallback_override = None
+                        if is_stream_tool_args_truncated:
+                            allow_fallback_override = (
+                                failover_decision.eligible
+                                and not retry_blocked_by_tool_execution
+                            )
                         return self._deferred_failure_result(
                             message=final_error_message,
                             error_data=error_dict,
                             assistant_message_id=assistant_msg.id,
                             decision=failover_decision,
                             attempts=error_attempt,
+                            allow_fallback_override=allow_fallback_override,
                         )
 
                     if self.callbacks.on_error:
@@ -2119,6 +2282,133 @@ class SessionRunner:
                 "error": str(exc),
             })
     
+    async def _build_turn_prompt_context(
+        self,
+        *,
+        agent: AgentInfo,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+        minimal_prompt: bool = False,
+    ) -> TurnPromptContext:
+        """Collect cached runtime values before deterministic prompt assembly."""
+        if minimal_prompt or getattr(agent, "prompt_profile", "standard") == "isolated":
+            return await self._add_turn_prompt_tail(
+                TurnPromptContext(minimal_prompt=True),
+                messages=messages,
+                last_user=last_user,
+                tools=tools,
+            )
+
+        from flocks.config import Config
+        from flocks.project.instance import Instance
+
+        try:
+            from flocks.tool.device.store import device_revision
+
+            current_device_revision = device_revision()
+        except Exception:
+            current_device_revision = None
+
+        current_tool_revision = ToolRegistry.revision()
+        try:
+            config = await Config.get()
+            config_data = config.model_dump(by_alias=True, exclude_none=True)
+            config_instructions = tuple(config.instructions or ())
+        except Exception as exc:
+            log.debug("runner.prompt_context.config_error", {"error": str(exc)})
+            config_data = None
+            config_instructions = ()
+
+        worktree = Instance.get_worktree()
+        sandbox_context, channel_context, device_asset_hint = await asyncio.gather(
+            self._build_sandbox_prompt(agent, config_data=config_data),
+            self._build_channel_context_prompt(),
+            self._build_device_asset_hint(),
+        )
+        source_context = TurnPromptContext(
+            tool_catalog=self._build_tool_catalog_prompt(agent),
+            device_asset_hint=device_asset_hint,
+            sandbox_context=sandbox_context,
+            channel_context=channel_context,
+            worktree=worktree,
+            config_instructions=config_instructions,
+            tool_revision=current_tool_revision,
+            device_revision=current_device_revision,
+            minimal_prompt=False,
+        )
+
+        return await self._add_turn_prompt_tail(
+            source_context,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+        )
+
+    async def _add_turn_prompt_tail(
+        self,
+        source_context: TurnPromptContext,
+        *,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+    ) -> TurnPromptContext:
+        """Add uncached per-step context and reminders to a source snapshot."""
+        text_tool_catalog = None
+        if self._should_use_text_tool_call_mode() and tools:
+            text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
+
+        tool_results_reminder = None
+        repeated_tool_calls_reminder = None
+        last_assistant_msg = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.role == MessageRole.ASSISTANT
+            ),
+            None,
+        )
+        if last_assistant_msg is not None:
+            parts = await Message.parts(last_assistant_msg.id, self.session.id)
+            has_text = any(
+                getattr(part, "type", None) == "text"
+                and getattr(part, "text", "").strip()
+                for part in parts
+            )
+            has_tool_result = any(
+                getattr(part, "type", None) == "tool"
+                and getattr(getattr(part, "state", None), "status", None)
+                in ("completed", "error", "running")
+                for part in parts
+            )
+            if has_tool_result and not has_text:
+                from flocks.session.prompt_strings import (
+                    PROMPT_TOOL_RESULTS_AVAILABLE,
+                )
+
+                tool_results_reminder = PROMPT_TOOL_RESULTS_AVAILABLE
+
+            if has_tool_result and self._should_warn_about_tool_loop(
+                last_user_id=last_user.id,
+            ):
+                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
+                log.warn("runner.repeated_tool_calls_detected", {
+                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
+                    "exact_count": state.get("exact_count", 0),
+                    "step": self._step,
+                })
+                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
+
+                repeated_tool_calls_reminder = PROMPT_REPEATED_TOOL_CALLS
+
+        return replace(
+            source_context,
+            additional_context=self._turn_additional_context,
+            text_tool_catalog=text_tool_catalog,
+            tool_results_reminder=tool_results_reminder,
+            repeated_tool_calls_reminder=repeated_tool_calls_reminder,
+        )
+
     async def _build_device_asset_hint(self) -> Optional[str]:
         """Return concise device-aware tool guidance plus enabled device summary."""
         try:
@@ -2161,15 +2451,22 @@ class SessionRunner:
             "如果同类设备有多个候选，不要猜测，先询问用户选择。"
         )
 
-    async def _build_sandbox_prompt(self, agent: AgentInfo) -> Optional[str]:
+    async def _build_sandbox_prompt(
+        self,
+        agent: AgentInfo,
+        *,
+        config_data: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """Build sandbox context prompt when sandboxing is active."""
         try:
-            from flocks.config import Config
             from flocks.session.core.session_state import get_main_session_id
             from flocks.sandbox.system_prompt import build_sandbox_system_prompt
 
-            cfg = await Config.get()
-            config_data = cfg.model_dump(by_alias=True, exclude_none=True)
+            if config_data is None:
+                from flocks.config import Config
+
+                config = await Config.get()
+                config_data = config.model_dump(by_alias=True, exclude_none=True)
             session_key = self.session.id
             main_session_key = get_main_session_id() or self.session.id
             return await build_sandbox_system_prompt(
@@ -2440,6 +2737,17 @@ class SessionRunner:
             }
         }
 
+        if type(exception).__name__ == "StreamToolArgumentsTruncatedError":
+            error_dict["data"].update({
+                "isRetryable": True,
+                "streamToolArgumentsTruncated": True,
+                "toolCallID": getattr(exception, "tool_call_id", None),
+                "toolName": getattr(exception, "tool_name", None),
+                "finishReason": getattr(exception, "finish_reason", None),
+                "argumentsLength": getattr(exception, "arguments_len", None),
+                "argumentsPreview": getattr(exception, "arguments_preview", None),
+            })
+
         transport_exception = _find_retryable_transport_exception(exception)
         if transport_exception is not None:
             transport_type = type(transport_exception).__name__
@@ -2681,14 +2989,26 @@ class SessionRunner:
 
     def _build_system_message_content(
         self,
-        system_prompts: List[str],
+        system_prompts: List[SystemPromptBlock] | List[str],
     ) -> str | list[dict[str, Any]]:
         """Format system prompts for the active provider.
 
         Anthropic supports structured system blocks, which lets us place a
         conservative cache breakpoint before the dynamic runtime tail.
         """
-        prompt_parts = [prompt for prompt in system_prompts if prompt and prompt.strip()]
+        typed_blocks = [
+            block
+            for block in system_prompts
+            if isinstance(block, SystemPromptBlock) and block.content.strip()
+        ]
+        if typed_blocks:
+            prompt_parts = [block.content for block in typed_blocks]
+        else:
+            prompt_parts = [
+                prompt
+                for prompt in system_prompts
+                if isinstance(prompt, str) and prompt.strip()
+            ]
         if not prompt_parts:
             return ""
 
@@ -2696,7 +3016,19 @@ class SessionRunner:
         if "anthropic" not in provider_lower:
             return "\n\n".join(prompt_parts)
 
-        cache_break_index = max(0, len(prompt_parts) - 3)
+        if typed_blocks:
+            first_runtime_tail = next(
+                (
+                    index
+                    for index, block in enumerate(typed_blocks)
+                    if block.cache_scope == "runtime_tail"
+                ),
+                len(typed_blocks),
+            )
+            cache_break_index = max(0, first_runtime_tail - 1)
+        else:
+            # Compatibility for callers still passing plain strings.
+            cache_break_index = max(0, len(prompt_parts) - 3)
         blocks: list[dict[str, Any]] = []
         for index, prompt in enumerate(prompt_parts):
             block: dict[str, Any] = {
@@ -2711,7 +3043,7 @@ class SessionRunner:
     async def _to_chat_messages(
         self,
         messages: List[MessageInfo],
-        system_prompts: List[str],
+        system_prompts: List[SystemPromptBlock] | List[str],
     ) -> List[ChatMessage]:
         """
         Convert messages to chat format with tool calls.
@@ -3701,7 +4033,11 @@ class SessionRunner:
             "agent": agent.name,
         })
 
-        await tool_accumulator.flush_remaining(stream_finish_reason)
+        try:
+            await tool_accumulator.flush_remaining(stream_finish_reason)
+        except Exception:
+            await processor.drain_parallel_tool_calls()
+            raise
 
         if stream_text_rewriter is not None:
             trailing_text = stream_text_rewriter.flush()
@@ -3907,13 +4243,52 @@ class SessionRunner:
         except Exception as _tr_err:
             log.debug("runner.observability.trace_end_failed", {"error": str(_tr_err)})
 
+    def _permission_ruleset_for_agent(self, agent: AgentInfo) -> List[Any]:
+        """Combine agent and session rules in effective priority order."""
+        from flocks.permission.helpers import merge
+        from flocks.permission.rule import (
+            PermissionLevel,
+            PermissionRule,
+            PermissionScope,
+        )
+
+        session_rules = []
+        for rule in getattr(self.session, "permission", None) or []:
+            session_rules.append(PermissionRule(
+                permission=rule.permission,
+                level=PermissionLevel(rule.action),
+                scope=PermissionScope.PATTERN,
+                pattern=rule.pattern,
+            ))
+        return merge(list(getattr(agent, "permission", None) or []), session_rules)
+
+    async def _effective_permission_ruleset(self) -> List[Any]:
+        ruleset = getattr(self, "_turn_permission_ruleset", None)
+        if ruleset is not None:
+            return ruleset
+        agent_name = getattr(self.session, "agent", None) or getattr(
+            self,
+            "agent_name",
+            None,
+        )
+        if not agent_name:
+            return []
+        agent = await Agent.get(agent_name) or await Agent.get("rex")
+        return self._permission_ruleset_for_agent(agent)
+
     async def _handle_permission(self, request) -> None:
         """Handle permission request."""
-        if self.callbacks.on_permission_request:
-            allowed = await self.callbacks.on_permission_request(request)
-            if not allowed:
-                raise PermissionError(f"Permission denied: {request.permission}")
-            return
+        from flocks.permission.next import PermissionNext
+
+        patterns = list(getattr(request, "patterns", None) or [])
+        ruleset = await self._effective_permission_ruleset()
+        configured_action = PermissionNext.evaluate_request(
+            request.permission,
+            patterns,
+            ruleset,
+        )
+        metadata = dict(getattr(request, "metadata", None) or {})
+        deny_only_preflight = metadata.get("reason") == "question_tool"
 
         tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
         if self.callbacks.event_publish_callback:
@@ -3922,30 +4297,40 @@ class SessionRunner:
                 "step": self._step,
                 "toolName": getattr(request, "permission", ""),
                 "alwaysLoad": tool_metadata.always_load,
-                "patterns": list(getattr(request, "patterns", None) or []),
+                "patterns": patterns,
             })
+
+        if configured_action == "deny":
+            raise PermissionError(f"Permission denied: {request.permission}")
+        if configured_action == "allow":
+            return
+        if deny_only_preflight:
+            return
+
+        if self.callbacks.on_permission_request:
+            allowed = await self.callbacks.on_permission_request(request)
+            if not allowed:
+                raise PermissionError(f"Permission denied: {request.permission}")
+            return
 
         from flocks.permission.interactive import legacy_tool_permission_prompt_required
 
-        if not legacy_tool_permission_prompt_required():
+        if configured_action is None and not legacy_tool_permission_prompt_required():
             return
 
-        from flocks.permission.next import PermissionNext
-
-        metadata = dict(getattr(request, "metadata", None) or {})
         metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
         metadata.setdefault("sessionID", self.session.id)
 
         reply = await PermissionNext.ask(
             session_id=self.session.id,
             permission=request.permission,
-            patterns=list(getattr(request, "patterns", None) or []),
-            ruleset=[],
+            patterns=patterns,
+            ruleset=ruleset,
             metadata=metadata,
             always=list(getattr(request, "always", None) or []),
             tool={"name": request.permission},
         )
-        if reply in {"deny", "reject", "never"}:
+        if reply in {"deny", "deny_session", "reject", "never"}:
             raise PermissionError(f"Permission denied: {request.permission}")
 
 

@@ -20,6 +20,7 @@ from flocks.provider.types import (
     ModelSetting,
     ModelType,
 )
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
 
@@ -503,6 +504,7 @@ async def get_model_settings(provider_id: str, model_id: str):
     summary="Update model settings",
     description="Enable/disable a model or set default parameters",
 )
+@serialized_config_mutation
 async def update_model_settings(
     provider_id: str, model_id: str, body: UpdateModelSettingRequest
 ) -> ModelSetting:
@@ -522,6 +524,7 @@ async def update_model_settings(
     summary="Delete model definition",
     description="Delete a model from a provider (removes from flocks.json and runtime)",
 )
+@serialized_config_mutation
 async def delete_model_definition(
     provider_id: str, model_id: str,
 ):

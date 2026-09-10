@@ -24,56 +24,56 @@ const EMPTY_STATS = {
   eventRange: { start: '', end: '', label: '', source: '' },
   generatedAt: '',
   latencyMs: 0,
-  sourceStatus: { workflowRoot: '', denoise: [], triage: [], denoiseFiles: [], triageFiles: [], missing: [] },
+  sourceStatus: { workflowRoot: '', denoise: [], triage: [], denoiseFiles: [], triageFiles: [], missing: [], metricQuality: {}, triageQuality: {} },
   denoise: {
-    totalRaw: 0,
-    totalNormalized: 0,
-    afterFilter: 0,
-    totalUnique: 0,
-    filterRemoved: 0,
-    dedupRemoved: 0,
-    duplicates: 0,
-    duplicateRate: 0,
-    dedupRate: 0,
-    uniqueRate: 0,
-    files: 0,
-    parseErrors: 0,
+    totalRaw: null,
+    totalNormalized: null,
+    afterFilter: null,
+    totalUnique: null,
+    filterRemoved: null,
+    dedupRemoved: null,
+    duplicates: null,
+    duplicateRate: null,
+    dedupRate: null,
+    uniqueRate: null,
+    files: null,
+    parseErrors: null,
   },
   triage: {
-    totalRecords: 0,
-    newTriaged: 0,
-    cacheHit: 0,
-    triageFailed: 0,
-    followersReused: 0,
-    attackTotal: 0,
-    attackSuccess: 0,
-    attack: 0,
-    attackFailed: 0,
-    benign: 0,
-    unknown: 0,
-    attackRate: 0,
-    successRate: 0,
-    cacheRate: 0,
-    coverageRate: 0,
-    avgTriageMs: 0,
-    files: 0,
-    parseErrors: 0,
+    totalRecords: null,
+    newTriaged: null,
+    cacheHit: null,
+    triageFailed: null,
+    followersReused: null,
+    attackTotal: null,
+    attackSuccess: null,
+    attack: null,
+    attackFailed: null,
+    benign: null,
+    unknown: null,
+    attackRate: null,
+    successRate: null,
+    cacheRate: null,
+    coverageRate: null,
+    avgTriageMs: null,
+    files: null,
+    parseErrors: null,
   },
   pipeline: {
-    raw: 0,
-    unique: 0,
-    triageTotal: 0,
-    attackTotal: 0,
-    reductionSaved: 0,
-    llmSaved: 0,
-    uniqueRate: 0,
-    workloadReuseRate: 0,
-    coverageRate: 0,
-    attackRate: 0,
-    successRate: 0,
+    raw: null,
+    unique: null,
+    triageTotal: null,
+    attackTotal: null,
+    reductionSaved: null,
+    llmSaved: null,
+    uniqueRate: null,
+    workloadReuseRate: null,
+    coverageRate: null,
+    attackRate: null,
+    successRate: null,
   },
   sources: [],
-  closedLoop: { autoClosed: 0, resolved: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
+  closedLoop: { autoClosed: null, resolved: null, manualDecision: null, pending: null, resolutionRate: null },
   tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [], dailyLabels: [], source: '' },
   verdicts: [],
   attackProfile: [],
@@ -379,6 +379,69 @@ function createTaskCenterState() {
     scheduledTasks: [],
     workflows: [],
     error: '',
+  };
+}
+
+function createAiTasksState() {
+  return {
+    connection: 'initializing',
+    generatedAt: '',
+    reason: '',
+    summary: {
+      active: 0,
+      running: 0,
+      waiting: 0,
+      stale: 0,
+      disabled: 0,
+      returned: 0,
+      truncated: false,
+    },
+    tasks: [],
+  };
+}
+
+function createMockAiTasksState() {
+  const now = Date.now();
+  const tasks = [
+    {
+      taskId: 'workflow:stream_alert_triage:mock-triage-run-002',
+      workflowId: 'stream_alert_triage',
+      executionId: 'mock-triage-run-002',
+      stage: 'triage',
+      status: 'running',
+      startedAt: now - 6200,
+      title: '远程命令执行攻击（Mock）',
+      sourceType: 'tdp',
+      counts: { raw: null },
+      dataQuality: 'pending',
+      progress: { mode: 'steps', current: 2, total: 4, percent: 0.5, label: '2 / 4 步' },
+    },
+    {
+      taskId: 'workflow:stream_alert_denoise:mock-denoise-run-004',
+      workflowId: 'stream_alert_denoise',
+      executionId: 'mock-denoise-run-004',
+      stage: 'denoise',
+      status: 'queued',
+      startedAt: now - 18000,
+      title: '端口扫描聚类（Mock）',
+      sourceType: 'qingteng',
+      counts: { raw: 12 },
+      dataQuality: 'complete',
+      progress: { mode: 'queued', current: 0, total: 4, percent: null, label: '等待执行' },
+    },
+  ];
+  return {
+    ...createAiTasksState(),
+    connection: 'online',
+    generatedAt: new Date(now).toISOString(),
+    summary: {
+      ...createAiTasksState().summary,
+      active: tasks.length,
+      running: 1,
+      waiting: 1,
+      returned: tasks.length,
+    },
+    tasks,
   };
 }
 
@@ -712,30 +775,91 @@ function refreshLabel(value) {
 }
 
 function mergeStats(raw) {
+  const sourceStatus = {
+    ...EMPTY_STATS.sourceStatus,
+    ...((raw || {}).sourceStatus || {}),
+    metricQuality: {
+      ...(EMPTY_STATS.sourceStatus.metricQuality || {}),
+      ...((raw || {}).sourceStatus?.metricQuality || {}),
+    },
+    triageQuality: {
+      ...(EMPTY_STATS.sourceStatus.triageQuality || {}),
+      ...((raw || {}).sourceStatus?.triageQuality || {}),
+    },
+  };
+  const metricQuality = sourceStatus.metricQuality || {};
+  const triageQuality = sourceStatus.triageQuality || {};
+  const denoiseMetricsUnavailable = metricQuality.metricsAvailable === false;
+  const triageMetricsUnavailable = triageQuality.metricsAvailable === false;
+  const sourceMetricsUnavailable = denoiseMetricsUnavailable
+    || metricQuality.sourceMetricsAvailable === false;
   const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
-  const processedTotal = Math.max(Number(denoise.totalRaw || 0), 0);
-  denoise.totalNormalized = processedTotal;
+  if (denoiseMetricsUnavailable) {
+    for (const key of [
+      'totalRaw', 'totalNormalized', 'afterFilter', 'totalUnique',
+      'filterRemoved', 'dedupRemoved', 'duplicates', 'duplicateRate',
+      'dedupRate', 'uniqueRate',
+    ]) denoise[key] = null;
+    if (metricQuality.dataAvailable === false) denoise.files = null;
+  }
+  const triage = { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) };
+  if (triageMetricsUnavailable) {
+    for (const key of Object.keys(EMPTY_STATS.triage)) triage[key] = null;
+  }
+  const pipeline = { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) };
+  if (denoiseMetricsUnavailable) {
+    for (const key of ['raw', 'unique', 'reductionSaved', 'uniqueRate', 'coverageRate']) {
+      pipeline[key] = null;
+    }
+  }
+  if (triageMetricsUnavailable) {
+    for (const key of [
+      'triageTotal', 'attackTotal', 'llmSaved', 'workloadReuseRate',
+      'attackRate', 'successRate',
+    ]) pipeline[key] = null;
+  }
+  const timeline = { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) };
+  if (denoiseMetricsUnavailable) {
+    timeline.denoiseRaw = [];
+    timeline.denoiseUnique = [];
+  }
+  if (triageMetricsUnavailable) {
+    timeline.triageTotal = [];
+    timeline.triageAttack = [];
+  }
+  const sources = Array.isArray((raw || {}).sources) ? raw.sources : [];
+  const closedLoop = { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) };
+  if (triageMetricsUnavailable) {
+    for (const key of Object.keys(EMPTY_STATS.closedLoop)) closedLoop[key] = null;
+  }
   return {
     ...EMPTY_STATS,
     ...(raw || {}),
-    sourceStatus: { ...EMPTY_STATS.sourceStatus, ...((raw || {}).sourceStatus || {}) },
+    sourceStatus,
     denoise,
-    triage: { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) },
-    pipeline: { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) },
-    closedLoop: { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) },
+    triage,
+    pipeline,
+    closedLoop,
     tokenUsage: { ...EMPTY_STATS.tokenUsage, ...((raw || {}).tokenUsage || {}) },
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
-    timeline: { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) },
-    sources: [
-      { key: 'ndr', label: 'NDR', value: processedTotal, rate: processedTotal > 0 ? 1 : 0, active: processedTotal > 0 },
-      { key: 'other', label: '其他接入', value: 0, rate: 0, active: false },
-    ],
+    timeline,
+    sources: sourceMetricsUnavailable
+      ? sources.map((item) => ({ ...item, value: null, rate: null, active: false }))
+      : sources,
+    verdicts: triageMetricsUnavailable
+      ? ((raw || {}).verdicts || []).map((item) => ({ ...item, value: null }))
+      : ((raw || {}).verdicts || []),
+    attackProfile: triageMetricsUnavailable ? [] : ((raw || {}).attackProfile || []),
+    topThreatTypes: triageMetricsUnavailable ? [] : ((raw || {}).topThreatTypes || []),
+    severityLevels: triageMetricsUnavailable ? [] : ((raw || {}).severityLevels || []),
+    riskLevels: triageMetricsUnavailable ? [] : ((raw || {}).riskLevels || []),
   };
 }
 
 function fullNumber(value) {
-  const n = Number(value || 0);
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  const n = Number(value);
   return new Intl.NumberFormat('zh-CN').format(n);
 }
 
@@ -771,7 +895,8 @@ function workflowDenoiseActivity(callCount, delta, generatedAt, workflowEvent) {
 }
 
 function compactNumber(value) {
-  const n = Number(value || 0);
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  const n = Number(value);
   if (Math.abs(n) >= 100000000) return `${trim(n / 100000000)}亿`;
   if (Math.abs(n) >= 10000) return `${trim(n / 10000)}万`;
   return fullNumber(n);
@@ -785,7 +910,8 @@ function formatTokenVolume(value) {
 
 function AnimatedNumber({ value, format, tag = 'span', className, duration = 900 }) {
   const { useEffect, useRef, useState } = getReact();
-  const target = Number(value || 0);
+  const unavailable = value === null || value === undefined || !Number.isFinite(Number(value));
+  const target = unavailable ? 0 : Number(value);
   const current = useRef(0);
   const [display, setDisplay] = useState(0);
   const formatter = format || ((number) => compactNumber(Math.round(number)));
@@ -813,8 +939,8 @@ function AnimatedNumber({ value, format, tag = 'span', className, duration = 900
 
   return h(tag, {
     className: cx('animated-number', className),
-    title: formatter(target),
-  }, formatter(display));
+    title: unavailable ? '数据不可用' : formatter(target),
+  }, unavailable ? '--' : formatter(display));
 }
 
 function trim(value) {
@@ -822,7 +948,8 @@ function trim(value) {
 }
 
 function pct(value) {
-  return `${Math.round(Number(value || 0) * 1000) / 10}%`;
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  return `${Math.round(Number(value) * 1000) / 10}%`;
 }
 
 function ratio(part, total) {
@@ -914,7 +1041,9 @@ function SourceColumn({ stats }) {
   return h('div', { className: 'column left-col' }, [
     h(Panel, { key: 'sources', title: '多源告警接入', meta: `${stats.denoise.files || 0} 个降噪批次` }, [
       h('div', { className: 'source-list', key: 'list' }, stats.sources.map((item) => {
-        const width = `${Math.max(4, Math.round((item.rate || 0) * 100))}%`;
+        const width = item.value === null || item.value === undefined
+          ? '0%'
+          : `${Math.max(4, Math.round((item.rate || 0) * 100))}%`;
         return h('div', { className: 'source-row', key: item.key }, [
           h('div', { className: cx('source-node', item.active && 'active'), key: 'node' }),
           h('div', { className: 'source-main', key: 'main' }, [
@@ -1762,6 +1891,9 @@ function laneLinkStatus(kind, event, peerLane) {
 }
 
 function triageContextText(stats) {
+  if (stats?.sourceStatus?.triageQuality?.metricsAvailable === false) {
+    return '窗口研判数据不可用';
+  }
   const triage = stats?.triage || EMPTY_STATS.triage;
   const total = Math.max(Number(triage.totalRecords || 0), 0);
   const newTriaged = Math.max(Number(triage.newTriaged || 0), 0);
@@ -1841,8 +1973,10 @@ function CommandGraph({ stats, activity }) {
   const activeSeverityTone = severityToneFor(activity.triage.current);
   const recentSeverityTone = severityToneFor(activity.triage.last);
   const activeSources = [...(stats.sources || [])].sort((a, b) => Number(b.value || 0) - Number(a.value || 0)).slice(0, 2);
-  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: 0 });
-  const severities = severityRows(stats);
+  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: null });
+  const triageMetricsAvailable = Boolean(stats.generatedAt)
+    && stats.sourceStatus?.triageQuality?.metricsAvailable !== false;
+  const severities = severityRows(stats, triageMetricsAvailable);
   return h('section', { className: cx('command-graph', denoiseActive && 'denoise-running', triageActive && 'triage-running', `load-${activity.mode}`) }, [
     h(CommandConnections, { key: 'links' }),
     h('div', { className: 'source-stack', key: 'sources' }, activeSources.map((source) => h('div', { className: 'command-source', key: source.key }, [
@@ -1930,7 +2064,7 @@ function CommandMetrics({ stats }) {
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
-    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
+    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate === null ? null : stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
     h(TokenUsageMetric, { tokenUsage, key: 'tokens' }),
   ]);
 }
@@ -2414,56 +2548,83 @@ function CommandTaskCenterPanel({ taskCenter }) {
   ]);
 }
 
-function CommandAiTaskPanel({ activity, timeFilter }) {
-  const tasks = buildEventQueueTasks(activity, timeFilter);
-  const filterTransitionKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
-  const visibleTasks = useAnimatedTaskWindow(
-    tasks.filter((task) => task.state !== 'completed'),
-    filterTransitionKey,
-  );
-  const counts = {
-    processing: visibleTasks.filter((task) => task.state === 'processing').length,
-    waiting: visibleTasks.filter((task) => task.state === 'waiting').length,
-  };
-  const queueCount = visibleTasks.length;
-  const banner = activity.connection === 'error'
-    ? '处理任务连接异常，正在重试'
-    : counts.processing
-      ? `AI 正在并行处理 ${counts.processing} 个任务`
-      : counts.waiting ? '最新 10 条待处理任务' : '等待新的降噪或研判任务';
+function WorkflowTaskProgress({ task }) {
+  const progress = task.progress || {};
+  if (progress.mode !== 'steps' || !Number.isFinite(Number(progress.percent))) {
+    return h('div', { className: 'event-rail-progress indeterminate', 'aria-label': 'AI 任务执行中' }, [
+      h('span', { className: 'event-rail-progress-track', key: 'track' }, [h('i', { key: 'fill' })]),
+      h('small', { key: 'label' }, progress.label || '执行中'),
+    ]);
+  }
+  const percent = Math.max(Math.min(Number(progress.percent), 1), 0);
+  return h('div', { className: 'event-rail-progress', 'aria-label': 'AI 任务步骤进度' }, [
+    h('span', { className: 'event-rail-progress-track', style: { '--queue-progress': percent }, key: 'track' }, [h('i', { key: 'fill' })]),
+    h('small', { key: 'label' }, progress.label || `${Math.round(percent * 100)}%`),
+  ]);
+}
+
+function CommandAiTaskPanel({ aiTasks }) {
+  const summary = { ...createAiTasksState().summary, ...(aiTasks.summary || {}) };
+  const visibleTasks = (aiTasks.tasks || []).slice(0, EVENT_RAIL_TASK_LIMIT);
+  const banner = aiTasks.connection === 'error' || aiTasks.connection === 'unavailable'
+    ? '处理任务数据不可用，正在重试'
+    : summary.running && summary.waiting
+      ? `正在处理 ${summary.running} 个，等待 ${summary.waiting} 个`
+      : summary.running
+        ? `AI 正在处理 ${summary.running} 个任务`
+        : summary.waiting
+          ? `${summary.waiting} 个任务等待处理`
+          : summary.stale
+            ? `发现 ${summary.stale} 个失联任务，已移出活跃列表`
+            : '当前没有运行或等待中的 AI 任务';
   return [
-    h('div', { className: cx('event-update-banner', activity.connection === 'error' && 'warn'), key: 'banner' }, banner),
+    h('div', { className: cx('event-update-banner', ['error', 'unavailable'].includes(aiTasks.connection) && 'warn'), key: 'banner' }, banner),
+    summary.truncated
+      ? h('small', { className: 'event-rail-limit-note', key: 'limit' }, `共 ${summary.active} 条活跃任务，当前展示 ${visibleTasks.length} 条`)
+      : null,
     h('div', { className: 'event-rail-list', key: 'list' }, visibleTasks.length ? visibleTasks.map((task) => {
-      const event = task.event;
-      const sampleCount = Math.max(Number(task.denoise?.sampleCount || 1), 1);
-      const title = `${event?.alert?.threatName || '未知告警'}${sampleCount > 1 ? ` × ${sampleCount}` : ''}`;
+      const processing = task.status === 'running';
+      const waiting = ['queued', 'pending'].includes(task.status);
+      const title = task.title || (task.stage === 'triage' ? '研判任务' : '降噪任务');
       const stageLabel = task.stage === 'triage'
-        ? task.state === 'waiting' ? '待研判' : '智能研判'
-        : task.state === 'waiting' ? '待降噪' : '智能降噪';
-      const stateLabel = task.state === 'processing'
-        ? '处理中'
-        : '等待处理';
-      const detail = event?.triggerSource === 'workflow_execution'
-        ? task.stage === 'triage'
-          ? task.state === 'processing' ? '研判工作流处理中' : '研判工作流待处理'
-          : event.result?.isDuplicate ? '重复告警已收敛' : '降噪处理完成'
-        : task.state === 'processing'
-          ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
-          : '等待 AI 处理';
-      const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
+        ? waiting ? '待研判' : '智能研判'
+        : waiting ? '待降噪' : '智能降噪';
+      const stateLabel = processing ? '处理中' : '等待处理';
+      const unverifiedZero = task.stage === 'denoise'
+        && Number(task.counts?.raw) === 0
+        && !task.emptyInput
+        && task.rawCountSource !== 'workflow_input';
+      const qualityDetail = unverifiedZero
+        ? ' · 原始条数待校验'
+        : task.dataQuality === 'invalid'
+        ? ' · 指标格式异常'
+        : task.dataQuality === 'empty-input'
+          ? ' · 空输入任务'
+        : task.dataQuality === 'missing'
+          ? ' · 原始条数未知'
+          : task.dataQuality === 'pending' && (task.counts?.raw === null || task.counts?.raw === undefined)
+            ? ' · 原始条数待生成'
+            : '';
+      const rawDetail = task.stage === 'denoise' && !task.emptyInput && !unverifiedZero && task.counts?.raw !== null && task.counts?.raw !== undefined
+        ? ` · 原始 ${task.counts.raw} 条`
+        : '';
+      const detail = task.stage === 'triage'
+        ? processing ? '研判工作流执行中' : '等待研判工作流调度'
+        : processing ? '降噪工作流执行中' : '等待降噪工作流调度';
+      const hasExecution = Boolean(task.workflowId && task.executionId);
       const handleOpen = () => {
-        if (hasExecution) openWorkflowExecutionFromEvent(event);
+        if (hasExecution) openWorkflowExecution(task.workflowId, task.executionId);
       };
       const handleKeyDown = (keyboardEvent) => {
         if (!hasExecution) return;
         if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
           keyboardEvent.preventDefault();
-          openWorkflowExecutionFromEvent(event);
+          openWorkflowExecution(task.workflowId, task.executionId);
         }
       };
       return h('article', {
-        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, hasExecution && 'clickable'),
-        key: task.key,
+        className: cx('event-rail-item', processing ? 'state-processing' : 'state-waiting', `kind-${task.stage}`, hasExecution && 'clickable'),
+        key: task.taskId,
         role: hasExecution ? 'button' : undefined,
         tabIndex: hasExecution ? 0 : undefined,
         title: hasExecution ? '打开执行详情' : undefined,
@@ -2473,20 +2634,19 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
         h('div', { className: 'event-rail-meta', key: 'meta' }, [
           h('span', { className: cx('event-queue-kind', `kind-${task.stage}`), key: 'kind' }, stageLabel),
           h('span', { className: 'event-stage', key: 'stage' }, stateLabel),
-          h('time', { key: 'time' }, eventTimeLabel(event?.occurredAt)),
+          h('time', { key: 'time' }, eventTimeLabel(task.startedAt)),
         ]),
         h('strong', { title, key: 'title' }, title),
-        h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)),
-        h('small', { key: 'result' }, hasExecution ? `${detail} · 查看执行` : detail),
-        task.state === 'processing' ? h(EventQueueProgress, { event, key: 'progress' }) : null,
+        h('span', { key: 'endpoint' }, [task.srcIp, task.dstIp].filter(Boolean).join(' → ') || '未提供网络端点'),
+        h('small', { key: 'result' }, `${detail}${rawDetail}${qualityDetail}${hasExecution ? ' · 查看执行' : ''}`),
+        processing ? h(WorkflowTaskProgress, { task, key: 'progress' }) : null,
       ]);
-    }) : h('div', { className: 'event-rail-empty' }, '等待新的降噪或研判任务')),
+    }) : h('div', { className: 'event-rail-empty' }, '暂无活跃的降噪或研判任务')),
   ];
 }
 
-function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
-  const tasks = buildEventQueueTasks(activity, timeFilter);
-  const queueCount = tasks.filter((task) => task.state !== 'completed').length;
+function CommandEventRail({ aiTasks, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
+  const queueCount = Math.max(Number(aiTasks.summary?.active || 0), 0);
   const taskCenterCount = Number(taskCenter.sessionCount || 0);
   const content = collapsed ? [] : [
     h('div', { className: 'event-rail-head rail-view-head', key: 'head' }, [
@@ -2512,7 +2672,7 @@ function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange
     ]),
     view === 'taskCenter'
       ? h(CommandTaskCenterPanel, { taskCenter, key: 'taskCenterContent' })
-      : h(CommandAiTaskPanel, { activity, timeFilter, key: 'aiTaskContent' }),
+      : h(CommandAiTaskPanel, { aiTasks, key: 'aiTaskContent' }),
   ];
   return h('aside', { className: cx('command-event-rail', collapsed && 'collapsed') }, [
     collapsed ? null : h('div', {
@@ -2554,6 +2714,7 @@ export default function Page() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activity, setActivity] = useState(createActivityState);
+  const [aiTasks, setAiTasks] = useState(createAiTasksState);
   const [taskCenter, setTaskCenter] = useState(createTaskCenterState);
   const activityCursor = useRef('');
   const workflowProgressByFilter = useRef(new Map());
@@ -2743,6 +2904,50 @@ export default function Page() {
   useEffect(() => {
     let stopped = false;
     let timer = 0;
+
+    const schedule = (delay) => {
+      if (!stopped) timer = window.setTimeout(() => void poll(), delay);
+    };
+
+    const poll = async () => {
+      if (stopped) return;
+      if (document.hidden) {
+        schedule(ACTIVITY_POLL_MS);
+        return;
+      }
+      try {
+        const response = await getApi().page.get('/ai-tasks', { params: {} });
+        const payload = response.data || {};
+        if (!stopped) {
+          setAiTasks({
+            ...createAiTasksState(),
+            ...payload,
+            summary: { ...createAiTasksState().summary, ...(payload.summary || {}) },
+            tasks: Array.isArray(payload.tasks) ? payload.tasks : [],
+          });
+        }
+      } catch (aiTaskError) {
+        if (!stopped) {
+          setAiTasks((previous) => ({
+            ...previous,
+            connection: 'error',
+            reason: aiTaskError instanceof Error ? aiTaskError.message : 'ai tasks api failed',
+          }));
+        }
+      }
+      schedule(ACTIVITY_POLL_MS);
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
     let statsTimer = 0;
     let lastStatsRefreshAt = 0;
     let retryDelay = ACTIVITY_POLL_MS;
@@ -2787,7 +2992,8 @@ export default function Page() {
             : (payload.events || []);
           const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
           const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
-          for (const workflowEvent of workflowEvents) {
+          const activeWorkflowEvents = workflowEvents.filter(isRunningWorkflowEvent);
+          for (const workflowEvent of activeWorkflowEvents) {
             const hasExecution = Boolean(workflowIdFromEvent(workflowEvent) && executionIdFromWorkflowEvent(workflowEvent));
             if (hasExecution) {
               incomingEvents.push(workflowEvent);
@@ -2819,9 +3025,9 @@ export default function Page() {
             workflowProgressByFilter.current.set(workflowFilterKey, { callCount, latestStartedAt });
           }
           const incomingRecentEvents = bootstrap
-            ? [...(payload.recentEvents || []), ...workflowEvents]
+            ? [...(payload.recentEvents || []), ...activeWorkflowEvents]
             : workflowChanged
-              ? [...rawIncomingEvents, ...workflowEvents]
+              ? [...rawIncomingEvents, ...activeWorkflowEvents]
               : rawIncomingEvents;
           setActivity((previous) => enqueueActivity(
             previous,
@@ -2924,6 +3130,14 @@ export default function Page() {
     ),
     [mockDashboardEnabled, taskCenter],
   );
+  const displayAiTasks = useMemo(
+    () => (
+      mockDashboardEnabled && !aiTasks.tasks.length
+        ? createMockAiTasksState()
+        : aiTasks
+    ),
+    [aiTasks, mockDashboardEnabled],
+  );
   const displayActivityBusy = Boolean(
     displayActivity.denoise.current
     || displayActivity.triage.current
@@ -2932,6 +3146,46 @@ export default function Page() {
     || displayActivity.batch?.receivedCount
     || displayActivity.batch?.triageUpdatedCount
   );
+  const metricQuality = stats.sourceStatus?.metricQuality || {};
+  const triageQuality = stats.sourceStatus?.triageQuality || {};
+  const metricIssues = [];
+  if (Number(metricQuality.invalidExecutionCount || 0) > 0) {
+    metricIssues.push(`${metricQuality.invalidExecutionCount} 次指标格式异常`);
+  }
+  if (Number(metricQuality.errorExecutionCount || 0) > 0) {
+    metricIssues.push(`${metricQuality.errorExecutionCount} 次执行失败`);
+  }
+  if (Number(metricQuality.unprocessedInputCount || 0) > 0) {
+    metricIssues.push(`${metricQuality.unprocessedInputCount} 条输入未完成归一化`);
+  }
+  const sourceCoverageRate = Number(metricQuality.sourceCoverageRate);
+  if (metricQuality.metricsAvailable && Number.isFinite(sourceCoverageRate) && sourceCoverageRate < 1) {
+    metricIssues.push(`来源覆盖 ${Math.round(sourceCoverageRate * 1000) / 10}%`);
+  }
+  const metricQualityWarning = !stats.generatedAt
+    ? ''
+    : metricQuality.dataAvailable === false || metricQuality.status === 'unavailable'
+      ? '降噪统计数据源不可用，相关数字已隐藏；系统正在重试'
+      : metricQuality.status === 'stale'
+        ? '降噪统计查询失败，当前显示上次缓存数据，可能已过期'
+      : metricQuality.status === 'partial' && !metricQuality.metricsAvailable
+        ? `降噪指标校验未通过，相关数字已隐藏${metricIssues.length ? `：${metricIssues.join('；')}` : ''}`
+    : metricQuality.metricsAvailable
+    ? metricQuality.status === 'partial'
+      ? `降噪指标部分可用${metricIssues.length ? `：${metricIssues.join('；')}` : ''}${metricQuality.coverageStartedAt ? `；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}` : ''}`
+      : metricIssues.length
+        ? `降噪指标存在异常：${metricIssues.join('；')}`
+        : ''
+    : metricQuality.status === 'legacy-partial'
+      ? `精确降噪指标尚未覆盖当前时间范围，相关数字已隐藏；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
+      : '精确降噪指标尚不可用，相关数字已隐藏；新指标链路产生数据后将自动显示';
+  const triageQualityWarning = !stats.generatedAt || triageQuality.metricsAvailable !== false
+    ? ''
+    : triageQuality.unavailableReason === 'soc_db_missing'
+      ? 'SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试'
+      : triageQuality.unavailableReason === 'soc_dashboard_schema_unavailable'
+        ? 'SOC 统计结构尚未就绪，研判、事件与闭环数字已隐藏；系统正在重试'
+      : 'SOC 研判统计查询失败，研判、事件与闭环数字已隐藏；系统正在重试';
 
   return h('div', {
     className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
@@ -2953,6 +3207,8 @@ export default function Page() {
       activity: displayActivity,
     }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
+    metricQualityWarning ? h('div', { className: 'quality-banner', key: 'quality' }, metricQualityWarning) : null,
+    triageQualityWarning ? h('div', { className: 'quality-banner', key: 'triage-quality' }, triageQualityWarning) : null,
     h('main', {
       className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
       key: 'main',
@@ -2963,8 +3219,7 @@ export default function Page() {
       ]),
       h(CommandEventRail, {
         key: 'events',
-        activity: displayActivity,
-        timeFilter,
+        aiTasks: displayAiTasks,
         taskCenter: displayTaskCenter,
         view: rightRailView,
         onViewChange: setRightRailView,
@@ -2995,6 +3250,15 @@ const CSS = `
   overflow-x: auto;
 }
 .adtd-root * { box-sizing: border-box; }
+.quality-banner {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(255,176,32,.34);
+  border-radius: 6px;
+  color: #f1c67d;
+  background: rgba(139,88,22,.16);
+  font-size: 11px;
+}
 .adtd-header {
   position: relative;
   display: grid;
@@ -5255,6 +5519,12 @@ const CSS = `
 }
 .event-update-banner:before { content: "ⓘ"; margin-right: 7px; color: #6ba4fb; }
 .event-update-banner.warn { border-color: rgba(255,174,52,.42); color: #f1c67d; background: rgba(139,88,22,.2); }
+.event-rail-limit-note {
+  display: block;
+  margin: 5px 14px 0;
+  color: rgba(170,222,255,.62);
+  font-size: 9px;
+}
 .task-center-panel {
   min-height: 0;
   padding: 8px 14px 18px;
@@ -5681,6 +5951,11 @@ const CSS = `
   box-shadow: 0 0 10px #73e9ff;
   transform: translate(50%, -50%);
 }
+.event-rail-progress.indeterminate .event-rail-progress-track i {
+  width: 38%;
+  transform: translateX(-120%);
+  animation: commandTaskIndeterminate 1.4s ease-in-out infinite;
+}
 .event-rail-progress > small {
   color: #9a8eff;
   font-size: 9px;
@@ -5694,6 +5969,10 @@ const CSS = `
   font-size: 11px;
 }
 @keyframes commandFlow { to { stroke-dashoffset: -36; } }
+@keyframes commandTaskIndeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(340%); }
+}
 @keyframes commandSpin { to { transform: rotate(360deg); } }
 @keyframes commandSpinReverse { to { transform: rotate(-360deg); } }
 @keyframes commandCorePulse {

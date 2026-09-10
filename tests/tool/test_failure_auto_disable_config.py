@@ -7,6 +7,7 @@ import pytest
 
 from flocks.config.config import Config, ConfigInfo, ToolFailureConfig
 from flocks.config.config_writer import ConfigWriter
+from flocks.tool.credential_context import activate_credential_probe
 from flocks.tool.registry import (
     Tool,
     ToolCategory,
@@ -154,3 +155,24 @@ async def test_config_can_turn_off_repeated_failure_auto_disable(
     assert "disabled" not in result.metadata
     assert tool.info.enabled is True
     assert ToolRegistry._failure_state == {}
+
+
+@pytest.mark.asyncio
+async def test_credential_probe_does_not_change_failure_tracking(
+    isolated_failure_tracking: Tool,
+) -> None:
+    tool = isolated_failure_tracking
+    ToolRegistry._failure_state[tool.info.name] = {
+        "key": "existing",
+        "count": 1,
+    }
+
+    async with activate_credential_probe():
+        result = await ToolRegistry.execute(tool.info.name, query="candidate")
+
+    assert result.success is False
+    assert result.metadata == {}
+    assert tool.info.enabled is True
+    assert ToolRegistry._failure_state == {
+        tool.info.name: {"key": "existing", "count": 1}
+    }

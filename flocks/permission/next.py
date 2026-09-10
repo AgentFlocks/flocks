@@ -480,6 +480,29 @@ class PermissionNext:
         return cls._evaluate(permission, pattern, ruleset)
 
     @classmethod
+    def evaluate_request(
+        cls,
+        permission: str,
+        patterns: List[str],
+        ruleset: Ruleset,
+    ) -> Optional[str]:
+        """Evaluate a tool request, or return None when it has no configured rule."""
+        if not any(
+            cls._pattern_matches(permission, rule.permission or "*")
+            for rule in ruleset
+        ):
+            return None
+
+        actions = {
+            cls._evaluate(permission, pattern, ruleset)
+            for pattern in (patterns or ["*"])
+        }
+        for action in ("deny", "ask", "allow"):
+            if action in actions:
+                return action
+        return None
+
+    @classmethod
     def _evaluate(
         cls,
         permission: str,

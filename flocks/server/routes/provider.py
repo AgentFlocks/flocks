@@ -7,6 +7,7 @@ temperature, tool_call, limit, etc.
 """
 
 import asyncio
+import copy
 import json
 import re
 import threading
@@ -22,6 +23,7 @@ from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
 from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
@@ -777,6 +779,7 @@ async def list_api_services_route():
     summary="Update API service",
     description="Enable or disable an API service and all tools it exposes."
 )
+@serialized_config_mutation
 async def update_api_service_route(
     provider_id: str,
     request: Dict[str, Any] = Body(...),
@@ -1247,6 +1250,10 @@ async def _write_api_service_status_cache(statuses: Dict[str, Any]) -> None:
 
 async def _save_api_service_status_if_configured(provider_id: str, response: Dict[str, Any]) -> None:
     """Persist API test status only when the provider is configured as an API service."""
+    from flocks.tool.credential_context import is_temporary_credential_override_active
+
+    if is_temporary_credential_override_active():
+        return
     raw_service = ConfigWriter.get_api_service_raw(provider_id)
     if raw_service is None:
         return
@@ -1395,6 +1402,7 @@ async def list_api_services() -> List[APIServiceSummary]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@serialized_config_mutation
 async def update_api_service(provider_id: str, request: APIServiceUpdateRequest) -> APIServiceSummary:
     try:
         from flocks.tool.registry import ToolRegistry
@@ -1498,6 +1506,7 @@ def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[tuple[str
     return None
 
 
+@serialized_config_mutation
 async def delete_api_service(provider_id: str) -> Dict[str, Any]:
     """Delete an API service configuration and its stored credential.
 
@@ -1796,6 +1805,7 @@ async def reveal_provider_credentials(
     summary="Set provider credentials",
     description="Set authentication credentials for a provider or API service."
 )
+@serialized_config_mutation
 async def set_provider_credentials(
     provider_id: str,
     request: ProviderCredentialRequest,
@@ -1996,6 +2006,7 @@ async def set_provider_credentials(
     summary="Delete provider credentials",
     description="Delete stored credentials for a provider or API service."
 )
+@serialized_config_mutation
 async def delete_provider_credentials(
     provider_id: str,
     _admin: object = Depends(require_admin),
@@ -2139,10 +2150,93 @@ async def get_service_credentials(
             username=field_values.get("username"),
             fields=safe_field_values or None,
             secret_ids=secret_ids or None,
-            has_credential=bool(any(value for value in field_values.values())),
+            has_credential=bool(
+                any(field_values.get(field_name) for field_name in sensitive_field_names)
+            ),
         )
     except Exception as e:
         log.error("service.credentials.get.error", {"provider_id": provider_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _load_api_service_primary_key(provider_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Load the primary API key for an API service without logging its value."""
+    from flocks.security import get_secret_manager
+
+    secrets = get_secret_manager()
+    raw_service = ConfigWriter.get_api_service_raw(provider_id)
+    metadata = _load_api_service_metadata_data(provider_id) or {}
+
+    for candidate in _get_api_service_secret_candidates(
+        provider_id,
+        raw_service,
+        field_name="api_key",
+    ):
+        value = secrets.get(candidate)
+        if not value:
+            continue
+
+        auth = metadata.get("authentication") or metadata.get("auth")
+        expects_secondary_secret = (
+            isinstance(auth, dict)
+            and bool(auth.get("secret_secret"))
+            and _should_persist_secondary_secret(metadata)
+        )
+        if expects_secondary_secret:
+            split_result = _split_compound_service_credentials(value)
+            if split_result:
+                value = split_result[0]
+        return candidate, value
+
+    return None, None
+
+
+@router.post(
+    "/{provider_id}/service-credentials/reveal",
+    response_model=ProviderCredentialResponse,
+    summary="Reveal API service credentials",
+    description="Reveal the primary API key for an API service to an administrator.",
+)
+async def reveal_service_credentials(
+    provider_id: str,
+    request: Request,
+    response: Response,
+    admin: AuthUser = Depends(require_admin),
+):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+    try:
+        secret_id, api_key = _load_api_service_primary_key(provider_id)
+        credentials = ProviderCredentialResponse(
+            secret_id=secret_id,
+            api_key=api_key,
+            api_key_masked=SecretManager.mask(api_key) if api_key else None,
+            has_credential=bool(api_key),
+        )
+        try:
+            await emit_audit_event(
+                "provider.service_credentials_reveal",
+                {
+                    "action": "service_credentials_reveal",
+                    "actor_id": admin.id,
+                    "actor_name": admin.username,
+                    "user_id": admin.id,
+                    "username": admin.username,
+                    "provider_id": provider_id,
+                    "secret_id": secret_id,
+                    "ip": get_request_ip(request),
+                    "user_agent": get_request_user_agent(request),
+                },
+            )
+        except Exception as audit_error:
+            log.warn(
+                "service.credentials.reveal.audit_failed",
+                {"provider_id": provider_id, "error": str(audit_error)},
+            )
+        return credentials
+    except Exception as e:
+        log.error("service.credentials.reveal.error", {"provider_id": provider_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2152,6 +2246,7 @@ async def get_service_credentials(
     summary="Set API service credentials",
     description="Set authentication credentials for an API service."
 )
+@serialized_config_mutation
 async def set_service_credentials(
     provider_id: str,
     request: ProviderCredentialRequest,
@@ -2299,6 +2394,63 @@ async def set_service_credentials(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post(
+    "/{provider_id}/service-credentials/configure",
+    response_model=Dict[str, Any],
+    summary="Validate and save API service credentials",
+    description="Validate credentials in an isolated request context and persist them only on success.",
+)
+@serialized_config_mutation
+async def configure_service_credentials(
+    provider_id: str,
+    request: ProviderCredentialRequest,
+    _admin: object = Depends(require_admin),
+):
+    """Test a service key without exposing it to other requests before saving."""
+    if provider_id not in {"threatbook-cn", "threatbook-io"}:
+        raise HTTPException(
+            status_code=400,
+            detail="This configure flow is only available for ThreatBook API services",
+        )
+    api_key = (request.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key required")
+
+    raw_service = ConfigWriter.get_api_service_raw(provider_id) or {}
+    secret_ids = _get_api_service_secret_candidates(
+        provider_id,
+        raw_service,
+        field_name="api_key",
+    )
+    if request.secret_id:
+        secret_ids.insert(0, request.secret_id)
+    secret_ids = list(dict.fromkeys(secret_ids))
+    primary_secret_id = secret_ids[0]
+    config_override = {
+        **raw_service,
+        "apiKey": f"{{secret:{primary_secret_id}}}",
+        "enabled": True,
+    }
+
+    from flocks.tool.credential_context import activate_credential_overrides
+
+    async with activate_credential_overrides(
+        secret_values={secret_id: api_key for secret_id in secret_ids},
+        service_id=provider_id,
+        config_values=config_override,
+    ):
+        validation = await _test_provider_credentials_impl(
+            provider_id,
+            api_key_override=api_key,
+        )
+
+    if not validation.get("success"):
+        return validation
+
+    await set_service_credentials(provider_id, request)
+    return validation
+
+
 class TestCredentialRequest(BaseModel):
     """Optional request body for test-credentials"""
     model_id: Optional[str] = Field(None, description="Model to test with (uses first available if omitted)")
@@ -2315,6 +2467,17 @@ async def test_provider_credentials(
     body: Optional[TestCredentialRequest] = None,
     _admin: object = Depends(require_admin),
 ):
+    return await _test_provider_credentials_impl(provider_id, body)
+
+
+async def _test_provider_credentials_impl(
+    provider_id: str,
+    body: Optional[TestCredentialRequest] = None,
+    *,
+    api_key_override: Optional[str] = None,
+    isolated_provider: bool = False,
+    base_url_override: Optional[str] = None,
+):
     """Test credentials for a provider or API service by making a real API call"""
     from flocks.security import get_secret_manager
 
@@ -2324,28 +2487,30 @@ async def test_provider_credentials(
         # test-credentials handles both LLM providers and API services.
         # Try _llm_key first (LLM provider), then all secret fields defined
         # in the credential schema (api_key, password, token, etc.).
-        secrets = get_secret_manager()
-        secret_id = f"{provider_id}_llm_key"
-        api_key = secrets.get(secret_id)
+        api_key = api_key_override
         if not api_key:
-            raw_service = ConfigWriter.get_api_service_raw(provider_id) or {}
-            secret_id = None
-            metadata = _load_api_service_metadata_data(provider_id) or {}
-            secret_field_names = _get_api_service_secret_field_names(provider_id, metadata)
-            if not secret_field_names:
-                secret_field_names = ["api_key"]
-            for field_name in secret_field_names:
-                for candidate in _get_api_service_secret_candidates(
-                    provider_id, raw_service, field_name=field_name
-                ):
-                    api_key = secrets.get(candidate)
+            secrets = get_secret_manager()
+            secret_id = f"{provider_id}_llm_key"
+            api_key = secrets.get(secret_id)
+            if not api_key:
+                raw_service = ConfigWriter.get_api_service_raw(provider_id) or {}
+                secret_id = None
+                metadata = _load_api_service_metadata_data(provider_id) or {}
+                secret_field_names = _get_api_service_secret_field_names(provider_id, metadata)
+                if not secret_field_names:
+                    secret_field_names = ["api_key"]
+                for field_name in secret_field_names:
+                    for candidate in _get_api_service_secret_candidates(
+                        provider_id, raw_service, field_name=field_name
+                    ):
+                        api_key = secrets.get(candidate)
+                        if api_key:
+                            secret_id = candidate
+                            break
                     if api_key:
-                        secret_id = candidate
                         break
-                if api_key:
-                    break
-        if not api_key:
-            api_key = _get_inline_provider_api_key(provider_id)
+            if not api_key:
+                api_key = _get_inline_provider_api_key(provider_id)
 
         if not api_key:
             response = {
@@ -2362,13 +2527,18 @@ async def test_provider_credentials(
         # _load_dynamic_providers skips already-registered providers, so it is safe
         # to call multiple times.
         await _load_dynamic_providers()
-        # Apply config to ensure _config_models (user-defined models) are loaded
-        config = await Config.get()
-        await Provider.apply_config(config, provider_id=provider_id)
+        # Temporary onboarding probes use a shallow provider clone so candidate
+        # credentials never enter the process-wide Provider registry.
+        if not isolated_provider:
+            config = await Config.get()
+            await Provider.apply_config(config, provider_id=provider_id)
         provider = Provider.get(provider_id)
 
         if provider:
             from flocks.provider.provider import ProviderConfig, ChatMessage as ProviderChatMessage
+
+            if isolated_provider:
+                provider = copy.copy(provider)
 
             # Always reconfigure with the freshest key from secret manager
             # to avoid stale keys from cached config or prior apply_config.
@@ -2385,7 +2555,7 @@ async def test_provider_credentials(
             provider.configure(ProviderConfig(
                 provider_id=provider_id,
                 api_key=api_key,
-                base_url=effective_base_url,
+                base_url=base_url_override or effective_base_url,
                 custom_settings=custom_settings,
             ))
             if hasattr(provider, '_client'):
@@ -2470,10 +2640,9 @@ async def test_provider_credentials(
             # Try to test connectivity by calling a simple tool
             from flocks.tool.registry import ToolRegistry, ToolCategory, ToolInfo
             from flocks.server.routes.tool import _get_tool_source
+            from flocks.tool.credential_context import activate_credential_probe
 
             await ToolRegistry.init_async()
-
-            _set_api_service_tools_enabled(provider_id, True)
 
             # If the plugin ships a `_test.yaml` with a `connectivity` block,
             # honour the declared (tool, params) probe. Tool failures (e.g.
@@ -2488,7 +2657,8 @@ async def test_provider_credentials(
                     "service": provider_id, "tool": spec.tool, "params": spec.params,
                 })
                 try:
-                    probe = await ToolRegistry.execute(tool_name=spec.tool, **spec.params)
+                    async with activate_credential_probe():
+                        probe = await ToolRegistry.execute(tool_name=spec.tool, **spec.params)
                     latency = int((time.time() - start) * 1000)
                     response = {
                         "success": probe.success,
@@ -2522,8 +2692,6 @@ async def test_provider_credentials(
             })
             
             for tool_info in all_tools:
-                if not tool_info.enabled:
-                    continue
                 source, source_name = _get_tool_source(tool_info)
                 if source in ("api", "device") and source_name == provider_id:
                     service_tools.append(tool_info)
@@ -2797,7 +2965,8 @@ async def test_provider_credentials(
                     "single_attempt": True,
                 })
 
-                result = await ToolRegistry.execute(tool_name=test_tool.name, **test_params)
+                async with activate_credential_probe():
+                    result = await ToolRegistry.execute(tool_name=test_tool.name, **test_params)
                 latency = int((time.time() - start) * 1000)
 
                 if result.success:
@@ -2879,6 +3048,10 @@ _API_SERVICE_STATUS_KEY = "api_service_status"
 
 async def _save_api_service_status(provider_id: str, test_response: dict) -> None:
     """Persist a single API service test result into the status cache."""
+    from flocks.tool.credential_context import is_temporary_credential_override_active
+
+    if is_temporary_credential_override_active():
+        return
     try:
         await Storage.init()
         cached = await Storage.read(_API_SERVICE_STATUS_KEY) or {}
