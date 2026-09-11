@@ -61,6 +61,31 @@ function parseTodoEntries(rawOutput: string, rawMetadata: unknown): Todo.Info[] 
   return undefined
 }
 
+function editDiffText(rawInput: unknown, rawMetadata: unknown): { oldText: string; newText: string } {
+  if (rawMetadata && typeof rawMetadata === "object") {
+    const filediff = (rawMetadata as Record<string, unknown>)["filediff"]
+    if (filediff && typeof filediff === "object") {
+      const value = filediff as Record<string, unknown>
+      if (typeof value["before"] === "string" && typeof value["after"] === "string") {
+        return { oldText: value["before"], newText: value["after"] }
+      }
+    }
+  }
+
+  if (rawInput && typeof rawInput === "object") {
+    const edits = (rawInput as Record<string, unknown>)["edits"]
+    if (Array.isArray(edits) && edits.length === 1 && edits[0] && typeof edits[0] === "object") {
+      const edit = edits[0] as Record<string, unknown>
+      return {
+        oldText: typeof edit["oldString"] === "string" ? edit["oldString"] : "",
+        newText: typeof edit["newString"] === "string" ? edit["newString"] : "",
+      }
+    }
+  }
+
+  return { oldText: "", newText: "" }
+}
+
 export namespace ACP {
   const log = Log.create({ service: "acp-agent" })
 
@@ -285,13 +310,7 @@ export namespace ACP {
                 if (kind === "edit") {
                   const input = part.state.input
                   const filePath = typeof input["filePath"] === "string" ? input["filePath"] : ""
-                  const oldText = typeof input["oldString"] === "string" ? input["oldString"] : ""
-                  const newText =
-                    typeof input["newString"] === "string"
-                      ? input["newString"]
-                      : typeof input["content"] === "string"
-                        ? input["content"]
-                        : ""
+                  const { oldText, newText } = editDiffText(input, part.state.metadata)
                   content.push({
                     type: "diff",
                     path: filePath,
@@ -622,13 +641,7 @@ export namespace ACP {
               if (kind === "edit") {
                 const input = part.state.input
                 const filePath = typeof input["filePath"] === "string" ? input["filePath"] : ""
-                const oldText = typeof input["oldString"] === "string" ? input["oldString"] : ""
-                const newText =
-                  typeof input["newString"] === "string"
-                    ? input["newString"]
-                    : typeof input["content"] === "string"
-                      ? input["content"]
-                      : ""
+                const { oldText, newText } = editDiffText(input, part.state.metadata)
                 content.push({
                   type: "diff",
                   path: filePath,

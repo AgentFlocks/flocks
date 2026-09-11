@@ -94,6 +94,31 @@ def to_locations(tool_name: str, input_data: Dict[str, Any]) -> List[ToolCallLoc
         return []
 
 
+def edit_diff_text(
+    input_data: Dict[str, Any],
+    metadata: Any,
+) -> tuple[str, str]:
+    """Extract edit text for ACP diff rendering from result metadata or edits[]."""
+    if isinstance(metadata, dict):
+        filediff = metadata.get("filediff")
+        if isinstance(filediff, dict):
+            before = filediff.get("before")
+            after = filediff.get("after")
+            if isinstance(before, str) and isinstance(after, str):
+                return before, after
+
+    edits = input_data.get("edits")
+    if isinstance(edits, list) and len(edits) == 1 and isinstance(edits[0], dict):
+        old_text = edits[0].get("oldString", "")
+        new_text = edits[0].get("newString", "")
+        return (
+            old_text if isinstance(old_text, str) else "",
+            new_text if isinstance(new_text, str) else "",
+        )
+
+    return "", ""
+
+
 def parse_uri(uri: str) -> Dict[str, Any]:
     """
     Parse URI into file or text content
@@ -503,8 +528,10 @@ class ACPAgent:
             # Add diff content for edit tools
             if kind == "edit":
                 file_path = input_data.get("filePath", "")
-                old_text = input_data.get("oldString", "")
-                new_text = input_data.get("newString", input_data.get("content", ""))
+                old_text, new_text = edit_diff_text(
+                    input_data,
+                    state.get("metadata"),
+                )
                 content.append({
                     "type": "diff",
                     "path": file_path,
@@ -854,8 +881,10 @@ class ACPAgent:
                     
                     if kind == "edit":
                         file_path = input_data.get("filePath", "")
-                        old_text = input_data.get("oldString", "")
-                        new_text = input_data.get("newString", input_data.get("content", ""))
+                        old_text, new_text = edit_diff_text(
+                            input_data,
+                            state.get("metadata"),
+                        )
                         content.append({
                             "type": "diff",
                             "path": file_path,
