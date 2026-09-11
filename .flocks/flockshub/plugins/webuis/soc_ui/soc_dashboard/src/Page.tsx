@@ -184,6 +184,7 @@ function createActivityState() {
     denoise: { current: null, queue: [], last: null },
     triage: { current: null, queue: [], last: null },
     recent: [],
+    lastIdentified: null,
     batch: emptyActivityBatch(),
     batchUpdatedAt: 0,
     mode: 'normal',
@@ -503,6 +504,54 @@ function isRunningWorkflowEvent(event) {
     && ['running', 'queued', 'pending'].includes(String(event?.status || '').toLowerCase());
 }
 
+function workflowActivityPriority(event) {
+  return isRunningWorkflowEvent(event) ? event.status === 'running' ? 2 : 1 : 0;
+}
+
+function displayAlertText(value) {
+  if (typeof value !== 'string') return '';
+  const text = value.trim();
+  return /^(unknown|none|null|--|待识别|待识别资产|未知告警|未知来源)$/i.test(text) ? '' : text;
+}
+
+function hasAlertIdentity(event) {
+  const alert = event?.alert || {};
+  return Boolean(displayAlertText(alert.srcIp) || displayAlertText(alert.dstIp)
+    || (displayAlertText(alert.threatName) && !/^(降噪批次|研判批次)/.test(alert.threatName)));
+}
+
+function isVisibleActivity(event) {
+  if (!event?.eventId || !['denoise', 'triage'].includes(event.stage)) return false;
+  return !(event.stage === 'denoise' && event.triggerSource === 'workflow_execution'
+    && event.result?.rawCount === 0 && !hasAlertIdentity(event));
+}
+
+function mergeActivityEvent(previous, incoming) {
+  if (!previous) return incoming;
+  const previousTime = Date.parse(previous.updatedAt || previous.occurredAt || '') || 0;
+  const incomingTime = Date.parse(incoming.updatedAt || incoming.occurredAt || '') || 0;
+  if (incomingTime < previousTime) return previous;
+  // A late polling response cannot resurrect a terminal execution.
+  if (previous.triggerSource === 'workflow_execution'
+    && !isRunningWorkflowEvent(previous) && isRunningWorkflowEvent(incoming)) return previous;
+  const incomingIdentity = hasAlertIdentity(incoming);
+  const differentAlert = incomingIdentity && displayAlertText(incoming.alert?.id)
+    && displayAlertText(previous.alert?.id) && incoming.alert.id !== previous.alert.id;
+  const alert = differentAlert ? {} : { ...previous.alert };
+  for (const [key, value] of Object.entries(incoming.alert || {})) {
+    if (displayAlertText(value)) {
+      if (key === 'id' && !incomingIdentity && hasAlertIdentity(previous)) continue;
+      if (key === 'threatName' && /^(降噪批次|研判批次)/.test(value) && hasAlertIdentity(previous)) continue;
+      alert[key] = value;
+    }
+  }
+  return {
+    ...previous, ...incoming, alert,
+    result: { ...previous.result, ...incoming.result },
+    playbackStartedAt: previous.playbackStartedAt,
+  };
+}
+
 function normalizeActivityBatch(raw) {
   const batch = { ...emptyActivityBatch(), ...(raw || {}) };
   for (const key of ['windowMs', 'receivedCount', 'duplicateCount', 'uniqueCount', 'clusterCount', 'triageUpdatedCount', 'sampledCount', 'suppressedCount', 'ratePerSecond']) {
@@ -521,14 +570,15 @@ function resolveActivityMode(previous, batch) {
   return { mode, calmPolls };
 }
 
-function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) {
+function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch, workflowSnapshotComplete = false) {
   const batch = normalizeActivityBatch(rawBatch);
   const modeState = resolveActivityMode(previous, batch);
   const hasBatch = batch.receivedCount > 0 || batch.triageUpdatedCount > 0;
-  const incomingEvents = (events || []).filter(Boolean);
-  const incomingRecentEvents = (recentEvents || []).filter(Boolean);
+  const incomingEvents = (events || []).filter(isVisibleActivity);
+  const incomingRecentEvents = (recentEvents || []).filter(isVisibleActivity);
   if (
     !hasBatch
+    && !workflowSnapshotComplete
     && !incomingEvents.length
     && !incomingRecentEvents.length
     && previous.connection === 'online'
@@ -547,20 +597,39 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) 
     mode: modeState.mode,
     calmPolls: modeState.calmPolls,
   };
+  if (workflowSnapshotComplete) {
+    const ids = new Set(incomingEvents.map((event) => event.eventId));
+    const retained = (event) => !isRunningWorkflowEvent(event) || ids.has(event.eventId);
+    for (const kind of ['denoise', 'triage']) {
+      const lane = next[kind];
+      if (lane.current && !retained(lane.current)) lane.current = null;
+      lane.queue = lane.queue.filter(retained);
+    }
+    next.recent = next.recent.filter(retained);
+  }
   if (batch.mode !== 'normal' && batch.receivedCount > 0) next.denoise.queue = [];
   for (const event of incomingEvents) {
     if (!event || !['denoise', 'triage'].includes(event.stage) || !event.eventId) continue;
+    const known = [next[event.stage].current, next[event.stage].last, ...next.recent]
+      .find((item) => item?.eventId === event.eventId);
+    const merged = mergeActivityEvent(known, event);
     const enriched = event.stage === 'denoise'
-      ? { ...event, playbackMode: batch.mode, batch }
-      : event;
+      ? { ...merged, playbackMode: batch.mode, batch }
+      : merged;
     const lane = next[enriched.stage];
+    if (enriched.triggerSource === 'workflow_execution' && !isRunningWorkflowEvent(enriched)) {
+      if (lane.current?.eventId === enriched.eventId) lane.current = null;
+      lane.queue = lane.queue.filter((item) => item.eventId !== enriched.eventId);
+      if (!lane.last || activityTimestamp(enriched) >= activityTimestamp(lane.last)) lane.last = enriched;
+      continue;
+    }
     if (lane.current?.eventId === enriched.eventId) {
-      lane.current = { ...lane.current, ...enriched, playbackStartedAt: lane.current.playbackStartedAt };
+      lane.current = mergeActivityEvent(lane.current, enriched);
       continue;
     }
     const queuedIndex = lane.queue.findIndex((item) => item?.eventId === enriched.eventId);
     if (queuedIndex >= 0) {
-      lane.queue[queuedIndex] = { ...lane.queue[queuedIndex], ...enriched };
+      lane.queue[queuedIndex] = mergeActivityEvent(lane.queue[queuedIndex], enriched);
       continue;
     }
     const knownLast = lane.last?.eventId === enriched.eventId;
@@ -568,19 +637,30 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) 
   }
   for (const kind of ['denoise', 'triage']) {
     const lane = next[kind];
+    lane.queue.sort((a, b) => workflowActivityPriority(b) - workflowActivityPriority(a));
+    if (workflowActivityPriority(lane.queue[0]) > workflowActivityPriority(lane.current)) {
+      const previousCurrent = lane.current;
+      lane.current = lane.queue.shift();
+      if (isRunningWorkflowEvent(previousCurrent)) lane.queue.push(previousCurrent);
+    }
     if (lane.queue.length > ACTIVITY_QUEUE_LIMIT) {
-      lane.queue = lane.queue.slice(-ACTIVITY_QUEUE_LIMIT);
+      lane.queue = lane.queue.slice(0, ACTIVITY_QUEUE_LIMIT);
     }
   }
-  const incomingRecent = incomingRecentEvents.length ? incomingRecentEvents : [...incomingEvents].reverse();
+  const incomingRecent = [...incomingRecentEvents, ...incomingEvents];
   for (const event of [...incomingRecent].reverse()) {
     if (!event?.eventId) continue;
-    const merged = [event, ...next.recent.filter((item) => item.eventId !== event.eventId)];
+    const merged = [mergeActivityEvent(next.recent.find((item) => item.eventId === event.eventId), event),
+      ...next.recent.filter((item) => item.eventId !== event.eventId)];
+    const priority = (a, b) => Number(isRunningWorkflowEvent(b)) - Number(isRunningWorkflowEvent(a))
+      || activityTimestamp(b) - activityTimestamp(a);
     next.recent = [
-      ...merged.filter((item) => item.stage === 'triage').slice(0, 12),
-      ...merged.filter((item) => item.stage === 'denoise').slice(0, 12),
+      ...merged.filter((item) => item.stage === 'triage').sort(priority).slice(0, 12),
+      ...merged.filter((item) => item.stage === 'denoise').sort(priority).slice(0, 12),
     ].sort((left, right) => Date.parse(right.occurredAt || '') - Date.parse(left.occurredAt || ''));
   }
+  next.lastIdentified = [...next.recent, next.lastIdentified]
+    .filter(hasAlertIdentity).sort((a, b) => activityTimestamp(b) - activityTimestamp(a))[0] || null;
   return next;
 }
 
@@ -739,36 +819,6 @@ function fullNumber(value) {
   return new Intl.NumberFormat('zh-CN').format(n);
 }
 
-function workflowDenoiseActivity(callCount, delta, generatedAt, workflowEvent) {
-  if (workflowEvent) {
-    return {
-      ...workflowEvent,
-      eventId: `workflow-playback:${callCount}:${workflowEvent.eventId}`,
-      statsDelta: delta,
-      workflowCallCount: callCount,
-    };
-  }
-  const occurredAt = generatedAt || new Date().toISOString();
-  return {
-    eventId: `workflow-denoise:${callCount}:${occurredAt}`,
-    stage: 'denoise',
-    status: 'completed',
-    occurredAt,
-    triggerSource: 'workflow_stats',
-    statsDelta: delta,
-    workflowCallCount: callCount,
-    hiddenFromQueue: true,
-    sampleCount: delta,
-    alert: {
-      sourceType: 'workflow.db',
-      threatName: '降噪工作流统计更新',
-    },
-    result: {
-      clusterId: `累计 ${fullNumber(callCount)}`,
-      isDuplicate: false,
-    },
-  };
-}
 
 function compactNumber(value) {
   const n = Number(value || 0);
@@ -1113,12 +1163,13 @@ function ActivityStageCard({ kind, lane, stats }) {
 }
 
 function AiCore({ stats, activity }) {
-  const denoiseActive = Boolean(activity.denoise.current);
-  const triageActive = Boolean(activity.triage.current);
+  const denoiseActive = activity.denoise.current?.status === 'running';
+  const triageActive = activity.triage.current?.status === 'running';
   const activeCount = Number(denoiseActive) + Number(triageActive);
-  const activeEvent = activity.denoise.current || activity.triage.current;
+  const activeEvent = (denoiseActive && activity.denoise.current) || (triageActive && activity.triage.current) || null;
   const activeKind = activeEvent?.stage || '';
-  const queueCount = activity.denoise.queue.length + activity.triage.queue.length;
+  const queueCount = buildEventQueueTasks(activity)
+    .filter((task) => task.state === 'waiting').length;
   const coreLabel = activeCount === 2
     ? '双任务处理中'
     : denoiseActive
@@ -1128,72 +1179,25 @@ function AiCore({ stats, activity }) {
   const workflowDenoiseActive = activeKind === 'denoise'
     && ['workflow_stats', 'workflow_execution'].includes(activeEvent?.triggerSource);
   const workflowExecutionActive = workflowDenoiseActive && activeEvent?.triggerSource === 'workflow_execution';
-  const workflowMetricsAvailable = workflowExecutionActive && activeEvent?.result?.metricsAvailable;
-  const alertName = activeEvent?.alert?.threatName || '未知告警';
-  const alertSource = activeEvent?.alert?.sourceType || '未知来源';
-  const sourceAddress = activeEvent?.alert?.srcIp || '待识别';
-  const targetAddress = activeEvent?.alert?.dstIp || '待识别';
-  const operations = workflowExecutionActive && !workflowMetricsAvailable
-    ? [
-        `接入告警 ${alertName}`,
-        `识别来源 ${alertSource}`,
-        `关联资产 ${sourceAddress} → ${targetAddress}`,
-        '等待可用降噪结果',
-      ]
-    : workflowExecutionActive
-    ? [
-        `接入原始告警 ${fullNumber(activeEvent?.result?.rawCount)}`,
-        `完成标准化 ${fullNumber(activeEvent?.result?.normalizedCount)}`,
-        `过滤与收敛 ${fullNumber(activeEvent?.result?.reducedCount)}`,
-        `留存研判告警 ${fullNumber(activeEvent?.result?.uniqueCount)}`,
-      ]
-    : workflowDenoiseActive
-    ? [
-        '检测 workflow.db 统计更新',
-        `读取降噪调用增量 +${fullNumber(activeEvent?.statsDelta || 1)}`,
-        '同步降噪处理状态',
-        `累计调用 ${fullNumber(activeEvent?.workflowCallCount)}`,
-      ]
+  // Keep one coherent alert. A historical fallback is labelled, never grafted
+  // onto a running execution whose input has not been provided.
+  const evidenceEvent = [activity.denoise.current, activity.triage.current].find(hasAlertIdentity)
+    || [...(activity.recent || []), activity.lastIdentified, activity.denoise.last, activity.triage.last]
+      .filter(hasAlertIdentity).sort((a, b) => activityTimestamp(b) - activityTimestamp(a))[0]
+    || activeEvent;
+  const evidenceIsCurrent = evidenceEvent && [activity.denoise.current, activity.triage.current]
+    .some((event) => event?.eventId === evidenceEvent.eventId && event.status === 'running');
+  const evidenceItems = [
+    { label: '告警名称', value: displayAlertText(evidenceEvent?.alert?.threatName) || '未提供' },
+    { label: '来源类型', value: displayAlertText(evidenceEvent?.alert?.sourceType) || '未提供' },
+    { label: '源地址', value: displayAlertText(evidenceEvent?.alert?.srcIp) || '未提供' },
+    { label: '目标地址', value: displayAlertText(evidenceEvent?.alert?.dstIp) || '未提供' },
+  ];
+  const operations = workflowExecutionActive
+    ? ['降噪工作流执行中', '提取告警特征', '等待降噪结果', '以实际执行状态为准']
     : activeKind === 'denoise'
-    ? [
-        `接入 ${activeEvent?.alert?.sourceType || '告警数据'}`,
-        '提取请求与网络特征',
-        `匹配相似簇 ${activeEvent?.result?.clusterId || '--'}`,
-        activeEvent?.result?.isDuplicate ? '输出：重复告警收敛' : '输出：保留代表告警',
-      ]
-    : [
-        '提取攻击证据',
-        '关联历史情报与资产',
-        '执行风险推理',
-        `生成结论：${activeEvent?.result?.verdictLabel || '待确认'}`,
-      ];
-  const evidenceItems = workflowExecutionActive && !workflowMetricsAvailable
-    ? [
-        { label: '告警名称', value: alertName },
-        { label: '来源类型', value: alertSource },
-        { label: '源地址', value: sourceAddress },
-        { label: '目标地址', value: targetAddress },
-      ]
-    : workflowExecutionActive
-    ? [
-        { label: '原始告警', value: fullNumber(activeEvent?.result?.rawCount) },
-        { label: '过滤数量', value: fullNumber(activeEvent?.result?.filterRemovedCount) },
-        { label: '去重数量', value: fullNumber(activeEvent?.result?.duplicateCount) },
-        { label: '降噪率', value: pct(activeEvent?.result?.reductionRate) },
-      ]
-    : workflowDenoiseActive
-    ? [
-        { label: '本次增量', value: `+${fullNumber(activeEvent?.statsDelta || 1)}` },
-        { label: '累计处理', value: fullNumber(activeEvent?.workflowCallCount) },
-        { label: '处理模式', value: activity.mode === 'surge' ? '洪峰' : activity.mode === 'burst' ? '批量' : '实时' },
-        { label: '当前队列', value: fullNumber(queueCount) },
-      ]
-    : activeEvent ? [
-        { label: '攻击源', value: activeEvent.alert?.srcIp || activeEvent.alert?.sourceType || '新告警' },
-        { label: '目标资产', value: activeEvent.alert?.dstIp || '待识别资产' },
-        { label: activeKind === 'denoise' ? '特征' : '攻击路径', value: activeEvent.alert?.requestUri || activeEvent.alert?.threatName || '特征提取中' },
-        { label: activeKind === 'denoise' ? '相似聚类' : '风险判断', value: activeKind === 'denoise' ? `簇 ${activeEvent.result?.clusterId || '--'}` : activityResultText(activeEvent) },
-      ] : [];
+      ? ['告警接入记录', '提取请求与网络特征', '相似特征聚类', '降噪结果展示']
+      : ['提取攻击证据', '关联历史情报与资产', '执行风险推理', '等待研判结果'];
   const statusLabel = activity.connection === 'error'
     ? '活动数据等待重连'
     : activeCount
@@ -1238,14 +1242,16 @@ function AiCore({ stats, activity }) {
         key: 'operation-idle',
       }, `AI新增研判 ${compactNumber(stats.triage.newTriaged)}`),
     ]),
-    activeEvent ? h('div', { className: 'ai-evidence-field', key: `evidence-${activeEvent.eventId}` }, evidenceItems.map((item, index) => h('div', {
+    h('div', { className: 'ai-evidence-field', key: 'evidence', 'aria-label': evidenceIsCurrent ? '当前任务告警' : '最近告警记录' }, evidenceItems.map((item, index) => h('div', {
       className: `ai-evidence-card evidence-${index + 1}`,
       key: item.label,
       style: { animationDelay: `${180 + index * 220}ms` },
     }, [
       h('span', { key: 'label' }, item.label),
       h('b', { title: item.value, key: 'value' }, item.value),
-    ]))) : null,
+    ]))),
+    h('span', { className: 'core-evidence-source', key: 'evidence-source' },
+      evidenceIsCurrent ? '当前任务告警' : evidenceEvent ? '最近告警记录' : '等待告警数据'),
     h('div', { className: 'core-particle particle-a', key: 'particle-a' }),
     h('div', { className: 'core-particle particle-b', key: 'particle-b' }),
     h('div', { className: 'core-particle particle-c', key: 'particle-c' }),
@@ -1622,7 +1628,7 @@ function TimeRefreshPopover({ value, refreshValue, open, onToggle, onApply, onCl
 }
 
 function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
-  const active = activity.denoise.current || activity.triage.current;
+  const active = [activity.denoise.current, activity.triage.current].some((event) => event?.status === 'running');
   const loadActive = activity.mode !== 'normal' && activity.batch?.receivedCount > 0;
   const status = activity.connection === 'error'
     ? '活动通道重连中'
@@ -1772,7 +1778,7 @@ function triageContextText(stats) {
 
 function CommandActivityLane({ kind, lane, peerLane, stats }) {
   const event = lane.current || lane.last;
-  const active = Boolean(lane.current);
+  const active = lane.current?.status === 'running';
   const steps = kind === 'denoise' ? ['接入', '特征', '聚类', '降噪'] : ['证据', '情报', '推理', '结论'];
   const duration = activityDuration(event);
   const drumDuration = kind === 'denoise' ? (active ? '2.6s' : '6.6s') : (active ? '7.2s' : '9.2s');
@@ -1780,7 +1786,8 @@ function CommandActivityLane({ kind, lane, peerLane, stats }) {
   const playbackMode = kind === 'denoise' ? event?.playbackMode : 'normal';
   const status = active
     ? playbackMode === 'surge' ? '洪峰处理' : playbackMode === 'burst' ? '批量处理' : '处理中'
-    : event ? '最近完成' : '待机巡航';
+    : isRunningWorkflowEvent(event) ? '等待处理'
+      : event?.status === 'failed' ? '最近失败' : event ? '最近完成' : '待机巡航';
   const sampleCount = Math.max(Number(event?.sampleCount || 1), 1);
   const eventTitle = event?.alert?.threatName
     ? `${event.alert.threatName}${sampleCount > 1 ? ` × ${sampleCount}` : ''}`
@@ -1832,8 +1839,8 @@ function CommandActivityLane({ kind, lane, peerLane, stats }) {
 }
 
 function CommandGraph({ stats, activity }) {
-  const denoiseActive = Boolean(activity.denoise.current);
-  const triageActive = Boolean(activity.triage.current);
+  const denoiseActive = activity.denoise.current?.status === 'running';
+  const triageActive = activity.triage.current?.status === 'running';
   const severityToneFor = (event) => {
     if (!event) return '';
     return severityKey(event.result?.threatSeverity);
@@ -1941,78 +1948,31 @@ function activityTimestamp(event) {
 }
 
 function activityTaskKey(event) {
-  const alertId = String(event?.alert?.id || '').trim();
-  return alertId || String(event?.eventId || '').trim();
+  // Executions are tasks, not alerts. Two executions can preview the same alert.
+  return String(event?.eventId || '').trim();
 }
 
 function buildEventQueueTasks(activity, timeFilter) {
-  const stateByEventId = new Map();
-  for (const kind of ['denoise', 'triage']) {
-    const lane = activity[kind];
-    if (lane.current?.eventId) stateByEventId.set(lane.current.eventId, 'processing');
-    for (const event of lane.queue) {
-      if (event?.eventId) stateByEventId.set(event.eventId, 'waiting');
-    }
-  }
-
+  const taskByKey = new Map();
   const allEvents = [
     ...(activity.recent || []),
-    activity.denoise.last,
-    activity.triage.last,
-    ...activity.denoise.queue,
-    ...activity.triage.queue,
-    activity.denoise.current,
-    activity.triage.current,
-  ].filter((event) => event?.eventId && !event.hiddenFromQueue && eventMatchesTimeFilter(event, timeFilter));
-  const taskByKey = new Map();
-  for (const event of allEvents) {
-    const key = activityTaskKey(event);
-    if (!key) continue;
-    const task = taskByKey.get(key) || { key, denoise: null, triage: null, latestAt: 0 };
-    task[event.stage] = event;
-    task.latestAt = Math.max(task.latestAt, activityTimestamp(event));
-    taskByKey.set(key, task);
+    activity.denoise.last, activity.triage.last,
+    ...activity.denoise.queue, ...activity.triage.queue,
+    activity.denoise.current, activity.triage.current,
+  ].filter((event) => isVisibleActivity(event) && !event.hiddenFromQueue
+    && event.triggerSource === 'workflow_execution' && (!timeFilter || eventMatchesTimeFilter(event, timeFilter)));
+  for (const incoming of allEvents) {
+    const key = activityTaskKey(incoming);
+    const event = mergeActivityEvent(taskByKey.get(key)?.event, incoming);
+    const status = String(event.status || '').toLowerCase();
+    const state = status === 'running' ? 'processing'
+      : ['queued', 'pending'].includes(status) ? 'waiting' : 'completed';
+    taskByKey.set(key, { key, event, state, stage: event.stage,
+      [event.stage]: event, latestAt: activityTimestamp(event) });
   }
-
-  const tasks = [...taskByKey.values()].map((task) => {
-    const denoiseState = stateByEventId.get(task.denoise?.eventId) || '';
-    const triageState = stateByEventId.get(task.triage?.eventId) || '';
-    let state = 'completed';
-    let stage = task.triage ? 'triage' : 'denoise';
-    if (triageState === 'processing') {
-      state = 'processing';
-      stage = 'triage';
-    } else if (denoiseState === 'processing') {
-      state = 'processing';
-      stage = 'denoise';
-    } else if (triageState === 'waiting') {
-      state = 'waiting';
-      stage = 'triage';
-    } else if (denoiseState === 'waiting') {
-      state = 'waiting';
-      stage = 'denoise';
-    } else if (!task.triage && task.denoise && task.denoise.status !== 'failed' && !task.denoise.result?.isDuplicate) {
-      state = 'waiting';
-      stage = 'triage';
-    }
-    return {
-      ...task,
-      state,
-      stage,
-      event: stage === 'triage' && task.triage ? task.triage : task.denoise,
-    };
-  });
-
   const stateRank = { processing: 0, waiting: 1, completed: 2 };
-  tasks.sort((left, right) => {
-    const stateDelta = stateRank[left.state] - stateRank[right.state];
-    if (stateDelta) return stateDelta;
-    if (left.state === 'waiting') return right.latestAt - left.latestAt;
-    if (left.state === 'processing' && left.stage !== right.stage) return left.stage === 'triage' ? -1 : 1;
-    return right.latestAt - left.latestAt;
-  });
-
-  return tasks;
+  return [...taskByKey.values()].sort((a, b) => stateRank[a.state] - stateRank[b.state]
+    || b.latestAt - a.latestAt || a.key.localeCompare(b.key));
 }
 
 function useAnimatedTaskWindow(tasks, transitionKey) {
@@ -2041,6 +2001,8 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
     task.event?.eventId || '',
     task.event?.playbackStartedAt || '',
     task.latestAt || '',
+    JSON.stringify(task.event?.alert || {}),
+    JSON.stringify(task.event?.result || {}),
   ].join(':')).join('|');
 
   useEffect(() => {
@@ -2102,30 +2064,10 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
   return displayedTasks;
 }
 
-function EventQueueProgress({ event }) {
-  const { useEffect, useRef, useState } = getReact();
-  const duration = Math.max(activityDuration(event), 1);
-  const start = useRef({ eventId: '', value: 0 });
-  if (start.current.eventId !== event.eventId) {
-    start.current = {
-      eventId: event.eventId,
-      value: Number(event.playbackStartedAt || Date.now()),
-    };
-  }
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const update = () => setNow(Date.now());
-    update();
-    const id = window.setInterval(update, 500);
-    return () => window.clearInterval(id);
-  }, [event.eventId]);
-  const elapsed = Math.min(Math.max(now - start.current.value, 0), duration);
-  const progress = elapsed / duration;
-  const elapsedSeconds = Math.min(Math.floor(elapsed / 1000), Math.round(duration / 1000));
-  return h('div', { className: 'event-rail-progress', 'aria-label': 'AI 任务处理进度' }, [
-    h('span', { className: 'event-rail-progress-track', style: { '--queue-progress': progress }, key: 'track' }, [h('i', { key: 'fill' })]),
-    h('small', { key: 'duration' }, `${elapsedSeconds}s / ${Math.round(duration / 1000)}s`),
-  ]);
+function EventQueueProgress() {
+  // Animation duration is not workflow progress. Avoid a fabricated countdown.
+  return h('div', { className: 'event-rail-progress', 'aria-label': '工作流运行状态' },
+    h('small', null, '执行中 · 等待结果更新'));
 }
 
 function taskCenterPercent(value) {
@@ -2422,10 +2364,9 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
     filterTransitionKey,
   );
   const counts = {
-    processing: visibleTasks.filter((task) => task.state === 'processing').length,
-    waiting: visibleTasks.filter((task) => task.state === 'waiting').length,
+    processing: tasks.filter((task) => task.state === 'processing').length,
+    waiting: tasks.filter((task) => task.state === 'waiting').length,
   };
-  const queueCount = visibleTasks.length;
   const banner = activity.connection === 'error'
     ? '处理任务连接异常，正在重试'
     : counts.processing
@@ -2435,21 +2376,16 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
     h('div', { className: cx('event-update-banner', activity.connection === 'error' && 'warn'), key: 'banner' }, banner),
     h('div', { className: 'event-rail-list', key: 'list' }, visibleTasks.length ? visibleTasks.map((task) => {
       const event = task.event;
-      const sampleCount = Math.max(Number(task.denoise?.sampleCount || 1), 1);
-      const title = `${event?.alert?.threatName || '未知告警'}${sampleCount > 1 ? ` × ${sampleCount}` : ''}`;
+      const title = displayAlertText(event?.alert?.threatName) || (task.stage === 'triage' ? '研判批次' : '降噪批次 · 数量未提供');
       const stageLabel = task.stage === 'triage'
         ? task.state === 'waiting' ? '待研判' : '智能研判'
         : task.state === 'waiting' ? '待降噪' : '智能降噪';
       const stateLabel = task.state === 'processing'
         ? '处理中'
         : '等待处理';
-      const detail = event?.triggerSource === 'workflow_execution'
-        ? task.stage === 'triage'
-          ? task.state === 'processing' ? '研判工作流处理中' : '研判工作流待处理'
-          : event.result?.isDuplicate ? '重复告警已收敛' : '降噪处理完成'
-        : task.state === 'processing'
-          ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
-          : '等待 AI 处理';
+      const detail = task.state === 'processing'
+        ? task.stage === 'triage' ? '研判工作流处理中' : '降噪工作流处理中'
+        : task.stage === 'triage' ? '研判工作流排队中' : '降噪工作流排队中';
       const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
       const handleOpen = () => {
         if (hasExecution) openWorkflowExecutionFromEvent(event);
@@ -2776,6 +2712,7 @@ export default function Page() {
           : { cursor: activityCursor.current, limit: 40, ...timeFilterParams(timeFilter) };
         const response = await getApi().page.get('/activity', { params });
         const payload = response.data || {};
+        if (stopped) return;
         if (payload.error) throw new Error(payload.error);
         activityCursor.current = payload.cursor || activityCursor.current;
         if (!stopped) {
@@ -2797,7 +2734,6 @@ export default function Page() {
           const hasWorkflowCount = rawCallCount !== null
             && rawCallCount !== undefined
             && Number.isFinite(Number(rawCallCount));
-          let workflowDelta = 0;
           let workflowChanged = false;
           if (hasWorkflowCount) {
             const callCount = Math.max(Math.trunc(Number(rawCallCount)), 0);
@@ -2807,15 +2743,6 @@ export default function Page() {
               callCount > previousProgress.callCount
               || latestStartedAt > previousProgress.latestStartedAt
             );
-            if (workflowChanged) {
-              workflowDelta = Math.max(callCount - previousProgress.callCount, 1);
-              incomingEvents.push(workflowDenoiseActivity(
-                callCount,
-                workflowDelta,
-                payload.generatedAt,
-                workflowEvents[0],
-              ));
-            }
             workflowProgressByFilter.current.set(workflowFilterKey, { callCount, latestStartedAt });
           }
           const incomingRecentEvents = bootstrap
@@ -2823,13 +2750,11 @@ export default function Page() {
             : workflowChanged
               ? [...rawIncomingEvents, ...workflowEvents]
               : rawIncomingEvents;
-          setActivity((previous) => enqueueActivity(
-            previous,
-            incomingEvents,
-            payload.generatedAt,
-            incomingRecentEvents,
-            payload.batch,
-          ));
+          setActivity((previous) => {
+            const next = enqueueActivity(previous, incomingEvents, payload.generatedAt,
+              incomingRecentEvents, payload.batch, payload.workflowSnapshotComplete === true);
+            return payload.workflowSnapshotAvailable === false ? { ...next, connection: 'error' } : next;
+          });
           const batch = normalizeActivityBatch(payload.batch);
           const hasStatsChange = workflowChanged
             || batch.receivedCount > 0
@@ -6109,12 +6034,23 @@ const CSS = `
   inset: 0;
   pointer-events: none;
 }
+.core-evidence-source {
+  position: absolute;
+  z-index: 8;
+  bottom: 2%;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #9bd5e9;
+  font-size: 10px;
+  white-space: nowrap;
+}
 .ai-evidence-card {
   position: absolute;
   display: flex;
   flex-direction: column;
   width: 104px;
   min-height: 42px;
+  pointer-events: auto;
   padding: 6px 8px;
   opacity: 0;
   border: 1px solid color-mix(in srgb, var(--core-task-accent) 48%, transparent);

@@ -6,6 +6,7 @@ import re
 import sqlite3
 import time
 from collections import Counter, OrderedDict
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1054,45 +1055,125 @@ def _get_workflow_progress(
     }
 
 
+def _dashboard_execution_detail(output_text, input_text):
+    """Read a bounded preview for this execution only; never open result files.
+
+    Kept separate from metric aggregation and task-center/workflow contracts.
+    A missing count is not zero (nor an assumed single-alert batch).
+    """
+    output = _safe_json_object(output_text)
+    inputs = _safe_json_object(input_text)
+    def text(*values):
+        return _first_text(*(value[:512] for value in values if isinstance(value, str)))
+
+    queue = [(value, 0) for value in (
+        output.get("enriched_alerts_with_triage"), output.get("triage_results"),
+        output.get("unique_alerts"), output.get("enriched_alerts"),
+        inputs.get("_soc_alert_preview"), inputs.get("alerts"),
+        inputs.get("alert_list"), inputs.get("syslog_message"), inputs.get("syslog"),
+    ) if value is not None]
+    best, best_score = {}, 0
+    for _ in range(48):
+        if not queue:
+            break
+        value, depth = queue.pop(0)
+        if depth > 6:
+            continue
+        if isinstance(value, str):
+            if len(value) > 65536:
+                continue
+            # Syslog prefixes can precede a vendor JSON envelope.
+            start = value.find("{")
+            parsed = _safe_json_object(value[start:] if start >= 0 else value)
+            if parsed:
+                queue.append((parsed, depth + 1))
+        elif isinstance(value, list):
+            queue.extend((item, depth + 1) for item in value[:3])
+        elif isinstance(value, dict):
+            if value.get("_type") == "dict":
+                continue  # Persisted key-only summary, not an alert.
+            alert = {
+                "id": text(value.get("id"), value.get("alert_id"), value.get("uuid")),
+                "threatName": text(value.get("threat_name"), value.get("alert_name"), value.get("attack_name")),
+                "sourceType": text(value.get("_source_type"), value.get("source_type"), value.get("device_type")),
+                "srcIp": text(value.get("sip"), value.get("src_ip"), value.get("source_ip"), value.get("net_real_src_ip")),
+                "dstIp": text(value.get("dip"), value.get("dst_ip"), value.get("destination_ip"), value.get("net_dest_ip")),
+            }
+            score = sum(bool(alert[key]) for key in ("threatName", "srcIp", "dstIp"))
+            if score > best_score:
+                best, best_score = alert, score
+            for key in ("preview", "data", "alert", "alerts", "message", "msg", "log", "event", "payload"):
+                if key in value:
+                    queue.append((value[key], depth + 1))
+    stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
+    raw = stats.get("raw_count", inputs.get("_soc_alert_count"))
+    try:
+        count = int(raw) if raw is not None and not isinstance(raw, bool) else None
+        if count is not None and (count < 0 or str(raw).strip() != str(count)):
+            count = None
+    except (ValueError, TypeError, OverflowError):
+        count = None
+    if count is None:
+        alerts = inputs.get("alerts", inputs.get("alert_list"))
+        if isinstance(alerts, list):
+            count = len(alerts)
+    if best:
+        best["sourceType"] = best["sourceType"] or text(
+            inputs.get("source_log_type"), output.get("source_log_type")
+        )
+    return best, count
+
+
 def _get_workflow_recent_events(
     workflow_name: str,
     start_time: int = 0,
     end_time: int = 0,
     limit: int = 10,
+    snapshot=None,
 ) -> list:
     if not WORKFLOW_DB.is_file():
+        if snapshot is not None:
+            snapshot.update(complete=False, available=False)
         return []
     workflow_stage = "triage" if workflow_name in TRIAGE_WORKFLOW_IDS else "denoise"
-    query_params = [workflow_name]
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
+        with closing(sqlite3.connect(f"{WORKFLOW_DB.resolve().as_uri()}?mode=ro", uri=True, timeout=0.2)) as conn:
+            deadline = time.monotonic() + 0.2
+            conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
             execution_columns = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
             }
+            # Do not materialize unbounded execution payloads in a 3-second UI poll.
+            def preview_column(name):
+                if name not in execution_columns:
+                    return f"'{{}}' AS {name}"
+                return f"CASE WHEN length({name}) <= 262144 THEN {name} ELSE '{{}}' END AS {name}"
+
+            latest_select = ", ".join([
+                "id", "status", "started_at",
+                _workflow_execution_column_expr(execution_columns, "updated_at", "started_at"),
+                *(preview_column(name) for name in ("output_results", "input_params", "payload")),
+            ])
+            query = f"SELECT {latest_select} FROM workflow_executions WHERE workflow_id = ?"
+            query_params = [workflow_name]
+            if start_time > 0 and end_time > 0:
+                query += " AND started_at >= ? AND started_at <= ?"
+                query_params.extend((int(start_time * 1000), int(end_time * 1000)))
+            row_limit = max(1, min(_safe_int(limit), 10))
+            active_rows = conn.execute(
+                query + " AND status IN ('running', 'queued', 'pending') ORDER BY started_at DESC LIMIT ?",
+                [*query_params, row_limit],
+            ).fetchall()
+            recent_rows = conn.execute(query + " ORDER BY started_at DESC LIMIT ?", [*query_params, row_limit]).fetchall()
+            rows = list({row["id"]: row for row in [*active_rows, *recent_rows]}.values())
+            if snapshot is not None and len(active_rows) == row_limit:
+                snapshot["complete"] = False
     except Exception:
-        return []
-    latest_select = ", ".join(
-        [
-            "id",
-            "status",
-            "started_at",
-            _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
-            _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
-            _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
-        ]
-    )
-    query = f"SELECT {latest_select} FROM workflow_executions WHERE workflow_id = ?"
-    if start_time > 0 and end_time > 0:
-        query += " AND started_at >= ? AND started_at <= ?"
-        query_params.extend((int(start_time * 1000), int(end_time * 1000)))
-    query += " ORDER BY started_at DESC LIMIT ?"
-    query_params.append(max(1, min(_safe_int(limit), 10)))
-    try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(query, query_params).fetchall()
-    except Exception:
+        if snapshot is not None:
+            snapshot.update(complete=False, available=False)
         return []
 
     events = []
@@ -1104,24 +1185,20 @@ def _get_workflow_recent_events(
         input_text = row["input_params"]
         payload_text = row["payload"]
         metrics = _workflow_execution_metrics(output_text, input_text)
-        preview = metrics["preview"]
-        raw_count = metrics["rawCount"]
+        alert, raw_count = _dashboard_execution_detail(output_text, input_text)
+        if workflow_stage == "denoise" and raw_count == 0 and not alert:
+            continue  # No alert work; keep the execution itself untouched.
         unique_count = metrics["uniqueCount"]
-        threat_name = ""
-        if workflow_stage == "triage":
+        threat_name = alert.get("threatName", "")
+        if not threat_name and workflow_stage == "triage":
             threat_name = _workflow_latest_alert_name(workflow_name, output_text, input_text)
         if not threat_name:
-            threat_name = str(
-                preview.get("threat_name")
-                or preview.get("_threat_type")
-                or preview.get("threat_type")
-                or f"降噪批次 · 原始 {raw_count} 条"
-            )
+            threat_name = f"降噪批次 · 原始 {raw_count} 条" if raw_count and raw_count > 0 else "降噪批次 · 数量未提供"
         normalized_status = str(status or "").lower()
         event_status = (
             "completed"
             if normalized_status in {"success", "completed"}
-            else "running"
+            else normalized_status
             if normalized_status in {"running", "queued", "pending"}
             else "failed"
         )
@@ -1139,17 +1216,18 @@ def _get_workflow_recent_events(
                 "occurredAt": datetime.fromtimestamp(
                     _safe_int(started_at) / 1000
                 ).astimezone().isoformat(timespec="seconds"),
+                "updatedAt": datetime.fromtimestamp(
+                    _safe_int(row["updated_at"] or started_at) / 1000
+                ).astimezone().isoformat(timespec="milliseconds"),
                 "triggerSource": "workflow_execution",
                 "workflowId": workflow_name,
                 "sessionId": session_id,
                 "messageId": message_id,
                 "sampleCount": max(unique_count, 1),
                 "alert": {
-                    "id": str(preview.get("id") or execution_id),
-                    "sourceType": metrics["sourceType"],
+                    **alert,
+                    "id": alert.get("id") or execution_id,
                     "threatName": threat_name,
-                    "srcIp": preview.get("sip") or preview.get("src_ip") or preview.get("net_real_src_ip"),
-                    "dstIp": preview.get("dip") or preview.get("dst_ip") or preview.get("net_dest_ip"),
                 },
                 "result": {
                     "isDuplicate": metrics["isDuplicate"],
@@ -1159,6 +1237,7 @@ def _get_workflow_recent_events(
                         for key, value in metrics.items()
                         if key not in {"preview", "sourceCounts", "sourceType"}
                     },
+                    "rawCount": raw_count,
                 },
             }
         )
@@ -1927,9 +2006,10 @@ def _get_activity(params):
         start_time,
         end_time,
     )
+    workflow_snapshot = {"complete": True, "available": True}
     workflow_events = [
-        *_get_workflow_recent_events("stream_alert_denoise", start_time, end_time),
-        *_get_workflow_recent_events("stream_alert_triage", start_time, end_time),
+        *_get_workflow_recent_events("stream_alert_denoise", start_time, end_time, snapshot=workflow_snapshot),
+        *_get_workflow_recent_events("stream_alert_triage", start_time, end_time, snapshot=workflow_snapshot),
     ]
     raw_cursor = str(params.get("cursor") or "").strip()
     bootstrap = str(params.get("bootstrap") or "").strip().lower() == "latest"
@@ -1943,6 +2023,7 @@ def _get_activity(params):
             cursor_reset=bool(raw_cursor),
             workflow_stats=workflow_stats,
             workflow_events=workflow_events,
+            workflow_snapshot=workflow_snapshot,
         )
 
     cursor = _decode_activity_cursor(raw_cursor) if raw_cursor else None
@@ -1963,6 +2044,7 @@ def _get_activity(params):
                     cursor_reset=cursor_reset,
                     workflow_stats=workflow_stats,
                     workflow_events=workflow_events,
+                    workflow_snapshot=workflow_snapshot,
                 )
             latest_row_id, latest_activity_id = _activity_latest_cursor(conn, settings)
 
@@ -1982,6 +2064,7 @@ def _get_activity(params):
                     recent_events=recent_events,
                     workflow_stats=workflow_stats,
                     workflow_events=workflow_events,
+                    workflow_snapshot=workflow_snapshot,
                 )
 
             last_row_id = max(_safe_int(cursor.get("lastRowId")), 0)
@@ -2007,6 +2090,7 @@ def _get_activity(params):
                 "",
                 workflow_stats=workflow_stats,
                 workflow_events=workflow_events,
+                workflow_snapshot=workflow_snapshot,
             ),
             "error": f"activity query failed: {exc}",
         }
@@ -2029,6 +2113,7 @@ def _get_activity(params):
             batch=batch,
             workflow_stats=workflow_stats,
             workflow_events=workflow_events,
+            workflow_snapshot=workflow_snapshot,
         ),
         "overflowCount": overflow_count,
     }
@@ -2044,6 +2129,7 @@ def _activity_response(
     batch=None,
     workflow_stats=None,
     workflow_events=None,
+    workflow_snapshot=None,
 ):
     return {
         "cursor": _encode_activity_cursor(last_row_id, last_activity_id),
@@ -2055,6 +2141,8 @@ def _activity_response(
         "cursorReset": cursor_reset,
         "workflowStats": workflow_stats or {"callCount": None, "latestStartedAt": None},
         "workflowEvents": workflow_events or [],
+        "workflowSnapshotComplete": bool(workflow_snapshot and workflow_snapshot["complete"]),
+        "workflowSnapshotAvailable": bool(workflow_snapshot and workflow_snapshot.get("available", True)),
         "tokenUsage": _read_token_usage(),
     }
 
