@@ -32,7 +32,6 @@ ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
-WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION = 3
 TASK_DB = Path.home() / ".flocks" / "data" / "tasks.db"
 USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
 SOC_PINNED_WORKFLOW_NAMES = {
@@ -905,192 +904,7 @@ def _empty_workflow_denoise_stats():
         "seriesUnique": [],
         "timelineLabels": [],
         "timelineWindow": "",
-        "metricsAvailable": False,
-        "dataAvailable": True,
-        "dataQuality": "legacy",
-        "unavailableReason": "",
-        "coverageComplete": False,
-        "coverageStartedAt": 0,
-        "sourceCoverageRate": 0,
-        "sourceMetricsAvailable": False,
-        "invalidExecutionCount": 0,
-        "unprocessedInputCount": 0,
-        "dataSource": "workflow.db.workflow_stats.call_count",
     }
-
-
-def _unavailable_workflow_denoise_stats(reason):
-    result = {
-        **_empty_workflow_denoise_stats(),
-        "dataAvailable": False,
-        "dataQuality": "unavailable",
-        "unavailableReason": str(reason or "workflow_metrics_unavailable"),
-        "dataSource": "unavailable",
-    }
-    for key in (
-        "callCount",
-        "successCount",
-        "errorCount",
-        "earliestStartedAt",
-        "latestStartedAt",
-        "rawCount",
-        "normalizedCount",
-        "afterFilterCount",
-        "uniqueCount",
-        "filterRemovedCount",
-        "duplicateCount",
-        "reducedCount",
-        "reductionRate",
-        "dedupRate",
-        "sourceCoverageRate",
-        "invalidExecutionCount",
-        "unprocessedInputCount",
-    ):
-        result[key] = None
-    return result
-
-
-def _get_workflow_metric_rollups(workflow_name, start_time, end_time):
-    if not WORKFLOW_DB.is_file():
-        return None
-    start_ms = max(_safe_int(start_time), 0) * 1000
-    end_ms = max(_safe_int(end_time), 0) * 1000
-    try:
-        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only = ON")
-            if not (
-                _table_exists(conn, "workflow_metric_rollups")
-                and _table_exists(conn, "workflow_metric_meta")
-            ):
-                return None
-            meta = conn.execute(
-                "SELECT coverage_started_at, updated_at FROM workflow_metric_meta "
-                "WHERE workflow_id = ?",
-                (workflow_name,),
-            ).fetchone()
-            if meta is None:
-                return None
-            verified_row = conn.execute(
-                "SELECT MIN(bucket_start) FROM workflow_metric_rollups "
-                "WHERE workflow_id = ? AND schema_version >= ?",
-                (workflow_name, WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION),
-            ).fetchone()
-            verified_started_at = _safe_int(verified_row[0] if verified_row else 0)
-            if verified_started_at <= 0:
-                # Existing v2 rows predate input/output reconciliation and may
-                # contain false zero ingress counts. Keep them out of the exact
-                # path until a v3 contribution establishes verified coverage.
-                return None
-            earliest_execution_ms = 0
-            if _table_exists(conn, "workflow_executions"):
-                earliest_execution_row = conn.execute(
-                    "SELECT MIN(started_at) FROM workflow_executions WHERE workflow_id = ?",
-                    (workflow_name,),
-                ).fetchone()
-                earliest_execution_ms = _safe_int(
-                    earliest_execution_row[0] if earliest_execution_row else 0
-                )
-            query = (
-                "SELECT * FROM workflow_metric_rollups "
-                "WHERE workflow_id = ? AND schema_version >= ?"
-            )
-            query_params = [workflow_name, WORKFLOW_METRIC_ROLLUP_SCHEMA_VERSION]
-            if start_ms > 0 and end_ms > 0:
-                query += " AND bucket_start >= ? AND bucket_start <= ?"
-                query_params.extend((start_ms - (start_ms % 60000), end_ms))
-            query += " ORDER BY bucket_start"
-            rows = conn.execute(query, query_params).fetchall()
-    except Exception:
-        return None
-
-    result = _empty_workflow_denoise_stats()
-    source_counts = Counter()
-    for row in rows:
-        parsed_sources = _safe_json_object(row["source_counts"])
-        if isinstance(parsed_sources, dict):
-            for key, value in parsed_sources.items():
-                source_counts[_norm(key)] += max(_safe_int(value), 0)
-    raw_count = sum(max(_safe_int(row["raw_count"]), 0) for row in rows)
-    normalized_count = sum(max(_safe_int(row["normalized_count"]), 0) for row in rows)
-    after_filter_count = sum(max(_safe_int(row["after_filter_count"]), 0) for row in rows)
-    unique_count = sum(max(_safe_int(row["unique_count"]), 0) for row in rows)
-    filter_removed_count = sum(max(_safe_int(row["filter_removed_count"]), 0) for row in rows)
-    duplicate_count = sum(max(_safe_int(row["duplicate_count"]), 0) for row in rows)
-    success_count = sum(max(_safe_int(row["success_count"]), 0) for row in rows)
-    error_count = sum(max(_safe_int(row["error_count"]), 0) for row in rows)
-    invalid_count = sum(max(_safe_int(row["invalid_count"]), 0) for row in rows)
-    source_covered_count = sum(max(_safe_int(row["source_covered_count"]), 0) for row in rows)
-    coverage_started_at = max(
-        _safe_int(meta["coverage_started_at"]),
-        verified_started_at,
-        0,
-    )
-    requested_start_ms = start_ms or earliest_execution_ms
-    # An unbounded query is complete only when execution history proves that
-    # verified rollups cover the workflow's first execution. Without that
-    # lower bound, treating recent v3 rows as all-time history would silently
-    # undercount older executions.
-    complete_window = requested_start_ms > 0 and coverage_started_at <= requested_start_ms
-    source_complete = source_covered_count == raw_count
-    metrics_complete = invalid_count == 0 and error_count == 0
-    quality = (
-        "complete"
-        if complete_window and metrics_complete and source_complete
-        else "partial"
-    )
-
-    first_bucket = _safe_int(rows[0]["bucket_start"]) if rows else start_ms
-    last_bucket = _safe_int(rows[-1]["bucket_start"]) if rows else end_ms
-    bucket_start, bucket_seconds, bucket_count, labels, window = _timeline_spec(
-        [],
-        start_time or first_bucket // 1000,
-        end_time or max(last_bucket // 1000, first_bucket // 1000),
-    )
-    series_raw = [0] * bucket_count
-    series_unique = [0] * bucket_count
-    for row in rows:
-        index = int(((_safe_int(row["bucket_start"]) // 1000) - bucket_start) / bucket_seconds)
-        if 0 <= index < bucket_count:
-            series_raw[index] += max(_safe_int(row["raw_count"]), 0)
-            series_unique[index] += max(_safe_int(row["unique_count"]), 0)
-
-    result.update(
-        {
-            "callCount": success_count + error_count,
-            "successCount": success_count,
-            "errorCount": error_count,
-            "earliestStartedAt": first_bucket,
-            "latestStartedAt": last_bucket,
-            "rawCount": raw_count,
-            "normalizedCount": normalized_count,
-            "afterFilterCount": after_filter_count,
-            "uniqueCount": unique_count,
-            "filterRemovedCount": filter_removed_count,
-            "duplicateCount": duplicate_count,
-            "reducedCount": max(raw_count - unique_count, 0),
-            "reductionRate": _ratio(max(raw_count - unique_count, 0), raw_count),
-            "dedupRate": _ratio(duplicate_count, after_filter_count),
-            "sourceCounts": dict(source_counts),
-            "seriesRaw": series_raw,
-            "seriesUnique": series_unique,
-            "timelineLabels": labels,
-            "timelineWindow": window,
-            "metricsAvailable": metrics_complete,
-            "sourceMetricsAvailable": source_complete,
-            "dataQuality": quality,
-            "coverageComplete": complete_window,
-            "coverageStartedAt": coverage_started_at,
-            # Sources describe ingress volume on the dashboard. Use the raw
-            # denominator so failed/invalid executions cannot silently vanish
-            # from coverage while still contributing to the raw total.
-            "sourceCoverageRate": _ratio(min(source_covered_count, raw_count), raw_count),
-            "invalidExecutionCount": invalid_count,
-            "unprocessedInputCount": max(raw_count - normalized_count, 0),
-            "dataSource": "workflow.db.workflow_metric_rollups",
-        }
-    )
-    return result
 
 
 def _get_workflow_denoise_stats(
@@ -1103,25 +917,15 @@ def _get_workflow_denoise_stats(
     now = time.time()
     cache_key = f"denoise:{workflow_name}:{start_time or 0}:{end_time or 0}"
 
-    # Source liveness is part of the quality contract. Do not let a fresh
-    # process-local cache make a disappeared database look healthy.
-    if not WORKFLOW_DB.is_file():
-        return _unavailable_workflow_denoise_stats("workflow_db_missing")
-
     with _cache_lock:
         cached = _workflow_stats_cache.get(cache_key)
         if not force and cached and now - float(cached.get("updatedAt") or 0) < _CACHE_TTL:
             _workflow_stats_cache.move_to_end(cache_key)
             return cached["value"]
 
-    rollup_result = _get_workflow_metric_rollups(workflow_name, start_time, end_time)
-    if rollup_result is not None and rollup_result.get("coverageComplete"):
-        with _cache_lock:
-            _workflow_stats_cache[cache_key] = {"updatedAt": now, "value": rollup_result}
-            _workflow_stats_cache.move_to_end(cache_key)
-            while len(_workflow_stats_cache) > _WORKFLOW_CACHE_MAX:
-                _workflow_stats_cache.popitem(last=False)
-        return rollup_result
+    empty = _empty_workflow_denoise_stats()
+    if not WORKFLOW_DB.is_file():
+        return empty
 
     try:
         with sqlite3.connect(WORKFLOW_DB) as conn:
@@ -1186,22 +990,6 @@ def _get_workflow_denoise_stats(
             result_dict["timelineLabels"] = labels
             result_dict["timelineWindow"] = window
 
-        if rollup_result is not None:
-            # A newly-created rollup cannot represent the part of a requested
-            # window that predates metric collection. Keep the legacy values
-            # visible until the selected window is fully covered, and expose
-            # the coverage state so the UI does not present them as exact.
-            result_dict.update(
-                {
-                    "dataQuality": "legacy-partial",
-                    "coverageComplete": False,
-                    "coverageStartedAt": rollup_result.get("coverageStartedAt", 0),
-                    "invalidExecutionCount": rollup_result.get("invalidExecutionCount", 0),
-                    "sourceCoverageRate": rollup_result.get("sourceCoverageRate", 0),
-                    "shadowMetricsAvailable": True,
-                }
-            )
-
         with _cache_lock:
             _workflow_stats_cache[cache_key] = {"updatedAt": now, "value": result_dict}
             _workflow_stats_cache.move_to_end(cache_key)
@@ -1211,13 +999,7 @@ def _get_workflow_denoise_stats(
     except Exception:
         with _cache_lock:
             cached = _workflow_stats_cache.get(cache_key)
-            if cached:
-                return {
-                    **cached["value"],
-                    "dataQuality": "stale",
-                    "unavailableReason": "workflow_db_query_failed",
-                }
-        return _unavailable_workflow_denoise_stats("workflow_db_query_failed")
+            return cached["value"] if cached else empty
 
 
 def _get_workflow_progress(
@@ -1466,10 +1248,6 @@ async def get_task_center(ctx, request):
     params = dict(request.query_params)
     include_mock = _truthy(params.get("mockActivity")) or _truthy(params.get("mockTaskCenter"))
     return await asyncio.to_thread(_get_task_center, include_mock)
-
-
-async def get_ai_tasks(ctx, request):
-    return await asyncio.to_thread(_get_ai_tasks)
 
 
 def _table_exists(conn, table_name):
@@ -2134,340 +1912,6 @@ def _get_task_center(include_mock=False):
     }
 
 
-def _workflow_task_metric(stats, key):
-    if key not in stats:
-        return None, "missing"
-    value = stats.get(key)
-    if isinstance(value, bool):
-        return None, "invalid"
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None, "invalid"
-    if parsed < 0:
-        return None, "invalid"
-    return parsed, "complete"
-
-
-def _workflow_task_metrics(output_text, status):
-    output = _safe_json_object(output_text)
-    stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
-    values = {}
-    qualities = []
-    for field, key in (
-        ("raw", "raw_count"),
-        ("normalized", "normalized_count"),
-        ("afterFilter", "after_filter_count"),
-        ("unique", "after_dedup_count"),
-    ):
-        values[field], quality = _workflow_task_metric(stats, key)
-        qualities.append(quality)
-    if all(quality == "complete" for quality in qualities):
-        ordered = (
-            values["raw"],
-            values["normalized"],
-            values["afterFilter"],
-            values["unique"],
-        )
-        if ordered[0] >= ordered[1] >= ordered[2] >= ordered[3] >= 0:
-            quality = "complete"
-        else:
-            # Running executions may expose node-local intermediate output.
-            # Treat an impossible stage order as pending until completion;
-            # persisted finished output with the same shape is invalid.
-            quality = "pending" if status in WORKFLOW_RUNNING_STATUSES else "invalid"
-    elif "invalid" in qualities:
-        quality = "invalid"
-    elif status in WORKFLOW_RUNNING_STATUSES:
-        quality = "pending"
-    else:
-        quality = "missing"
-    return values, quality
-
-
-def _workflow_task_input_count(inputs):
-    # Match stream_alert_denoise's receive node exactly: a decodable syslog
-    # payload wins over every batch field.
-    value = inputs.get("syslog_message") or inputs.get("syslog")
-    if isinstance(value, dict) and value.get("message"):
-        try:
-            parsed_syslog = json.loads(str(value["message"]))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
-        else:
-            if isinstance(parsed_syslog, dict):
-                return 1
-
-    def sequence_count(value):
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                return None
-        if isinstance(value, list):
-            return len(value)
-        if isinstance(value, dict):
-            if value.get("_type") in {"list", "tuple", "set"}:
-                count, quality = _workflow_task_metric(value, "count")
-                return count if quality == "complete" else None
-            if "data" in value:
-                value = value.get("data")
-                return len(value) if isinstance(value, list) else (1 if value else 0)
-        return 1 if value else 0
-
-    # `alerts` shadows `alert_list` even when it is empty, matching
-    # inputs.get('alerts', inputs.get('alert_list', [])) in the workflow.
-    for key in ("alerts", "alert_list"):
-        marker_key = f"_{key}_count"
-        if key not in inputs and marker_key not in inputs:
-            continue
-        materialized_count = sequence_count(inputs.get(key)) if key in inputs else None
-        if materialized_count is not None:
-            return materialized_count
-        marker, quality = _workflow_task_metric(inputs, marker_key)
-        if quality == "complete":
-            return marker
-        return None
-
-    # Compatibility fallbacks for older/compacted execution rows. They are
-    # considered only when no canonical workflow input is present.
-    for marker_key in ("_raw_alerts_count", "raw_count"):
-        marker, quality = _workflow_task_metric(inputs, marker_key)
-        if quality == "complete":
-            return marker
-    if "raw_alerts" in inputs:
-        return sequence_count(inputs.get("raw_alerts"))
-    if inputs.get("alert") not in (None, "", {}):
-        return 1
-    return None
-
-
-def _workflow_task_row(row, workflow_id, effective_status):
-    output_text = row["output_results"]
-    input_text = row["input_params"]
-    output = _safe_json_object(output_text)
-    inputs = _safe_json_object(input_text)
-    metrics = _workflow_execution_metrics(output_text, input_text)
-    counts, data_quality = _workflow_task_metrics(output_text, effective_status)
-    input_count = _workflow_task_input_count(inputs)
-    output_raw_count = counts["raw"]
-    raw_count_source = "workflow_output" if output_raw_count is not None else "pending"
-    if input_count is not None:
-        counts["raw"] = input_count
-        raw_count_source = "workflow_input"
-        if output_raw_count is not None and output_raw_count != input_count:
-            data_quality = (
-                "pending" if effective_status in WORKFLOW_RUNNING_STATUSES else "invalid"
-            )
-        elif input_count == 0 and data_quality in {"complete", "pending", "missing"}:
-            data_quality = "empty-input"
-    elif effective_status in WORKFLOW_RUNNING_STATUSES and output_raw_count == 0:
-        # A zero-initialized output is not proof that an active task received
-        # no alerts. Keep it unknown until input or completed output verifies it.
-        counts["raw"] = None
-        raw_count_source = "pending"
-        data_quality = "pending"
-    preview = metrics["preview"]
-    stage = "triage" if workflow_id in TRIAGE_WORKFLOW_IDS else "denoise"
-    title = _workflow_latest_alert_name(workflow_id, output_text, input_text)
-    if stage == "denoise" and not preview:
-        raw_count = counts["raw"]
-        title = (
-            "降噪批次 · 空输入"
-            if data_quality == "empty-input"
-            else f"降噪批次 · 原始 {raw_count} 条"
-            if raw_count is not None
-            else "降噪批次 · 原始条数待生成"
-        )
-    session_id, message_id = _workflow_link_context(row)
-    total_steps = max(_workflow_node_count(workflow_id), _safe_int(row["step_count"]))
-    current_step = max(_safe_int(row["current_step_index"]), 0)
-    if effective_status == "running" and total_steps > 0:
-        progress = {
-            "mode": "steps",
-            "current": min(max(current_step, 1), total_steps),
-            "total": total_steps,
-            "percent": _ratio(min(max(current_step, 1), total_steps), total_steps),
-            "label": f"第 {min(max(current_step, 1), total_steps)}/{total_steps} 步",
-        }
-    else:
-        progress = {
-            "mode": "waiting" if effective_status in {"queued", "pending"} else "none",
-            "current": current_step,
-            "total": total_steps,
-            "percent": None,
-            "label": "等待调度" if effective_status in {"queued", "pending"} else "",
-        }
-    source_type = metrics["sourceType"]
-    return {
-        "taskId": f"workflow-execution:{row['id']}",
-        "workflowId": workflow_id,
-        "executionId": str(row["id"]),
-        "stage": stage,
-        "status": effective_status,
-        "startedAt": _safe_int(row["started_at"]),
-        "updatedAt": _safe_int(row["updated_at"]),
-        "finishedAt": _safe_int(row["finished_at"]),
-        "currentPhase": str(row["current_phase"] or ""),
-        "title": title,
-        "sourceType": source_type,
-        "srcIp": preview.get("sip") or preview.get("src_ip") or preview.get("net_real_src_ip"),
-        "dstIp": preview.get("dip") or preview.get("dst_ip") or preview.get("net_dest_ip"),
-        "counts": counts,
-        "dataQuality": data_quality,
-        "rawCountSource": raw_count_source,
-        "emptyBatch": data_quality == "empty-input",
-        "emptyInput": data_quality == "empty-input",
-        "progress": progress,
-        "sessionId": session_id,
-        "messageId": message_id,
-        "error": str(row["error_message"] or ""),
-        "inputMode": str(output.get("input_mode") or inputs.get("input_mode") or ""),
-    }
-
-
-def _get_ai_tasks():
-    empty_summary = {
-        "active": 0,
-        "running": 0,
-        "waiting": 0,
-        "stale": 0,
-        "disabled": 0,
-        "returned": 0,
-        "truncated": False,
-    }
-    if not WORKFLOW_DB.is_file():
-        return {
-            "generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "connection": "unavailable",
-            "reason": "workflow_db_missing",
-            "summary": empty_summary,
-            "tasks": [],
-        }
-    workflow_ids = tuple(SOC_PINNED_WORKFLOW_NAMES)
-    try:
-        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only = ON")
-            if not _table_exists(conn, "workflow_executions"):
-                return {
-                    "generatedAt": datetime.now().isoformat(timespec="seconds"),
-                    "connection": "unavailable",
-                    "reason": "workflow_executions_missing",
-                    "summary": empty_summary,
-                    "tasks": [],
-                }
-            columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
-            }
-            updated_expr = "updated_at" if "updated_at" in columns else "started_at"
-            freshness_expr = f"COALESCE(NULLIF({updated_expr}, 0), started_at)"
-            latest_select = ", ".join(
-                [
-                    "id",
-                    "workflow_id",
-                    "status",
-                    "started_at",
-                    _workflow_execution_column_expr(columns, "finished_at", "0"),
-                    _workflow_execution_column_expr(columns, "updated_at", "0"),
-                    _workflow_execution_column_expr(columns, "current_phase", "''"),
-                    _workflow_execution_column_expr(columns, "current_step_index", "0"),
-                    _workflow_execution_column_expr(columns, "step_count", "0"),
-                    _workflow_execution_column_expr(columns, "output_results", "'{}'"),
-                    _workflow_execution_column_expr(columns, "input_params", "'{}'"),
-                    _workflow_execution_column_expr(columns, "payload", "'{}'"),
-                    _workflow_execution_column_expr(columns, "error_message", "''"),
-                ]
-            )
-            now_ms = int(time.time() * 1000)
-            tasks = []
-            summary = dict(empty_summary)
-            for workflow_id in workflow_ids:
-                trigger_state = _workflow_trigger_state(conn, workflow_id)
-                cutoff = now_ms - trigger_state["timeoutSeconds"] * 1000
-                if trigger_state["hasConfig"] and not trigger_state["enabled"]:
-                    summary["disabled"] += _safe_int(
-                        conn.execute(
-                            "SELECT COUNT(*) FROM workflow_executions "
-                            "WHERE workflow_id = ? AND status IN ('running', 'queued', 'pending')",
-                            (workflow_id,),
-                        ).fetchone()[0]
-                    )
-                    continue
-                active_count = _safe_int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM workflow_executions "
-                        "WHERE workflow_id = ? AND status IN ('running', 'queued', 'pending') "
-                        f"AND {freshness_expr} >= ?",
-                        (workflow_id, cutoff),
-                    ).fetchone()[0]
-                )
-                running_count = _safe_int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM workflow_executions "
-                        "WHERE workflow_id = ? AND status = 'running' "
-                        f"AND {freshness_expr} >= ?",
-                        (workflow_id, cutoff),
-                    ).fetchone()[0]
-                )
-                waiting_count = _safe_int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM workflow_executions "
-                        "WHERE workflow_id = ? AND status IN ('queued', 'pending') "
-                        f"AND {freshness_expr} >= ?",
-                        (workflow_id, cutoff),
-                    ).fetchone()[0]
-                )
-                stale_count = _safe_int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM workflow_executions "
-                        "WHERE workflow_id = ? AND status IN ('running', 'queued', 'pending') "
-                        f"AND {freshness_expr} < ?",
-                        (workflow_id, cutoff),
-                    ).fetchone()[0]
-                )
-                summary["active"] += active_count
-                summary["running"] += running_count
-                summary["waiting"] += waiting_count
-                summary["stale"] += stale_count
-                rows = conn.execute(
-                    f"SELECT {latest_select} FROM workflow_executions "
-                    "WHERE workflow_id = ? AND status IN ('running', 'queued', 'pending') "
-                    f"AND {freshness_expr} >= ? "
-                    f"ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END, {freshness_expr} DESC "
-                    "LIMIT 50",
-                    (workflow_id, cutoff),
-                ).fetchall()
-                for row in rows:
-                    effective_status = str(row["status"] or "").lower()
-                    tasks.append(_workflow_task_row(row, workflow_id, effective_status))
-            tasks.sort(
-                key=lambda item: (
-                    0 if item["status"] == "running" else 1,
-                    -max(item["updatedAt"], item["startedAt"]),
-                )
-            )
-            tasks = tasks[:50]
-            summary["returned"] = len(tasks)
-            summary["truncated"] = summary["active"] > len(tasks)
-            return {
-                "generatedAt": datetime.now().isoformat(timespec="seconds"),
-                "connection": "online",
-                "reason": "",
-                "summary": summary,
-                "tasks": tasks,
-            }
-    except Exception as exc:
-        return {
-            "generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "connection": "error",
-            "reason": str(exc),
-            "summary": empty_summary,
-            "tasks": [],
-        }
-
-
 def _get_activity(params):
     _ensure_sqlite_schema()
     _maybe_prune_activity()
@@ -2542,13 +1986,6 @@ def _get_activity(params):
 
             last_row_id = max(_safe_int(cursor.get("lastRowId")), 0)
             last_activity_id = max(_safe_int(cursor.get("lastActivityId")), 0)
-            previous_polled_at = max(_safe_int(cursor.get("polledAt")), 0)
-            current_polled_at = int(time.time() * 1000)
-            poll_window_ms = (
-                max(current_polled_at - previous_polled_at, 1)
-                if previous_polled_at
-                else ACTIVITY_WINDOW_MS
-            )
             if last_row_id > latest_row_id or last_activity_id > latest_activity_id:
                 last_row_id = 0
                 last_activity_id = 0
@@ -2561,7 +1998,6 @@ def _get_activity(params):
                 latest_row_id=latest_row_id,
                 latest_activity_id=latest_activity_id,
                 limit=limit,
-                window_ms=poll_window_ms,
             )
     except Exception as exc:
         return {
@@ -2609,11 +2045,9 @@ def _activity_response(
     workflow_stats=None,
     workflow_events=None,
 ):
-    generated_at = datetime.now().astimezone()
-    polled_at = int(generated_at.timestamp() * 1000)
     return {
-        "cursor": _encode_activity_cursor(last_row_id, last_activity_id, polled_at),
-        "generatedAt": generated_at.isoformat(timespec="seconds"),
+        "cursor": _encode_activity_cursor(last_row_id, last_activity_id),
+        "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "events": events,
         "recentEvents": recent_events or [],
         "overflowCount": 0,
@@ -2640,12 +2074,11 @@ def _empty_activity_batch():
     }
 
 
-def _encode_activity_cursor(last_row_id, last_activity_id, polled_at=None):
+def _encode_activity_cursor(last_row_id, last_activity_id):
     payload = json.dumps(
         {
             "lastRowId": max(_safe_int(last_row_id), 0),
             "lastActivityId": max(_safe_int(last_activity_id), 0),
-            "polledAt": max(_safe_int(polled_at), 0),
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -2684,7 +2117,6 @@ def _activity_rows(
     latest_row_id,
     latest_activity_id,
     limit,
-    window_ms=ACTIVITY_WINDOW_MS,
 ):
     summary = _activity_insert_summary(conn, settings, last_row_id, latest_row_id)
     new_count = summary["receivedCount"]
@@ -2726,11 +2158,11 @@ def _activity_rows(
             if new_count > ACTIVITY_SURGE_LIMIT
             else "burst" if new_count > ACTIVITY_NORMAL_LIMIT else "normal"
         ),
-        "windowMs": max(_safe_int(window_ms), 1),
+        "windowMs": ACTIVITY_WINDOW_MS,
         "triageUpdatedCount": updated_count,
         "sampledCount": sampled_count,
         "suppressedCount": max(new_count - sampled_count, 0),
-        "ratePerSecond": round(new_count / (max(_safe_int(window_ms), 1) / 1000), 1),
+        "ratePerSecond": round(new_count / (ACTIVITY_WINDOW_MS / 1000), 1),
     }
     return rows, max(new_count + updated_count - len(rows), 0), batch
 
@@ -2974,13 +2406,7 @@ async def get_stats(ctx, request):
 
 
 def _get_stats(params):
-    try:
-        _ensure_sqlite_schema()
-    except Exception:
-        # Source quality is resolved by the read-only query below. Keeping the
-        # endpoint alive lets the UI distinguish an unavailable SOC database
-        # from a healthy database whose selected window genuinely has zero rows.
-        pass
+    _ensure_sqlite_schema()
     time_window = _normalize_time_window(
         params.get("startTime"),
         params.get("endTime"),
@@ -3015,16 +2441,6 @@ def _get_stats(params):
         _stats_cache_ttl(range_start_time, range_end_time),
     )
     if cached is not None:
-        cached_status = cached.get("sourceStatus") or {}
-        cached_assets = cached_status.get("assets") or {}
-        cached_workflow = cached_status.get("metricQuality") or {}
-        source_liveness_changed = bool(cached_assets.get("exists")) != _active_source_exists()
-        workflow_liveness_changed = bool(cached_workflow.get("dataAvailable", True)) != bool(
-            WORKFLOW_DB.is_file()
-        )
-        if source_liveness_changed or workflow_liveness_changed:
-            cached = None
-    if cached is not None:
         return {
             **cached,
             "tokenUsage": _read_token_usage(),
@@ -3036,12 +2452,7 @@ def _get_stats(params):
     denoise_files, denoise_locations = [], []
     triage_files, triage_locations = [], []
 
-    asset_files, triage_quality = _find_asset_files_with_quality(
-        start_date,
-        end_date,
-        start_time,
-        end_time,
-    )
+    asset_files = _find_asset_files(start_date, end_date, start_time, end_time)
     asset_denoise_files = [path for path in asset_files if _asset_file_role(path) == "denoise"]
     asset_triage_files = [path for path in asset_files if _asset_file_role(path) == "triage"]
     sample_mode = bool(asset_denoise_files or asset_triage_files)
@@ -3055,59 +2466,37 @@ def _get_stats(params):
         range_end_time,
         force=force_refresh,
     )
-    denoise = _read_denoise(denoise_files, workflow_stats.get("callCount") or 0)
+    denoise = _read_denoise(denoise_files, workflow_stats.get("callCount", 0))
     soc_unique_count = denoise["totalUnique"]
     soc_unique_series = denoise["seriesUnique"]
     timeline_labels = workflow_stats["timelineLabels"] or denoise.get("_timelineLabels", [])
     timeline_window = workflow_stats["timelineWindow"] or denoise.get("_timelineWindow", "")
     workflow_series_raw = workflow_stats["seriesRaw"]
-    metrics_available = bool(workflow_stats.get("metricsAvailable"))
-    if metrics_available:
-        processed_total = workflow_stats["rawCount"]
-        normalized_total = workflow_stats["normalizedCount"]
-        after_filter_total = workflow_stats["afterFilterCount"]
-        unique_total = workflow_stats["uniqueCount"]
-        filter_removed_count = workflow_stats["filterRemovedCount"]
-        duplicate_count = workflow_stats["duplicateCount"]
-        workflow_series_unique = workflow_stats["seriesUnique"]
-    else:
-        # Legacy/unavailable data is kept only as an internal compatibility
-        # fallback. The quality contract tells the UI not to present it as an
-        # authoritative metric; unavailable fields themselves remain null in
-        # sourceStatus.workflowStats.
-        processed_total = max(_safe_int(workflow_stats.get("callCount")), 0)
-        normalized_total = processed_total
-        after_filter_total = processed_total
-        unique_total = soc_unique_count
-        filter_removed_count = 0
-        duplicate_count = max(processed_total - soc_unique_count, 0)
-        workflow_series_unique = soc_unique_series
-    if not workflow_series_raw and workflow_series_unique:
-        workflow_series_raw = [0] * len(workflow_series_unique)
-    reduced_count = max(processed_total - unique_total, 0)
+    if not workflow_series_raw and soc_unique_series:
+        workflow_series_raw = [0] * len(soc_unique_series)
+    processed_total = workflow_stats["callCount"]
+    reduced_count = max(processed_total - soc_unique_count, 0)
     reduction_rate = _ratio(reduced_count, processed_total)
     denoise.update(
         {
             "totalRaw": processed_total,
-            "totalNormalized": normalized_total,
-            "afterFilter": after_filter_total,
-            "totalUnique": unique_total,
-            "filterRemoved": filter_removed_count,
-            "dedupRemoved": duplicate_count,
+            "totalNormalized": processed_total,
+            "afterFilter": processed_total,
+            "totalUnique": soc_unique_count,
+            "filterRemoved": 0,
+            "dedupRemoved": reduced_count,
             "duplicates": reduced_count,
             "duplicateRate": reduction_rate,
-            "dedupRate": _ratio(duplicate_count, after_filter_total),
-            "uniqueRate": _ratio(min(unique_total, processed_total), processed_total),
-            "files": workflow_stats.get("callCount"),
+            "dedupRate": reduction_rate,
+            "uniqueRate": _ratio(min(soc_unique_count, processed_total), processed_total),
+            "files": processed_total,
             "sourceCounter": Counter(workflow_stats["sourceCounts"]),
             "seriesRaw": workflow_series_raw,
-            "seriesUnique": workflow_series_unique,
+            "seriesUnique": soc_unique_series,
             "_timelineLabels": timeline_labels,
             "_timelineWindow": timeline_window,
-            "workflowCallCount": workflow_stats["callCount"],
-            "socPersistedUnique": soc_unique_count,
-            "dataSource": workflow_stats.get("dataSource"),
-            "dataQuality": workflow_stats.get("dataQuality"),
+            "workflowCallCount": processed_total,
+            "dataSource": "workflow.db.workflow_stats.call_count + soc.db.unique",
         }
     )
     triage = _read_triage(triage_files)
@@ -3120,65 +2509,6 @@ def _get_stats(params):
     available_dates = _available_asset_dates()
     date_range = _build_date_range(start_date, end_date, asset_files, available_dates)
     event_range = _build_event_range(date_range, denoise, triage)
-    triage_payload = _without_counters(triage)
-    pipeline_payload = dict(pipeline)
-    closed_loop_payload = dict(closed_loop)
-    attack_profile = _build_attack_profile(denoise, triage)
-    verdicts = [
-        {"key": "attack_success", "label": "攻击成功", "value": triage["attackSuccess"], "color": "#ff4d6d"},
-        {"key": "attack", "label": "攻击行为", "value": triage["attack"], "color": "#ffb020"},
-        {"key": "attack_failed", "label": "攻击失败", "value": triage["attackFailed"], "color": "#2ee6a6"},
-        {"key": "non_attack", "label": "非攻击", "value": triage["benign"], "color": "#58a6ff"},
-        {"key": "unknown", "label": "未知", "value": triage["unknown"], "color": "#9b8cff"},
-    ]
-    top_threat_types = _counter_items(
-        triage["threatTypeCounter"] or denoise["threatTypeCounter"],
-        14,
-    )
-    severity_levels = _counter_items(
-        _profile_counter(denoise, triage, "severityCounter"),
-        8,
-    )
-    risk_levels = _counter_items(triage["riskCounter"], 5)
-    triage_series_total = triage["seriesTotal"]
-    triage_series_attack = triage["seriesAttack"]
-    if not triage_quality["metricsAvailable"]:
-        for key in (
-            "totalRecords", "batchTotal", "newTriaged", "cacheHit", "triageFailed",
-            "followersReused", "attackTotal", "attackSuccess", "attack", "attackFailed",
-            "benign", "unknown", "attackRate", "successRate", "cacheRate", "coverageRate",
-            "avgTriageMs", "headers", "files", "parseErrors",
-        ):
-            triage_payload[key] = None
-        for key in (
-            "triageTotal", "attackTotal", "llmSaved", "workloadReuseRate",
-            "attackRate", "successRate",
-        ):
-            pipeline_payload[key] = None
-        closed_loop_payload = {key: None for key in closed_loop_payload}
-        verdicts = [{**item, "value": None} for item in verdicts]
-        attack_profile = []
-        top_threat_types = []
-        severity_levels = []
-        risk_levels = []
-        triage_series_total = []
-        triage_series_attack = []
-
-    missing_sources = [
-        item
-        for item in denoise_locations + triage_locations
-        if not item["exists"] or item["fileCount"] == 0
-    ]
-    if not triage_quality["dataAvailable"]:
-        missing_sources.append(
-            {
-                "kind": "soc",
-                "path": _display_path(DEFAULT_SQLITE_DB),
-                "exists": DEFAULT_SQLITE_DB.is_file(),
-                "fileCount": 0,
-                "reason": triage_quality["unavailableReason"],
-            }
-        )
 
     result = {
         "date": start_date,
@@ -3198,20 +2528,6 @@ def _get_stats(params):
             },
             "workflowStatsDb": _display_path(WORKFLOW_DB),
             "workflowStats": workflow_stats,
-            "triageQuality": triage_quality,
-            "metricQuality": {
-                "status": workflow_stats.get("dataQuality", "legacy"),
-                "dataAvailable": workflow_stats.get("dataAvailable", True),
-                "unavailableReason": workflow_stats.get("unavailableReason", ""),
-                "coverageComplete": workflow_stats.get("coverageComplete", False),
-                "coverageStartedAt": workflow_stats.get("coverageStartedAt", 0),
-                "sourceCoverageRate": workflow_stats.get("sourceCoverageRate", 0),
-                "sourceMetricsAvailable": workflow_stats.get("sourceMetricsAvailable", False),
-                "invalidExecutionCount": workflow_stats.get("invalidExecutionCount", 0),
-                "unprocessedInputCount": workflow_stats.get("unprocessedInputCount", 0),
-                "errorExecutionCount": workflow_stats.get("errorCount", 0),
-                "metricsAvailable": metrics_available,
-            },
             "sampleMode": sample_mode,
             "sampleFile": ", ".join(_source_label(path) for path in asset_files) if sample_mode else "",
             "assets": {
@@ -3228,18 +2544,34 @@ def _get_stats(params):
             "triage": triage_locations,
             "denoiseFiles": [_file_brief(path) for path in denoise_files],
             "triageFiles": [_file_brief(path) for path in triage_files],
-            "missing": missing_sources,
+            "missing": [] if sample_mode else [
+                item
+                for item in denoise_locations + triage_locations
+                if not item["exists"] or item["fileCount"] == 0
+            ],
         },
         "denoise": _without_counters(denoise),
-        "triage": triage_payload,
-        "pipeline": pipeline_payload,
+        "triage": _without_counters(triage),
+        "pipeline": pipeline,
         "sources": sources,
-        "closedLoop": closed_loop_payload,
-        "attackProfile": attack_profile,
-        "verdicts": verdicts,
-        "topThreatTypes": top_threat_types,
-        "severityLevels": severity_levels,
-        "riskLevels": risk_levels,
+        "closedLoop": closed_loop,
+        "attackProfile": _build_attack_profile(denoise, triage),
+        "verdicts": [
+            {"key": "attack_success", "label": "攻击成功", "value": triage["attackSuccess"], "color": "#ff4d6d"},
+            {"key": "attack", "label": "攻击行为", "value": triage["attack"], "color": "#ffb020"},
+            {"key": "attack_failed", "label": "攻击失败", "value": triage["attackFailed"], "color": "#2ee6a6"},
+            {"key": "non_attack", "label": "非攻击", "value": triage["benign"], "color": "#58a6ff"},
+            {"key": "unknown", "label": "未知", "value": triage["unknown"], "color": "#9b8cff"},
+        ],
+        "topThreatTypes": _counter_items(
+            triage["threatTypeCounter"] or denoise["threatTypeCounter"],
+            14,
+        ),
+        "severityLevels": _counter_items(
+            _profile_counter(denoise, triage, "severityCounter"),
+            8,
+        ),
+        "riskLevels": _counter_items(triage["riskCounter"], 5),
         "tokenUsage": _read_token_usage(),
         "timeline": {
             "labels": denoise.get("_timelineLabels")
@@ -3248,8 +2580,8 @@ def _get_stats(params):
             or _timeline_window(start_date, end_date, len(denoise["seriesRaw"])),
             "denoiseRaw": denoise["seriesRaw"],
             "denoiseUnique": denoise["seriesUnique"],
-            "triageTotal": triage_series_total,
-            "triageAttack": triage_series_attack,
+            "triageTotal": triage["seriesTotal"],
+            "triageAttack": triage["seriesAttack"],
         },
     }
     result["cacheHit"] = False
@@ -3291,17 +2623,7 @@ def _date_span(start_date, end_date):
 
 
 def _find_asset_files(start_date, end_date, start_time=0, end_time=0):
-    sources, _ = _find_sqlite_sources_with_quality(
-        start_date,
-        end_date,
-        start_time,
-        end_time,
-    )
-    return sources
-
-
-def _find_asset_files_with_quality(start_date, end_date, start_time=0, end_time=0):
-    return _find_sqlite_sources_with_quality(start_date, end_date, start_time, end_time)
+    return _find_sqlite_sources(start_date, end_date, start_time, end_time)
 
 
 def _asset_file_date(path):
@@ -3345,31 +2667,10 @@ def _active_source_exists():
 
 
 def _find_sqlite_sources(start_date, end_date, start_time=0, end_time=0):
-    sources, _ = _find_sqlite_sources_with_quality(
-        start_date,
-        end_date,
-        start_time,
-        end_time,
-    )
-    return sources
-
-
-def _soc_source_quality(*, available, reason="", record_count=0):
-    return {
-        "status": "complete" if available else "unavailable",
-        "dataAvailable": bool(available),
-        "metricsAvailable": bool(available),
-        "unavailableReason": "" if available else str(reason or "soc_metrics_unavailable"),
-        "recordCount": max(_safe_int(record_count), 0) if available else None,
-        "dataSource": "soc.db.soc_dashboard_alert_facts" if available else "unavailable",
-    }
-
-
-def _find_sqlite_sources_with_quality(start_date, end_date, start_time=0, end_time=0):
     settings = _sqlite_settings()
     db_path = settings["db_path"]
     if not db_path.is_file():
-        return [], _soc_source_quality(available=False, reason="soc_db_missing")
+        return []
 
     time_clause = ""
     query_params = [start_date, end_date]
@@ -3385,24 +2686,9 @@ def _find_sqlite_sources_with_quality(start_date, end_date, start_time=0, end_ti
     )
     try:
         with sqlite3.connect(db_path) as conn:
-            conn.execute("PRAGMA query_only = ON")
-            required_tables = (DEFAULT_SQLITE_TABLE, FACTS_TABLE, META_TABLE)
-            if not all(_table_exists(conn, table_name) for table_name in required_tables):
-                return [], _soc_source_quality(
-                    available=False,
-                    reason="soc_dashboard_schema_unavailable",
-                )
-            schema_row = conn.execute(
-                f"SELECT meta_value FROM {META_TABLE} WHERE meta_key='schema_version'"
-            ).fetchone()
-            if not schema_row or str(schema_row[0]) != SCHEMA_VERSION:
-                return [], _soc_source_quality(
-                    available=False,
-                    reason="soc_dashboard_schema_unavailable",
-                )
             rows = conn.execute(query, query_params).fetchall()
     except Exception:
-        return [], _soc_source_quality(available=False, reason="soc_db_query_failed")
+        return []
 
     sources = []
     for asset_date, record_count in rows:
@@ -3420,10 +2706,7 @@ def _find_sqlite_sources_with_quality(start_date, end_date, start_time=0, end_ti
                 end_time=end_time,
             )
         )
-    return sources, _soc_source_quality(
-        available=True,
-        record_count=sum(source.record_count for source in sources),
-    )
+    return sources
 
 
 def _available_sqlite_dates():
