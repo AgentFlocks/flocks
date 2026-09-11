@@ -1,34 +1,31 @@
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentType, ReactNode } from 'react';
-import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  ArrowLeft,
-  ArrowUpCircle,
-  Archive,
   Check,
   ImageIcon,
   Languages,
+  Monitor,
   Moon,
   RotateCcw,
-  ScrollText,
   Save,
-  Settings as SettingsIcon,
   ShieldCheck,
-  Shield,
   Sun,
   TextCursorInput,
   Upload,
-  UserCog,
   type LucideIcon,
 } from 'lucide-react';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import { ThemeContext } from '@/contexts/ThemeContext';
-import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useToast } from '@/components/common/Toast';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { toolFailureConfigApi } from '@/api/toolFailureConfig';
+import {
+  isSettingsSectionId,
+  useSettingsSectionGroups,
+  type SettingsSectionId,
+} from '@/utils/settingsSections';
 import { preloadI18nNamespaces } from '@/i18nResources';
 
 type LazySettingsModule = { default: ComponentType<any> };
@@ -51,61 +48,6 @@ const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), [
 
 const SecurityConfigPage = lazySettingsPage(() => import('@/pages/SecurityConfig'), ['flockspro']);
 
-type SettingsSectionId = 'preferences' | 'archived-data' | 'account' | 'security-config' | 'system-logs' | 'audit-logs' | 'flockspro';
-
-interface ReturnLocation {
-  pathname: string;
-  search: string;
-  hash: string;
-}
-
-interface SettingsLocationState {
-  from?: Partial<ReturnLocation>;
-}
-
-interface SettingsSection {
-  id: SettingsSectionId;
-  name: string;
-  icon: LucideIcon;
-  adminOnly?: boolean;
-  requiresFlockspro?: boolean;
-}
-
-interface SettingsGroup {
-  name: string;
-  items: SettingsSection[];
-}
-
-function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
-  return (
-    value === 'preferences' ||
-    value === 'archived-data' ||
-    value === 'account' ||
-    value === 'security-config' ||
-    value === 'system-logs' ||
-    value === 'audit-logs' ||
-    value === 'flockspro'
-  );
-}
-
-function sanitizeReturnLocation(state: unknown): ReturnLocation {
-  const from = (state as SettingsLocationState | null)?.from;
-  const pathname = typeof from?.pathname === 'string' ? from.pathname : '';
-  if (!pathname.startsWith('/') || pathname.startsWith('/settings')) {
-    return { pathname: '/', search: '', hash: '' };
-  }
-
-  return {
-    pathname,
-    search: typeof from?.search === 'string' && from.search.startsWith('?') ? from.search : '',
-    hash: typeof from?.hash === 'string' && from.hash.startsWith('#') ? from.hash : '',
-  };
-}
-
-function buildReturnPath(location: ReturnLocation): string {
-  return `${location.pathname}${location.search}${location.hash}`;
-}
-
 function PreferenceRow({
   icon: Icon,
   title,
@@ -118,7 +60,7 @@ function PreferenceRow({
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4 border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1fr)_14rem] md:items-center md:gap-8">
+    <section className="flex flex-col gap-4 border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
       <div className="flex min-w-0 items-start gap-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
           <Icon className="h-5 w-5" />
@@ -151,7 +93,7 @@ function SegmentedOption({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors ${
+      className={`inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-sm font-semibold transition-colors ${
         active
           ? 'bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950'
           : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white'
@@ -198,7 +140,7 @@ function PreferenceSwitch({
 
 function PreferencesPanel() {
   const { t, i18n } = useTranslation('nav');
-  const { theme, setTheme } = useContext(ThemeContext);
+  const { theme, mode: themeMode, setTheme } = useContext(ThemeContext);
   const {
     productName,
     configuredDisplayName,
@@ -443,16 +385,23 @@ function PreferencesPanel() {
           title={t('theme')}
           description={t('themeDescription')}
         >
-          <div className="grid w-56 grid-cols-2 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="grid w-full grid-cols-3 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
             <SegmentedOption
-              active={theme === 'light'}
+              active={themeMode === 'system'}
+              icon={Monitor}
+              onClick={() => setTheme('system')}
+            >
+              {t('systemTheme')}
+            </SegmentedOption>
+            <SegmentedOption
+              active={themeMode === 'light'}
               icon={Sun}
               onClick={() => setTheme('light')}
             >
               {t('lightTheme')}
             </SegmentedOption>
             <SegmentedOption
-              active={theme === 'dark'}
+              active={themeMode === 'dark'}
               icon={Moon}
               onClick={() => setTheme('dark')}
             >
@@ -495,97 +444,12 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
 
 export default function SettingsPage() {
   const params = useParams();
-  const location = useLocation();
-  const navigate = useNavigate();
-  const { t } = useTranslation('nav');
-  const { user } = useAuth();
-  const { proProductName } = useProductName();
-  const isAdmin = user?.role === 'admin';
   const sectionId = params.sectionId;
-  const [flocksproCapabilityReady, setFlocksproCapabilityReady] = useState(false);
-  const [hasFlocksproCapability, setHasFlocksproCapability] = useState(false);
-  const returnLocation = useMemo(() => sanitizeReturnLocation(location.state), [location.state]);
-  const settingsRouteState = useMemo(() => ({ from: returnLocation }), [returnLocation]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!isAdmin) {
-      setHasFlocksproCapability(false);
-      setFlocksproCapabilityReady(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setFlocksproCapabilityReady(false);
-    const refreshCapability = () => {
-      void flocksproUsersApi.hasCapability()
-        .then((ok) => {
-          if (!cancelled) {
-            setHasFlocksproCapability(ok);
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setHasFlocksproCapability(false);
-          }
-        })
-        .finally(() => {
-          if (!cancelled) {
-            setFlocksproCapabilityReady(true);
-          }
-        });
-    };
-
-    refreshCapability();
-    window.addEventListener('flockspro-license-status-changed', refreshCapability);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('flockspro-license-status-changed', refreshCapability);
-    };
-  }, [isAdmin]);
-
-  const groups = useMemo<SettingsGroup[]>(
-    () => [
-      {
-        name: t('settingsGroupPreferences'),
-        items: [
-          { id: 'preferences', name: t('settingsPreferences'), icon: SettingsIcon },
-        ],
-      },
-      {
-        name: t('settingsGroupData'),
-        items: [
-          { id: 'archived-data', name: t('archivedData'), icon: Archive },
-        ],
-      },
-      {
-        name: t('settingsGroupSystem'),
-        items: [
-          { id: 'account', name: t('accountManagement'), icon: UserCog },
-          { id: 'security-config', name: t('securityConfig'), icon: Shield, adminOnly: true, requiresFlockspro: true },
-          { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
-          { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
-          { id: 'flockspro', name: proProductName, icon: ArrowUpCircle, adminOnly: true },
-        ],
-      },
-    ],
-    [proProductName, t],
-  );
-
-  const visibleGroups = groups
-    .map((group) => ({
-      ...group,
-      items: group.items.filter((item) => {
-        if (item.adminOnly && !isAdmin) return false;
-        if (item.requiresFlockspro && flocksproCapabilityReady && !hasFlocksproCapability) return false;
-        return true;
-      }),
-    }))
-    .filter((group) => group.items.length > 0);
+  // Same source as the layout sidebar, so menu and page can never disagree.
+  const { groups } = useSettingsSectionGroups();
 
   if (!sectionId) {
-    return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
+    return <Navigate to="/settings/preferences" replace />;
   }
 
   if (sectionId === 'models') {
@@ -597,103 +461,13 @@ export default function SettingsPage() {
   }
 
   if (!isSettingsSectionId(sectionId)) {
-    return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
+    return <Navigate to="/settings/preferences" replace />;
   }
 
-  const currentSection = visibleGroups.flatMap((group) => group.items).find((item) => item.id === sectionId);
-
-  if (!currentSection) {
-    return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
+  const visible = groups.flatMap((group) => group.items).some((item) => item.id === sectionId);
+  if (!visible) {
+    return <Navigate to="/settings/preferences" replace />;
   }
 
-  return (
-    <div className="flex h-screen min-h-0 bg-white text-zinc-950 dark:bg-zinc-950 dark:text-zinc-100">
-      <aside className="hidden w-64 shrink-0 border-r border-zinc-200 bg-gray-50 dark:border-zinc-800 dark:bg-zinc-900 md:block">
-        <div className="border-b border-zinc-200 px-6 py-5 dark:border-zinc-800">
-          <button
-            type="button"
-            onClick={() => navigate(buildReturnPath(returnLocation))}
-            className="-ml-1 mb-4 inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-semibold text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            {t('settingsBack')}
-          </button>
-          <h1 className="text-xl font-bold text-zinc-950 dark:text-zinc-50">{t('settingsTitle')}</h1>
-          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{t('settingsDescription')}</p>
-        </div>
-        <nav className="space-y-6 px-3 py-4">
-          {visibleGroups.map((group) => (
-            <div key={group.name}>
-              <h2 className="px-3 text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-                {group.name}
-              </h2>
-              <div className="mt-2 space-y-1">
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  const active = item.id === sectionId;
-                  return (
-                    <Link
-                      key={item.id}
-                      to={`/settings/${item.id}`}
-                      state={settingsRouteState}
-                      className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
-                        active
-                          ? 'bg-zinc-100 text-zinc-950 dark:bg-zinc-900 dark:text-zinc-50'
-                          : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
-                      }`}
-                    >
-                      <Icon className={`h-5 w-5 ${active ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                      <span className="truncate">{item.name}</span>
-                    </Link>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </nav>
-      </aside>
-
-      <div className="min-w-0 flex-1 overflow-y-auto bg-white dark:bg-zinc-950">
-        <div className="border-b border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950 md:hidden">
-          <button
-            type="button"
-            onClick={() => navigate(buildReturnPath(returnLocation))}
-            className="-ml-1 inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-semibold text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            {t('settingsBack')}
-          </button>
-          <div className="mt-2">
-            <h1 className="text-lg font-bold text-zinc-950 dark:text-zinc-50">{t('settingsTitle')}</h1>
-            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{currentSection.name}</p>
-          </div>
-          <nav className="mt-3 flex gap-2 overflow-x-auto pb-1" aria-label={t('settingsTitle')}>
-            {visibleGroups.flatMap((group) => group.items).map((item) => {
-              const Icon = item.icon;
-              const active = item.id === sectionId;
-              return (
-                <Link
-                  key={item.id}
-                  to={`/settings/${item.id}`}
-                  state={settingsRouteState}
-                  className={`inline-flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors ${
-                    active
-                      ? 'bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                      : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                  }`}
-                >
-                  <Icon className="h-4 w-4" />
-                  {item.name}
-                </Link>
-              );
-            })}
-          </nav>
-        </div>
-
-        <div className="mx-auto min-h-full w-full px-4 py-5 md:px-6 md:py-6 lg:px-8">
-          <SettingsContent sectionId={sectionId} />
-        </div>
-      </div>
-    </div>
-  );
+  return <SettingsContent sectionId={sectionId} />;
 }

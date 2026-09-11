@@ -1,0 +1,12 @@
+{
+  "id": "ai-redteam-surface",
+  "title": "攻击面",
+  "titleEn": "Attack Surface",
+  "route": "/contracts/webui/ai-redteam-surface",
+  "icon": "Radar",
+  "order": 20,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 1788900000000
+}

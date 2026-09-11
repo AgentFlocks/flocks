@@ -92,6 +92,12 @@ export const webuiContractPagesAPI = {
       params: enabledOnly ? { enabledOnly: true } : undefined,
     }),
 
+  setWorkspaceEnabled: (workspaceId: string, enabled: boolean) =>
+    client.patch<WebUIContractWorkspaceListItem>(
+      `/api/contracts/webui/workspaces/${workspaceId}`,
+      { enabled },
+    ),
+
   create: (payload: WebUIContractPageCreateRequest) =>
     client.post<WebUIContractPageDetail>('/api/contracts/webui/pages', payload),
 

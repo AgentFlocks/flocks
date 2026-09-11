@@ -3236,7 +3236,7 @@ export default function Page() {
 const CSS = `
 .adtd-root {
   box-sizing: border-box;
-  min-height: 100vh;
+  min-height: 100%;
   min-width: 1100px;
   margin: 0;
   padding: 0 16px;
@@ -4560,7 +4560,7 @@ const CSS = `
   --command-blue: #3677bc;
   --command-border: rgba(255, 255, 255, .09);
   position: relative;
-  height: 100vh;
+  height: 100%;
   min-height: 720px;
   min-width: 1180px;
   margin: 0;
@@ -4780,7 +4780,7 @@ const CSS = `
   z-index: 2;
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--event-rail-width, 330px);
-  height: calc(100vh - 68px);
+  height: calc(100% - 68px);
   min-height: 652px;
   transition: grid-template-columns .24s ease;
 }

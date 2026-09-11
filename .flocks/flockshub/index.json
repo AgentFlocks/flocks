@@ -14640,7 +14640,7 @@
       "name": "SOC Workspace WebUI",
       "description": "SOC workspace pages for posture, overview, and alert investigation.",
       "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
-      "version": "1.1.5",
+      "version": "1.1.6",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14746,6 +14746,86 @@
       "trust": "official",
       "riskLevel": "medium",
       "manifestPath": "plugins/components/soc-workspace/manifest.json"
+    },
+    {
+      "id": "code_audit_ui",
+      "type": "webui",
+      "name": "Code Audit Workspace WebUI",
+      "nameCn": "代码审计工作区页面",
+      "description": "Code audit workspace pages for audit overview and findings.",
+      "descriptionCn": "代码审计工作区页面，包含审计总览和缺陷清单。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "edition": "pro",
+      "manifestPath": "plugins/webuis/code_audit_ui/manifest.json"
+    },
+    {
+      "id": "code-audit-workspace",
+      "type": "component",
+      "name": "Code Audit Workspace Component",
+      "nameCn": "代码审计场景套件",
+      "description": "Composite installer for the Flocks code audit workspace.",
+      "descriptionCn": "Flocks 代码审计工作区场景套件安装器。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "edition": "pro",
+      "manifestPath": "plugins/components/code-audit-workspace/manifest.json"
+    },
+    {
+      "id": "ai_redteam_ui",
+      "type": "webui",
+      "name": "AI Redteam Workspace WebUI",
+      "nameCn": "AI 红队工作区页面",
+      "description": "AI redteam workspace pages for campaigns and attack surface.",
+      "descriptionCn": "AI 红队工作区页面，包含演练总览和攻击面。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "edition": "pro",
+      "manifestPath": "plugins/webuis/ai_redteam_ui/manifest.json"
+    },
+    {
+      "id": "ai-redteam-workspace",
+      "type": "component",
+      "name": "AI Redteam Workspace Component",
+      "nameCn": "AI 红队场景套件",
+      "description": "Composite installer for the Flocks AI redteam workspace.",
+      "descriptionCn": "Flocks AI 红队工作区场景套件安装器。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "edition": "pro",
+      "manifestPath": "plugins/components/ai-redteam-workspace/manifest.json"
     }
   ]
 }
