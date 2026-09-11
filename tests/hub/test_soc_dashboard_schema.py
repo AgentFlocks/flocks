@@ -1,9 +1,150 @@
 import importlib.util
+import gc
 import json
 import sqlite3
 import sys
+import time
+import tracemalloc
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import pytest
+
+
+def _activity_workflow_db(tmp_path):
+    path = tmp_path / "workflow.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE workflow_executions (
+            id TEXT PRIMARY KEY, workflow_id TEXT, status TEXT,
+            started_at INTEGER, updated_at INTEGER,
+            input_params TEXT, output_results TEXT, payload TEXT)""")
+        conn.execute("CREATE INDEX idx_started ON workflow_executions(workflow_id, started_at DESC)")
+        conn.execute("CREATE INDEX idx_status ON workflow_executions(workflow_id, status)")
+    return path
+
+
+def _activity_execution(path, key, *, status="running", started=1000, inputs=None, output=None, payload=None):
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+            key, "stream_alert_denoise", status, started, started + 100,
+            json.dumps(inputs or {}), json.dumps(output or {}), json.dumps(payload or {}),
+        ))
+
+
+@pytest.mark.parametrize("wrapper", ["direct", "preview", "syslog", "nested"])
+def test_activity_preview_handles_bounded_execution_shapes(wrapper):
+    handlers = _load_dashboard_handlers()
+    record = {"id": "a", "threat_name": "scan", "_source_type": "ndr",
+              "net_real_src_ip": "192.0.2.1", "net_dest_ip": "198.51.100.2"}
+    output, inputs = {}, {}
+    if wrapper == "direct":
+        inputs = {"alerts": [record]}
+    elif wrapper == "preview":
+        output = {"unique_alerts": {"_type": "list", "preview": [record]}}
+    elif wrapper == "syslog":
+        inputs = {"syslog_message": {"message": "Sep 11 device vendor: " + json.dumps(record)}}
+    else:
+        inputs = {"syslog_message": {"message": json.dumps({"data": {"message": json.dumps(record)}})}}
+    alert, count = handlers._dashboard_execution_detail(json.dumps(output), json.dumps(inputs))
+    assert alert == {"id": "a", "threatName": "scan", "sourceType": "ndr",
+                     "srcIp": "192.0.2.1", "dstIp": "198.51.100.2"}
+    assert count == (1 if wrapper == "direct" else None)
+
+
+def test_activity_does_not_combine_unrelated_alerts_or_guess_source():
+    handlers = _load_dashboard_handlers()
+    output = {"unique_alerts": [
+        {"id": "a", "threat_name": "first", "sip": "192.0.2.1"},
+        {"id": "b", "dip": "198.51.100.2", "_source_type": "ndr"},
+    ]}
+    alert, _ = handlers._dashboard_execution_detail(json.dumps(output), "{}")
+    assert alert["id"] == "a"
+    assert alert["dstIp"] == alert["sourceType"] == ""
+
+
+def test_activity_distinguishes_empty_unknown_and_real_batches(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "empty", output={"stats": {"raw_count": 0}})
+    _activity_execution(handlers.WORKFLOW_DB, "unknown", inputs={"source_log_type": "ndr"})
+    _activity_execution(handlers.WORKFLOW_DB, "nonempty", inputs={"_soc_alert_count": 5})
+    _activity_execution(handlers.WORKFLOW_DB, "queued", status="queued", inputs={"_soc_alert_count": 2})
+    events = {e["eventId"]: e for e in handlers._get_workflow_recent_events("stream_alert_denoise")}
+    assert "workflow-execution:empty" not in events
+    assert events["workflow-execution:unknown"]["result"]["rawCount"] is None
+    assert events["workflow-execution:unknown"]["alert"]["threatName"] == "降噪批次 · 数量未提供"
+    assert events["workflow-execution:nonempty"]["result"]["rawCount"] == 5
+    assert events["workflow-execution:queued"]["status"] == "queued"
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        assert conn.execute("SELECT count(*) FROM workflow_executions").fetchone()[0] == 4
+
+
+def test_activity_keeps_long_running_execution_and_bounds_history(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "long-running", started=1000)
+    for index in range(30):
+        _activity_execution(handlers.WORKFLOW_DB, f"done-{index}", status="success", started=2000 + index)
+    snapshot = {"complete": True}
+    events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
+    assert len(events) == 11
+    assert events[0]["eventId"] == "workflow-execution:long-running"
+    assert events[0]["updatedAt"] != events[0]["occurredAt"]
+    assert snapshot["complete"] is True
+    assert all(e["eventId"] != "workflow-execution:long-running" for e in
+               handlers._get_workflow_recent_events("stream_alert_denoise", 2, 3))
+
+
+def test_activity_large_payload_and_database_lock_degrade_without_writes(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "large", payload={"large": "x" * 1_000_000},
+                        inputs={"large": "x" * 1_000_000})
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert len(json.dumps(events)) < 4096
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("BEGIN EXCLUSIVE")
+        snapshot = {"complete": True}
+        started = time.monotonic()
+        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert time.monotonic() - started < 1.0
+        assert snapshot["complete"] is False
+
+
+def test_activity_truncated_active_snapshot_is_not_authoritative(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    for index in range(12):
+        _activity_execution(handlers.WORKFLOW_DB, str(index))
+    snapshot = {"complete": True}
+    assert len(handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)) <= 20
+    assert snapshot["complete"] is False
+
+
+def test_activity_repeated_projection_does_not_retain_payloads(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    for index in range(12):
+        _activity_execution(handlers.WORKFLOW_DB, str(index), inputs={
+            "_soc_alert_preview": {"threat_name": "scan", "sip": "192.0.2.1"},
+            "padding": "x" * 20000,
+        })
+    tracemalloc.start(1)
+    try:
+        for _ in range(10):
+            handlers._get_workflow_recent_events("stream_alert_denoise")
+        gc.collect()
+        before, _ = tracemalloc.get_traced_memory()
+        for _ in range(200):
+            events = handlers._get_workflow_recent_events("stream_alert_denoise")
+            assert len(events) <= 20
+            assert len(json.dumps(events)) < 20000
+        gc.collect()
+        after, peak = tracemalloc.get_traced_memory()
+        assert after - before < 1_000_000
+        assert peak < 8_000_000
+    finally:
+        tracemalloc.stop()
 
 
 def _load_dashboard_handlers():
@@ -1888,7 +2029,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     }
     assert [event["alert"]["threatName"] for event in activity["workflowEvents"]] == [
         "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
+        "降噪批次 · 数量未提供",
     ]
 
     events = handlers._get_workflow_recent_events(
@@ -1898,7 +2039,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     )
     assert [event["alert"]["threatName"] for event in events] == [
         "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
+        "降噪批次 · 数量未提供",
     ]
     assert events[0]["result"]["rawCount"] == 1
     assert events[0]["result"]["uniqueCount"] == 0

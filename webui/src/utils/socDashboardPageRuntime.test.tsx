@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -24,6 +24,29 @@ function setDocumentHidden(value: boolean) {
     configurable: true,
     value,
   });
+}
+
+function workflowEvent(id: string, status = 'running', extra: Record<string, any> = {}) {
+  return {
+    eventId: `workflow-execution:${id}`, triggerSource: 'workflow_execution',
+    workflowId: 'stream_alert_denoise', stage: 'denoise', status,
+    occurredAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    alert: { id: 'same-alert', threatName: '边界扫描', sourceType: 'ndr',
+      srcIp: '192.0.2.1', dstIp: '198.51.100.2' },
+    result: { rawCount: 5, metricsAvailable: true }, ...extra,
+  };
+}
+
+function mockActivity(read: () => any) {
+  const fallback = pageGetMock.getMockImplementation()!;
+  pageGetMock.mockImplementation((path: string, ...args: any[]) => path === '/activity'
+    ? Promise.resolve().then(() => ({ data: { cursor: 'test-cursor', events: [], recentEvents: [],
+      workflowSnapshotComplete: true, ...read() } }))
+    : fallback(path, ...args));
+}
+
+async function pollActivity() {
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
 }
 
 describe('SOC dashboard contract page runtime', () => {
@@ -58,6 +81,7 @@ describe('SOC dashboard contract page runtime', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     delete (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__;
     if (originalDocumentHidden) {
       Object.defineProperty(document, 'hidden', originalDocumentHidden);
@@ -293,6 +317,166 @@ describe('SOC dashboard contract page runtime', () => {
     expect(screen.getAllByText('执行详情').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('查看执行').length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText('查看对话')).not.toBeInTheDocument();
+  });
+
+  it('shows only actual running/queued tasks, not completed playback or empty batches', async () => {
+    mockActivity(() => ({ workflowEvents: [
+      workflowEvent('done', 'completed'), workflowEvent('failed', 'failed'),
+      workflowEvent('empty', 'running', { alert: { threatName: '降噪批次 · 原始 0 条' }, result: { rawCount: 0 } }),
+      workflowEvent('active'), workflowEvent('queued', 'queued'),
+    ] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(container.querySelectorAll('.event-rail-item')).toHaveLength(2));
+    const rail = container.querySelector('.event-rail-list') as HTMLElement;
+    expect(within(rail).getByText('处理中')).toBeInTheDocument();
+    expect(within(rail).getByText('等待处理')).toBeInTheDocument();
+    expect(within(rail).queryByText(/原始 0 条/)).not.toBeInTheDocument();
+    expect(within(rail).queryByText(/降噪处理完成/)).not.toBeInTheDocument();
+    expect(within(rail).queryByText(/s \/ .*s/)).not.toBeInTheDocument();
+  });
+
+  it('keeps four identity cards stable when metrics and partial fields arrive', async () => {
+    vi.useFakeTimers();
+    let event = workflowEvent('active');
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
+    expect(within(cards).getByText('告警名称')).toBeInTheDocument();
+    expect(within(cards).getByText('来源类型')).toBeInTheDocument();
+    const original = cards.textContent;
+    event = { ...event, alert: { id: 'same-alert', threatName: '降噪批次', sourceType: 'unknown', srcIp: '', dstIp: '' },
+      result: { rawCount: 5, metricsAvailable: false } };
+    await pollActivity();
+    expect(cards.textContent).toBe(original);
+    expect(cards.querySelectorAll('.ai-evidence-card')).toHaveLength(4);
+    expect(within(cards).queryByText('原始告警')).not.toBeInTheDocument();
+  });
+
+  it('refreshes right-hand task metadata even when ID and status are unchanged', async () => {
+    vi.useFakeTimers();
+    let event = workflowEvent('active', 'running', { alert: { threatName: '降噪批次 · 数量未提供' } });
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    event = workflowEvent('active');
+    await pollActivity();
+    const rail = container.querySelector('.event-rail-list') as HTMLElement;
+    expect(within(rail).getByText('边界扫描')).toBeInTheDocument();
+    expect(within(rail).getByText('192.0.2.1 → 198.51.100.2')).toBeInTheDocument();
+  });
+
+  it('does not replay a terminal workflow or synthesize tasks from counter increases', async () => {
+    vi.useFakeTimers();
+    const running = workflowEvent('active');
+    let event = running;
+    let callCount = 1;
+    mockActivity(() => ({ workflowEvents: [event], workflowStats: { callCount } }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    event = { ...running, status: 'completed' };
+    callCount += 20;
+    await pollActivity();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+    expect(screen.getByText('最近告警记录')).toBeInTheDocument();
+    event = running; // out-of-order running response must not resurrect it
+    await pollActivity();
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+    expect(container.querySelectorAll('.ai-core.core-processing')).toHaveLength(0);
+  });
+
+  it('preserves data on failed/incomplete polls and removes absent tasks only with a complete snapshot', async () => {
+    vi.useFakeTimers();
+    let data: any = { workflowEvents: [workflowEvent('active')] };
+    mockActivity(() => data);
+    const { container } = render(<Page />);
+    await act(async () => {});
+    data = { workflowEvents: [], workflowSnapshotComplete: false };
+    await pollActivity();
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1);
+    data = { error: 'offline' };
+    await pollActivity();
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1);
+    expect(screen.getByText('处理任务连接异常，正在重试')).toBeInTheDocument();
+    data = { workflowEvents: [], workflowSnapshotComplete: true };
+    await act(async () => { await vi.advanceTimersByTimeAsync(6500); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+  });
+
+  it('labels a historical alert fallback without assigning it to an unrelated active batch', async () => {
+    mockActivity(() => ({ workflowEvents: [workflowEvent('batch', 'running', {
+      alert: { threatName: '降噪批次 · 数量未提供' }, result: { rawCount: null },
+    })], recentEvents: [{ ...workflowEvent('history', 'completed'), triggerSource: 'soc_record' }] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(screen.getByText('最近告警记录')).toBeInTheDocument());
+    const rail = container.querySelector('.event-rail-list') as HTMLElement;
+    expect(within(rail).getByText('降噪批次 · 数量未提供')).toBeInTheDocument();
+    expect(within(rail).queryByText('边界扫描')).not.toBeInTheDocument();
+    const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
+    expect(within(cards).getByText('边界扫描')).toBeInTheDocument();
+  });
+
+  it('keeps the visible queue bounded under repeated polling and clears poll timers on unmount', async () => {
+    vi.useFakeTimers();
+    let batch = 0;
+    mockActivity(() => ({ workflowEvents: Array.from({ length: 20 }, (_, index) =>
+      workflowEvent(`${batch}-${index}`)) }));
+    const { container, unmount } = render(<Page />);
+    await act(async () => {});
+    for (batch = 1; batch <= 20; batch += 1) await pollActivity();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelectorAll('.event-rail-item').length).toBeLessThanOrEqual(10);
+    unmount();
+    const calls = pageGetMock.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(pageGetMock.mock.calls.length).toBe(calls);
+  });
+
+  it('does not mix two different alerts from the same batch execution', async () => {
+    vi.useFakeTimers();
+    let event = workflowEvent('batch');
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    event = workflowEvent('batch', 'running', { alert: {
+      id: 'different-alert', threatName: '另一条告警', srcIp: '203.0.113.9',
+    } });
+    await pollActivity();
+    const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
+    expect(within(cards).getByText('另一条告警')).toBeInTheDocument();
+    expect(within(cards).queryByText('198.51.100.2')).not.toBeInTheDocument();
+    expect(within(cards).getAllByText('未提供')).toHaveLength(2);
+  });
+
+  it('promotes real running work ahead of an earlier queued task', async () => {
+    vi.useFakeTimers();
+    let events = [workflowEvent('queued', 'queued', { alert: { threatName: '等待中的批次' } })];
+    mockActivity(() => ({ workflowEvents: events }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    events = [...events, workflowEvent('running')];
+    await pollActivity();
+    const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
+    expect(within(cards).getByText('边界扫描')).toBeInTheDocument();
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(2);
+    expect(container.querySelector('.ai-core')).toHaveClass('core-processing');
+  });
+
+  it('ignores an in-flight activity response after unmount', async () => {
+    vi.useFakeTimers();
+    const fallback = pageGetMock.getMockImplementation()!;
+    let resolveActivity: (value: any) => void = () => {};
+    pageGetMock.mockImplementation((path: string, ...args: any[]) => path === '/activity'
+      ? new Promise((resolve) => { resolveActivity = resolve; }) : fallback(path, ...args));
+    const { unmount } = render(<Page />);
+    await act(async () => {});
+    unmount();
+    const callCount = pageGetMock.mock.calls.length;
+    await act(async () => { resolveActivity({ data: { cursor: 'late', workflowEvents: [workflowEvent('late')] } }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(pageGetMock.mock.calls.length).toBe(callCount);
   });
 
   it('reacts to the shared SOC dashboard title change event', async () => {
