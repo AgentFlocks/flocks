@@ -536,3 +536,23 @@ def test_security_audit_forwards_cleanup_option(monkeypatch, tmp_path) -> None:
     result = runner.invoke(security_cmd.security_app, ["audit", str(tmp_path), "--cleanup-intermediates", "--json"])
     assert result.exit_code == 0, result.output
     assert observed["cleanup_intermediates"] is True
+
+
+@pytest.mark.parametrize("flags,bash,web", [
+    ([], False, False), (["--bash"], True, False),
+    (["--web-search"], False, True), (["--bash", "--web-search"], True, True),
+])
+def test_optional_analysis_flags_forward_only_selected_tools(monkeypatch, tmp_path, flags, bash, web):
+    received = {}
+
+    async def run_audit(target, **kwargs):
+        received.update(kwargs)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(security_cmd, "_load_plugin_cli", lambda: (run_audit, None))
+    result = runner.invoke(security_cmd.security_app, ["audit", str(tmp_path), *flags])
+    assert result.exit_code == 0, result.output
+    assert received.get("bash_enabled", False) is bash
+    assert received.get("web_search_enabled", False) is web
+    if not flags:
+        assert "bash_enabled" not in received and "web_search_enabled" not in received

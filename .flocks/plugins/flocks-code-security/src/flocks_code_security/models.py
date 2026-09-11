@@ -16,6 +16,7 @@ class SnapshotFile:
     line_count: int
     language: str
     is_binary: bool
+    executable_mode: int = 0
 
 
 @dataclass(frozen=True)

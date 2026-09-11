@@ -209,6 +209,12 @@ class ReportWriter:
                 }
             )
             supplemental_contents: dict[str, bytes] = {}
+            if scan.get("bash_enabled") or scan.get("web_search_enabled"):
+                supplemental_contents["tool-capabilities.json"] = canonical_json_bytes({
+                    "scanId": scan_id,
+                    "bashEnabled": bool(scan.get("bash_enabled")),
+                    "webSearchEnabled": bool(scan.get("web_search_enabled")),
+                })
             if data.get("source_exclusions"):
                 supplemental_contents["source-exclusions.json"] = canonical_json_bytes({
                     "scanId": scan_id, "exclusions": data["source_exclusions"],
@@ -398,6 +404,7 @@ class ReportWriter:
                         manifest,
                         findings_document,
                         coverage_document,
+                        capabilities=scan,
                     ).encode("utf-8"),
                     "report.sarif": canonical_json_bytes(self._sarif(manifest, findings_document)),
                 }
@@ -549,6 +556,7 @@ class ReportWriter:
                 manifest,
                 findings,
                 coverage,
+                capabilities=data["scan"],
             ).encode("utf-8"),
             "report.sarif": canonical_json_bytes(
                 self._sarif(
@@ -1418,6 +1426,8 @@ class ReportWriter:
         manifest: dict[str, Any],
         findings_document: dict[str, Any],
         coverage: dict[str, Any],
+        *,
+        capabilities: dict[str, Any] | None = None,
     ) -> str:
         scan = manifest["scan"]
         target = scan["target"]
@@ -1448,6 +1458,11 @@ class ReportWriter:
             f"- Deferred work: **{len(coverage['deferred'])}**",
             f"- Static validation limitations: **{len(limitations)}**",
         ]
+        if capabilities and (capabilities.get("bash_enabled") or capabilities.get("web_search_enabled")):
+            from flocks_code_security.capabilities import optional_tool_names
+
+            names = ", ".join(sorted(optional_tool_names(capabilities)))
+            lines.append(f"- Auxiliary tools enabled: `{names}` (see `tool-capabilities.json`)")
         for limitation in scan.get("scope", {}).get("limitations", []):
             lines.append("- Scope limitation: " + ReportWriter._markdown_text(limitation))
         missing_pocs = (scan.get("pocGeneration") or {}).get("missingCandidateIds", [])

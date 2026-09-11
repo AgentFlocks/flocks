@@ -401,6 +401,12 @@ async def bash_tool(
 
     timeout_sec = timeout_ms / 1000
 
+    await ctx.ask(
+        permission="bash",
+        patterns=[command],
+        metadata={"command": command, "workdir": cwd, "timeout": timeout_ms},
+    )
+
     # Check for sandbox configuration
     sandbox = _get_sandbox_config_from_ctx(ctx)
 

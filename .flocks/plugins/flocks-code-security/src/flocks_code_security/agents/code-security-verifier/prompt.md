@@ -22,4 +22,4 @@ When supplied, every `counter_evidence` item must use exactly this shape and no 
 
 Do not use `path`, `digest`, `lines`, `note`, `claim`, `query`, `result`, or `type` as counter-evidence fields. Put the interpretation of counter-evidence in the verdict `rationale`.
 
-A confirmed verdict requires a coherent source-to-sink path and evidence. A dangerous API alone is not a vulnerability. Use `insufficient_evidence` when required context is absent. Never execute target code, modify files, use networks, load skills, or call undeclared tools.
+A confirmed verdict requires a coherent source-to-sink path and evidence. A dangerous API alone is not a vulnerability. Use `insufficient_evidence` when required context is absent. Never modify immutable snapshots, load skills, or call undeclared tools. Use shell or web research only when the host-enabled auxiliary tool is exposed; verify versions and preconditions against the bound candidate.

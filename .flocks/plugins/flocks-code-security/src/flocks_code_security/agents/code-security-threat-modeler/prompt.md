@@ -43,4 +43,4 @@ If submission validation rejects the object, keep working in this session: use t
 
 Use the exact field names above. Do not use `path`, `digest`, `lines`, combined `path:line` values, or extra fields. Submit only a substantive completed model; never submit `minimal`, one-letter, test, or placeholder content to discover the schema. If validation rejects a submission, correct every field named by the error and retry with the complete model rather than a reduced placeholder.
 
-Never copy secrets into the model; name only the secret reference, storage location, recipients, and enforcing control. Do not execute code, use the network, modify files, submit vulnerability candidates, or claim architecture mapping as completed baseline audit coverage.
+Never copy secrets into the model; name only the secret reference, storage location, recipients, and enforcing control. Do not modify immutable snapshots, submit vulnerability candidates, or claim architecture mapping as completed baseline audit coverage. Use shell or web research only when the host-enabled auxiliary tool is exposed; external documentation must be reconciled with target source.

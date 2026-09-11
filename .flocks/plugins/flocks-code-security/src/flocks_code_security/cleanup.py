@@ -115,6 +115,8 @@ async def _cleanup_scan(runtime: PluginRuntime, scan_id: str, *, owned_parent_se
             if not shared:
                 expected = runtime.snapshots.snapshots_root.resolve() / snapshot.snapshot_id
                 deleted_trees += await asyncio.to_thread(_remove_tree, Path(snapshot.root_path), expected=expected)
+        shell_root = runtime_dir().resolve() / "shell" / scan_id
+        deleted_trees += await asyncio.to_thread(_remove_tree, shell_root, expected=shell_root)
         docker_root = runtime_dir().resolve() / "docker" / scan_id
         deleted_trees += await asyncio.to_thread(_remove_tree, docker_root, expected=docker_root)
         return await asyncio.to_thread(

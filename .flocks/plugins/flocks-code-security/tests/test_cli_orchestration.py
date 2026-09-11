@@ -955,11 +955,17 @@ async def test_orchestrator_runs_one_parent_directed_rescan(
         ),
     ],
 )
+@pytest.mark.parametrize("bash_enabled,web_search_enabled", [(False, False), (True, False), (False, True), (True, True)])
 async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
     monkeypatch: pytest.MonkeyPatch,
     knowledge_base: dict | None,
     expected_tools: set[str],
+    bash_enabled: bool,
+    web_search_enabled: bool,
 ) -> None:
+    from flocks_code_security import workspaces
+
+    monkeypatch.setattr(workspaces, "prepare_bash_workspace", AsyncMock())
     decision = {
         "scan_id": "scan_parent",
         "adjudication_round": 1,
@@ -971,6 +977,10 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
 
     class _Store:
         calls = 0
+
+        @staticmethod
+        def get_scan(_scan_id: str):
+            return {"bash_enabled": bash_enabled, "web_search_enabled": web_search_enabled}
 
         @classmethod
         def get_latest_adjudication(cls, _scan_id: str):
@@ -1014,8 +1024,12 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
     assert "host has already completed" in create_message.await_args.kwargs["content"].lower()
     set_callable_tools.assert_awaited_once_with(
         "coordinator",
-        expected_tools,
+        expected_tools | ({"bash"} if bash_enabled else set())
+        | ({"websearch", "webfetch"} if web_search_enabled else set()),
     )
+    prompt = create_message.await_args.kwargs["content"]
+    assert ("Bash is enabled" if bash_enabled else "Bash is disabled") in prompt
+    assert ("reading are enabled" if web_search_enabled else "reading are disabled") in prompt
     run_loop.assert_awaited_once_with(
         "coordinator",
         provider_id="provider",

@@ -7,6 +7,8 @@ import hashlib
 import os
 import stat
 from collections import Counter
+from collections.abc import Iterator
+from threading import Event
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,27 @@ SOURCE_ROLES = {
 class AuditSourceRepository:
     def __init__(self, store: ScanStore):
         self.store = store
+
+    def copy_to(self, snapshot_id: str, destination: Path, cancel: Event | None = None) -> None:
+        """Copy only verified manifest files into a new writable directory."""
+        import shutil
+
+        destination.mkdir(parents=True, exist_ok=False, mode=0o700)
+        try:
+            for record in self.store.list_snapshot_files(snapshot_id):
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("Source copy cancelled")
+                target = destination / normalize_relative_path(record.relative_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as output:
+                    for chunk in self._verified_chunks(snapshot_id, record):
+                        if cancel is not None and cancel.is_set():
+                            raise InterruptedError("Source copy cancelled")
+                        output.write(chunk)
+                target.chmod(0o600 | (record.executable_mode & 0o111))
+        except BaseException:
+            shutil.rmtree(destination)
+            raise
 
     def binding(self, session_id: str) -> SessionBinding:
         return self.store.require_binding(session_id, SOURCE_ROLES)
@@ -431,6 +454,9 @@ class AuditSourceRepository:
         return record
 
     def _verified_bytes(self, snapshot_id: str, record: SnapshotFile) -> bytes:
+        return b"".join(self._verified_chunks(snapshot_id, record))
+
+    def _verified_chunks(self, snapshot_id: str, record: SnapshotFile) -> Iterator[bytes]:
         snapshot = self.store.get_snapshot(snapshot_id)
         if snapshot is None:
             raise ValueError("Bound snapshot no longer exists")
@@ -446,21 +472,20 @@ class AuditSourceRepository:
                 raise ValueError("Snapshot entry is no longer a regular file")
             if file_stat.st_size != record.size_bytes:
                 raise ValueError("Snapshot content size mismatch")
-            chunks: list[bytes] = []
+            digest = hashlib.sha256()
             total = 0
             while True:
                 chunk = os.read(descriptor, min(64 * 1024, record.size_bytes + 1 - total))
                 if not chunk:
                     break
-                chunks.append(chunk)
+                digest.update(chunk)
                 total += len(chunk)
                 if total > record.size_bytes:
                     raise ValueError("Snapshot content size mismatch")
-            data = b"".join(chunks)
+                yield chunk
+            if total != record.size_bytes or digest.hexdigest() != record.blob_digest:
+                raise ValueError("Snapshot content digest mismatch")
         finally:
             if descriptor is not None:
                 os.close(descriptor)
             os.close(root_descriptor)
-        if hashlib.sha256(data).hexdigest() != record.blob_digest:
-            raise ValueError("Snapshot content digest mismatch")
-        return data

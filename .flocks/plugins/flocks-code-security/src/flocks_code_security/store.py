@@ -101,7 +101,7 @@ def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
 
 
 # Bump this whenever initialize() adds or changes schema migrations.
-STORE_SCHEMA_VERSION = 8
+STORE_SCHEMA_VERSION = 9
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -831,6 +831,9 @@ class ScanStore:
                     ON scan_events(scan_id, event_type);
                 """
             )
+            file_columns = {row["name"] for row in connection.execute("PRAGMA table_info(snapshot_files)")}
+            if "executable_mode" not in file_columns:
+                connection.execute("ALTER TABLE snapshot_files ADD COLUMN executable_mode INTEGER NOT NULL DEFAULT 0")
             scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)").fetchall()}
             if "dynamic_enabled" not in scan_columns:
                 connection.execute("ALTER TABLE scans ADD COLUMN dynamic_enabled INTEGER NOT NULL DEFAULT 0")
@@ -847,6 +850,8 @@ class ScanStore:
                     "INTEGER NOT NULL DEFAULT 1"
                 )
             scan_column_definitions = (
+                ("bash_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                ("web_search_enabled", "INTEGER NOT NULL DEFAULT 0"),
                 ("owner_subject", "TEXT"),
                 ("request_source", "TEXT NOT NULL DEFAULT 'cli'"),
                 ("workspace_ref", "TEXT"),
@@ -1328,7 +1333,8 @@ class ScanStore:
             )
             connection.executemany(
                 """
-                INSERT INTO snapshot_files VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO snapshot_files (snapshot_id, relative_path, blob_digest, size_bytes, line_count, language, is_binary, executable_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1339,6 +1345,7 @@ class ScanStore:
                         item.line_count,
                         item.language,
                         int(item.is_binary),
+                        item.executable_mode,
                     )
                     for item in files
                 ],
@@ -1438,7 +1445,7 @@ class ScanStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT relative_path, blob_digest, size_bytes, line_count, language, is_binary
+                SELECT relative_path, blob_digest, size_bytes, line_count, language, is_binary, executable_mode
                 FROM snapshot_files WHERE snapshot_id = ? ORDER BY relative_path
                 """,
                 (snapshot_id,),
@@ -1451,6 +1458,7 @@ class ScanStore:
                 line_count=row["line_count"],
                 language=row["language"],
                 is_binary=bool(row["is_binary"]),
+                executable_mode=row["executable_mode"],
             )
             for row in rows
         ]
@@ -1471,7 +1479,7 @@ class ScanStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT relative_path, blob_digest, size_bytes, line_count, language, is_binary
+                SELECT relative_path, blob_digest, size_bytes, line_count, language, is_binary, executable_mode
                 FROM snapshot_files WHERE snapshot_id = ? AND relative_path = ?
                 """,
                 (snapshot_id, relative_path),
@@ -1485,6 +1493,7 @@ class ScanStore:
             line_count=row["line_count"],
             language=row["language"],
             is_binary=bool(row["is_binary"]),
+            executable_mode=row["executable_mode"],
         )
 
     def create_scan(
@@ -4724,6 +4733,8 @@ class ScanStore:
         item = dict(row)
         item["dynamic_enabled"] = bool(item["dynamic_enabled"])
         item["poc_enabled"] = bool(item.get("poc_enabled", 0))
+        item["bash_enabled"] = bool(item.get("bash_enabled", 0))
+        item["web_search_enabled"] = bool(item.get("web_search_enabled", 0))
         return item
 
     def find_scan_by_idempotency(
@@ -4741,6 +4752,8 @@ class ScanStore:
         item = dict(row)
         item["dynamic_enabled"] = bool(item["dynamic_enabled"])
         item["poc_enabled"] = bool(item.get("poc_enabled", 0))
+        item["bash_enabled"] = bool(item.get("bash_enabled", 0))
+        item["web_search_enabled"] = bool(item.get("web_search_enabled", 0))
         return item
 
     def set_scan_request_metadata(
@@ -4756,6 +4769,8 @@ class ScanStore:
         task_owner_token: str | None = None,
         task_owner_identity: str | None = None,
         knowledge_base: dict[str, Any] | None = None,
+        bash_enabled: bool = False,
+        web_search_enabled: bool = False,
     ) -> None:
         if knowledge_base is not None:
             display_name = knowledge_base.get("display_name")
@@ -4777,6 +4792,7 @@ class ScanStore:
                     "UPDATE scans SET owner_subject = ?, request_source = ?, "
                     "workspace_ref = ?, idempotency_key = ?, request_digest = ?, "
                     "task_owner_pid = ?, task_owner_token = ?, task_owner_identity = ?, "
+                    "bash_enabled = ?, web_search_enabled = ?, "
                     "current_phase = 'snapshot', updated_at = ? "
                     "WHERE scan_id = ?",
                     (
@@ -4788,6 +4804,8 @@ class ScanStore:
                         task_owner_pid,
                         task_owner_token,
                         task_owner_identity,
+                        int(bash_enabled),
+                        int(web_search_enabled),
                         _now(),
                         scan_id,
                     ),
@@ -5233,6 +5251,8 @@ class ScanStore:
         item = dict(row)
         item["dynamic_enabled"] = bool(item["dynamic_enabled"])
         item["poc_enabled"] = bool(item.get("poc_enabled", 0))
+        item["bash_enabled"] = bool(item.get("bash_enabled", 0))
+        item["web_search_enabled"] = bool(item.get("web_search_enabled", 0))
         return item
 
     @staticmethod

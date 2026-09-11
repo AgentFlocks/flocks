@@ -116,7 +116,7 @@ Model messages and audit-tool inputs/outputs can contain proprietary source code
 
 Standard static audits use the flow threat modeling → repository-wide baseline → optional focused investigation → verification → parent adjudication → deterministic reduction. Dynamic audits insert probing and Docker execution after verification. The parent may instead direct one targeted rescan, followed by verification, dynamic processing of only new confirmed candidates, and a mandatory second/final adjudication. Baseline and investigator workers must consume the persisted threat model before they can submit candidates or coverage. Every candidate must receive one independent verifier verdict and be classified by the parent before finalization. Parent-rejected candidates are omitted, insufficient-evidence candidates remain deferred coverage, and only independently confirmed candidates accepted by the parent are projected into SARIF.
 
-The public `code-security` Agent remains the interactive audit entry point. In an interactive audit it may drive the audit tools directly. In the one-command CLI path it is invoked only at the adjudication boundary, where the session callable-tool set exposes `audit_knowledge_base`, `audit_adjudication_context`, and `audit_submit_adjudication`; the host resumes control after the decision.
+The public `code-security` Agent remains the interactive audit entry point. In an interactive audit it may drive the audit tools directly. In the one-command CLI path it is invoked only at the adjudication boundary, where the session callable-tool set exposes `audit_knowledge_base`, `audit_adjudication_context`, and `audit_submit_adjudication`, plus explicitly enabled auxiliary tools; the host resumes control after the decision.
 
 The six Agent definitions are declarative and live in `src/flocks_code_security/agents/<agent-name>/agent.yaml`, with each prompt in the adjacent `prompt.md`. Tools, skills, model settings, and isolation policy can therefore be reviewed and changed independently for each Agent while remaining owned and packaged by this plugin.
 
@@ -176,3 +176,50 @@ crashes are reported as incomplete collection. A storage or cleanup failure does
 not erase the observed process outcome, and missing bytes cannot be submitted as
 a verified artifact. Final failure summaries preserve run and worker reasons;
 only a later successful operation in the same lineage resolves an old failure.
+
+## Optional CLI analysis tools
+
+```sh
+flocks security audit ./target --bash --web-search
+flocks security batch run ./tasks --web-search
+```
+
+Both flags default to off. `--web-search` enables the existing `websearch` and
+`webfetch` tools, so analysis can discover documentation and read the original
+page, including a supplied URL. `--bash` enables the existing native Bash tool
+for auxiliary analysis. Without Flocks sandbox configuration it executes on the
+host; with sandbox configuration it follows the existing sandbox policy. The
+flag does not create a container or imply filesystem or network isolation.
+Disabling `--web-search` hides the two web tools, not shell network access.
+
+Capabilities apply to every Agent stage: threat modeling, baseline, investigation,
+targeted rescan, verification, probing, PoC generation, CyberGym solving and parent
+adjudication. Agents autonomously choose among enabled Bash, websearch, webfetch
+and their dedicated tools. Both flags can be combined with `--cybergym-manifest`
+and batch `--dynamic`. Bash may support builds, tests, scripts and experiments;
+each Bash-enabled session receives an independent writable copy of the verified
+snapshot files as its persisted working directory. Retries get a fresh copy;
+continuing the same session preserves its changes. This consumes additional disk
+space per session; copies are prepared before execution, even if the Agent
+ultimately does not call Bash. Copying uses bounded chunks and restores recorded
+executable bits. Older snapshots without that metadata retain a non-executable
+default; start a new scan to capture the original mode. Cancellation stops and
+joins copying before cleanup. `--cleanup-intermediates` removes these copies
+with other execution data. Immutable snapshots and audit records remain separate. The existing submission contracts and persisted
+replay evidence still determine formal reproduction results.
+
+The host persists the selected capabilities for each scan and batch; batch
+resume and retries reuse them. No global tool setting is changed. Disabled
+tools remain unavailable. Agent permission rules retain their original order,
+including global and per-Agent configuration and specific allow exceptions;
+Bash commands and web requests are checked
+when invoked. Secondary permissions such as `external_directory` retain their
+deny, ask, and allow rules. CLI opt-in supplies approval for ask rules only for
+the enabled auxiliary tools. Only the parent and
+workers actually created have their permission policies applied. Auxiliary prompts explain
+when to use the tools, preserve source receipts and independent verification,
+and treat command output and web content as untrusted data. Web sources must
+be checked against the target version; secrets and private source code must
+not be included in queries or URLs. Tool errors leave an explicit limitation
+instead of manufactured evidence. Enabled flags are visible in JSON status
+and sealed report artifacts (`tool-capabilities.json`).

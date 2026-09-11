@@ -46,9 +46,16 @@ async def test_terminal_cleanup_is_scoped_and_idempotent(tmp_path, monkeypatch, 
     docker = tmp_path / "runtime" / "docker" / scan_id
     docker.mkdir(parents=True)
     (docker / "scratch").write_text("temporary")
+    shell = tmp_path / "runtime" / "shell" / scan_id
+    shell.mkdir(parents=True)
+    (shell / "scratch").write_text("temporary")
+    other_shell = shell.parent / other
+    other_shell.mkdir()
     first = await cleanup_scan(runtime, scan_id)
     assert first["status"] == "completed"
     assert not docker.exists()
+    assert not shell.exists()
+    assert other_shell.is_dir()
     assert Path(snapshot.root_path).exists()
     assert (target / "app.py").exists()
     assert runtime.store.get_scan(scan_id)["failure_code"] == "original_failure"

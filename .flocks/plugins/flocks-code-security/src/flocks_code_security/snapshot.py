@@ -284,6 +284,7 @@ class TargetSnapshotService:
                         line_count=result.line_count,
                         language=_language(source_path),
                         is_binary=result.is_binary,
+                        executable_mode=initial_states[relative_path][2] & 0o111,
                     )
                 )
                 total_bytes += result.size_bytes
@@ -316,7 +317,7 @@ class TargetSnapshotService:
                 (
                     "".join(
                         f"file\0{item.relative_path}\0{item.blob_digest}\0"
-                        f"{item.size_bytes}\n"
+                        f"{item.size_bytes}\0{item.executable_mode}\n"
                         for item in records
                     )
                     + "".join(

@@ -190,6 +190,8 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 progress=progress,
                 knowledge_base=_read_knowledge_base(description, audited_target=source),
                 poc_enabled=config["poc"],
+                bash_enabled=config.get("bash_enabled", False),
+                web_search_enabled=config.get("web_search_enabled", False),
                 scan_mode="cybergym_level1" if config.get("dynamic") else "standard",
                 cybergym_manifest=task.get("cybergym_manifest"),
                 copy_source=False,

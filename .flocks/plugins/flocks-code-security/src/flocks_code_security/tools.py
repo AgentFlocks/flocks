@@ -87,6 +87,9 @@ def _ruleset_digest() -> str:
             digest.update((_AGENT_DEFINITIONS_ROOT / relative_name).read_bytes())
             digest.update(b"\0")
     for name in (
+        "capabilities.py",
+        "workspaces.py",
+        "projection.py",
         "contract.py",
         "coverage.py",
         "dockerfile_policy.py",
@@ -1795,7 +1798,18 @@ async def _launch_worker(
     model = model if isinstance(model, dict) else {}
     provider_id = model.get("providerID") or parent.provider
     model_id = model.get("modelID") or parent.model
+    from flocks_code_security.capabilities import (
+        OPTIONAL_TOOLS, capability_permissions, capability_prompt, optional_tool_names,
+    )
+    from flocks.session.callable_state import set_session_callable_tools
+
+    scan = await asyncio.to_thread(runtime.store.get_scan, scan_id)
+    if scan is None:
+        raise ValueError("Scan not found")
     child_kwargs: dict[str, Any] = {}
+    permissions = await capability_permissions(scan, agent_name)
+    if permissions:
+        child_kwargs["permission"] = permissions
     if provider_id and model_id:
         child_kwargs.update(
             provider=provider_id,
@@ -1887,6 +1901,7 @@ async def _launch_worker(
         prompt = cybergym_solver_prompt(recovery_reason=recovery_reason)
     else:
         raise ValueError("Worker prompt data is incomplete")
+    prompt += capability_prompt(scan, agent_name)
     await asyncio.to_thread(
         runtime.store.reserve_worker_capacity,
         unit["work_unit_id"],
@@ -1910,7 +1925,13 @@ async def _launch_worker(
         raise
     attempt: dict[str, Any] | None = None
     try:
+        from flocks_code_security.workspaces import prepare_bash_workspace
+
+        await prepare_bash_workspace(runtime, scan, child.id)
         callable_tools = await get_session_callable_tools(child.id)
+        callable_tools = await set_session_callable_tools(
+            child.id, (callable_tools - OPTIONAL_TOOLS) | optional_tool_names(scan, agent_name),
+        )
         attempt = await asyncio.to_thread(
             runtime.store.create_work_attempt,
             work_unit_id=unit["work_unit_id"],

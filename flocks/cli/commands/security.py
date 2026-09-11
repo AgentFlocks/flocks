@@ -289,6 +289,11 @@ def _render_status(status: dict[str, Any]) -> None:
         f"[bold]Dynamic:[/bold] {'enabled' if status.get('dynamic_enabled') else 'disabled'}  "
         f"[bold]PoC:[/bold] {'enabled' if status.get('poc_enabled') else 'disabled'}"
     )
+    if status.get("bash_enabled") or status.get("web_search_enabled"):
+        tools = (["bash"] if status.get("bash_enabled") else []) + (
+            ["websearch", "webfetch"] if status.get("web_search_enabled") else []
+        )
+        console.print(f"[bold]Auxiliary tools:[/bold] {', '.join(tools)}")
     adjudication = status.get("adjudication")
     if adjudication:
         console.print(
@@ -345,6 +350,8 @@ def security_audit(
         "--json",
         help="Emit newline-delimited JSON progress events",
     ),
+    bash: bool = typer.Option(False, "--bash", help="Enable native Bash for auxiliary analysis (host execution unless sandbox is configured)."),
+    web_search: bool = typer.Option(False, "--web-search", help="Enable web search and webpage reading (websearch + webfetch)."),
     dynamic: bool = typer.Option(
         False,
         "--dynamic",
@@ -420,6 +427,10 @@ def security_audit(
             audit_kwargs["cleanup_intermediates"] = True
         if not copy_source:
             audit_kwargs["copy_source"] = False
+        if bash:
+            audit_kwargs["bash_enabled"] = True
+        if web_search:
+            audit_kwargs["web_search_enabled"] = True
         if dynamic:
             audit_kwargs["dynamic_enabled"] = True
         if poc:

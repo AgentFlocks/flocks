@@ -3476,9 +3476,12 @@ async def test_three_independent_votes_produce_one_majority_verdict(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bash_enabled,web_search_enabled", [(False, False), (True, False), (False, True), (True, True)])
 async def test_background_worker_orchestration_retries_failed_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    bash_enabled: bool,
+    web_search_enabled: bool,
 ) -> None:
     from flocks.session.message import Message
     from flocks.session.session import Session
@@ -3503,6 +3506,9 @@ async def test_background_worker_orchestration_retries_failed_verification(
         provider="provider",
         model="model",
     )
+    from flocks_code_security import workspaces
+
+    monkeypatch.setattr(workspaces, "prepare_bash_workspace", AsyncMock())
     children: list[SimpleNamespace] = []
 
     async def create_child(**kwargs):
@@ -3538,6 +3544,15 @@ async def test_background_worker_orchestration_retries_failed_verification(
     }
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
+    from flocks_code_security.capabilities import optional_tool_names
+
+    runtime.store.set_scan_request_metadata(
+        scan_id, owner_subject="cli:test", request_source="cli", workspace_ref=None,
+        idempotency_key=None, request_digest="test",
+        bash_enabled=bash_enabled, web_search_enabled=web_search_enabled,
+    )
+    expected_optional = optional_tool_names(runtime.store.get_scan(scan_id))
+    get_callable_tools.return_value.update(expected_optional)
 
     blocked_baseline = await audit_run_workers(coordinator, scan_id, "baseline")
     assert blocked_baseline.success is False
@@ -3722,6 +3737,22 @@ async def test_background_worker_orchestration_retries_failed_verification(
     assert finalized.output["finding_summaries"][0]["locations"][0]["path"] == "app.py"
     assert finalized.output["coverage_completeness"] == "complete"
     assert finalized.output["pending_count"] == 0
+
+    from flocks.session.callable_state import get_session_callable_tools
+    from flocks_code_security.capabilities import OPTIONAL_TOOLS
+    from flocks_code_security.artifact_integrity import verify_artifact_bundle
+
+    for child in children:
+        actual = await get_session_callable_tools(child.id)
+        assert actual & OPTIONAL_TOOLS == expected_optional
+    report_dir = Path(finalized.output["report_path"]).parent
+    assert verify_artifact_bundle(scan_id, report_dir).status == "valid"
+    if expected_optional:
+        flags = json.loads((report_dir / "tool-capabilities.json").read_text())
+        assert flags == {"scanId": scan_id, "bashEnabled": bash_enabled, "webSearchEnabled": web_search_enabled}
+        assert "Auxiliary tools enabled" in (report_dir / "report.md").read_text()
+    else:
+        assert not (report_dir / "tool-capabilities.json").exists()
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,8 @@ POC_AGENT_TOOL_NAMES = {"audit_poc_subject", "audit_submit_poc"}
 
 def _require_enabled_audit_tools(
     *,
+    bash_enabled: bool = False,
+    web_search_enabled: bool = False,
     dynamic_enabled: bool = False,
     knowledge_base_enabled: bool = False,
     cybergym_enabled: bool = False,
@@ -76,13 +78,21 @@ def _require_enabled_audit_tools(
         excluded.update(CYBERGYM_AGENT_TOOL_NAMES)
     if not poc_enabled:
         excluded.update(POC_AGENT_TOOL_NAMES)
-    required = tuple(name for name in AUDIT_TOOL_NAMES if name not in excluded)
+    from flocks_code_security.capabilities import is_native_optional_tool, optional_tool_names
+
+    optional = optional_tool_names(
+        {"bash_enabled": bash_enabled, "web_search_enabled": web_search_enabled}
+    )
+    required = tuple(name for name in AUDIT_TOOL_NAMES if name not in excluded) + tuple(sorted(optional))
     unavailable = [name for name in required if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled]
     if unavailable:
         raise RuntimeError(
             "Code-security audit requires enabled tools: "
             f"{', '.join(unavailable)}. Enable them in tool_settings before retrying."
         )
+    for name in sorted(optional):
+        if not is_native_optional_tool(ToolRegistry.get(name).info):
+            raise RuntimeError(f"Code-security audit requires the native tool handler: {name}")
 
 
 def _emit(
@@ -586,6 +596,15 @@ class AuditOrchestrator:
             "audit_adjudication_context",
             "audit_submit_adjudication",
         }
+        from flocks_code_security.capabilities import capability_prompt, optional_tool_names
+
+        scan = await asyncio.to_thread(store.get_scan, scan_id)
+        if scan is None:
+            raise RuntimeError("Scan not found")
+        from flocks_code_security.workspaces import prepare_bash_workspace
+
+        await prepare_bash_workspace(get_runtime(), scan, self.ctx.session_id)
+        callable_tools.update(optional_tool_names(scan, "code-security"))
         if knowledge_base_present:
             callable_tools.add("audit_knowledge_base")
         await set_session_callable_tools(
@@ -603,7 +622,8 @@ class AuditOrchestrator:
             session_id=self.ctx.session_id,
             role=MessageRole.USER,
             content=(
-                f"Host-orchestrated audit {scan_id} is ready for parent semantic "
+                capability_prompt(scan, "code-security") + "\n\n"
+                + f"Host-orchestrated audit {scan_id} is ready for parent semantic "
                 f"adjudication round {expected_round}. The host has already completed "
                 "all required macro phases. "
                 + knowledge_base_instruction
@@ -978,6 +998,8 @@ async def run_standard_audit(
     source_exclusions: list[dict[str, str]] | None = None,
     copy_source: bool = True,
     cleanup_intermediates: bool = False,
+    bash_enabled: bool = False,
+    web_search_enabled: bool = False,
     dynamic_enabled: bool = False,
     poc_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
@@ -1015,6 +1037,8 @@ async def run_standard_audit(
             copy_source=copy_source,
             cleanup_intermediates=cleanup_intermediates,
             dynamic_enabled=dynamic_enabled,
+            bash_enabled=bash_enabled,
+            web_search_enabled=web_search_enabled,
             poc_enabled=poc_enabled,
             coverage_policy=coverage_policy,
             verification_votes=verification_votes,

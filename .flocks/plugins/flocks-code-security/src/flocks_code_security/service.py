@@ -149,6 +149,8 @@ class StartScanRequest:
     max_total_bytes: int | None = None
     copy_source: bool = True
     cleanup_intermediates: bool = False
+    bash_enabled: bool = False
+    web_search_enabled: bool = False
     dynamic_enabled: bool = False
     poc_enabled: bool = False
     coverage_policy: str = "evidence_backed_partial"
@@ -631,6 +633,8 @@ class AuditService:
             max_total_bytes=request.max_total_bytes,
             copy_source=bool(request.copy_source),
             cleanup_intermediates=request.cleanup_intermediates,
+            bash_enabled=request.bash_enabled,
+            web_search_enabled=request.web_search_enabled,
             dynamic_enabled=bool(request.dynamic_enabled),
             poc_enabled=bool(request.poc_enabled),
             coverage_policy=str(request.coverage_policy or "").strip(),
@@ -638,6 +642,8 @@ class AuditService:
             idempotency_key=(request.idempotency_key or "").strip() or None,
             knowledge_base=self._validate_knowledge_base(request.knowledge_base),
         )
+        if type(normalized.bash_enabled) is not bool or type(normalized.web_search_enabled) is not bool:
+            raise AuditServiceError("invalid_parameter", "Tool capability flags must be booleans")
         if type(normalized.cleanup_intermediates) is not bool:
             raise AuditServiceError("invalid_parameter", "cleanup_intermediates must be a boolean")
         if normalized.scan_mode not in {"standard", "cybergym_level1"}:
@@ -755,6 +761,8 @@ class AuditService:
                     task_owner_token=owner_token,
                     task_owner_identity=process_identity(os.getpid()),
                     knowledge_base=knowledge_base,
+                    bash_enabled=normalized.bash_enabled,
+                    web_search_enabled=normalized.web_search_enabled,
                 )
             except ValueError as exc:
                 self._discard_prepared_scan(scan_id, prepared)
@@ -775,6 +783,11 @@ class AuditService:
                     "knowledge_base": {key: value for key, value in knowledge_base.items() if key != "content"},
                 }
 
+            prepared = {
+                **prepared,
+                "bash_enabled": normalized.bash_enabled,
+                "web_search_enabled": normalized.web_search_enabled,
+            }
             recorder = _ProgressRecorder(
                 scan_id,
                 dynamic_enabled=(
@@ -935,6 +948,8 @@ class AuditService:
             "scan_mode": scan["mode"],
             "dynamic_enabled": dynamic_validator is not None,
             "dynamic_validator": dynamic_validator,
+            "bash_enabled": bool(scan.get("bash_enabled", 0)),
+            "web_search_enabled": bool(scan.get("web_search_enabled", 0)),
             "poc_enabled": bool(scan.get("poc_enabled", 0)),
             "coverage_policy": scan["coverage_policy"],
             "verification_votes": scan["verification_vote_count"],
@@ -1494,13 +1509,18 @@ class AuditService:
         request: StartScanRequest,
         caller: AuditCaller,
     ) -> ToolContext:
+        from flocks_code_security.capabilities import capability_permissions
+
         try:
             _require_enabled_audit_tools(
+                bash_enabled=request.bash_enabled,
+                web_search_enabled=request.web_search_enabled,
                 dynamic_enabled=request.dynamic_enabled,
                 knowledge_base_enabled=request.knowledge_base is not None,
                 cybergym_enabled=request.scan_mode == "cybergym_level1",
                 poc_enabled=request.poc_enabled,
             )
+            permissions = await capability_permissions(request.__dict__, "code-security")
             await Storage.init()
             provider_id, model_id = await _resolve_model(request.model)
         except ValueError as exc:
@@ -1514,6 +1534,7 @@ class AuditService:
             project_id=project.id,
             directory=str(runtime_dir()),
             title=f"Code security audit: {request.target_path.name}",
+            permission=permissions or None,
             agent="code-security",
             provider=provider_id,
             model=model_id,
@@ -1744,6 +1765,10 @@ class AuditService:
                 else None
             ),
         }
+        if request.bash_enabled:
+            payload["bash_enabled"] = True
+        if request.web_search_enabled:
+            payload["web_search_enabled"] = True
         if request.source_exclusions:
             payload["source_exclusions"] = list(request.source_exclusions)
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

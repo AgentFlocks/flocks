@@ -40,6 +40,8 @@ def start(
     concurrency: int = typer.Option(30, min=1, max=128),
     model: Optional[str] = typer.Option(None),
     poc: bool = typer.Option(False, "--poc"),
+    bash: bool = typer.Option(False, "--bash", help="Enable native Bash (host unless sandbox is configured)."),
+    web_search: bool = typer.Option(False, "--web-search", help="Enable websearch and webfetch for analysis."),
     dynamic: bool = typer.Option(
         False, "--dynamic", help="Enable local fuzz/GDB validation using each task's cybergym.json; implies --poc."
     ),
@@ -75,6 +77,8 @@ def start(
             model=model,
             poc=poc,
             dynamic=dynamic,
+            bash_enabled=bash,
+            web_search_enabled=web_search,
             dynamic_concurrency=dynamic_concurrency,
             task_timeout=task_timeout,
             max_snapshot_bytes=max_snapshot_bytes,

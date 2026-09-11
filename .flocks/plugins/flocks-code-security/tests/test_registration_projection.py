@@ -154,7 +154,8 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
         assert agent.delegatable is False
         assert agent.skills == []
         assert agent.prompt_profile == "isolated"
-        assert agent.session_directory == "~/.flocks/workspace/code-security/runtime"
+        assert agent.session_directory is None
+        assert agent.prompt.count("## Optional tools") == 1
         assert agent.memory_enabled is False
         assert agent.require_dedicated_session is True
         raw = yaml.safe_load((AGENTS_ROOT / name / "agent.yaml").read_text(encoding="utf-8"))

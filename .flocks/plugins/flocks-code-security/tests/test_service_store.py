@@ -2005,7 +2005,9 @@ def test_initialize_migrates_legacy_coverage_as_untrusted_partial_state(
     )
     with store._connect() as connection:
         connection.execute(
-            "INSERT INTO snapshot_files VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO snapshot_files "
+            "(snapshot_id, relative_path, blob_digest, size_bytes, line_count, language, is_binary) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("snapshot_test", "app.py", "c" * 64, 12, 1, "python", 0),
         )
         connection.execute(

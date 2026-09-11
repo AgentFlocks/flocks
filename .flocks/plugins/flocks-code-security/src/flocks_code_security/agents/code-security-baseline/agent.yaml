@@ -11,7 +11,6 @@ temperature: 0.1
 steps: 200
 skills: []
 prompt_profile: isolated
-session_directory: ~/.flocks/workspace/code-security/runtime
 memory_enabled: false
 require_dedicated_session: true
 tools:
@@ -22,3 +21,6 @@ tools:
   - audit_search
   - audit_submit_candidate
   - audit_submit_coverage
+  - bash
+  - webfetch
+  - websearch

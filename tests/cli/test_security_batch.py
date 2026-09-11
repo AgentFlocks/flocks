@@ -680,3 +680,53 @@ def test_automatic_mode_is_frozen_by_cli(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.stdout
     assert batch.read_json(tmp_path / 'auto/batch.json')['auto_exclude_external_symlinks'] is True
     assert batch.read_json(tmp_path / 'run/batch.json')['auto_exclude_external_symlinks'] is False
+
+
+@pytest.mark.parametrize("flags,bash,web", [
+    ([], False, False), (["--bash"], True, False),
+    (["--web-search"], False, True), (["--bash", "--web-search"], True, True),
+])
+def test_batch_persists_cli_capabilities_and_resume_reuses_them(tmp_path, monkeypatch, flags, bash, web):
+    from flocks.cli.commands import security_batch as command
+
+    monkeypatch.setattr(batch, "registry_root", lambda: tmp_path / "registry")
+    source = tmp_path / "input" / "1"
+    source.mkdir(parents=True)
+    (source / "repo-vul.tar.gz").write_bytes(b"archive")
+    (source / "description.txt").write_text("Audit this source")
+    observed = []
+    monkeypatch.setattr(command, "_run", lambda root, *args: observed.append(batch.read_json(root / "batch.json")))
+    root = tmp_path / "run"
+    cli_runner = CliRunner()
+    result = cli_runner.invoke(security_app, [
+        "batch", "run", str(source.parent), "--run-dir", str(root), *flags,
+    ])
+    assert result.exit_code == 0, result.output
+    result = cli_runner.invoke(security_app, ["batch", "resume", str(root), "--retry-failed"])
+    assert result.exit_code == 0, result.output
+    assert len(observed) == 2
+    for config in observed:
+        assert config["bash_enabled"] is bash
+        assert config["web_search_enabled"] is web
+
+
+def test_batch_accepts_all_tools_with_cybergym(tmp_path, monkeypatch):
+    from flocks.cli.commands import security_batch as command
+    from flocks.security import batch_dynamic
+
+    make_batch(tmp_path, monkeypatch)
+    source = tmp_path / "input"
+    (source / "0" / "cybergym.json").write_text(json.dumps(dynamic_manifest()))
+    checked = []
+    monkeypatch.setattr(batch_dynamic, "preflight", lambda manifests: checked.extend(manifests))
+    observed = []
+    monkeypatch.setattr(command, "_run", lambda root: observed.append(batch.read_json(root / "batch.json")))
+    result = CliRunner().invoke(security_app, [
+        "batch", "run", str(source), "--run-dir", str(tmp_path / "dynamic"),
+        "--bash", "--web-search", "--dynamic",
+    ])
+    assert result.exit_code == 0, result.output
+    assert observed[0]["bash_enabled"] is True
+    assert observed[0]["web_search_enabled"] is True
+    assert observed[0]["dynamic"] is True
+    assert checked

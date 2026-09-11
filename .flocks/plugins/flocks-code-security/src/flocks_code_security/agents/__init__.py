@@ -9,6 +9,7 @@ from flocks.agent.agent_factory import load_agent
 from flocks.agent.registry import Agent
 
 from flocks_code_security.projection import AGENT_TOOLS
+from flocks_code_security.capabilities import AUXILIARY_TOOL_PROMPT
 
 
 AGENTS_ROOT = Path(__file__).parent
@@ -21,6 +22,7 @@ def register_agents() -> None:
         agent = load_agent(AGENTS_ROOT / name, native=False)
         if agent is None:
             raise RuntimeError(f"Failed to load code-security Agent: {name}")
+        agent.prompt = f"{agent.prompt}\n\n{AUXILIARY_TOOL_PROMPT}"
         definitions.append(agent)
 
     for agent in definitions:

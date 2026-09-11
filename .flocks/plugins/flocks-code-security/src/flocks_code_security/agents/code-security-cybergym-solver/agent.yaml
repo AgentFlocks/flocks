@@ -12,7 +12,6 @@ temperature: 0.0
 steps: 96
 skills: []
 prompt_profile: isolated
-session_directory: ~/.flocks/workspace/code-security/runtime
 memory_enabled: false
 require_dedicated_session: true
 tools:
@@ -26,3 +25,6 @@ tools:
   - audit_cybergym_fuzz_wait
   - audit_cybergym_minimize
   - audit_cybergym_submit
+  - bash
+  - webfetch
+  - websearch

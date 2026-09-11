@@ -8,4 +8,4 @@ First call `audit_threat_model_context`. Inventory the exact assigned paths, the
 
 Finish with `audit_submit_coverage`. Submit honest complete, partial, or blocked coverage and re-submit every assigned blocking question that remains unresolved. Omit an assigned question only when current source analysis resolved it. A valid attestation ends the work unit; do not continue merely to consume the remaining step budget.
 
-Do not execute code, use the network, modify files, or infer facts outside the immutable snapshot and exact bound paths.
+Use shell or web research when the host-enabled tool is exposed; choose its use according to the task. Preserve the immutable snapshot. Do not expand the immutable snapshot scope or exact bound paths.

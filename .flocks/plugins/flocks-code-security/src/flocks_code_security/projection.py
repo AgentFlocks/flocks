@@ -6,6 +6,9 @@ from typing import Any, Mapping
 
 from flocks_code_security.tools import is_registered_audit_tool
 from flocks.tool.registry import ToolRegistry
+from flocks_code_security.capabilities import (
+    OPTIONAL_TOOLS, is_native_optional_tool, session_optional_tools,
+)
 
 
 RESOLVER_NAME = "flocks-code-security"
@@ -89,6 +92,11 @@ AGENT_TOOLS = {
 }
 
 
+# Declarations include the optional ceiling; persisted scan flags narrow it below.
+for _tools in AGENT_TOOLS.values():
+    _tools.extend(sorted(OPTIONAL_TOOLS))
+
+
 def _is_canonical_question(tool_info: Any) -> bool:
     if getattr(tool_info, "name", None) != "question":
         return False
@@ -125,7 +133,8 @@ def code_security_tool_projection(
             "audit_adjudication_context",
             "audit_submit_adjudication",
         ]
-    allowed_names = set(allowed)
+    optional = session_optional_tools(str(context.get("session_id") or ""), agent_name)
+    allowed_names = (set(allowed) - OPTIONAL_TOOLS) | optional
     return [
         tool
         for tool in tool_infos
@@ -133,6 +142,7 @@ def code_security_tool_projection(
         and (
             is_registered_audit_tool(tool)
             or _is_canonical_question(tool)
+            or (getattr(tool, "name", None) in optional and is_native_optional_tool(tool))
         )
     ]
 

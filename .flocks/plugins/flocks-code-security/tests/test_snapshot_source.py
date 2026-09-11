@@ -949,3 +949,83 @@ def test_duplicate_verdict_migration_preserves_conflict_fact(tmp_path: Path) -> 
     assert len(data["verifications"]) == 1
     assert data["verification_conflicts"][0]["candidate_id"] == "candidate"
     assert {item["verdict"] for item in data["verification_conflicts"][0]["verifications"]} == {"confirmed", "rejected"}
+
+
+@pytest.mark.parametrize("copy_source", [False, True])
+def test_writable_source_copy_contains_only_verified_manifest_files(tmp_path, copy_source):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("original")
+    (target / "excluded.bin").write_bytes(b"x" * 100)
+    runtime = build_runtime(tmp_path / "data")
+    snapshot = runtime.snapshots.create(target, copy_source=copy_source, max_file_bytes=20)
+    destination = tmp_path / "working"
+    runtime.source.copy_to(snapshot.snapshot_id, destination)
+    assert sorted(p.name for p in destination.iterdir()) == ["app.py"]
+    (destination / "app.py").write_text("modified")
+    assert (target / "app.py").read_text() == "original"
+    with pytest.raises(FileExistsError):
+        runtime.source.copy_to(snapshot.snapshot_id, destination)
+    assert (destination / "app.py").read_text() == "modified"
+    if not copy_source:
+        (target / "app.py").write_text("tampered")
+        with pytest.raises(ValueError):
+            runtime.source.copy_to(snapshot.snapshot_id, tmp_path / "failed")
+        assert not (tmp_path / "failed").exists()
+
+
+@pytest.mark.parametrize("copy_source", [False, True])
+def test_working_copy_streams_content_and_preserves_executable_mode(tmp_path, monkeypatch, copy_source):
+    target = tmp_path / "target"
+    target.mkdir()
+    script = target / "build.sh"
+    script.write_text("#!/bin/sh\nprintf 'build-ok'\n")
+    script.chmod(0o755)
+    (target / "data").write_bytes(b"x" * (256 * 1024))
+    runtime = build_runtime(tmp_path / "plugin")
+    snapshot = runtime.snapshots.create(target, copy_source=copy_source)
+    assert runtime.store.get_snapshot_file(snapshot.snapshot_id, "build.sh").executable_mode == 0o111
+    restored = build_runtime(tmp_path / "plugin")
+    monkeypatch.setattr(restored.source, "_verified_bytes", lambda *args: pytest.fail("copy must stream"))
+    chunks = []
+    original = restored.source._verified_chunks
+
+    def streamed(*args):
+        for chunk in original(*args):
+            chunks.append(len(chunk))
+            yield chunk
+
+    monkeypatch.setattr(restored.source, "_verified_chunks", streamed)
+    destination = tmp_path / "working"
+    restored.source.copy_to(snapshot.snapshot_id, destination)
+    assert max(chunks) <= 64 * 1024
+    assert (destination / "build.sh").stat().st_mode & 0o111 == 0o111
+    assert not (destination / "data").stat().st_mode & 0o111
+    assert subprocess.run([str(destination / "build.sh")], check=True, capture_output=True).stdout == b"build-ok"
+
+
+def test_snapshot_executable_metadata_migration_and_identity(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    script = target / "script.sh"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o644)
+    runtime = build_runtime(tmp_path / "plugin")
+    plain = runtime.snapshots.create(target)
+    script.chmod(0o755)
+    executable = runtime.snapshots.create(target)
+    assert executable.tree_digest != plain.tree_digest
+    with runtime.store._connect() as connection:
+        connection.execute("ALTER TABLE snapshot_files DROP COLUMN executable_mode")
+        connection.execute("ALTER TABLE scans DROP COLUMN bash_enabled")
+        connection.execute("ALTER TABLE scans DROP COLUMN web_search_enabled")
+        connection.execute("PRAGMA user_version = 8")
+    restored = build_runtime(tmp_path / "plugin")
+    # Old snapshots have no reliable record of the original execution mode.
+    assert restored.store.get_snapshot_file(plain.snapshot_id, "script.sh").executable_mode == 0
+    with restored.store._connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
+        assert {"bash_enabled", "web_search_enabled"} <= columns
+    new = restored.snapshots.create(target)
+    assert restored.store.get_snapshot_file(new.snapshot_id, "script.sh").executable_mode == 0o111
