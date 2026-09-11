@@ -464,6 +464,87 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container.querySelector('.ai-core')).toHaveClass('core-processing');
   });
 
+  it.each(['', 'batch'])('replaces a whole preview when the alert ID is missing or a legacy execution fallback (%s)', async (id) => {
+    vi.useFakeTimers();
+    let event = workflowEvent('batch', 'running', { alert: {
+      id, threatName: '第一条告警', srcIp: '192.0.2.1', dstIp: '198.51.100.2', sourceType: 'ndr',
+    } });
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    event = { ...event, alert: { id, threatName: '第二条告警', srcIp: '203.0.113.9' } };
+    await pollActivity();
+    const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
+    expect(within(cards).getByText('第二条告警')).toBeInTheDocument();
+    expect(within(cards).getAllByText('未提供')).toHaveLength(2);
+    expect(within(cards).queryByText('198.51.100.2')).not.toBeInTheDocument();
+    const rail = container.querySelector('.event-rail-list') as HTMLElement;
+    expect(within(rail).queryByText(/198\.51\.100\.2/)).not.toBeInTheDocument();
+  });
+
+  it('releases an unconfirmed current task when busy snapshots keep omitting its final state', async () => {
+    vi.useFakeTimers();
+    let events = [workflowEvent('old', 'running', { alert: { id: 'old-alert', threatName: '旧任务' } })];
+    mockActivity(() => ({ workflowEvents: events, workflowSnapshotComplete: false }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    events = Array.from({ length: 10 }, (_, index) => workflowEvent(`new-${index}`, 'running', {
+      alert: { id: `new-alert-${index}`, threatName: `新任务-${index}` },
+    }));
+    for (let i = 0; i < 12; i += 1) await pollActivity();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
+    expect(within(cards).queryByText('旧任务')).not.toBeInTheDocument();
+    expect(within(cards).getByText(/新任务-/)).toBeInTheDocument();
+    expect(screen.getByText('AI 正在并行处理 10 个任务')).toBeInTheDocument();
+  });
+
+  it('does not expire a long-running task whose unchanged status is still confirmed by polls', async () => {
+    vi.useFakeTimers();
+    const event = workflowEvent('long-running');
+    mockActivity(() => ({ workflowEvents: [event], workflowSnapshotComplete: false }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    for (let i = 0; i < 25; i += 1) await pollActivity();
+    expect(container.querySelector('.event-rail-item')).toHaveClass('state-processing');
+    expect(container.querySelector('.ai-core')).toHaveClass('core-processing');
+    expect(screen.queryByText('状态待确认')).not.toBeInTheDocument();
+  });
+
+  it('marks tasks unconfirmed even during a hung request and restores them on a fresh confirmation', async () => {
+    vi.useFakeTimers();
+    const event = workflowEvent('active');
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    const fallback = pageGetMock.getMockImplementation()!;
+    let resolveActivity: (value: any) => void = () => {};
+    pageGetMock.mockImplementation((path: string, ...args: any[]) => path === '/activity'
+      ? new Promise((resolve) => { resolveActivity = resolve; }) : fallback(path, ...args));
+    await act(async () => { await vi.advanceTimersByTimeAsync(33000); });
+    expect(container.querySelector('.event-rail-item')).toHaveClass('state-unconfirmed');
+    expect(container.querySelector('.ai-core')).not.toHaveClass('core-processing');
+    expect(within(container.querySelector('.event-rail-list') as HTMLElement).getByText('状态待确认')).toBeInTheDocument();
+    await act(async () => { resolveActivity({ data: { workflowEvents: [event], workflowSnapshotComplete: true } }); });
+    expect(container.querySelector('.event-rail-item')).toHaveClass('state-processing');
+    expect(container.querySelector('.ai-core')).toHaveClass('core-processing');
+  });
+
+  it('removes unconfirmed tasks when an authoritative snapshot confirms their absence', async () => {
+    vi.useFakeTimers();
+    let data: any = { workflowEvents: [workflowEvent('old')] };
+    mockActivity(() => data);
+    const { container } = render(<Page />);
+    await act(async () => {});
+    data = { workflowEvents: [], workflowSnapshotComplete: false };
+    await act(async () => { await vi.advanceTimersByTimeAsync(33000); });
+    expect(container.querySelector('.event-rail-item')).toHaveClass('state-unconfirmed');
+    data = { workflowEvents: [], workflowSnapshotComplete: true };
+    await pollActivity();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+  });
+
   it('ignores an in-flight activity response after unmount', async () => {
     vi.useFakeTimers();
     const fallback = pageGetMock.getMockImplementation()!;

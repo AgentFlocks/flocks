@@ -86,6 +86,7 @@ const EMPTY_STATS = {
 const ACTIVITY_QUEUE_LIMIT = 8;
 const EVENT_RAIL_TASK_LIMIT = 10;
 const ACTIVITY_POLL_MS = 3000;
+const WORKFLOW_CONFIRMATION_TTL_MS = 30000;
 const ACTIVITY_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 const ACTIVITY_SEEN_KEY = 'soc-dashboard-seen-activity-v1';
 const EVENT_RAIL_DEFAULT_WIDTH = 330;
@@ -533,11 +534,18 @@ function mergeActivityEvent(previous, incoming) {
   if (incomingTime < previousTime) return previous;
   // A late polling response cannot resurrect a terminal execution.
   if (previous.triggerSource === 'workflow_execution'
-    && !isRunningWorkflowEvent(previous) && isRunningWorkflowEvent(incoming)) return previous;
+    && ['completed', 'success', 'failed', 'cancelled'].includes(previous.status)
+    && isRunningWorkflowEvent(incoming)) return previous;
+  if (incoming.status === 'unconfirmed' && previous.lastConfirmedAt > incoming.lastConfirmedAt) return previous;
   const incomingIdentity = hasAlertIdentity(incoming);
-  const differentAlert = incomingIdentity && displayAlertText(incoming.alert?.id)
-    && displayAlertText(previous.alert?.id) && incoming.alert.id !== previous.alert.id;
-  const alert = differentAlert ? {} : { ...previous.alert };
+  const incomingId = displayAlertText(incoming.alert?.id);
+  const previousId = displayAlertText(previous.alert?.id);
+  // An execution ID is not an alert ID (including responses from older builds).
+  // Without a shared real identity, use a whole preview, never graft endpoints.
+  const sameAlert = incomingId && incomingId === previousId
+    && incomingId !== executionIdFromWorkflowEvent(incoming)
+    && previousId !== executionIdFromWorkflowEvent(previous);
+  const alert = incomingIdentity && !sameAlert ? {} : { ...previous.alert };
   for (const [key, value] of Object.entries(incoming.alert || {})) {
     if (displayAlertText(value)) {
       if (key === 'id' && !incomingIdentity && hasAlertIdentity(previous)) continue;
@@ -549,7 +557,31 @@ function mergeActivityEvent(previous, incoming) {
     ...previous, ...incoming, alert,
     result: { ...previous.result, ...incoming.result },
     playbackStartedAt: previous.playbackStartedAt,
+    lastConfirmedAt: Math.max(previous.lastConfirmedAt || 0, incoming.lastConfirmedAt || 0),
   };
+}
+
+function expireWorkflowActivity(previous, now = Date.now()) {
+  let changed = false;
+  const expire = (event) => {
+    if (!isRunningWorkflowEvent(event) || !event.lastConfirmedAt
+      || now - event.lastConfirmedAt < WORKFLOW_CONFIRMATION_TTL_MS) return event;
+    changed = true;
+    // A missing/truncated response is not evidence of completion or failure.
+    return { ...event, status: 'unconfirmed' };
+  };
+  const next = { ...previous, recent: previous.recent.map(expire), lastIdentified: expire(previous.lastIdentified) };
+  for (const kind of ['denoise', 'triage']) {
+    const lane = previous[kind];
+    const current = expire(lane.current);
+    next[kind] = {
+      ...lane,
+      current: current?.status === 'unconfirmed' ? null : current,
+      last: current?.status === 'unconfirmed' ? current : expire(lane.last),
+      queue: lane.queue.map(expire).filter((event) => event.status !== 'unconfirmed'),
+    };
+  }
+  return changed ? next : previous;
 }
 
 function normalizeActivityBatch(raw) {
@@ -571,11 +603,14 @@ function resolveActivityMode(previous, batch) {
 }
 
 function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch, workflowSnapshotComplete = false) {
+  previous = expireWorkflowActivity(previous);
   const batch = normalizeActivityBatch(rawBatch);
   const modeState = resolveActivityMode(previous, batch);
   const hasBatch = batch.receivedCount > 0 || batch.triageUpdatedCount > 0;
-  const incomingEvents = (events || []).filter(isVisibleActivity);
-  const incomingRecentEvents = (recentEvents || []).filter(isVisibleActivity);
+  const confirmed = (event) => event.triggerSource === 'workflow_execution'
+    ? { ...event, lastConfirmedAt: Date.now() } : event;
+  const incomingEvents = (events || []).filter(isVisibleActivity).map(confirmed);
+  const incomingRecentEvents = (recentEvents || []).filter(isVisibleActivity).map(confirmed);
   if (
     !hasBatch
     && !workflowSnapshotComplete
@@ -599,10 +634,11 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch, 
   };
   if (workflowSnapshotComplete) {
     const ids = new Set(incomingEvents.map((event) => event.eventId));
-    const retained = (event) => !isRunningWorkflowEvent(event) || ids.has(event.eventId);
+    const retained = (event) => !(isRunningWorkflowEvent(event) || event?.status === 'unconfirmed') || ids.has(event.eventId);
     for (const kind of ['denoise', 'triage']) {
       const lane = next[kind];
       if (lane.current && !retained(lane.current)) lane.current = null;
+      if (lane.last?.status === 'unconfirmed' && !retained(lane.last)) lane.last = null;
       lane.queue = lane.queue.filter(retained);
     }
     next.recent = next.recent.filter(retained);
@@ -1786,7 +1822,7 @@ function CommandActivityLane({ kind, lane, peerLane, stats }) {
   const playbackMode = kind === 'denoise' ? event?.playbackMode : 'normal';
   const status = active
     ? playbackMode === 'surge' ? '洪峰处理' : playbackMode === 'burst' ? '批量处理' : '处理中'
-    : isRunningWorkflowEvent(event) ? '等待处理'
+    : event?.status === 'unconfirmed' ? '状态待确认' : isRunningWorkflowEvent(event) ? '等待处理'
       : event?.status === 'failed' ? '最近失败' : event ? '最近完成' : '待机巡航';
   const sampleCount = Math.max(Number(event?.sampleCount || 1), 1);
   const eventTitle = event?.alert?.threatName
@@ -1965,12 +2001,12 @@ function buildEventQueueTasks(activity, timeFilter) {
     const key = activityTaskKey(incoming);
     const event = mergeActivityEvent(taskByKey.get(key)?.event, incoming);
     const status = String(event.status || '').toLowerCase();
-    const state = status === 'running' ? 'processing'
+    const state = status === 'unconfirmed' ? 'unconfirmed' : status === 'running' ? 'processing'
       : ['queued', 'pending'].includes(status) ? 'waiting' : 'completed';
     taskByKey.set(key, { key, event, state, stage: event.stage,
       [event.stage]: event, latestAt: activityTimestamp(event) });
   }
-  const stateRank = { processing: 0, waiting: 1, completed: 2 };
+  const stateRank = { processing: 0, waiting: 1, unconfirmed: 2, completed: 3 };
   return [...taskByKey.values()].sort((a, b) => stateRank[a.state] - stateRank[b.state]
     || b.latestAt - a.latestAt || a.key.localeCompare(b.key));
 }
@@ -2366,12 +2402,14 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
   const counts = {
     processing: tasks.filter((task) => task.state === 'processing').length,
     waiting: tasks.filter((task) => task.state === 'waiting').length,
+    unconfirmed: tasks.filter((task) => task.state === 'unconfirmed').length,
   };
   const banner = activity.connection === 'error'
     ? '处理任务连接异常，正在重试'
     : counts.processing
       ? `AI 正在并行处理 ${counts.processing} 个任务`
-      : counts.waiting ? '最新 10 条待处理任务' : '等待新的降噪或研判任务';
+      : counts.waiting ? '最新 10 条待处理任务'
+        : counts.unconfirmed ? '任务状态待确认，等待数据更新' : '等待新的降噪或研判任务';
   return [
     h('div', { className: cx('event-update-banner', activity.connection === 'error' && 'warn'), key: 'banner' }, banner),
     h('div', { className: 'event-rail-list', key: 'list' }, visibleTasks.length ? visibleTasks.map((task) => {
@@ -2382,8 +2420,10 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
         : task.state === 'waiting' ? '待降噪' : '智能降噪';
       const stateLabel = task.state === 'processing'
         ? '处理中'
-        : '等待处理';
-      const detail = task.state === 'processing'
+        : task.state === 'unconfirmed' ? '状态待确认' : '等待处理';
+      const detail = task.state === 'unconfirmed'
+        ? '近期未收到该任务的状态，尚不能确认是否结束'
+        : task.state === 'processing'
         ? task.stage === 'triage' ? '研判工作流处理中' : '降噪工作流处理中'
         : task.stage === 'triage' ? '研判工作流排队中' : '降噪工作流排队中';
       const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
@@ -2595,6 +2635,12 @@ export default function Page() {
   useEffect(() => {
     void loadStats(timeFilter);
   }, [loadStats, timeFilter]);
+
+  useEffect(() => {
+    // Also expires stale state while requests are failing or remain in flight.
+    const timer = window.setInterval(() => setActivity(expireWorkflowActivity), ACTIVITY_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const intervalMs = REFRESH_INTERVAL_MS[refreshKey];
@@ -5557,6 +5603,7 @@ const CSS = `
 .event-stage { color: #83aef1; background: rgba(52,86,143,.5); }
 .event-rail-item.state-processing .event-stage { color: #57e1b5; background: rgba(23,111,83,.48); }
 .event-rail-item.state-waiting .event-stage { color: #d6a95e; background: rgba(120,81,23,.38); }
+.event-rail-item.state-unconfirmed .event-stage { color: #a9c0d0; background: rgba(75,98,118,.32); }
 .event-rail-item > strong,
 .event-rail-item > span,
 .event-rail-item > small {

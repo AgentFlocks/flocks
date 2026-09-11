@@ -1,12 +1,16 @@
 import importlib.util
+import asyncio
 import gc
 import json
 import sqlite3
+import subprocess
 import sys
 import time
 import tracemalloc
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,6 +123,139 @@ def test_activity_truncated_active_snapshot_is_not_authoritative(tmp_path):
     snapshot = {"complete": True}
     assert len(handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)) <= 20
     assert snapshot["complete"] is False
+
+
+def test_activity_does_not_substitute_execution_id_for_missing_alert_id(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "batch", inputs={
+        "alerts": [{"threat_name": "scan", "sip": "192.0.2.1"}],
+    })
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["eventId"] == "workflow-execution:batch"
+    assert event["alert"]["id"] == ""
+
+
+def test_activity_old_sqlite_omits_payloads_instead_of_using_unsafe_length(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "old-sqlite", inputs={
+        "alerts": [{"threat_name": "must not read this"}],
+    })
+    original_connect = sqlite3.connect
+    queries = []
+
+    class OldSQLiteConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            queries.append(sql)
+            if sql == "SELECT octet_length('')":
+                raise sqlite3.OperationalError("no such function: octet_length")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(handlers.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=OldSQLiteConnection))
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert events[0]["status"] == "running"
+    assert "must not read this" not in json.dumps(events)
+    assert not any("CASE WHEN" in query or "length(payload)" in query for query in queries)
+
+
+def test_activity_reader_does_not_wait_or_open_another_db_when_busy(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "active")
+    with handlers._workflow_activity_read_lock:
+        with monkeypatch.context() as patch:
+            def unexpected_connect(*args, **kwargs):
+                raise AssertionError("contending reader must not open SQLite")
+            patch.setattr(handlers.sqlite3, "connect", unexpected_connect)
+            snapshot = {"complete": True, "available": True}
+            assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+            assert snapshot == {"complete": False, "available": False}
+    assert handlers._get_workflow_recent_events("stream_alert_denoise")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_keeps_activity_read_slot_until_worker_exits(monkeypatch):
+    handlers = _load_dashboard_handlers()
+    entered, release = Event(), Event()
+
+    def blocked_read(*args):
+        entered.set()
+        assert release.wait(3), "test must release its worker"
+        return []
+
+    monkeypatch.setattr(handlers, "_read_workflow_recent_events", blocked_read)
+    request = asyncio.create_task(asyncio.to_thread(handlers._get_workflow_recent_events, "stream_alert_denoise"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert handlers._workflow_activity_read_lock.locked()
+        snapshot = {"complete": True, "available": True}
+        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert snapshot == {"complete": False, "available": False}
+    finally:
+        release.set()
+        assert await asyncio.to_thread(handlers._workflow_activity_read_lock.acquire, True, 3)
+        handlers._workflow_activity_read_lock.release()
+
+
+def test_activity_preview_limit_counts_utf8_bytes_not_characters(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "unicode")
+    inputs = json.dumps({"padding": "中" * 100_000, "alerts": [{"threat_name": "oversized-preview"}]}, ensure_ascii=False)
+    assert len(inputs) < 262144 < len(inputs.encode("utf-8"))
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET input_params = ?", (inputs,))
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert events[0]["status"] == "running"
+    assert "oversized-preview" not in json.dumps(events)
+
+
+def test_activity_deadline_is_checked_even_without_sqlite_progress_callback(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "active")
+    ticks = iter([100.0, 101.0])
+    monkeypatch.setattr(handlers, "time", SimpleNamespace(monotonic=lambda: next(ticks, 101.0)))
+    snapshot = {"complete": True, "available": True}
+    assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+    assert snapshot == {"complete": False, "available": False}
+    # Errors must release the worker-owned lock as well.
+    assert handlers._workflow_activity_read_lock.acquire(blocking=False)
+    handlers._workflow_activity_read_lock.release()
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="native RSS via resource is Unix-only")
+def test_activity_large_text_is_not_materialized_in_native_sqlite_memory(tmp_path):
+    handlers = _load_dashboard_handlers()
+    db = _activity_workflow_db(tmp_path)
+    _activity_execution(db, "old-large-running", payload={"padding": "x" * (32 * 1024 * 1024)})
+    for index in range(12):
+        _activity_execution(db, f"new-done-{index}", status="success", started=2000 + index)
+    # A fresh process excludes fixture allocations; tracemalloc alone cannot
+    # see SQLite's native buffers. Do not start the application or touch user DBs.
+    script = '''
+import importlib.util, json, resource, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("soc_native_rss_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+module.WORKFLOW_DB = Path(sys.argv[2])
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+events = module._get_workflow_recent_events("stream_alert_denoise")
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+scale = 1024**2 if sys.platform == "darwin" else 1024
+print(json.dumps({"growth_mib": (after - before) / scale, "events": len(events)}))
+'''
+    result = subprocess.run([sys.executable, "-B", "-c", script, handlers.__file__, str(db)],
+                            check=True, text=True, capture_output=True, timeout=20)
+    measurement = json.loads(result.stdout)
+    assert measurement["events"] == 11
+    assert measurement["growth_mib"] < 16, measurement
 
 
 def test_activity_repeated_projection_does_not_retain_payloads(tmp_path):
