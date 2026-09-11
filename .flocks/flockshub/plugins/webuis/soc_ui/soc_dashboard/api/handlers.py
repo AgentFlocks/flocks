@@ -10,7 +10,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -77,6 +77,7 @@ _STATS_RESPONSE_CACHE_MAX = 32
 _token_usage_cache = {"updatedAt": 0.0, "mtimeNs": 0, "value": None}
 _TOKEN_USAGE_CACHE_TTL = 30.0
 _cache_lock = RLock()
+_workflow_activity_read_lock = Lock()
 _schema_lock = RLock()
 _schema_ready: set = set()
 _activity_pruned_at: float = 0
@@ -1131,6 +1132,20 @@ def _get_workflow_recent_events(
     limit: int = 10,
     snapshot=None,
 ) -> list:
+    # Polling must not multiply native SQLite allocations across dashboard tabs.
+    # The worker owns this lock until its reads/parsing actually finish, even if
+    # the HTTP request awaiting asyncio.to_thread is cancelled.
+    if not _workflow_activity_read_lock.acquire(blocking=False):
+        if snapshot is not None:
+            snapshot.update(complete=False, available=False)
+        return []
+    try:
+        return _read_workflow_recent_events(workflow_name, start_time, end_time, limit, snapshot)
+    finally:
+        _workflow_activity_read_lock.release()
+
+
+def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, snapshot):
     if not WORKFLOW_DB.is_file():
         if snapshot is not None:
             snapshot.update(complete=False, available=False)
@@ -1139,25 +1154,32 @@ def _get_workflow_recent_events(
     try:
         with closing(sqlite3.connect(f"{WORKFLOW_DB.resolve().as_uri()}?mode=ro", uri=True, timeout=0.2)) as conn:
             deadline = time.monotonic() + 0.2
-            conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 100)
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN")
             execution_columns = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
             }
-            # Do not materialize unbounded execution payloads in a 3-second UI poll.
-            def preview_column(name):
-                if name not in execution_columns:
-                    return f"'{{}}' AS {name}"
-                return f"CASE WHEN length({name}) <= 262144 THEN {name} ELSE '{{}}' END AS {name}"
+            # octet_length(column) reads the record's byte-length metadata, not
+            # the entire TEXT. length(TEXT), including a cast-based fallback,
+            # is NOT a native-memory bound. Older SQLite must omit previews.
+            try:
+                conn.execute("SELECT octet_length('')").fetchone()
+                has_octet_length = True
+            except sqlite3.OperationalError:
+                has_octet_length = False
 
-            latest_select = ", ".join([
+            def preview_column(name):
+                if name not in execution_columns or not has_octet_length:
+                    return f"'{{}}' AS {name}"
+                return f"CASE WHEN octet_length({name}) <= 262144 THEN {name} ELSE '{{}}' END AS {name}"
+
+            metadata_select = ", ".join([
                 "id", "status", "started_at",
                 _workflow_execution_column_expr(execution_columns, "updated_at", "started_at"),
-                *(preview_column(name) for name in ("output_results", "input_params", "payload")),
             ])
-            query = f"SELECT {latest_select} FROM workflow_executions WHERE workflow_id = ?"
+            query = f"SELECT {metadata_select} FROM workflow_executions WHERE workflow_id = ?"
             query_params = [workflow_name]
             if start_time > 0 and end_time > 0:
                 query += " AND started_at >= ? AND started_at <= ?"
@@ -1168,7 +1190,22 @@ def _get_workflow_recent_events(
                 [*query_params, row_limit],
             ).fetchall()
             recent_rows = conn.execute(query + " ORDER BY started_at DESC LIMIT ?", [*query_params, row_limit]).fetchall()
-            rows = list({row["id"]: row for row in [*active_rows, *recent_rows]}.values())
+            ids = list(dict.fromkeys(row["id"] for row in [*active_rows, *recent_rows]))
+            if time.monotonic() > deadline:
+                raise sqlite3.OperationalError("activity read budget exceeded")
+            # Select payloads only AFTER bounding IDs; a sorting query must not
+            # materialize previews for every matching execution before LIMIT.
+            rows = []
+            if ids:
+                previews = ", ".join(preview_column(name) for name in ("output_results", "input_params", "payload"))
+                placeholders = ",".join("?" for _ in ids)
+                by_id = {row["id"]: row for row in conn.execute(
+                    f"SELECT {metadata_select}, {previews} FROM workflow_executions WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()}
+                rows = [by_id[key] for key in ids]
+            if time.monotonic() > deadline:
+                raise sqlite3.OperationalError("activity read budget exceeded")
             if snapshot is not None and len(active_rows) == row_limit:
                 snapshot["complete"] = False
     except Exception:
@@ -1226,7 +1263,7 @@ def _get_workflow_recent_events(
                 "sampleCount": max(unique_count, 1),
                 "alert": {
                     **alert,
-                    "id": alert.get("id") or execution_id,
+                    "id": alert.get("id") or "",
                     "threatName": threat_name,
                 },
                 "result": {
