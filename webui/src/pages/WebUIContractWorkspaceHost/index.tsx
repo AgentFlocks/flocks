@@ -11,6 +11,7 @@ import { useSSE } from '@/hooks/useSSE';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
 import { ThemeContext } from '@/contexts/ThemeContext';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
 import {
   buildWebUIContractWorkspacePageList,
@@ -25,6 +26,8 @@ export default function WebUIContractWorkspaceHost() {
   const [error, setError] = useState<string | null>(null);
   const showLoading = useDelayedVisible(loading ? 180 : 0);
   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
+  // Hidden tabs stay mounted; the override must follow the tab on screen.
+  const paneActive = useContext(PaneActiveContext);
   const workspacePageOrders = useWorkspacePageOrders();
   // A workspace that is missing may simply belong to a suite this edition
   // cannot install; say so instead of "not found".
@@ -107,14 +110,13 @@ export default function WebUIContractWorkspaceHost() {
     : null;
 
   useEffect(() => {
-    if (!temporaryThemeOverride) {
-      setTemporaryThemeOverride(null);
-      return undefined;
-    }
+    // Only the visible pane owns the override, and only its cleanup releases
+    // it: an inactive pane setting null here could clobber the active one's.
+    if (!paneActive || !temporaryThemeOverride) return undefined;
 
     setTemporaryThemeOverride(temporaryThemeOverride);
     return () => setTemporaryThemeOverride(null);
-  }, [setTemporaryThemeOverride, temporaryThemeOverride]);
+  }, [paneActive, setTemporaryThemeOverride, temporaryThemeOverride]);
 
   if (!workspaceId) {
     return <div className="text-sm text-zinc-500">{t('workspace.missingWorkspaceId')}</div>;

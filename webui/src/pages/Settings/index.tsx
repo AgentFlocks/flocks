@@ -6,6 +6,7 @@ import {
   Check,
   ImageIcon,
   Languages,
+  Monitor,
   Moon,
   RotateCcw,
   Save,
@@ -59,7 +60,7 @@ function PreferenceRow({
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4 border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1fr)_14rem] md:items-center md:gap-8">
+    <section className="flex flex-col gap-4 border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
       <div className="flex min-w-0 items-start gap-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
           <Icon className="h-5 w-5" />
@@ -92,7 +93,7 @@ function SegmentedOption({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors ${
+      className={`inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-sm font-semibold transition-colors ${
         active
           ? 'bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950'
           : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white'
@@ -139,7 +140,7 @@ function PreferenceSwitch({
 
 function PreferencesPanel() {
   const { t, i18n } = useTranslation('nav');
-  const { theme, setTheme } = useContext(ThemeContext);
+  const { theme, mode: themeMode, setTheme } = useContext(ThemeContext);
   const {
     productName,
     configuredDisplayName,
@@ -384,16 +385,23 @@ function PreferencesPanel() {
           title={t('theme')}
           description={t('themeDescription')}
         >
-          <div className="grid w-56 grid-cols-2 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="grid w-full grid-cols-3 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
             <SegmentedOption
-              active={theme === 'light'}
+              active={themeMode === 'system'}
+              icon={Monitor}
+              onClick={() => setTheme('system')}
+            >
+              {t('systemTheme')}
+            </SegmentedOption>
+            <SegmentedOption
+              active={themeMode === 'light'}
               icon={Sun}
               onClick={() => setTheme('light')}
             >
               {t('lightTheme')}
             </SegmentedOption>
             <SegmentedOption
-              active={theme === 'dark'}
+              active={themeMode === 'dark'}
               icon={Moon}
               onClick={() => setTheme('dark')}
             >

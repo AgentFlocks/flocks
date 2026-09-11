@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SettingsPage from './index';
-import { ThemeContext, type Theme } from '@/contexts/ThemeContext';
+import { ThemeContext, type Theme, type ThemeMode } from '@/contexts/ThemeContext';
 import { ToastProvider } from '@/components/common/Toast';
 
 const { changeLanguage, flocksproUsersApi, setTheme, toolFailureConfigApi, useAuth } = vi.hoisted(() => ({
@@ -78,12 +78,13 @@ function LocationProbe() {
   return <div data-testid="location">{`${location.pathname}${location.search}${location.hash}`}</div>;
 }
 
-function renderSettings(path: string, theme: Theme = 'light', state?: Record<string, unknown>) {
+function renderSettings(path: string, theme: Theme = 'light', state?: Record<string, unknown>, mode: ThemeMode = theme) {
   return render(
     <ToastProvider>
       <ThemeContext.Provider
         value={{
           theme,
+          mode,
           effectiveTheme: theme,
           toggleTheme: vi.fn(),
           setTheme,
@@ -135,6 +136,22 @@ describe('SettingsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'darkTheme' }));
     expect(setTheme).toHaveBeenCalledWith('dark');
+  });
+
+  it('marks "follow system" as the selected theme and lets the user pick it', async () => {
+    const user = userEvent.setup();
+
+    // Resolved dark (the OS is dark) but the stored choice is "system".
+    renderSettings('/settings/preferences', 'dark', undefined, 'system');
+
+    expect(screen.getByRole('button', { name: 'systemTheme' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'darkTheme' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'lightTheme' })).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(screen.getByRole('button', { name: 'lightTheme' }));
+    expect(setTheme).toHaveBeenCalledWith('light');
+    await user.click(screen.getByRole('button', { name: 'systemTheme' }));
+    expect(setTheme).toHaveBeenCalledWith('system');
   });
 
   it('loads and updates repeated tool failure auto-disable', async () => {

@@ -8,6 +8,7 @@ import {
   type RouteObject,
 } from 'react-router-dom';
 import { FULL_SCREEN_PATH_PATTERNS } from '@/routes/contentRoutes';
+import { PaneActiveContext } from './PaneActiveContext';
 
 export interface KeepAlivePane {
   /** Tab identity (sidebar entry href). */
@@ -39,18 +40,20 @@ function Pane({ active, location, routes }: PaneProps) {
   const fullScreen = isFullScreenPath(location.pathname);
   return (
     <LocationContext.Provider value={{ location, navigationType: NavigationType.Pop }}>
-      <div
-        className={`absolute inset-0 ${active ? '' : 'invisible pointer-events-none'}`}
-        aria-hidden={active ? undefined : true}
-        inert={!active}
-        data-keep-alive-pane={active ? 'active' : 'inactive'}
-      >
-        {fullScreen ? element : (
-          <div className="h-full overflow-y-auto">
-            <div className="min-h-full p-6">{element}</div>
-          </div>
-        )}
-      </div>
+      <PaneActiveContext.Provider value={active}>
+        <div
+          className={`absolute inset-0 ${active ? '' : 'invisible pointer-events-none'}`}
+          aria-hidden={active ? undefined : true}
+          inert={!active}
+          data-keep-alive-pane={active ? 'active' : 'inactive'}
+        >
+          {fullScreen ? element : (
+            <div className="h-full overflow-y-auto">
+              <div className="min-h-full p-6">{element}</div>
+            </div>
+          )}
+        </div>
+      </PaneActiveContext.Provider>
     </LocationContext.Provider>
   );
 }

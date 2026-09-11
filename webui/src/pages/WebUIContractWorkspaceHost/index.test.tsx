@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import WebUIContractWorkspaceHost from './index';
 import { setupSSEMock } from '@/test/mocks/sse';
 import { ThemeContext } from '@/contexts/ThemeContext';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 
 const { listWorkspacesMock } = vi.hoisted(() => ({
   listWorkspacesMock: vi.fn(),
@@ -204,6 +205,7 @@ describe('WebUIContractWorkspaceHost', () => {
       <ThemeContext.Provider
         value={{
           theme: 'light',
+          mode: 'light',
           effectiveTheme: 'light',
           toggleTheme: vi.fn(),
           setTheme: vi.fn(),
@@ -229,5 +231,44 @@ describe('WebUIContractWorkspaceHost', () => {
     unmount();
 
     expect(setTemporaryThemeOverride).toHaveBeenLastCalledWith(null);
+  });
+  it('releases the dark override while its keep-alive pane is hidden and takes it back when shown', async () => {
+    const setTemporaryThemeOverride = vi.fn();
+    const themeValue = {
+      theme: 'light' as const,
+      mode: 'light' as const,
+      effectiveTheme: 'light' as const,
+      toggleTheme: vi.fn(),
+      setTheme: vi.fn(),
+      setTemporaryThemeOverride,
+    };
+    const tree = (paneActive: boolean) => (
+      <ThemeContext.Provider value={themeValue}>
+        <PaneActiveContext.Provider value={paneActive}>
+          <MemoryRouter initialEntries={['/contracts/webui/workspaces/scene_workspace/risk-dashboard']}>
+            <Routes>
+              <Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} />
+            </Routes>
+          </MemoryRouter>
+        </PaneActiveContext.Provider>
+      </ThemeContext.Provider>
+    );
+    const { rerender } = render(tree(true));
+
+    await waitFor(() => {
+      expect(setTemporaryThemeOverride).toHaveBeenCalledWith('dark');
+    });
+
+    // Switching to another tab hides this pane but keeps it mounted: the
+    // override must go with the tab, not with the (never happening) unmount.
+    setTemporaryThemeOverride.mockClear();
+    rerender(tree(false));
+    expect(setTemporaryThemeOverride).toHaveBeenCalledTimes(1);
+    expect(setTemporaryThemeOverride).toHaveBeenLastCalledWith(null);
+
+    setTemporaryThemeOverride.mockClear();
+    rerender(tree(true));
+    expect(setTemporaryThemeOverride).toHaveBeenCalledTimes(1);
+    expect(setTemporaryThemeOverride).toHaveBeenLastCalledWith('dark');
   });
 });
