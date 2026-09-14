@@ -255,15 +255,42 @@ def test_llm_does_not_retry_an_oversized_response(monkeypatch):
     assert provider.calls == 1
 
 
-def test_llm_timeout_retries_then_raises(monkeypatch):
+@pytest.mark.parametrize("cancellable", [False, True])
+def test_llm_timeout_retries_then_raises(monkeypatch, cancellable):
     provider = _FakeProvider("demo", "timeout", models=["m"])
     _patch_provider(monkeypatch, {"demo": provider})
 
-    client = LLMClient(provider_id="demo", model="m")
+    polls = 0
+
+    def never_cancel():
+        nonlocal polls
+        polls += 1
+        assert polls < 1000, "LLM timeout was swallowed by the cancellation poll loop"
+        return False
+
+    client = LLMClient(
+        provider_id="demo", model="m", cancel_checker=never_cancel if cancellable else None,
+    )
     with pytest.raises(ValueError, match="timed out after 0.01s"):
         client.ask("hello", timeout_s=0.01, max_retries=2, retry_delay_s=0)
 
     assert provider.calls == 3
+
+
+def test_cancellable_llm_can_retry_after_timeout_and_succeed(monkeypatch):
+    provider = _FakeProvider("demo", ["timeout", "ok"], models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    polls = 0
+
+    def never_cancel():
+        nonlocal polls
+        polls += 1
+        assert polls < 1000
+        return False
+
+    client = LLMClient(provider_id="demo", model="m", cancel_checker=never_cancel)
+    assert client.ask("hello", timeout_s=0.01, max_retries=1, retry_delay_s=0) == "demo:m"
+    assert provider.calls == 2
 
 
 def test_llm_ask_honors_cancel_checker(monkeypatch):
