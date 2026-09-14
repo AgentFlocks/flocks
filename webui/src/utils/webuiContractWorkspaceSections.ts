@@ -8,6 +8,7 @@ export type WebUIContractWorkspaceContentPadding = 'comfortable' | 'none';
 export type WebUIContractWorkspaceThemeOverride = 'light' | 'dark';
 
 export interface WebUIContractWorkspaceSectionView {
+  query?: Record<string, string>;
   id: string;
   label: string;
   pages: WebUIContractPageListItem[];
@@ -63,6 +64,7 @@ export function buildWebUIContractWorkspaceSections(
           ? section.defaultPageId
           : sectionPages[0].id;
         return {
+          ...(section.query && Object.keys(section.query).length ? { query: section.query } : {}),
           id: section.id,
           label: getLocalizedSectionLabel(section, language),
           pages: sectionPages.map((page) => localizePage(page, language)),
@@ -89,4 +91,28 @@ export function buildWebUIContractWorkspaceSections(
       themeOverride: null,
     },
   ];
+}
+
+export function workspaceSectionHref(
+  route: string,
+  section: WebUIContractWorkspaceSectionView,
+  pageId = section.defaultPageId,
+): string {
+  const query = new URLSearchParams(section.query).toString();
+  return `${route}/${pageId}${query ? `?${query}` : ''}`;
+}
+
+export function findWorkspaceSection(
+  sections: WebUIContractWorkspaceSectionView[],
+  pageId: string,
+  search: string,
+) {
+  const params = new URLSearchParams(search);
+  return sections
+    .filter(
+      (section) =>
+        section.pages.some((page) => page.id === pageId) &&
+        Object.entries(section.query || {}).every(([key, value]) => params.get(key) === value),
+    )
+    .sort((a, b) => Object.keys(b.query || {}).length - Object.keys(a.query || {}).length)[0];
 }

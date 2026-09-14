@@ -1,6 +1,6 @@
 {
   "id": "code_security",
-  "version": "1.0.5",
+  "version": "1.0.8",
   "title": "代码审计",
   "titleEn": "Code Security",
   "icon": "ShieldCheck",
@@ -10,11 +10,26 @@
   "defaultPageId": "code-security-workspace",
   "sections": [
     {
-      "id": "audit",
-      "label": "代码审计",
-      "labelEn": "Code Audit",
-      "pageIds": ["code-security-workspace"],
+      "id": "home",
+      "label": "首页",
+      "labelEn": "Home",
+      "pageIds": [
+        "code-security-workspace"
+      ],
       "defaultPageId": "code-security-workspace",
+      "contentPadding": "none"
+    },
+    {
+      "id": "audits",
+      "label": "审计列表",
+      "labelEn": "Audit list",
+      "pageIds": [
+        "code-security-workspace"
+      ],
+      "defaultPageId": "code-security-workspace",
+      "query": {
+        "view": "audits"
+      },
       "contentPadding": "none"
     }
   ]

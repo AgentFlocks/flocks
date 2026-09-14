@@ -18,6 +18,7 @@ export interface WebUIContractPageListItem {
 }
 
 export interface WebUIContractWorkspaceSection {
+  query?: Record<string, string>;
   id: string;
   label: string;
   labelEn?: string | null;

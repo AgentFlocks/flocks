@@ -47,6 +47,8 @@ export function NewAuditDrawer({
     baselineRef.current = draft;
     return draft;
   });
+  const [mode, setMode] = useState<"auto" | "manual">("manual");
+  const [intent, setIntent] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -74,7 +76,8 @@ export function NewAuditDrawer({
     if (
       !availableProjects.some((project) => project.id === values.workspaceId)
     ) {
-      const workspaceId = availableProjects[0]?.id || "";
+      const workspaceId =
+        availableProjects.length === 1 ? availableProjects[0].id : "";
       setValues((current) => {
         const next = { ...current, workspaceId };
         baselineRef.current = {
@@ -119,7 +122,7 @@ export function NewAuditDrawer({
         dialogRef.current.querySelectorAll<HTMLElement>(
           "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, a[href]",
         ),
-      );
+      ).filter((element) => element.getClientRects().length > 0);
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -194,7 +197,7 @@ export function NewAuditDrawer({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     const nextErrors: Record<string, string> = {};
-    if (!values.workspaceId) nextErrors.workspaceId = "请选择工作区。";
+    if (!values.workspaceId) nextErrors.workspaceId = "请选择代码项目。";
     if (!validatePath())
       nextErrors.targetPath = "目标目录必须是工作区内的相对路径。";
     if (values.model && !values.model.includes("/"))
@@ -290,7 +293,55 @@ export function NewAuditDrawer({
             <Icon name="close" />
           </button>
         </header>
-        <form onSubmit={submit} noValidate>
+        <div
+          className="cs-mode-switch"
+          role="tablist"
+          aria-label={t("审计配置方式")}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "auto"}
+            onClick={() => setMode("auto")}
+          >
+            {t("自动选择")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "manual"}
+            onClick={() => setMode("manual")}
+          >
+            {t("手动选择")}
+          </button>
+        </div>
+        {mode === "auto" && (
+          <section className="cs-auto-config" role="tabpanel">
+            <h3>{t("描述你想审计的代码")}</h3>
+            <p>{t("用对话配置审计范围和关注点。")}</p>
+            <textarea
+              aria-label={t("审计需求草稿")}
+              value={intent}
+              onChange={(e) => setIntent(e.target.value)}
+              placeholder={t(
+                "例如：审计 API 中的身份认证和权限检查，排除测试目录。",
+              )}
+            />
+            <p role="status">
+              {t(
+                "自动配置服务尚未接入。需求草稿会在切换时保留，请使用手动选择发起审计。",
+              )}
+            </p>
+            <button
+              type="button"
+              className="cs-button cs-button--primary"
+              onClick={() => setMode("manual")}
+            >
+              {t("使用手动选择")}
+            </button>
+          </section>
+        )}
+        <form onSubmit={submit} noValidate hidden={mode !== "manual"}>
           {(Object.values(errors).some(Boolean) || submitError) && (
             <div
               className="cs-form-errors"
@@ -316,7 +367,7 @@ export function NewAuditDrawer({
             <legend>{t("目标")}</legend>
             <label className="cs-field" htmlFor="audit-workspaceId">
               <span>
-                {t("工作区")} <b aria-hidden="true">*</b>
+                {t("代码项目")} <b aria-hidden="true">*</b>
               </span>
               <select
                 id="audit-workspaceId"
@@ -324,7 +375,7 @@ export function NewAuditDrawer({
                 onChange={(event) => set("workspaceId", event.target.value)}
                 aria-invalid={Boolean(errors.workspaceId)}
               >
-                <option value="">{t("请选择工作区")}</option>
+                <option value="">{t("请选择代码项目")}</option>
                 {availableProjects.map((project) => (
                   <option key={project.id} value={project.id}>
                     {project.name || project.worktree}
@@ -348,7 +399,7 @@ export function NewAuditDrawer({
                 aria-describedby={`audit-target-help${errors.targetPath ? " audit-targetPath-error" : ""}`}
               />
               <small id="audit-target-help">
-                {t("相对于所选工作区，例如")} <code>packages/api</code>。
+                {t("相对于代码项目根目录，例如")} <code>packages/api</code>。
               </small>
               {errors.targetPath && (
                 <small id="audit-targetPath-error" role="alert">

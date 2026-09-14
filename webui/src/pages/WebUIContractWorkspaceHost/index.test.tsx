@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import WebUIContractWorkspaceHost from './index';
 import { setupSSEMock } from '@/test/mocks/sse';
 import { ThemeContext } from '@/contexts/ThemeContext';
@@ -27,6 +27,17 @@ vi.mock('react-i18next', () => ({
 }));
 
 describe('WebUIContractWorkspaceHost', () => {
+  it('resets page-local task state when the sidebar links to the same page again', async () => {
+    const route = '/contracts/webui/workspaces/scene_workspace/ops-overview';
+    render(<MemoryRouter initialEntries={[route]}>
+      <Link to={route}>Home</Link>
+      <Routes><Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} /></Routes>
+    </MemoryRouter>);
+    const previous = await screen.findByText('page:ops-overview');
+    fireEvent.click(screen.getByRole('link', {name:'Home'}));
+    await waitFor(() => expect(screen.getByText('page:ops-overview')).not.toBe(previous));
+  });
+
   setupSSEMock();
 
   beforeEach(() => {

@@ -52,6 +52,7 @@ class WebUIWorkspaceSectionManifest(BaseModel):
     id: str = Field(..., description="Stable section identifier")
     label: str = Field(..., description="Section label")
     labelEn: Optional[str] = Field(None, description="English section label", alias="labelEn")
+    query: dict[str, str] = Field(default_factory=dict, description="Query parameters for this navigation view")
     pageIds: list[str] = Field(
         default_factory=list,
         description="Page ids in this section",

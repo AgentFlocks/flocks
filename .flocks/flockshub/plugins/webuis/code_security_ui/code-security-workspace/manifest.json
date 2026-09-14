@@ -1,7 +1,7 @@
 {
   "id": "code-security-workspace",
-  "title": "代码审计工作区",
-  "titleEn": "Code Audit Workspace",
+  "title": "代码审计首页",
+  "titleEn": "Code Audit Home",
   "route": "/contracts/webui/code-security-workspace",
   "icon": "ShieldCheck",
   "order": 10,

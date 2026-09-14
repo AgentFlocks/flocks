@@ -27,6 +27,7 @@ export interface ProjectSummary {
 }
 
 export interface ScanSummary {
+  workspace_ref?: string;
   batch_id?: string;
   task_id?: string;
   audit_scan_id?: string | null;
@@ -143,6 +144,7 @@ export interface ArtifactRef {
 export interface ScanDetail {
   schemaVersion: string;
   scan: {
+    workspace_ref?: string;
     scan_id: string;
     lifecycle_status: LifecycleStatus;
     current_phase?: string | null;

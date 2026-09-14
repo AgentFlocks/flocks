@@ -1,14 +1,15 @@
 import { useContext, useEffect, useMemo } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
-import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
+import { buildWebUIContractWorkspaceSections, findWorkspaceSection } from '@/utils/webuiContractWorkspaceSections';
 
 export default function WebUIContractWorkspaceHost() {
+  const location = useLocation();
   const { workspaceId, pageId } = useParams<{ workspaceId: string; pageId?: string }>();
   const { t, i18n } = useTranslation('webuiContractPage');
   const {
@@ -35,7 +36,7 @@ export default function WebUIContractWorkspaceHost() {
   );
   const currentPage = pages.find((page) => page.id === pageId);
   const currentSection = currentPage
-    ? sections.find((section) => section.pages.some((page) => page.id === currentPage.id))
+    ? findWorkspaceSection(sections, currentPage.id, location.search)
     : undefined;
   const temporaryThemeOverride = currentSection?.themeOverride && theme !== currentSection.themeOverride
     ? currentSection.themeOverride
@@ -112,7 +113,7 @@ export default function WebUIContractWorkspaceHost() {
     <div className="h-full min-h-0 overflow-hidden bg-zinc-50 dark:bg-zinc-950">
       <div className={pageContentClassName}>
         <PageRuntimeHost
-          key={currentPage.id}
+          key={`${currentPage.id}:${location.key}`}
           pageId={currentPage.id}
           initialBuildHash={currentPage.buildStatus === 'ready' ? currentPage.buildHash : undefined}
         />

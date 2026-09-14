@@ -25,6 +25,7 @@ interface GroupedEvent {
 export function EventStream({
   events,
   selectedPhase,
+  fixedPhase = false,
   hasOlder,
   loading,
   loadingOlder,
@@ -32,6 +33,7 @@ export function EventStream({
 }: {
   events: AuditEvent[];
   selectedPhase?: string;
+  fixedPhase?: boolean;
   hasOlder: boolean;
   loading: boolean;
   loadingOlder: boolean;
@@ -163,20 +165,22 @@ export function EventStream({
           </span>
         </div>
         <div className="cs-event-filters">
-          <label className="cs-event-filter cs-event-filter--phase">
-            <span className="cs-visually-hidden">{t("按阶段筛选事件")}</span>
-            <select
-              value={phase}
-              onChange={(event) => setPhase(event.target.value)}
-            >
-              <option value="all">{t("全部阶段")}</option>
-              {phaseOptions.map((value) => (
-                <option key={value} value={value}>
-                  {t(phaseLabel(value))}
-                </option>
-              ))}
-            </select>
-          </label>
+          {!fixedPhase && (
+            <label className="cs-event-filter cs-event-filter--phase">
+              <span className="cs-visually-hidden">{t("按阶段筛选事件")}</span>
+              <select
+                value={phase}
+                onChange={(event) => setPhase(event.target.value)}
+              >
+                <option value="all">{t("全部阶段")}</option>
+                {phaseOptions.map((value) => (
+                  <option key={value} value={value}>
+                    {t(phaseLabel(value))}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {workerOptions.length > 0 && (
             <label className="cs-event-filter cs-event-filter--worker">
               <span className="cs-visually-hidden">

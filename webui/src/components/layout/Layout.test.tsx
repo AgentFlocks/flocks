@@ -1130,6 +1130,62 @@ describe('Layout onboarding entry', () => {
 });
 
 describe('Layout WebUI contract pages navigation', () => {
+  it('renders separate Home and Audit list sidebar links', async () => {
+    const original = useWebUIContractPages.getMockImplementation()!;
+    try {
+      const page = {
+        workspaceId: 'code_security',
+        workspaceTitle: '代码审计',
+        workspaceRoute: '/contracts/webui/workspaces/code_security',
+        id: 'code-security-workspace',
+        title: '代码审计',
+        route: '/contracts/webui/code-security-workspace',
+        icon: 'ShieldCheck',
+        order: 10,
+        enabled: true,
+        placement: 'home.after',
+        buildStatus: 'ready' as const,
+        buildHash: 'ready',
+      };
+      useWebUIContractPages.mockReturnValue({
+        pages: [page],
+        loading: false,
+        error: null,
+        refetch: vi.fn(),
+        workspaces: [
+          {
+            id: 'code_security',
+            title: '代码审计',
+            route: '/contracts/webui/workspaces/code_security',
+            icon: 'ShieldCheck',
+            order: 10,
+            enabled: true,
+            placement: 'sceneWorkspace',
+            defaultPageId: page.id,
+            pages: [page],
+            sections: [
+              { id: 'home', label: '首页', pageIds: [page.id] },
+              { id: 'audits', label: '审计列表', pageIds: [page.id], query: { view: 'audits' } },
+            ],
+          },
+        ],
+      });
+      renderHomeWithLayout();
+      await userEvent.click(await screen.findByRole('link', { name: '代码审计', exact: true }));
+      const menu = within(screen.getByRole('navigation', { name: 'workspace.sectionNavigation' }));
+      expect(menu.getByRole('link', { name: '首页', exact: true })).toHaveAttribute(
+        'href',
+        '/contracts/webui/workspaces/code_security/code-security-workspace',
+      );
+      expect(menu.getByRole('link', { name: '审计列表', exact: true })).toHaveAttribute(
+        'href',
+        '/contracts/webui/workspaces/code_security/code-security-workspace?view=audits',
+      );
+    } finally {
+      useWebUIContractPages.mockImplementation(original);
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();

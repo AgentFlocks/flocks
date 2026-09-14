@@ -221,3 +221,15 @@ export function readApiFailure(reason: any, fallback: string): ApiFailure {
 export async function listBatchRecords(): Promise<ScanSummary[]> {
   return (await getApi().get(`${BASE}/batch-records`)).data.items;
 }
+
+export async function registerAuditProject(
+  worktree: string,
+  name?: string,
+): Promise<ProjectSummary> {
+  return (
+    await getApi().post("/api/project/", {
+      worktree: worktree.trim(),
+      name: name?.trim() || undefined,
+    })
+  ).data;
+}

@@ -6,7 +6,7 @@ import { lifecycleLabels, phaseLabels, relativeTime } from "../labels";
 import type { ScanSummary } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
-const SCAN_ROW_HEIGHT = 106;
+const SCAN_ROW_HEIGHT = 78;
 const SCAN_OVERSCAN = 5;
 const PREFETCH_DELAY_MS = 180;
 
@@ -15,6 +15,8 @@ export function ScanListPanel({
   selectedId,
   onSelect,
   onNewAudit,
+  onHome,
+  onAuditList,
   canCreate,
   canManage = canCreate,
   open,
@@ -29,6 +31,8 @@ export function ScanListPanel({
   selectedId: string | null;
   onSelect: (scanId: string) => void;
   onNewAudit: () => void;
+  onHome?: () => void;
+  onAuditList?: () => void;
   canCreate: boolean;
   canManage?: boolean;
   open: boolean;
@@ -198,6 +202,24 @@ export function ScanListPanel({
           </button>
         </div>
       </div>
+      {onHome && (
+        <button
+          type="button"
+          className="cs-button cs-button--secondary cs-button--full cs-sidebar-home"
+          onClick={onHome}
+        >
+          {t("首页")}
+        </button>
+      )}
+      {onAuditList && (
+        <button
+          type="button"
+          className="cs-button cs-button--secondary cs-button--full"
+          onClick={onAuditList}
+        >
+          {t("审计列表")}
+        </button>
+      )}
       {canCreate && (
         <button
           className="cs-button cs-button--secondary cs-button--full"

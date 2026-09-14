@@ -183,6 +183,7 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
             {
                 "id": "operations",
                 "label": "调查列表",
+                "query": {"view": "audits"},
                 "pageIds": ["ops-overview", "investigation-list"],
                 "defaultPageId": "ops-overview",
                 "contentPadding": "comfortable",
@@ -205,6 +206,8 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
     assert len(workspaces[0].sections) == 1
     assert workspaces[0].sections[0].id == "operations"
     assert workspaces[0].sections[0].label == "调查列表"
+    assert workspaces[0].sections[0].query == {"view": "audits"}
+    assert workspaces[0].model_dump()["sections"][0]["query"] == {"view": "audits"}
     assert workspaces[0].sections[0].pageIds == ["ops-overview", "investigation-list"]
     assert workspaces[0].sections[0].defaultPageId == "ops-overview"
     assert workspaces[0].sections[0].contentPadding == "comfortable"

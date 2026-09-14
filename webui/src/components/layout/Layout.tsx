@@ -162,6 +162,8 @@ import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import {
   buildWebUIContractWorkspaceSections,
+  findWorkspaceSection,
+  workspaceSectionHref,
   getLocalizedWebUIContractTitle,
 } from '@/utils/webuiContractWorkspaceSections';
 import { sessionApi } from '@/api/session';
@@ -1333,7 +1335,8 @@ export default function Layout() {
           <div className="flex-1 space-y-2 overflow-y-auto px-3 py-4">
             {activeWorkspaceSections.length > 0 ? (
               activeWorkspaceSections.map((workspaceSection) => {
-                const sectionActive = workspaceSection.pages.some((page) => location.pathname === `${activeWorkspaceMenu.route}/${page.id}`);
+                const currentPageId = workspaceSection.pages.find(page => location.pathname === `${activeWorkspaceMenu.route}/${page.id}`)?.id;
+                const sectionActive = Boolean(currentPageId && findWorkspaceSection(activeWorkspaceSections, currentPageId, location.search)?.id === workspaceSection.id);
                 const showPageChildren = workspaceSection.pages.length > 1;
                 const sectionCollapsed = collapsedWorkspaceSectionIds.has(workspaceSection.id);
                 return (
@@ -1355,7 +1358,8 @@ export default function Layout() {
                         </button>
                       ) : (
                         <Link
-                          to={`${activeWorkspaceMenu.route}/${workspaceSection.defaultPageId}`}
+                          to={workspaceSectionHref(activeWorkspaceMenu.route, workspaceSection)}
+                          aria-current={sectionActive ? "page" : undefined}
                           onClick={() => {
                             setOpenWorkspaceMenuId(null);
                             setSidebarOpen(false);
@@ -1382,11 +1386,11 @@ export default function Layout() {
                     {showPageChildren && !sectionCollapsed ? (
                       <div className="space-y-1">
                         {workspaceSection.pages.map((page) => {
-                          const pageActive = location.pathname === `${activeWorkspaceMenu.route}/${page.id}`;
+                          const pageActive = sectionActive && location.pathname === `${activeWorkspaceMenu.route}/${page.id}`;
                           return (
                             <Link
                               key={page.id}
-                              to={`${activeWorkspaceMenu.route}/${page.id}`}
+                              to={workspaceSectionHref(activeWorkspaceMenu.route, workspaceSection, page.id)}
                               onClick={() => {
                                 setOpenWorkspaceMenuId(null);
                                 setSidebarOpen(false);

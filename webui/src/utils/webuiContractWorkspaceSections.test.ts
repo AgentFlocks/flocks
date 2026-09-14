@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildWebUIContractWorkspaceSections, getLocalizedWebUIContractTitle } from './webuiContractWorkspaceSections';
+import { buildWebUIContractWorkspaceSections, getLocalizedWebUIContractTitle, findWorkspaceSection, workspaceSectionHref } from './webuiContractWorkspaceSections';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 const workspace: WebUIContractWorkspaceListItem = {
@@ -71,3 +71,14 @@ describe('webuiContractWorkspaceSections localization', () => {
     expect(sections[0].pages.map((page) => page.title)).toEqual(['SOC 总览', '告警调查']);
   });
 });
+
+ it('distinguishes home and audit list even when they share a page implementation', () => {
+   const sections = buildWebUIContractWorkspaceSections({...workspace, sections:[
+     {id:'home',label:'首页',pageIds:['soc-overview']},
+     {id:'audits',label:'审计列表',pageIds:['soc-overview'],query:{view:'audits'}},
+   ]});
+   expect(workspaceSectionHref('/workspace', sections[0])).toBe('/workspace/soc-overview');
+   expect(workspaceSectionHref('/workspace', sections[1])).toBe('/workspace/soc-overview?view=audits');
+   expect(findWorkspaceSection(sections, 'soc-overview','')?.id).toBe('home');
+   expect(findWorkspaceSection(sections, 'soc-overview','?view=audits&scan_id=123')?.id).toBe('audits');
+ });

@@ -205,6 +205,238 @@ const scanDetail = {
 };
 
 describe("code security workspace contract page", () => {
+  it("keeps the audit list separate from the project home and returns from task detail", async () => {
+    window.history.replaceState({}, "", "/?view=audits");
+    render(<Page />);
+    expect(
+      await screen.findByRole("heading", { name: "审计列表", exact: true }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Flocks 代码安全审计工作台" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "查看审计 flocks" }),
+    );
+    expect(await screen.findByLabelText("审计指标")).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get("view")).toBe(
+      "audits",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "返回审计列表" }));
+    expect(
+      await screen.findByRole("heading", { name: "审计列表", exact: true }),
+    ).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "← 代码审计首页" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Flocks 代码安全审计工作台" }),
+    ).toBeVisible();
+    expect(new URLSearchParams(window.location.search).has("view")).toBe(false);
+  });
+
+  it("can return home from a loading batch task and clears audit navigation parameters", async () => {
+    const original = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) =>
+      path.includes("/batches/")
+        ? new Promise(() => undefined)
+        : original(path, config),
+    );
+    window.history.replaceState(
+      {},
+      "",
+      "/?batch_id=batch_a&task_id=1&scan_id=scan_demo&artifact=coverage&keep=1#evidence",
+    );
+    render(<Page />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "← 代码审计首页" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Flocks 代码安全审计工作台" }),
+    ).toBeVisible();
+    expect(window.location.search).toBe("?keep=1");
+    expect(window.location.hash).toBe("");
+    expect(screen.getByRole("button", { name: "发起审计" })).toBeVisible();
+  });
+
+  it("provides a home button in the audit task list", async () => {
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+    await userEvent.click(
+      screen.getByRole("button", { name: "首页", exact: true }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Flocks 代码安全审计工作台" }),
+    ).toBeVisible();
+    expect(screen.queryByLabelText("审计指标")).not.toBeInTheDocument();
+  });
+
+  it("registers an existing source directory through the project API", async () => {
+    window.history.replaceState({}, "", "/");
+    apiPost.mockResolvedValue({
+      data: {
+        id: "project-new",
+        name: "New service",
+        worktree: "/workspace/new",
+        pathStatus: "available",
+      },
+    });
+    render(<Page />);
+    await screen.findByRole("heading", { name: "Flocks 代码安全审计工作台" });
+    await userEvent.click(screen.getByRole("button", { name: "添加项目" }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "项目名称" }),
+      "New service",
+    );
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "源码目录" }),
+      "/workspace/new",
+    );
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "添加项目" })[1],
+    );
+    expect(await screen.findByText("/workspace/new")).toBeVisible();
+    expect(apiPost).toHaveBeenCalledWith("/api/project/", {
+      name: "New service",
+      worktree: "/workspace/new",
+    });
+  });
+
+  it("opens the artifact drawer when following an artifact deep link", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?scan_id=scan_demo&artifact=candidate_index",
+    );
+    render(<Page />);
+    expect(await screen.findByRole("tab", { name: /候选漏洞/ })).toBeVisible();
+    expect(await screen.findByText("待验证路径穿越")).toBeVisible();
+  });
+
+  it("opens the project homepage without selecting an audit and can return from a task", async () => {
+    window.history.replaceState({}, "", "/");
+    render(<Page />);
+    expect(
+      await screen.findByRole("heading", { name: "Flocks 代码安全审计工作台" }),
+    ).toBeVisible();
+    expect(await screen.findByText("/workspace/flocks")).toBeVisible();
+    expect(screen.queryByLabelText("审计指标")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByText("其他审计记录"));
+    await userEvent.click(screen.getByRole("button", { name: /^flocks/ }));
+    expect(await screen.findByLabelText("审计指标")).toBeVisible();
+    expect(
+      screen.getByRole("textbox", { name: "审计结果追问" }),
+    ).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /代码审计首页/ }));
+    expect(
+      screen.getByRole("heading", { name: "Flocks 代码安全审计工作台" }),
+    ).toBeVisible();
+    expect(new URLSearchParams(window.location.search).has("scan_id")).toBe(
+      false,
+    );
+  });
+
+  it("follows new phases until history is selected and scopes events by run id", async () => {
+    const first: PhaseRun = {
+      phase_run_id: "round-1",
+      phase: "verification",
+      ordinal: 1,
+      status: "completed",
+      created_at: "2026-09-14T01:00:00Z",
+    };
+    const second: PhaseRun = {
+      ...first,
+      phase_run_id: "round-2",
+      ordinal: 2,
+      status: "running",
+      created_at: "2026-09-14T02:00:00Z",
+    };
+    const events = [first, second].map((phase, index) => ({
+      seq: index + 1,
+      scan_id: "scan",
+      phase_run_id: phase.phase_run_id,
+      type: "worker.started",
+      level: "info",
+      title: `轮次记录 ${index + 1}`,
+      summary: { phase: "verification" },
+      created_at: phase.created_at!,
+    }));
+    const view = render(
+      <PhaseWorkspace
+        phases={[first]}
+        events={events}
+        workers={[]}
+        currentPhase="verification"
+      />,
+    );
+    expect(screen.getByRole("tab")).toHaveAttribute("aria-selected", "true");
+    view.rerender(
+      <PhaseWorkspace
+        phases={[first, second]}
+        events={events}
+        workers={[]}
+        currentPhase="verification"
+      />,
+    );
+    expect(screen.getByRole("tab", { name: /第 2 轮/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByText("轮次记录 1")).not.toBeInTheDocument();
+    expect(screen.getByText("轮次记录 2")).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: /第 1 轮/ }));
+    const third = {
+      ...second,
+      phase_run_id: "round-3",
+      ordinal: 3,
+      created_at: "2026-09-14T03:00:00Z",
+    };
+    view.rerender(
+      <PhaseWorkspace
+        phases={[first, second, third]}
+        events={events}
+        workers={[]}
+        currentPhase="verification"
+      />,
+    );
+    expect(screen.getByRole("tab", { name: /第 1 轮/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("轮次记录 1")).toBeVisible();
+    expect(screen.queryByText("轮次记录 2")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "回到最新阶段" }));
+    expect(screen.getByRole("tab", { name: /第 3 轮/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("retains both mode drafts and does not submit unavailable automatic configuration", async () => {
+    const created = vi.fn();
+    render(
+      <NewAuditDrawer
+        open
+        projects={[
+          { id: "p", name: "Demo", worktree: "/demo", pathStatus: "available" },
+        ]}
+        onClose={vi.fn()}
+        onCreated={created}
+      />,
+    );
+    const target = screen.getByLabelText(/目标目录/);
+    fireEvent.change(target, { target: { value: "src" } });
+    await userEvent.click(screen.getByRole("tab", { name: "自动选择" }));
+    await userEvent.type(screen.getByLabelText("审计需求草稿"), "检查认证模块");
+    expect(
+      screen.queryByRole("button", { name: "启动静态审计" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "手动选择" }));
+    expect(target).toHaveValue("src");
+    await userEvent.click(screen.getByRole("tab", { name: "自动选择" }));
+    expect(screen.getByLabelText("审计需求草稿")).toHaveValue("检查认证模块");
+    expect(created).not.toHaveBeenCalled();
+  });
+
   it("shows concurrent and queued tasks in history and scopes detail requests on selection", async () => {
     const original = apiGet.getMockImplementation()!;
     let prepared = false;
@@ -533,6 +765,7 @@ describe("code security workspace contract page", () => {
     expect(workerModel).toHaveTextContent("第 2 次执行 · 续跑 1 次");
     expect(workerModel).toHaveClass("cs-worker-model");
     expect(workerModel.closest(".cs-worker-card__heading")).not.toBeNull();
+    await userEvent.click(screen.getByText("查看阶段详情与工作单元"));
     await userEvent.click(screen.getByText("查看执行记录（2）"));
     expect(screen.getByText("openai / gpt-5.4")).toBeVisible();
     expect(screen.getByText("路由参数可能触发路径穿越")).toBeInTheDocument();
@@ -577,15 +810,13 @@ describe("code security workspace contract page", () => {
       screen.getByRole("heading", { name: "阶段事件" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("可信执行过程")).not.toBeInTheDocument();
-    expect(screen.getByText("静态验证 · 显示 1 / 2 条")).toBeInTheDocument();
+    expect(screen.getByText("静态验证 · 显示 1 / 1 条")).toBeInTheDocument();
     expect(screen.getByText("独立验证 Worker 已开始")).toBeInTheDocument();
     expect(screen.getByText("1 运行中")).toHaveAccessibleName(
       "1 个工作单元正在运行",
     );
     expect(screen.queryByText("seq 2")).not.toBeInTheDocument();
-    expect(
-      screen.getByLabelText("按阶段筛选事件").closest("label"),
-    ).toHaveClass("cs-event-filter--phase");
+    expect(screen.queryByLabelText("按阶段筛选事件")).not.toBeInTheDocument();
     expect(
       screen.getByLabelText("按工作单元筛选事件").closest("label"),
     ).toHaveClass("cs-event-filter--worker");
@@ -601,21 +832,17 @@ describe("code security workspace contract page", () => {
     expect(screen.queryByText("不可变源码快照已创建")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: /动态验证阶段/ }));
     expect(screen.getByText("启动审计时未启用动态验证。")).toBeInTheDocument();
-    expect(screen.getByText("动态验证 · 显示 0 / 2 条")).toBeInTheDocument();
+    expect(screen.getByText("动态验证 · 显示 0 / 0 条")).toBeInTheDocument();
     expect(
       screen.queryByText("独立验证 Worker 已开始"),
     ).not.toBeInTheDocument();
-    await userEvent.selectOptions(
-      screen.getByLabelText("按阶段筛选事件"),
-      "all",
+    await userEvent.click(
+      screen.getByRole("tab", { name: /准备源码快照阶段/ }),
     );
-    expect(screen.getByText("全部阶段 · 显示 2 / 2 条")).toBeInTheDocument();
-    const latestEvent = screen.getByText("独立验证 Worker 已开始");
-    const earlierEvent = screen.getByText("不可变源码快照已创建");
+    expect(screen.getByText("不可变源码快照已创建")).toBeInTheDocument();
     expect(
-      latestEvent.compareDocumentPosition(earlierEvent) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).not.toBe(0);
+      screen.queryByText("独立验证 Worker 已开始"),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText("不使用不可解释的总体百分比"),
     ).not.toBeInTheDocument();
@@ -1412,8 +1639,8 @@ describe("code security workspace contract page", () => {
 
     const { container, unmount } = render(<Page />);
 
-    expect(await screen.findByLabelText("正在加载代码审计工作区")).toHaveClass(
-      "cs-workspace-skeleton",
+    expect(await screen.findByLabelText("正在加载扫描详情")).toHaveClass(
+      "cs-detail-skeleton",
     );
     expect(
       container.querySelector(".code-security-workspace > style"),
@@ -1751,6 +1978,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
+    await user.click(screen.getAllByRole("button", { name: "查看产物" })[0]);
     await user.click(screen.getByRole("tab", { name: /候选漏洞/ }));
 
     expect(await screen.findByText("待验证路径穿越")).toBeInTheDocument();
@@ -2124,7 +2352,7 @@ describe("code security workspace contract page", () => {
     expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "阶段事件" }),
-    ).not.toBeInTheDocument();
+    ).toBeInTheDocument();
   });
 
   it("shows packaging results instead of empty operational details", () => {
@@ -2181,13 +2409,16 @@ describe("code security workspace contract page", () => {
     expect(screen.getByText("完整性").nextElementSibling).toHaveTextContent(
       "校验通过",
     );
-    expect(screen.getByText("最终报告").nextElementSibling).toHaveTextContent(
-      "已完成",
-    );
+    expect(
+      screen
+        .getAllByText("最终报告")
+        .find((element) => element.nextElementSibling?.textContent === "已完成")
+        ?.nextElementSibling,
+    ).toHaveTextContent("已完成");
     expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "阶段事件" }),
-    ).not.toBeInTheDocument();
+    ).toBeInTheDocument();
   });
 
   it("shows what the main agent accepted and rejected during adjudication", async () => {
@@ -2746,8 +2977,8 @@ describe("code security workspace contract page", () => {
     view.rerender(<ArtifactInspector {...props} />);
 
     expect(
-      screen.getByRole("heading", { name: "Audit artifacts" }),
-    ).toBeInTheDocument();
+      screen.getAllByRole("heading", { name: "Audit artifacts" }).length,
+    ).toBeGreaterThan(0);
     expect(
       screen.getByLabelText("Execution status: Completed"),
     ).toBeInTheDocument();
@@ -2784,12 +3015,18 @@ describe("code security workspace contract page", () => {
     expect(
       await screen.findByRole("heading", { name: "Phases and live events" }),
     ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByText("View phase details and work units"),
+    );
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "View artifacts" })[0],
+    );
     expect(
       screen.getByRole("heading", { name: "Work units" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Audit artifacts" }),
-    ).toBeInTheDocument();
+      screen.getAllByRole("heading", { name: "Audit artifacts" }).length,
+    ).toBeGreaterThan(0);
     expect(
       screen.getByRole("combobox", { name: "Filter events by level" }),
     ).toBeInTheDocument();

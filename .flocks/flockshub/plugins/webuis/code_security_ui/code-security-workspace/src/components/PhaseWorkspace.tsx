@@ -75,6 +75,7 @@ const attemptStatusLabels: Record<string, string> = {
 
 export function PhaseWorkspace({
   scanId,
+  onOpenArtifacts,
   phases,
   events,
   workers,
@@ -90,6 +91,7 @@ export function PhaseWorkspace({
   onLoadOlderEvents = async () => undefined,
 }: {
   scanId?: string;
+  onOpenArtifacts?: () => void;
   phases: PhaseRun[];
   events: AuditEvent[];
   workers: WorkerRun[];
@@ -139,21 +141,21 @@ export function PhaseWorkspace({
       : label;
   };
   const defaultId =
-    sorted.find(
-      (phase) => phase.phase === currentPhase && phase.status === "running",
-    )?.phase_run_id ||
+    [...sorted]
+      .reverse()
+      .find(
+        (phase) => phase.phase === currentPhase && phase.status === "running",
+      )?.phase_run_id ||
     [...sorted].reverse().find((phase) => phase.status !== "pending")
       ?.phase_run_id ||
     sorted[0]?.phase_run_id;
-  const [selectedId, setSelectedId] = useState<string | undefined>(defaultId);
+  const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const selected =
     sorted.find((phase) => phase.phase_run_id === selectedId) ||
     sorted.find((phase) => phase.phase_run_id === defaultId);
   const sealedArtifactCount =
     artifactBundle?.artifacts.filter((artifact) => artifact.state === "sealed")
       .length || 0;
-  const selectedHasOperationalDetails =
-    selected?.phase !== "snapshot" && selected?.phase !== "finalization";
   const selectedAdjudicationRound = numberValue(
     selected?.phase === "adjudication"
       ? selected.summary?.adjudication_round
@@ -163,14 +165,26 @@ export function PhaseWorkspace({
     const phaseByRunId = new Map(
       sorted.map((phase) => [phase.phase_run_id, phase.phase]),
     );
-    return events.map((event) => {
-      if (typeof event.summary.phase === "string" || !event.phase_run_id) {
-        return event;
-      }
-      const phase = phaseByRunId.get(event.phase_run_id);
-      return phase ? { ...event, summary: { ...event.summary, phase } } : event;
-    });
-  }, [events, sorted]);
+    return events
+      .map((event) => {
+        // Prefer the durable run identifier. Older snapshot events predate phase metadata.
+        const phase = event.phase_run_id
+          ? phaseByRunId.get(event.phase_run_id)
+          : event.summary.phase ||
+            (event.type === "scan.snapshot_ready" ? "snapshot" : undefined);
+        return phase
+          ? { ...event, summary: { ...event.summary, phase } }
+          : event;
+      })
+      .filter(
+        (event) =>
+          selected &&
+          (event.phase_run_id
+            ? event.phase_run_id === selected.phase_run_id
+            : event.summary.phase === selected.phase &&
+              sorted.filter((p) => p.phase === selected.phase).length === 1),
+      );
+  }, [events, sorted, selected]);
 
   return (
     <section className="cs-execution" aria-labelledby="execution-title">
@@ -200,191 +214,276 @@ export function PhaseWorkspace({
         </div>
       </div>
 
-      <div className="cs-phase-rail" role="tablist" aria-label={t("审计阶段")}>
-        {sorted.map((phase) => {
-          const displayStatus =
-            phase.phase === "dynamic_validation" &&
-            dynamicValidationStatus === "not_runnable"
-              ? "not_runnable"
-              : phase.status;
-          const workerDone = phase.worker_status_counts?.completed || 0;
-          const workerTotal =
-            phase.worker_count ||
-            Object.values(phase.worker_status_counts || {}).reduce(
-              (sum, value) => sum + value,
-              0,
+      <aside className="cs-context-rail">
+        <h3>{t("审计阶段")}</h3>
+        <div
+          className="cs-phase-rail"
+          role="tablist"
+          aria-label={t("审计阶段")}
+        >
+          {sorted.map((phase) => {
+            const displayStatus =
+              phase.phase === "dynamic_validation" &&
+              dynamicValidationStatus === "not_runnable"
+                ? "not_runnable"
+                : phase.status;
+            const workerDone = phase.worker_status_counts?.completed || 0;
+            const workerTotal =
+              phase.worker_count ||
+              Object.values(phase.worker_status_counts || {}).reduce(
+                (sum, value) => sum + value,
+                0,
+              );
+            return (
+              <button
+                key={phase.phase_run_id}
+                type="button"
+                role="tab"
+                aria-selected={selected?.phase_run_id === phase.phase_run_id}
+                className={`cs-phase-step${selected?.phase_run_id === phase.phase_run_id ? " is-selected" : ""}`}
+                onClick={() => setSelectedId(phase.phase_run_id)}
+              >
+                <StatusBadge
+                  status={displayStatus}
+                  context={t("{{phase}}阶段", {
+                    phase: phaseTitle(phase),
+                  })}
+                />
+                <strong>{phaseTitle(phase)}</strong>
+                <span className="cs-tabular">
+                  {workerTotal
+                    ? t("{{done}}/{{total}} 个工作单元 · ", {
+                        done: workerDone,
+                        total: workerTotal,
+                      })
+                    : ""}
+                  {phase.started_at ? (
+                    <ElapsedTime
+                      startedAt={phase.started_at}
+                      finishedAt={phase.finished_at}
+                      initialMs={phase.duration_ms || 0}
+                      running={phase.status === "running"}
+                      prefix=""
+                    />
+                  ) : (
+                    formatDuration(phase.duration_ms, t)
+                  )}
+                </span>
+              </button>
             );
-          return (
-            <button
-              key={phase.phase_run_id}
-              type="button"
-              role="tab"
-              aria-selected={selected?.phase_run_id === phase.phase_run_id}
-              className={`cs-phase-step${selected?.phase_run_id === phase.phase_run_id ? " is-selected" : ""}`}
-              onClick={() => setSelectedId(phase.phase_run_id)}
-            >
-              <StatusBadge
-                status={displayStatus}
-                context={t("{{phase}}阶段", {
-                  phase: phaseTitle(phase),
-                })}
-              />
-              <strong>{phaseTitle(phase)}</strong>
-              <span className="cs-tabular">
-                {workerTotal
-                  ? t("{{done}}/{{total}} 个工作单元 · ", {
-                      done: workerDone,
-                      total: workerTotal,
-                    })
-                  : ""}
-                {phase.started_at ? (
-                  <ElapsedTime
-                    startedAt={phase.started_at}
-                    finishedAt={phase.finished_at}
-                    initialMs={phase.duration_ms || 0}
-                    running={phase.status === "running"}
-                    prefix=""
-                  />
-                ) : (
-                  formatDuration(phase.duration_ms, t)
-                )}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {selected ? (
-        <article className="cs-current-phase" role="tabpanel">
-          <div className="cs-current-phase__header">
-            <div>
-              <span className="cs-kicker">{t("当前查看")}</span>
-              <h3>{phaseTitle(selected)}</h3>
-            </div>
-            <StatusBadge
-              status={
-                selected.phase === "dynamic_validation" &&
-                dynamicValidationStatus === "not_runnable"
-                  ? "not_runnable"
-                  : selected.status
-              }
-              context={t("阶段状态")}
-            />
-          </div>
-          <dl className="cs-metric-grid">
-            <div>
-              <dt>{t("开始时间")}</dt>
-              <dd>{formatTime(selected.started_at, language)}</dd>
-            </div>
-            <div>
-              <dt>{t("结束时间")}</dt>
-              <dd>{formatTime(selected.finished_at, language)}</dd>
-            </div>
-            <div>
-              <dt>{t("阶段耗时")}</dt>
-              <dd className="cs-tabular">
-                {selected.started_at ? (
-                  <ElapsedTime
-                    startedAt={selected.started_at}
-                    finishedAt={selected.finished_at}
-                    initialMs={selected.duration_ms || 0}
-                    running={selected.status === "running"}
-                    prefix=""
-                  />
-                ) : (
-                  formatDuration(selected.duration_ms, t)
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>
-                {t(
-                  selected.phase === "snapshot"
-                    ? "快照大小"
-                    : selected.phase === "finalization"
-                      ? "已完成产物"
-                      : selected.phase === "adjudication"
-                        ? "裁决轮次"
-                        : "工作单元",
-                )}
-              </dt>
-              <dd className="cs-tabular">
-                {selected.phase === "snapshot"
-                  ? snapshotBoundary
-                    ? formatFileSize(snapshotBoundary.total_bytes, language)
-                    : "—"
-                  : selected.phase === "finalization"
-                    ? t("{{count}} 个", { count: sealedArtifactCount })
-                    : selected.phase === "adjudication"
-                      ? selectedAdjudicationRound
-                        ? t("第 {{round}} 轮", {
-                            round: selectedAdjudicationRound,
-                          })
-                        : "—"
-                      : (selected.worker_count ?? "—")}
-              </dd>
-            </div>
-          </dl>
-          {selected.status === "skipped" && (
-            <p className="cs-callout cs-callout--muted">
-              {t("启动审计时未启用动态验证。")}
-            </p>
-          )}
-          {selected.status === "partial" && (
-            <p className="cs-callout cs-callout--warning">
-              {t("该阶段仅部分完成，请结合覆盖度与限制项判断结果。")}
-            </p>
-          )}
-        </article>
-      ) : (
-        <div className="cs-inline-empty">
-          {t("阶段信息将在快照创建后出现。")}
+          })}
         </div>
-      )}
 
-      {selected?.phase === "snapshot" ? (
-        snapshotBoundary ? (
-          <SnapshotBoundary boundary={snapshotBoundary} />
+        {artifactBundle && (
+          <div className="cs-context-artifacts">
+            <h3>{t("审计产物")}</h3>
+            {artifactBundle.artifacts.map((artifact) => (
+              <div key={artifact.kind}>
+                <span>
+                  {t(
+                    (
+                      {
+                        snapshot_summary: "快照摘要",
+                        report_markdown: "最终报告",
+                        threat_model: "威胁模型",
+                        coverage: "覆盖度",
+                        candidate_index: "候选漏洞",
+                        verification_index: "静态验证",
+                        adjudication: "主智能体裁决",
+                        dynamic_validation: "动态验证",
+                      } as Record<string, string>
+                    )[artifact.kind] || artifact.kind,
+                  )}
+                </span>
+                <small>
+                  {t(artifactStateLabels[artifact.state] || artifact.state)}
+                </small>
+              </div>
+            ))}
+            {onOpenArtifacts && (
+              <button type="button" onClick={onOpenArtifacts}>
+                {t("查看产物")}
+              </button>
+            )}
+          </div>
+        )}
+      </aside>
+      <div className="cs-stage-session">
+        <div className="cs-session-identity">
+          <span>R</span>
+          <strong>Rex</strong>
+          <small>{t("代码审计 · 执行记录")}</small>
+          {selectedId && (
+            <button type="button" onClick={() => setSelectedId(undefined)}>
+              {t("回到最新阶段")}
+            </button>
+          )}
+        </div>
+        {selected ? (
+          <article className="cs-current-phase" role="tabpanel">
+            <div className="cs-current-phase__header">
+              <div>
+                <span className="cs-kicker">{t("当前查看")}</span>
+                <h3>{phaseTitle(selected)}</h3>
+              </div>
+              <StatusBadge
+                status={
+                  selected.phase === "dynamic_validation" &&
+                  dynamicValidationStatus === "not_runnable"
+                    ? "not_runnable"
+                    : selected.status
+                }
+                context={t("阶段状态")}
+              />
+            </div>
+
+            {selected.status === "skipped" && (
+              <p className="cs-callout cs-callout--muted">
+                {t("启动审计时未启用动态验证。")}
+              </p>
+            )}
+            {selected.status === "partial" && (
+              <p className="cs-callout cs-callout--warning">
+                {t("该阶段仅部分完成，请结合覆盖度与限制项判断结果。")}
+              </p>
+            )}
+          </article>
         ) : (
           <div className="cs-inline-empty">
-            {t("快照可信边界将在源码快照创建后出现。")}
+            {t("阶段信息将在快照创建后出现。")}
           </div>
-        )
-      ) : selected?.phase === "finalization" ? (
-        artifactBundle ? (
-          <ArtifactBundleSummary bundle={artifactBundle} />
-        ) : (
-          <div className="cs-inline-empty">
-            {t("封装结果将在最终产物生成后出现。")}
-          </div>
-        )
-      ) : selected?.phase === "adjudication" ? (
-        <AdjudicationSummary
-          scanId={scanId}
-          phase={selected}
-          workers={workers}
-        />
-      ) : (
-        <WorkerList
-          dynamicValidationStatus={dynamicValidationStatus}
-          workers={
-            selected
-              ? workers.filter((worker) => worker.phase === selected.phase)
-              : workers
-          }
-        />
-      )}
-      {selectedHasOperationalDetails && (
-        <EventStream
-          key={selected?.phase_run_id || "all-events"}
-          events={eventsWithPhase}
-          selectedPhase={selected?.phase}
-          hasOlder={hasOlderEvents}
-          loading={loadingEvents}
-          loadingOlder={loadingOlderEvents}
-          onLoadOlder={onLoadOlderEvents}
-        />
-      )}
+        )}
+
+        <details className="cs-stage-details">
+          <summary>{t("查看阶段详情与工作单元")}</summary>
+          {selected && (
+            <dl className="cs-metric-grid">
+              <div>
+                <dt>{t("开始时间")}</dt>
+                <dd>{formatTime(selected.started_at, language)}</dd>
+              </div>
+              <div>
+                <dt>{t("结束时间")}</dt>
+                <dd>{formatTime(selected.finished_at, language)}</dd>
+              </div>
+              <div>
+                <dt>{t("阶段耗时")}</dt>
+                <dd className="cs-tabular">
+                  {selected.started_at ? (
+                    <ElapsedTime
+                      startedAt={selected.started_at}
+                      finishedAt={selected.finished_at}
+                      initialMs={selected.duration_ms || 0}
+                      running={selected.status === "running"}
+                      prefix=""
+                    />
+                  ) : (
+                    formatDuration(selected.duration_ms, t)
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>
+                  {t(
+                    selected.phase === "snapshot"
+                      ? "快照大小"
+                      : selected.phase === "finalization"
+                        ? "已完成产物"
+                        : selected.phase === "adjudication"
+                          ? "裁决轮次"
+                          : "工作单元",
+                  )}
+                </dt>
+                <dd className="cs-tabular">
+                  {selected.phase === "snapshot"
+                    ? snapshotBoundary
+                      ? formatFileSize(snapshotBoundary.total_bytes, language)
+                      : "—"
+                    : selected.phase === "finalization"
+                      ? t("{{count}} 个", { count: sealedArtifactCount })
+                      : selected.phase === "adjudication"
+                        ? selectedAdjudicationRound
+                          ? t("第 {{round}} 轮", {
+                              round: selectedAdjudicationRound,
+                            })
+                          : "—"
+                        : (selected.worker_count ?? "—")}
+                </dd>
+              </div>
+            </dl>
+          )}
+          {selected?.phase === "snapshot" ? (
+            snapshotBoundary ? (
+              <SnapshotBoundary boundary={snapshotBoundary} />
+            ) : (
+              <div className="cs-inline-empty">
+                {t("快照可信边界将在源码快照创建后出现。")}
+              </div>
+            )
+          ) : selected?.phase === "finalization" ? (
+            artifactBundle ? (
+              <ArtifactBundleSummary bundle={artifactBundle} />
+            ) : (
+              <div className="cs-inline-empty">
+                {t("封装结果将在最终产物生成后出现。")}
+              </div>
+            )
+          ) : selected?.phase === "adjudication" ? (
+            <AdjudicationSummary
+              scanId={scanId}
+              phase={selected}
+              workers={
+                sorted.filter((p) => p.phase === selected.phase).length === 1
+                  ? workers
+                  : []
+              }
+            />
+          ) : (
+            <WorkerList
+              dynamicValidationStatus={dynamicValidationStatus}
+              workers={
+                selected
+                  ? workers.filter(
+                      (worker) =>
+                        worker.phase === selected.phase &&
+                        sorted.filter((p) => p.phase === selected.phase)
+                          .length === 1,
+                    )
+                  : workers
+              }
+            />
+          )}
+          {selected &&
+            sorted.filter((p) => p.phase === selected.phase).length > 1 && (
+              <p>
+                {t(
+                  "该阶段执行了多轮。当前接口未提供工作单元与轮次的关联，以下执行事件按轮次单独展示。",
+                )}
+              </p>
+            )}
+        </details>
+        {selected && (
+          <details
+            className="cs-session-steps"
+            open
+            key={selected.phase_run_id}
+          >
+            <summary>
+              {t("查看 {{count}} 个步骤", { count: eventsWithPhase.length })}
+            </summary>
+            <EventStream
+              fixedPhase
+              key={selected?.phase_run_id || "all-events"}
+              events={eventsWithPhase}
+              selectedPhase={selected?.phase}
+              hasOlder={hasOlderEvents}
+              loading={loadingEvents}
+              loadingOlder={loadingOlderEvents}
+              onLoadOlder={onLoadOlderEvents}
+            />
+          </details>
+        )}
+      </div>
     </section>
   );
 }

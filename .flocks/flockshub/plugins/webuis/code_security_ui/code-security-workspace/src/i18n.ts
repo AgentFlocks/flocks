@@ -7,6 +7,93 @@ interface ContractRuntime {
 }
 
 const englishMessages: Record<string, string> = {
+  审计列表: "Audit list",
+  返回审计列表: "Back to audit list",
+  "查看所有审计任务的执行进度与结果。":
+    "Review progress and results for all audit tasks.",
+  "已加载 {{count}} 个审计任务": "{{count}} audit tasks loaded",
+  筛选审计任务状态: "Filter audit task status",
+  搜索审计任务: "Search audit tasks",
+  搜索任务名称或编号: "Search task name or ID",
+  审计任务: "Audit task",
+  当前阶段: "Current phase",
+  "查看审计 {{name}}": "View audit {{name}}",
+  没有匹配的审计任务: "No matching audit tasks",
+  还没有审计任务: "No audit tasks yet",
+  "发起一次代码审计，执行过程和结果会显示在这里。":
+    "Start a code audit to see its progress and results here.",
+  "筛选结果基于已加载的任务。": "Filters apply to loaded tasks.",
+
+  首页: "Home",
+  "Flocks 代码安全审计工作台": "Flocks Code Security Workbench",
+  "管理代码项目，查看审计进展与结果。":
+    "Manage code projects and review audit progress and results.",
+  发起审计: "Start audit",
+  添加项目: "Add project",
+  登记已有代码目录: "Register an existing code directory",
+  "使用服务器上已存在且已授权的源码目录。":
+    "Use an existing, authorized source directory on the server.",
+  项目名称: "Project name",
+  源码目录: "Source directory",
+  可选: "Optional",
+  服务器上的源码目录绝对路径: "Absolute source directory path on the server",
+  代码项目: "Code projects",
+  筛选项目审计状态: "Filter project audit status",
+  搜索代码项目: "Search code projects",
+  搜索项目名称或路径: "Search project name or path",
+  暂无审计: "No audits",
+  最近审计: "Latest audit",
+  审计状态: "Audit status",
+  漏洞数量: "Findings",
+  已加载审计: "Loaded audits",
+  操作: "Actions",
+  查看审计: "View audit",
+  上一页: "Previous",
+  下一页: "Next",
+  其他审计记录: "Other audit records",
+  "← 代码审计首页": "\u2190 Code audit home",
+  审计指标: "Audit metrics",
+  候选问题: "Candidates",
+  不等同于已确认漏洞: "Not confirmed findings",
+  快照文件: "Snapshot files",
+  当前审计范围: "Current audit scope",
+  已完成阶段: "Completed phases",
+  按实际执行阶段统计: "Based on actual execution phases",
+  覆盖状态: "Coverage status",
+  以证据覆盖结果为准: "Based on evidence coverage",
+  审计结果会话: "Audit result conversation",
+  审计结果追问: "Ask about audit results",
+  "代码审计 · 执行记录": "Code audit \u00b7 Execution records",
+  回到最新阶段: "Return to latest phase",
+  查看阶段详情与工作单元: "View phase details and work units",
+  "查看 {{count}} 个步骤": "View {{count}} steps",
+  "该阶段执行了多轮。当前接口未提供工作单元与轮次的关联，以下执行事件按轮次单独展示。":
+    "This phase has multiple runs. Work-unit associations are unavailable; execution events below are scoped to the selected run.",
+  自动选择: "Automatic",
+  手动选择: "Manual",
+  审计配置方式: "Audit configuration mode",
+  描述你想审计的代码: "Describe the code you want to audit",
+  "用对话配置审计范围和关注点。":
+    "Configure audit scope and focus through conversation.",
+  审计需求草稿: "Audit request draft",
+  "例如：审计 API 中的身份认证和权限检查，排除测试目录。":
+    "For example: audit API authentication and authorization, excluding tests.",
+  "自动配置服务尚未接入。需求草稿会在切换时保留，请使用手动选择发起审计。":
+    "Automatic configuration is not connected yet. Your draft is retained when switching modes. Use Manual to start an audit.",
+  使用手动选择: "Use manual configuration",
+  请选择代码项目: "Select a code project",
+  "相对于代码项目根目录，例如":
+    "Relative to the code project root, for example",
+  "结果会话尚未接入，可先查看各阶段记录和审计报告":
+    "Result conversations are not connected yet. Review the phase records and audit report.",
+  "全部流程执行完成后，才能基于审计结果会话":
+    "Conversations about audit results require the entire workflow to finish.",
+  当前版本仅支持查看执行记录与产物:
+    "This version supports execution records and artifact viewing.",
+  审计期间仅可查看执行过程:
+    "Execution is read-only while the audit is running.",
+  快照摘要: "Snapshot summary",
+
   任务: "Task",
   取消任务: "Cancel task",
   取消失败: "Cancellation failed",

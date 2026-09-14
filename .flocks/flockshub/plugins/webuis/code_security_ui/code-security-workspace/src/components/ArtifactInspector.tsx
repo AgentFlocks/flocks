@@ -26,12 +26,14 @@ const tabs = [
 ];
 
 export function ArtifactInspector({
+  drawerOnly = false,
   detail,
   activeTab,
   onTabChange,
   open,
   onClose,
 }: {
+  drawerOnly?: boolean;
   detail: ScanDetail;
   activeTab: string;
   onTabChange: (tab: string) => void;
@@ -47,7 +49,7 @@ export function ArtifactInspector({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
-  const [wideLayout, setWideLayout] = useState(
+  const [detectedWideLayout, setWideLayout] = useState(
     () => window.matchMedia?.("(min-width: 1440px)").matches ?? false,
   );
   const inspectorRef = useRef<HTMLElement>(null);
@@ -59,6 +61,7 @@ export function ArtifactInspector({
       ),
     [detail.artifacts],
   );
+  const wideLayout = !drawerOnly && detectedWideLayout;
   const visible = wideLayout || open;
   const dynamicValidationDisabled =
     activeTab === "dynamic_validation" && !detail.scan.dynamic_enabled;
