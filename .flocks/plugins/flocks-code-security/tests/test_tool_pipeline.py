@@ -1256,13 +1256,13 @@ async def test_large_repository_threat_model_needs_summary_not_inventory_paginat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_enabled", [False, True])
 @pytest.mark.parametrize("poc_failed", [False, True])
-@pytest.mark.parametrize("automatic_exclusion", [False, True])
+@pytest.mark.parametrize("automatic_exclusion", [None, "external_symlink_auto", "broken_internal_symlink"])
 async def test_prepare_candidate_verify_finalize_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cleanup_enabled: bool,
     poc_failed: bool,
-    automatic_exclusion: bool,
+    automatic_exclusion: str | None,
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -1290,7 +1290,7 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert prepared.success is True
     scan_id = prepared.output["scan_id"]
     if poc_failed or automatic_exclusion:
-        source_exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink_auto" if automatic_exclusion else "external_symlink"}]
+        source_exclusions = [{"path": "install-sh", "target": "missing/install-sh" if automatic_exclusion == "broken_internal_symlink" else "/usr/share/automake/install-sh", "reason": automatic_exclusion or "external_symlink"}]
         runtime.store.append_scan_event(scan_id, "source.archive_exclusions", "Archive scope",
                                         {"exclusions": source_exclusions}, level="warning")
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
@@ -1491,9 +1491,9 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         assert "PoC generation incomplete" in (output / "report.md").read_text()
         assert json.loads((output / "source-exclusions.json").read_text())["exclusions"] == source_exclusions
         assert runtime.store.report_data(scan_id)["source_exclusions"] == source_exclusions
-        assert "external archive symlink" in (output / "report.md").read_text()
+        assert "archive symlink" in (output / "report.md").read_text()
         coverage = json.loads((output / "coverage.json").read_text())
-        assert "external_symlink" in json.dumps(coverage)
+        assert source_exclusions[0]["reason"] in json.dumps(coverage)
         assert any(item["path"] == "source-exclusions.json" for item in manifest["scan"]["artifacts"])
         with runtime.store._connect() as connection:
             events = connection.execute("SELECT payload_json FROM scan_events WHERE event_type = 'worker.execution_failed'").fetchall()

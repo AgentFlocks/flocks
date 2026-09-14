@@ -2172,6 +2172,10 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
         link.type = tarfile.SYMTYPE
         link.linkname = "/usr/share/automake/install-sh"
         stream.addfile(link)
+        broken = tarfile.TarInfo("broken")
+        broken.type = tarfile.SYMTYPE
+        broken.linkname = "missing"
+        stream.addfile(broken)
     (source / "description.txt").write_text("Review the target")
     (source / "cybergym.json").write_text(json.dumps(_manifest()))
     monkeypatch.setattr(batch, "registry_root", lambda: tmp_path / "registry")
@@ -2197,8 +2201,9 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
     result = await batch_worker.execute(root, "1", "one")
     await batch.cleanup_child_work(task, result)
     assert result["status"] == "completed"
-    assert captured["exclude_patterns"] == ["install-sh"]
+    assert captured["exclude_patterns"] == ["broken", "install-sh"]
     exclusions = [{"path": "install-sh", "target": "/usr/share/automake/install-sh", "reason": "external_symlink_auto" if automatic_exclusion else "external_symlink"}]
+    exclusions.insert(0, {"path": "broken", "target": "missing", "reason": "broken_internal_symlink"})
     assert captured["source_exclusions"] == exclusions
     assert result["source_exclusions"] == exclusions
     assert batch.read_json(task / "source-exclusions.json")["exclusions"] == exclusions

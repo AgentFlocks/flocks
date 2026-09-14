@@ -2070,3 +2070,18 @@ def test_archive_exclusions_require_explicit_scope_and_affect_request_identity()
     first = StartScanRequest(target_path=Path("/tmp/source"), exclude_patterns=("install-sh",), source_exclusions=exclusions)
     second = StartScanRequest(target_path=Path("/tmp/source"), exclude_patterns=("install-sh",))
     assert AuditService._request_digest(first) != AuditService._request_digest(second)
+
+
+@pytest.mark.parametrize("reason,target,valid", [
+    ("broken_internal_symlink", "missing/file", True),
+    ("broken_internal_symlink", "/outside", False),
+    ("broken_internal_symlink", "", False),
+    ("external_symlink_auto", "missing/file", False),
+])
+def test_source_exclusion_target_matches_reason(reason, target, valid):
+    exclusions = ({"path": "link", "target": target, "reason": reason},)
+    if valid:
+        assert AuditService._validate_source_exclusions(exclusions, ("link",)) == exclusions
+    else:
+        with pytest.raises(AuditServiceError, match="explicit audit scope"):
+            AuditService._validate_source_exclusions(exclusions, ("link",))

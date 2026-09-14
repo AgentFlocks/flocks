@@ -387,7 +387,7 @@ class ReportWriter:
             manifest["scan"]["status"] = final_status
             if data.get("source_exclusions"):
                 manifest["scan"]["scope"].setdefault("limitations", []).append(
-                    f"{len(data['source_exclusions'])} external archive symlink(s) were excluded; "
+                    f"{len(data['source_exclusions'])} archive symlink(s) were excluded; "
                     "coverage describes the remaining source only. See source-exclusions.json."
                 )
             if missing_poc_ids:
@@ -1125,7 +1125,7 @@ class ReportWriter:
             and merged_coverage["completeness"] == "complete"
             and not uncovered
             and not failed_files
-            and not any(item["reason"] == "external_symlink_auto" for item in data.get("source_exclusions", []))
+            and not any(item["reason"] in {"external_symlink_auto", "broken_internal_symlink"} for item in data.get("source_exclusions", []))
             else "partial"
         )
         total_files = len(snapshot_files)

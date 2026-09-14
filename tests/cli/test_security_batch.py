@@ -680,3 +680,59 @@ def test_automatic_mode_is_frozen_by_cli(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.stdout
     assert batch.read_json(tmp_path / 'auto/batch.json')['auto_exclude_external_symlinks'] is True
     assert batch.read_json(tmp_path / 'run/batch.json')['auto_exclude_external_symlinks'] is False
+
+
+@pytest.mark.parametrize("name,target", [
+    ("src-vul/skia/tools/gyp", "../third_party/externals/gyp/"),
+    ("src-vul/botan/.travis.yml", "src-vul/scripts/ci/travis.yml"),
+])
+def test_archive_excludes_broken_internal_links_without_guessing_target(tmp_path, name, target):
+    archive, source = _archive_with_link(tmp_path, [
+        (name, target, tarfile.SYMTYPE),
+        ("src-vul/botan/src/scripts/ci/travis.yml", "", tarfile.REGTYPE),
+        ("src-vul/skia/third_party/externals/angle2/gyp", "", tarfile.DIRTYPE),
+        ("alias.c", "main.c", tarfile.SYMTYPE),
+    ])
+    exclusions = extract_source(archive, source, 100)
+    assert len(exclusions) == 1
+    assert exclusions[0]["path"] == name
+    # tarfile may normalize the trailing slash on newer Python versions.
+    assert exclusions[0]["target"].rstrip("/") == target.rstrip("/")
+    assert exclusions[0]["reason"] == "broken_internal_symlink"
+    assert not (source / name).exists()
+    assert not (source / name).is_symlink()
+    assert (source / "alias.c").read_text() == "code"
+    assert (source / "src-vul/botan/src/scripts/ci/travis.yml").is_file()
+
+
+def test_archive_records_broken_links_in_materialized_directory_aliases(tmp_path):
+    archive, source = _archive_with_link(tmp_path, [
+        ("directory/broken", "missing", tarfile.SYMTYPE),
+        ("alias", "directory", tarfile.SYMTYPE),
+        ("chain", "directory/broken", tarfile.SYMTYPE),
+    ])
+    exclusions = extract_source(archive, source, 100)
+    assert [item["path"] for item in exclusions] == ["alias/broken", "chain", "directory/broken"]
+    assert all(item["reason"] == "broken_internal_symlink" for item in exclusions)
+    assert not any(path.is_symlink() for path in source.rglob("*"))
+
+
+@pytest.mark.parametrize("entries", [
+    [("loop", "loop", tarfile.SYMTYPE)],
+    [("a", "b", tarfile.SYMTYPE), ("b", "a", tarfile.SYMTYPE)],
+    [("directory/loop", "..", tarfile.SYMTYPE)],
+    [("broken", "../missing", tarfile.SYMTYPE)],
+    [("a", "b", tarfile.SYMTYPE), ("b", "../missing", tarfile.SYMTYPE)],
+])
+def test_broken_link_exclusion_still_rejects_cycles_and_missing_external_targets(tmp_path, entries):
+    archive, source = _archive_with_link(tmp_path, entries)
+    with pytest.raises((ValueError, tarfile.FilterError)):
+        extract_source(archive, source, 100)
+
+
+def test_broken_link_exclusion_metadata_is_bounded(tmp_path):
+    archive, source = _archive_with_link(tmp_path, [
+        (f"broken-{index}", "missing", tarfile.SYMTYPE) for index in range(129)
+    ])
+    with pytest.raises(ValueError, match="metadata exceeds limit"):
+        extract_source(archive, source, 100)

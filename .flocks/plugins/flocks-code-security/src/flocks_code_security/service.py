@@ -765,7 +765,7 @@ class AuditService:
 
             if normalized.source_exclusions:
                 self.store.append_scan_event(
-                    scan_id, "source.archive_exclusions", "External source symlinks explicitly excluded",
+                    scan_id, "source.archive_exclusions", "Archive source symlinks excluded",
                     {"exclusions": list(normalized.source_exclusions)}, level="warning",
                 )
             if knowledge_base is not None:
@@ -1658,8 +1658,9 @@ class AuditService:
         for item in values:
             if (not isinstance(item, dict) or set(item) != {"path", "target", "reason"}
                     or not all(isinstance(value, str) for value in item.values())
-                    or item["reason"] not in {"external_symlink", "external_symlink_auto"}
-                    or not item["target"].startswith("/")
+                    or item["reason"] not in {"external_symlink", "external_symlink_auto", "broken_internal_symlink"}
+                    or not item["target"]
+                    or (item["target"].startswith("/") == (item["reason"] == "broken_internal_symlink"))
                     or glob.escape(item["path"]) not in patterns):
                 raise AuditServiceError("invalid_parameter", "Source exclusions must match explicit audit scope")
             result.append(dict(item))

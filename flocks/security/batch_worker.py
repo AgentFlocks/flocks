@@ -24,7 +24,7 @@ def extract_source(
     *, skip_external_symlinks: dict[str, str] | None = None,
     auto_exclude_external_symlinks: bool = False,
 ) -> list[dict[str, str]]:
-    """Validate all entries; never follow an omitted absolute symlink target."""
+    """Validate entries and record omitted external or broken internal symlinks."""
     from flocks.security.batch import parse_link_exclusions
 
     policy = parse_link_exclusions([f"{name}={target}" for name, target in (skip_external_symlinks or {}).items()])
@@ -77,15 +77,31 @@ def extract_source(
 
         def copy_node(source: Path, target: Path, ancestors: frozenset[Path]) -> None:
             nonlocal total, entries
-            try:
-                resolved = source.resolve(strict=True)
-            except (OSError, RuntimeError) as exc:
-                raise ValueError(f"Unresolved or cyclic source link: {source.relative_to(destination)}") from exc
-            if not resolved.is_relative_to(destination.resolve()) or resolved in ancestors:
-                raise ValueError(f"External or cyclic source link: {source.name}")
             entries += 1
             if entries > 200_000:
                 raise ValueError("Expanded source contains too many entries")
+            try:
+                # Check containment even when the final target does not exist.
+                resolved = source.resolve(strict=False)
+                if not resolved.is_relative_to(destination.resolve()):
+                    raise ValueError(f"External source link: {source.relative_to(destination)}")
+                try:
+                    resolved = source.resolve(strict=True)
+                except FileNotFoundError:
+                    if not source.is_symlink():
+                        raise
+                    name = target.relative_to(normalized).as_posix()
+                    exclusions[name] = {
+                        "path": name, "target": os.readlink(source),
+                        "reason": "broken_internal_symlink",
+                    }
+                    if len(exclusions) > 128 or len(json.dumps(list(exclusions.values())).encode("utf-8")) > 48_000:
+                        raise ValueError("Source exclusion metadata exceeds limit")
+                    return
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"Unresolved or cyclic source link: {source.relative_to(destination)}") from exc
+            if resolved in ancestors:
+                raise ValueError(f"Cyclic source link: {source.relative_to(destination)}")
             if resolved.is_dir():
                 target.mkdir()
                 for item in sorted(resolved.iterdir()):

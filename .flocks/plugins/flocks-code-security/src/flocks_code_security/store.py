@@ -6550,7 +6550,7 @@ class ScanStore:
                     "AND event_type = 'source.archive_exclusions'", (scan_id,),
                 )
                 for item in json.loads(row["payload_json"])["exclusions"]
-                if item["reason"] == "external_symlink_auto"
+                if item["reason"] in {"external_symlink_auto", "broken_internal_symlink"}
             ]
             unit_rows = connection.execute(
                 "SELECT work_unit_id, phase, role, paths_json FROM work_units "
