@@ -27,7 +27,7 @@ def _json(value: Any) -> str:
 
 
 def public_messages(rows: list[Any]) -> list[dict[str, Any]]:
-    """Allowlist visible parts. Never return system fields or reasoning parts."""
+    """Allowlist workbench-visible content; omit system and provider metadata."""
     result = []
     for row in rows:
         value = row.model_dump() if hasattr(row, "model_dump") else row
@@ -35,14 +35,24 @@ def public_messages(rows: list[Any]) -> list[dict[str, Any]]:
         if info.get("role") not in {"user", "assistant"}:
             continue
         parts = []
-        for part in value.get("parts", []):
-            if part.get("type") == "text" and not part.get("synthetic") and not part.get("ignored"):
-                parts.append({"type": "text", "text": part.get("text", "")})
+        for index, part in enumerate(value.get("parts", [])):
+            if part.get("synthetic") or part.get("ignored"):
+                continue
+            visible = {"id": part.get("id") or f"{info['id']}-{index}"}
+            timing = part.get("time")
+            if isinstance(timing, dict):
+                visible["time"] = {k: timing[k] for k in ("start", "end") if k in timing}
+            if part.get("type") in {"text", "reasoning", "thinking"}:
+                parts.append({**visible, "type": part["type"], "text": part.get("text") or part.get("thinking", "")})
             elif part.get("type") == "tool":
                 state = part.get("state", {})
                 parts.append(
                     {
+                        **visible,
                         "type": "tool",
+                        "callID": part.get("callID"),
+                        "title": state.get("title"),
+                        "time": {k: state["time"][k] for k in ("start", "end") if k in state["time"]} if isinstance(state.get("time"), dict) else None,
                         "tool": part.get("tool"),
                         "status": state.get("status"),
                         "input": state.get("input"),
@@ -51,7 +61,7 @@ def public_messages(rows: list[Any]) -> list[dict[str, Any]]:
                     }
                 )
         if parts:
-            result.append({"id": info["id"], "role": info["role"], "time": info.get("time", {}), "parts": parts})
+            result.append({"id": info["id"], "role": info["role"], "time": info.get("time", {}), "finish": info.get("finish"), "parts": parts})
     return result
 
 

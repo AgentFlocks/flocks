@@ -115,11 +115,8 @@ const paths: Record<IconName, ReactElement> = {
   ),
   trash: (
     <>
-      <path d="M4 7h16" />
-      <path d="M9 3h6l1 4H8l1-4Z" />
-      <path d="m7 7 1 14h8l1-14" />
-      <path d="M10 11v6" />
-      <path d="M14 11v6" />
+      <path d="M3 6h18M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+      <path d="m5 6 1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14M10 10v7M14 10v7" />
     </>
   ),
   chevron: <path d="m8 10 4 4 4-4" />,

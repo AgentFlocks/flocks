@@ -2074,6 +2074,8 @@ def test_archive_exclusions_require_explicit_scope_and_affect_request_identity()
 
 @pytest.mark.parametrize("reason,target,valid", [
     ("broken_internal_symlink", "missing/file", True),
+    ("cyclic_symlink", ".", True),
+    ("cyclic_symlink", "/outside", False),
     ("broken_internal_symlink", "/outside", False),
     ("broken_internal_symlink", "", False),
     ("external_symlink_auto", "missing/file", False),
@@ -2085,3 +2087,28 @@ def test_source_exclusion_target_matches_reason(reason, target, valid):
     else:
         with pytest.raises(AuditServiceError, match="explicit audit scope"):
             AuditService._validate_source_exclusions(exclusions, ("link",))
+
+
+@pytest.mark.asyncio
+async def test_project_purge_deletes_database_rows_and_keeps_other_projects(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from flocks.session.session import Session
+    store = _store(tmp_path)
+    ids = []
+    for project in ['deleted-project', 'other-project']:
+        scan_id = store.create_scan(parent_session_id='missing-parent', snapshot_id='snapshot_test', mode='standard', ruleset_digest='rules', workspace_ref=project)
+        store.mark_scan_terminal(scan_id, 'cancelled')
+        ids.append(scan_id)
+    with store._connect() as connection:
+        connection.execute("INSERT INTO audit_chat_turns(scan_id,subject,request_id,question,status,created_at) VALUES (?,?,?,?,?,?)", (ids[0], 'owner', 'request', 'question', 'completed', 'now'))
+    monkeypatch.setattr(Session, 'get_by_id_unfiltered', AsyncMock(return_value=None))
+    monkeypatch.setattr(service_module, 'find_output_directory', lambda scan_id: None)
+    service = object.__new__(AuditService)
+    service.store = store
+    service.runtime = SimpleNamespace(snapshots=SimpleNamespace(snapshots_root=tmp_path / 'snapshots'))
+    await service.delete_project_audits({'deleted-project'}, AuditCaller(subject='owner', source='webui', is_admin=True))
+    assert store.get_scan(ids[0]) is None
+    assert store.get_scan(ids[1]) is not None
+    assert store.get_snapshot('snapshot_test') is not None
+    with store._connect() as connection:
+        assert connection.execute('SELECT COUNT(*) FROM audit_chat_turns WHERE scan_id=?', (ids[0],)).fetchone()[0] == 0

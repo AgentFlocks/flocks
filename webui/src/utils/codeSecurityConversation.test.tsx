@@ -1,3 +1,4 @@
+import AuditSessionTranscript from '../components/common/AuditSessionTranscript';
 import React from "react";
 import {
   act,
@@ -42,12 +43,34 @@ beforeEach(() => {
   localStorage.clear();
   (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__ = {
     React,
+    AuditModelPicker: ({ onReady }: any) => { React.useEffect(() => onReady(true), [onReady]); return <button type="button">Test model</button>; },
+    AuditSessionTranscript,
     useLanguage: () => "zh-CN",
     api: { get, post },
   };
 });
 
 describe("audit conversation", () => {
+  it("hides stage setup instructions but preserves execution output and later messages", async () => {
+    const response = session("模型执行结果");
+    response.data.items[0].messages.unshift({ id: "setup", role: "user", parts: [{ type: "text", text: "内部阶段引导" }] });
+    response.data.items[0].messages.push({ id: "later", role: "user", parts: [{ type: "text", text: "后续校验反馈" }] });
+    get.mockResolvedValue(response);
+    render(<NativePhaseSessions scanId="audit" phaseId="phase" running={false} />);
+    await screen.findByText("模型执行结果");
+    expect(screen.queryByText("内部阶段引导")).not.toBeInTheDocument();
+    expect(screen.getByText("后续校验反馈")).toBeInTheDocument();
+    expect(response.data.items[0].messages[0].parts[0].text).toBe("内部阶段引导");
+  });
+  it("shows waiting output when only stage setup instructions exist", async () => {
+    const response = session("内部阶段引导");
+    response.data.items[0].messages[0].role = "user";
+    get.mockResolvedValue(response);
+    render(<NativePhaseSessions scanId="audit" phaseId="phase" running={false} />);
+    await screen.findByText("等待会话输出…");
+    expect(screen.queryByText("内部阶段引导")).not.toBeInTheDocument();
+  });
+
   it("locks every unfinished state without requesting or sending a conversation", () => {
     const view = render(
       <AuditConversation

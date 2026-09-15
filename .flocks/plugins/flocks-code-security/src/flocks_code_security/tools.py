@@ -1899,7 +1899,7 @@ async def _launch_worker(
             parent_id=parent.id,
             agent=agent_name,
             category="task",
-            metadata={"langfuse": langfuse_metadata, "code_security_scan_id": scan_id},
+            metadata={"langfuse": langfuse_metadata, "code_security_scan_id": scan_id, "hideFromSessionManager": True, "session_scope": "code-security"},
             **child_kwargs,
         )
     except BaseException:

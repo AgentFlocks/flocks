@@ -3,6 +3,19 @@ import { jsx, jsxs } from 'react/jsx-runtime';
 import { useTranslation } from 'react-i18next';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import apiClient from '@/api/client';
+import type { ComponentProps } from 'react';
+import type AuditSessionTranscriptComponent from '@/components/common/AuditSessionTranscript';
+import type { AuditModelPickerProps } from '@/components/common/AuditModelPicker';
+const LazyAuditModelPicker = lazy(() => import('@/components/common/AuditModelPicker'));
+export function AuditModelPicker(props: AuditModelPickerProps) {
+  return <Suspense fallback={<div aria-busy="true" />}><LazyAuditModelPicker {...props} /></Suspense>;
+}
+
+const LazyAuditSessionTranscript = lazy(() => import('@/components/common/AuditSessionTranscript'));
+
+export function AuditSessionTranscript(props: ComponentProps<typeof AuditSessionTranscriptComponent>) {
+  return <Suspense fallback={<div aria-busy="true" />}><LazyAuditSessionTranscript {...props} /></Suspense>;
+}
 import { useAuth } from '@/contexts/AuthContext';
 
 interface MarkdownRendererProps {
@@ -53,6 +66,8 @@ export interface WebUIContractPageSdk {
   api: WebUIContractPageApiClient;
   Card: typeof Card;
   Markdown: typeof Markdown;
+  AuditSessionTranscript: typeof AuditSessionTranscript;
+  AuditModelPicker: typeof AuditModelPicker;
   useCurrentUser: typeof useCurrentUser;
   useLanguage: typeof useLanguage;
 }
@@ -151,6 +166,8 @@ export function installWebUIContractPageRuntime(pageId: string): void {
     api,
     Card,
     Markdown,
+    AuditSessionTranscript,
+    AuditModelPicker,
     useCurrentUser,
     useLanguage,
   };

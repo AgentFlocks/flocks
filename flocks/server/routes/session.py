@@ -690,7 +690,12 @@ async def _prepare_session_agent_before_bootstrap(
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
     """Return whether a session should be excluded from manager listings."""
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    return bool(metadata.get("hideFromSessionManager"))
+    return bool(
+        metadata.get("hideFromSessionManager")
+        or metadata.get("code_security_scan_id")
+        or metadata.get("session_scope") == "code-security"
+        or session.agent == "code-security"
+    )
 
 
 def _share_metadata(session: SessionModel, *, shared: bool, actor_user_id: str) -> Dict[str, Any]:
@@ -5290,6 +5295,8 @@ async def get_recent_sessions(limit: int = Query(10, ge=1, le=50, description="N
         # Convert to response format
         sessions = []
         for session_model in sessions_result:
+            if _is_hidden_from_session_manager(session_model):
+                continue
             try:
                 session_dict = session_model.model_dump(mode="json", by_alias=True)
                 sessions.append(SessionResponse(**session_dict))

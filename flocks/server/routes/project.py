@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -40,6 +40,7 @@ class ProjectCreateRequest(BaseModel):
 
     worktree: str
     name: Optional[str] = None
+    scope: Literal["workbench", "code-security"] = "workbench"
 
 
 class FolderEntry(BaseModel):
@@ -118,12 +119,13 @@ async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List
 
 @router.get("", response_model=List[ProjectInfo], include_in_schema=False)
 @router.get("/", response_model=List[ProjectInfo], summary="List projects")
-async def list_projects(request: Request, search: Optional[str] = Query(None)):
+async def list_projects(request: Request, search: Optional[str] = Query(None), scope: Literal["workbench", "code-security"] = Query("workbench")):
     """List user-registered project folders."""
 
     user = require_user(request)
     try:
-        return await _list_project_summaries(user, search)
+        projects = await _list_project_summaries(user, search)
+        return [project for project in projects if scope == "code-security" or (project.scope or "workbench") == "workbench"]
     except Exception as exc:
         log.error("project.list.error", {"error": str(exc)})
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -140,8 +142,11 @@ async def create_project(request: Request, payload: ProjectCreateRequest):
             owner_id=user.id,
             name=payload.name,
             worktree=payload.worktree,
+            scope=payload.scope,
         )
     except ProjectPathConflictError as exc:
+        if exc.project.scope != payload.scope:
+            raise HTTPException(status_code=409, detail="该目录已在另一工作区登记，请选择其他目录") from exc
         return exc.project
     except ProjectNameConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

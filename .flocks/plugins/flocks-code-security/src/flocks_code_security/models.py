@@ -42,10 +42,12 @@ class SnapshotRef:
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
     copy_source: bool = True
+    source_path: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("root_path", None)
+        data.pop("source_path", None)
         return data
 
 

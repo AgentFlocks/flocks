@@ -273,6 +273,11 @@ def _resolve_target(root: Path, relative_path: str) -> Path:
 
 @router.post("/scans")
 async def create_scan(request: Request, payload: CreateScanRequest):
+    async with Project.lifecycle_guard(payload.workspace_id):
+        return await _create_scan(request, payload)
+
+
+async def _create_scan(request: Request, payload: CreateScanRequest):
     user = require_admin(request)
     if payload.dynamic_enabled and not payload.dynamic_confirmed:
         raise HTTPException(
@@ -332,12 +337,21 @@ async def list_scans(
             return {"items": [], "next_cursor": None}
     service, _AuditCaller, _StartScanRequest, AuditServiceError = _service_types(request)
     try:
-        return await service.list_scans(
-            _caller(user, caller_type=_AuditCaller),
-            statuses=set(status_filter or []),
-            cursor=cursor,
-            limit=limit,
-        )
+        removed_projects = Project.removed_project_ids()
+        items = []
+        next_cursor = cursor
+        while len(items) < limit:
+            page = await service.list_scans(
+                _caller(user, caller_type=_AuditCaller),
+                statuses=set(status_filter or []),
+                cursor=next_cursor,
+                limit=limit - len(items),
+            )
+            items.extend(item for item in page["items"] if item.get("workspace_ref") not in removed_projects)
+            previous_cursor, next_cursor = next_cursor, page.get("next_cursor")
+            if not next_cursor or next_cursor == previous_cursor:
+                break
+        return {"items": items, "next_cursor": next_cursor}
     except Exception as exc:
         raise _map_service_error(exc, AuditServiceError) from exc
 
@@ -579,3 +593,47 @@ async def configure_audit(request: Request, payload: AuditConfigurationRequest):
         return result.model_dump()
     except Exception as exc:
         raise _map_service_error(exc, error_type) from exc
+
+
+@router.post('/projects/import')
+async def import_source_project(request: Request):
+    """Import source code and register it for the requesting administrator."""
+    import asyncio
+    import zipfile
+    import httpx
+    from flocks.project.source_import import import_project
+    user = require_admin(request)
+    try:
+        async with request.form(max_files=1, max_fields=5) as form:
+            return await asyncio.wait_for(import_project(
+                owner_id=user.id,
+                kind=str(form.get('kind', '')),
+                name=str(form.get('name', '')).strip() or None,
+                url=str(form.get('url', '')),
+                branch=str(form.get('branch', '')),
+                upload=form.get('file'),
+            ), timeout=240)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except (zipfile.BadZipFile, RuntimeError) as exc:
+        raise HTTPException(400, detail='无法读取 ZIP，请上传未加密的有效 ZIP 源码包') from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, detail='源码下载失败，请检查 URL 和访问权限') from exc
+    except TimeoutError as exc:
+        raise HTTPException(408, detail='源码导入超时，请稍后重试') from exc
+
+
+@router.delete('/projects/{project_id}', status_code=204)
+async def delete_audit_project(request: Request, project_id: str):
+    user = require_admin(request)
+    async with Project.lifecycle_guard(project_id):
+        project = await Project.get(project_id, owner_id=user.id)
+        if project is None:
+            raise HTTPException(404, detail="项目不存在或无权删除")
+        service, caller_type, _, error_type = _service_types(request)
+        try:
+            project_ids = Project.audit_history_project_ids(user.id, project)
+            await service.delete_project_audits(project_ids, _caller(user, caller_type=caller_type))
+            await Project.purge_registrations(user.id, project_ids)
+        except Exception as exc:
+            raise _map_service_error(exc, error_type) from exc

@@ -48,6 +48,8 @@ def start(
     ),
     task_timeout: int = typer.Option(7200, min=1, help="Total seconds allowed per task, including preparation."),
     max_snapshot_bytes: int = typer.Option(4 * 1024**3, min=1),
+    max_snapshot_files: int = typer.Option(50_000, min=1, help="Maximum files included in each audit snapshot."),
+    exclude_cyclic_symlinks: bool = typer.Option(False, help="Exclude cyclic source symlinks and record coverage exclusions."),
     run_dir: Optional[Path] = typer.Option(None),
     auto_exclude_external_symlinks: bool = typer.Option(
         False, "--auto-exclude-external-symlinks",
@@ -78,6 +80,8 @@ def start(
             dynamic_concurrency=dynamic_concurrency,
             task_timeout=task_timeout,
             max_snapshot_bytes=max_snapshot_bytes,
+            max_snapshot_files=max_snapshot_files,
+            exclude_cyclic_symlinks=exclude_cyclic_symlinks,
             skip_external_symlinks=skip_external_symlink,
             auto_exclude_external_symlinks=auto_exclude_external_symlinks,
         )

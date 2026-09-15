@@ -24,6 +24,7 @@ export function NativePhaseSessions({
 }) {
   const { t } = useCodeSecurityI18n();
   const api = useAuditApi();
+  const Transcript = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.AuditSessionTranscript;
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -44,7 +45,7 @@ export function NativePhaseSessions({
           const failure = readApiFailure(reason, t("无法读取阶段会话"));
           setError(
             failure.message === "Code security request failed"
-              ? t("阶段会话加载失败，可重试或查看下方执行事件。")
+              ? t("阶段会话加载失败，请重试。")
               : failure.message,
           );
         }
@@ -72,7 +73,7 @@ export function NativePhaseSessions({
       {data && !data.complete && (
         <p role="status">
           {data.reason === "isolated_session_store"
-            ? t("此任务的会话位于独立批次存储，当前仅展示执行事件。")
+            ? t("此任务的会话位于独立批次存储，当前无法读取。")
             : data.reason === "sessions_cleaned"
               ? t("中间会话已清理，可查看保留的审计产物。")
               : t(
@@ -81,9 +82,14 @@ export function NativePhaseSessions({
         </p>
       )}
       {data?.items?.length === 0 && data.complete && (
-        <p>{t("该阶段暂无智能体会话，执行过程见下方步骤。")}</p>
+        <p>{t("该阶段暂无智能体会话。")}</p>
       )}
-      {data?.items?.map((session: any, index: number) => (
+      {data?.items?.map((session: any, index: number) => {
+        // The leading user messages are worker setup instructions, not user conversation.
+        // Keep them in the stored transcript and full audit context, but omit them here.
+        const firstOutput = session.messages.findIndex((message: any) => message.role === "assistant");
+        const visibleMessages = firstOutput < 0 ? [] : session.messages.slice(firstOutput);
+        return (
         <details
           key={session.attempt_id}
           open={index === data.items.length - 1}
@@ -95,43 +101,17 @@ export function NativePhaseSessions({
             {session.model_id || t("默认模型")}
           </summary>
           {!session.available && <p>{t("此会话已不可用。")}</p>}
-          {session.available && !session.messages.length && (
+          {session.available && !visibleMessages.length && (
             <p>{t("等待会话输出…")}</p>
           )}
-          {session.messages.map((message: any) => (
-            <article
-              key={message.id}
-              className={`cs-native-message cs-native-message--${message.role}`}
-            >
-              <small>
-                {message.role === "user" ? t("审计任务指令") : "Agent"}
-              </small>
-              {message.parts.map((part: any, i: number) =>
-                part.type === "text" ? (
-                  <AuditMarkdown key={i} text={part.text} />
-                ) : (
-                  <details key={i} className="cs-native-tool">
-                    <summary>
-                      {part.tool} · {part.status}
-                    </summary>
-                    <pre>
-                      {JSON.stringify(
-                        {
-                          input: part.input,
-                          output: part.output,
-                          error: part.error,
-                        },
-                        null,
-                        2,
-                      )}
-                    </pre>
-                  </details>
-                ),
-              )}
-            </article>
-          ))}
+          {Transcript ? (
+            <Transcript messages={visibleMessages} running={running && ["pending", "running", "recovering"].includes(session.status)} />
+          ) : (
+            <p role="status">{t("请刷新页面以加载工作台会话组件。")}</p>
+          )}
         </details>
-      ))}
+        );
+      })}
     </section>
   );
 }
@@ -154,6 +134,38 @@ export function AuditConversation({
 }) {
   const { t } = useCodeSecurityI18n();
   const api = useAuditApi();
+  const Transcript = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.AuditSessionTranscript;
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const conversationRef = useRef<HTMLElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const section = conversationRef.current;
+    const dock = dockRef.current;
+    if (!section || !dock) return;
+    const position = () => {
+      const bounds = section.getBoundingClientRect();
+      const left = Math.max(12, bounds.left);
+      const right = Math.min(window.innerWidth - 12, bounds.right);
+      const width = Math.max(0, Math.min(760, right - left));
+      dock.style.width = `${width}px`;
+      dock.style.left = `${left + (right - left - width) / 2}px`;
+      section.style.paddingBottom = `${dock.getBoundingClientRect().height + 32}px`;
+    };
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
+    observer?.observe(section);
+    observer?.observe(dock);
+    const workspace = section.closest(".code-security-workspace");
+    if (workspace) observer?.observe(workspace);
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    position();
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, []);
+
   const [state, setState] = useState<{
     ready: boolean;
     reason?: string;
@@ -162,6 +174,11 @@ export function AuditConversation({
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [question, setQuestion] = useState("");
+  useEffect(() => {
+    const input = inputRef.current;
+    if (input) { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 240)}px`; }
+  }, [question]);
+
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
   const attempt = useRef<{ question: string; id: string } | undefined>(
@@ -253,11 +270,17 @@ export function AuditConversation({
     }
   };
   return (
-    <section className="cs-result-conversation" aria-label={t("审计结果会话")}>
+    <section ref={conversationRef} className="cs-result-conversation" aria-label={t("审计结果会话")}>
       {state.turns.map((turn) => (
         <article className="cs-answer-turn" key={turn.request_id}>
-          <div className="cs-user-question">{turn.question}</div>
-          <AuditMarkdown text={turn.answer} />
+          {Transcript ? (
+            <Transcript messages={[
+              { id: `${turn.request_id}-user`, role: "user", parts: [{ type: "text", text: turn.question }] },
+              { id: `${turn.request_id}-answer`, role: "assistant", finish: "stop", parts: [{ type: "text", text: turn.answer }] },
+            ]} />
+          ) : (
+            <><div className="cs-user-question">{turn.question}</div><AuditMarkdown text={turn.answer} /></>
+          )}
           <div className="cs-answer-sources">
             {turn.sources.map((source) =>
               source.phase_run_id ? (
@@ -283,8 +306,12 @@ export function AuditConversation({
           </div>
         </article>
       ))}
-      <form className="cs-qa-composer" onSubmit={send}>
+      <div ref={dockRef} className="cs-conversation-dock">
+      <form className="cs-qa-composer cs-workbench-composer" onSubmit={send} aria-busy={sending}>
+        <div className="cs-composer-input">
         <textarea
+          ref={inputRef}
+          rows={1}
           aria-label={t("审计结果追问")}
           maxLength={8000}
           disabled={!state.ready || sending || loading}
@@ -304,39 +331,43 @@ export function AuditConversation({
             loading
               ? t("正在准备全部阶段的会话与产物…")
               : state.ready
-                ? t("基于全部阶段与产物继续追问…")
+                ? t("追问 Agent…（Enter 发送，Shift+Enter 换行）")
                 : state.reason || t("问答上下文尚未就绪")
           }
         />
-        <div>
-          <span>
+        </div>
+        <div className="cs-composer-toolbar">
+          <span className="cs-composer-context">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z" /></svg>
             {state.ready
               ? t("基于全部阶段会话与审计产物 · 只读问答")
               : state.reason || t("正在检查会话条件")}
           </span>
-          {state.ready && (
-            <button
-              type="submit"
-              className="cs-button cs-button--primary"
-              disabled={sending || !question.trim()}
-            >
-              {sending ? t("正在回答…") : t("发送")}
-            </button>
-          )}
+          <button
+            type="submit"
+            className="cs-composer-send"
+            aria-label={sending ? t("正在回答…") : t("发送")}
+            title={sending ? t("正在回答…") : t("发送")}
+            disabled={!state.ready || loading || sending || !question.trim()}
+          >
+            {sending ? <svg className="cs-composer-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-8-8" /></svg>
+              : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v14" /></svg>}
+          </button>
         </div>
-        {error && <p role="alert">{error}</p>}
+      </form>
+      {error && <p role="alert">{error}</p>}
         {detail.scan.lifecycle_status === "completed" &&
           !loading &&
           !sending && (
             <button
               type="button"
-              className="cs-button cs-button--secondary"
+              className="cs-conversation-refresh"
               onClick={() => setRetry((v) => v + 1)}
             >
               {t("刷新上下文")}
             </button>
           )}
-      </form>
+      </div>
     </section>
   );
 }

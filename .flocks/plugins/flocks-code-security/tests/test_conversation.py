@@ -37,25 +37,27 @@ def audit(tmp_path):
     return service, scan_id, caller, scan, detail
 
 
-def test_existing_database_migrates_without_losing_scans(audit):
+@pytest.mark.parametrize("existing_version", [8, 9, 10])
+def test_existing_database_migrates_without_losing_scans(audit, existing_version):
     service, sid, *_ = audit
     with service.store._connect() as connection:
         connection.execute("DROP TABLE scan_phase_sessions")
         connection.execute("DROP TABLE audit_chat_turns")
-        connection.execute("PRAGMA user_version = 8")
+        connection.execute(f"PRAGMA user_version = {existing_version}")
     ScanStore(service.store.database_path).initialize()
     with service.store._connect() as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA_VERSION
         assert connection.execute("SELECT scan_id FROM scans").fetchone()[0] == sid
         assert connection.execute("SELECT COUNT(*) FROM audit_chat_turns").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM scan_phase_sessions").fetchone()[0] == 0
 
 
-def test_visible_transcripts_omit_system_and_reasoning():
+def test_visible_transcripts_preserve_workbench_parts_without_system_fields():
     rows = [
         {
             "info": {"id": "a", "role": "assistant", "system": "secret"},
             "parts": [
-                {"type": "reasoning", "text": "private"},
+                {"id": "think-1", "type": "reasoning", "text": "Inspecting entry points", "time": {"start": 100, "end": 200}, "metadata": {"private": "secret"}},
                 {"type": "text", "text": "visible"},
                 {"type": "text", "text": "internal", "synthetic": True},
                 {
@@ -68,8 +70,10 @@ def test_visible_transcripts_omit_system_and_reasoning():
         {"info": {"id": "s", "role": "system"}, "parts": [{"type": "text", "text": "hidden"}]},
     ]
     result = chat.public_messages(rows)
-    assert len(result) == 1 and len(result[0]["parts"]) == 2
-    assert result[0]["parts"][1]["output"] == "source"
+    assert len(result) == 1 and len(result[0]["parts"]) == 3
+    assert result[0]["parts"][2]["output"] == "source"
+    assert result[0]["parts"][0]["text"] == "Inspecting entry points"
+    assert result[0]["parts"][0]["time"] == {"start": 100, "end": 200}
     assert "private" not in json.dumps(result) and "secret" not in json.dumps(result)
 
 

@@ -138,6 +138,8 @@ class ProjectInfo(BaseModel):
 
     id: str
     worktree: str
+    source_kind: Optional[Literal["local", "git", "zip", "url"]] = Field(None, alias="sourceKind")
+    scope: Optional[Literal["workbench", "code-security"]] = None
     vcs: Optional[str] = None
     name: Optional[str] = None
     icon: Optional[ProjectIcon] = None
@@ -165,6 +167,8 @@ class ProjectRegistryEntry(BaseModel):
     id: str
     name: str
     worktree: str
+    source_kind: Optional[Literal["local", "git", "zip", "url"]] = Field(None, alias="sourceKind")
+    scope: Optional[Literal["workbench", "code-security"]] = None
     created_at: int = Field(alias="createdAt")
     updated_at: int = Field(alias="updatedAt")
     owner_user_id: Optional[str] = Field(None, alias="ownerUserID")
@@ -484,6 +488,8 @@ class Project:
             id=entry.id,
             worktree=entry.worktree,
             name=entry.name,
+            sourceKind=entry.source_kind,
+            scope=entry.scope or ("code-security" if entry.source_kind in {"git", "zip", "url"} else "workbench"),
             vcs="git" if (Path(entry.worktree) / ".git").exists() else None,
             time=ProjectTime(created=entry.created_at, updated=entry.updated_at),
             pathStatus=cls._path_status(entry.worktree),
@@ -515,6 +521,8 @@ class Project:
         owner_id: str,
         name: Optional[str],
         worktree: str,
+        source_kind: Literal["local", "git", "zip", "url"] = "local",
+        scope: Literal["workbench", "code-security"] = "workbench",
     ) -> ProjectInfo:
         """Register an existing directory for a user."""
 
@@ -554,7 +562,11 @@ class Project:
                     ),
                     None,
                 )
-                if removed_entry is not None:
+                # Re-adding an audit source starts a new project history.
+                # Keep the old registration removed so its scans stay hidden.
+                if removed_entry is not None and scope != "code-security" and removed_entry.scope != "code-security":
+                    removed_entry.scope = scope
+                    removed_entry.source_kind = source_kind
                     removed_entry.name = normalized_name
                     removed_entry.worktree = normalized_worktree
                     removed_entry.owner_user_id = owner_id
@@ -574,6 +586,8 @@ class Project:
                     createdAt=now,
                     updatedAt=now,
                     ownerUserID=owner_id,
+                    sourceKind=source_kind,
+                    scope=scope,
                 )
                 registry.projects.append(entry)
                 cls._write_registry(owner_id, registry)
@@ -865,6 +879,26 @@ class Project:
             cls.invalidate_session_stats(owner_id)
             log.info("project.restored", {"id": project_id})
             return cls._entry_to_info(entry)
+
+    @classmethod
+    def audit_history_project_ids(cls, owner_id: str, project: ProjectInfo) -> set[str]:
+        return {entry.id for entry in cls._read_registry(owner_id).projects
+                if entry.id == project.id or (entry.removed_at is not None and
+                    cls._normalized_worktree(entry.worktree) == cls._normalized_worktree(project.worktree))}
+
+    @classmethod
+    async def purge_registrations(cls, owner_id: str, project_ids: set[str]) -> None:
+        """Remove registrations after the caller has cleaned their audit data."""
+        async with cls._lock:
+            with _registry_cross_process_lock(cls.registry_path(owner_id)):
+                registry = cls._read_registry(owner_id)
+                registry.projects = [entry for entry in registry.projects if entry.id not in project_ids]
+                cls._write_registry(owner_id, registry)
+            cls.invalidate_session_stats(owner_id)
+
+    @classmethod
+    def removed_project_ids(cls) -> set[str]:
+        return {entry.id for entry in cls._all_registry_entries(include_removed=True) if entry.removed_at is not None}
 
     @classmethod
     def registered_project_ids(cls, owner_id: str) -> set[str]:

@@ -147,6 +147,7 @@ class StartScanRequest:
     source_exclusions: tuple[dict[str, str], ...] = ()
     max_file_bytes: int | None = None
     max_total_bytes: int | None = None
+    max_files: int = 50_000
     copy_source: bool = True
     cleanup_intermediates: bool = False
     dynamic_enabled: bool = False
@@ -633,6 +634,7 @@ class AuditService:
             source_exclusions=self._validate_source_exclusions(request.source_exclusions, request.exclude_patterns),
             max_file_bytes=request.max_file_bytes,
             max_total_bytes=request.max_total_bytes,
+            max_files=request.max_files,
             copy_source=bool(request.copy_source),
             cleanup_intermediates=request.cleanup_intermediates,
             dynamic_enabled=bool(request.dynamic_enabled),
@@ -689,6 +691,8 @@ class AuditService:
             )
         if normalized.model and len(normalized.model) > 256:
             raise AuditServiceError("invalid_parameter", "model may contain at most 256 characters")
+        if type(normalized.max_files) is not int or normalized.max_files < 1:
+            raise AuditServiceError("invalid_parameter", "max_files must be a positive integer")
         if normalized.max_total_bytes is not None and (
             type(normalized.max_total_bytes) is not int or normalized.max_total_bytes < 1
         ):
@@ -730,6 +734,7 @@ class AuditService:
                 exclude_patterns=list(normalized.exclude_patterns) or None,
                 max_file_bytes=normalized.max_file_bytes,
                 max_total_bytes=normalized.max_total_bytes,
+                max_files=normalized.max_files,
                 copy_source=normalized.copy_source,
                 cleanup_intermediates=normalized.cleanup_intermediates,
                 mode=normalized.scan_mode,
@@ -979,7 +984,11 @@ class AuditService:
         return {
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "scan": public_scan,
-            "target": snapshot.public_dict(),
+            "target": {
+                **snapshot.public_dict(),
+                "source_path": snapshot.source_path or (snapshot.root_path if not snapshot.copy_source else None),
+                "snapshot_path": snapshot.root_path if snapshot.copy_source else None,
+            },
             "counts": status.get("counts", {}),
             "finding_summary": self._finding_summary(
                 scan_id,
@@ -1192,7 +1201,33 @@ class AuditService:
             await cleanup_scan(self.runtime, scan_id, owned_parent_session=bool(scan.get("task_owner_token")))
         return await self.get_scan(scan_id, caller)
 
-    async def delete_scan(self, scan_id: str, caller: AuditCaller) -> None:
+    async def delete_project_audits(self, project_ids: set[str], caller: AuditCaller) -> None:
+        if not caller.is_admin:
+            raise AuditServiceError("scan_delete_forbidden", "Only administrators may delete audits", status_code=403)
+        placeholders = ",".join("?" for _ in project_ids)
+        if not placeholders:
+            return
+        with self.store._connect() as connection:
+            scans = [dict(row) for row in connection.execute(
+                f"SELECT * FROM scans WHERE workspace_ref IN ({placeholders})", tuple(project_ids)
+            ).fetchall()]
+        if any(scan["status"] not in TERMINAL_SCAN_STATUSES for scan in scans):
+            raise AuditServiceError("scan_delete_conflict", "项目仍有运行中的审计，请先取消并等待停止后再删除", status_code=409)
+        from flocks.session.session import Session
+        from flocks_code_security.cleanup import _delete_session, _owned_worker_sessions
+        for scan in scans:
+            session_ids = self.store.cleanup_session_ids(scan["scan_id"])
+            session_ids.extend(await _owned_worker_sessions(scan["parent_session_id"], scan["scan_id"]))
+            parent = await Session.get_by_id_unfiltered(scan["parent_session_id"])
+            # A scan launched from an ordinary chat must not delete that chat.
+            if parent is not None and parent.agent == "code-security":
+                session_ids.append(parent.id)
+            allowed = set(session_ids)
+            for session_id in dict.fromkeys(session_ids):
+                await _delete_session(session_id, allowed)
+            await self.delete_scan(scan["scan_id"], caller, strict_cleanup=True)
+
+    async def delete_scan(self, scan_id: str, caller: AuditCaller, *, strict_cleanup: bool = False) -> None:
         if not caller.is_admin:
             raise AuditServiceError(
                 "scan_delete_forbidden",
@@ -1209,7 +1244,7 @@ class AuditService:
 
         output = find_output_directory(scan_id)
         try:
-            deleted = await asyncio.to_thread(self.store.delete_terminal_scan, scan_id)
+            deleted = await asyncio.to_thread(self.store.delete_terminal_scan, scan_id, dry_run=strict_cleanup)
         except ValueError as exc:
             current = self.store.get_scan(scan_id)
             if current is None:
@@ -1250,13 +1285,18 @@ class AuditService:
                     root=root,
                     expected_name=expected_name,
                 )
-            except OSError:
+            except OSError as exc:
+                if strict_cleanup:
+                    raise AuditServiceError("project_cleanup_failed", "审计文件清理失败，项目已保留，请重试", status_code=500) from exc
                 logger.warning(
                     "Failed to remove code-security storage after deleting scan %s: %s",
                     scan_id,
                     path,
                     exc_info=True,
                 )
+
+        if strict_cleanup:
+            await asyncio.to_thread(self.store.delete_terminal_scan, scan_id)
 
     async def get_result(self, scan_id: str, caller: AuditCaller) -> dict[str, Any]:
         detail = await self.get_scan(scan_id, caller)
@@ -1519,6 +1559,7 @@ class AuditService:
             directory=str(runtime_dir()),
             title=f"Code security audit: {request.target_path.name}",
             agent="code-security",
+            metadata={"hideFromSessionManager": True, "session_scope": "code-security"},
             provider=provider_id,
             model=model_id,
             model_pinned=True,
@@ -1662,9 +1703,9 @@ class AuditService:
         for item in values:
             if (not isinstance(item, dict) or set(item) != {"path", "target", "reason"}
                     or not all(isinstance(value, str) for value in item.values())
-                    or item["reason"] not in {"external_symlink", "external_symlink_auto", "broken_internal_symlink"}
+                    or item["reason"] not in {"external_symlink", "external_symlink_auto", "broken_internal_symlink", "cyclic_symlink"}
                     or not item["target"]
-                    or (item["target"].startswith("/") == (item["reason"] == "broken_internal_symlink"))
+                    or (item["target"].startswith("/") == (item["reason"] in {"broken_internal_symlink", "cyclic_symlink"}))
                     or glob.escape(item["path"]) not in patterns):
                 raise AuditServiceError("invalid_parameter", "Source exclusions must match explicit audit scope")
             result.append(dict(item))
@@ -1734,6 +1775,7 @@ class AuditService:
             "exclude_patterns": list(request.exclude_patterns),
             "max_file_bytes": request.max_file_bytes,
             "max_total_bytes": request.max_total_bytes,
+            "max_files": request.max_files,
             "copy_source": request.copy_source,
             "cleanup_intermediates": request.cleanup_intermediates,
             "dynamic_enabled": request.dynamic_enabled,

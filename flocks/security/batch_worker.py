@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -15,7 +16,7 @@ import tarfile
 import tempfile
 import time
 
-from flocks.security.batch import atomic_json, file_lock, read_json, resolve_task
+from flocks.security.batch import atomic_json, file_lock, read_json, resolve_task, task_result
 from flocks.utils.process_identity import process_identity
 
 
@@ -23,6 +24,7 @@ def extract_source(
     archive: Path, destination: Path, limit: int,
     *, skip_external_symlinks: dict[str, str] | None = None,
     auto_exclude_external_symlinks: bool = False,
+    exclude_cyclic_symlinks: bool = False,
 ) -> list[dict[str, str]]:
     """Validate entries and record omitted external or broken internal symlinks."""
     from flocks.security.batch import parse_link_exclusions
@@ -75,6 +77,12 @@ def extract_source(
         normalized = destination.with_name(destination.name + "-normalized")
         total, entries = 0, 0
 
+        def exclude_cycle(source: Path, target: Path) -> None:
+            name = target.relative_to(normalized).as_posix()
+            exclusions[name] = {"path": name, "target": os.readlink(source), "reason": "cyclic_symlink"}
+            if len(exclusions) > 128 or len(json.dumps(list(exclusions.values())).encode("utf-8")) > 48_000:
+                raise ValueError("Source exclusion metadata exceeds limit")
+
         def copy_node(source: Path, target: Path, ancestors: frozenset[Path]) -> None:
             nonlocal total, entries
             entries += 1
@@ -99,8 +107,14 @@ def extract_source(
                         raise ValueError("Source exclusion metadata exceeds limit")
                     return
             except (OSError, RuntimeError) as exc:
+                if exclude_cyclic_symlinks and source.is_symlink() and (isinstance(exc, RuntimeError) or exc.errno == errno.ELOOP):
+                    exclude_cycle(source, target)
+                    return
                 raise ValueError(f"Unresolved or cyclic source link: {source.relative_to(destination)}") from exc
             if resolved in ancestors:
+                if exclude_cyclic_symlinks and source.is_symlink():
+                    exclude_cycle(source, target)
+                    return
                 raise ValueError(f"Cyclic source link: {source.relative_to(destination)}")
             if resolved.is_dir():
                 target.mkdir()
@@ -124,17 +138,40 @@ def cleanup_work(path: str | None, task_dir: Path) -> None:
     if not path:
         return
     root = Path(path)
+    receipt = task_dir / f".cleanup-{root.name}.json"
     if not root.exists():
+        receipt.unlink(missing_ok=True)
         return
     if root.is_symlink() or root.parent.resolve() != Path(tempfile.gettempdir()).resolve():
         raise ValueError("Refusing cleanup outside batch temporary directory")
-    if (root / ".batch-owner").read_text() != str(task_dir):
+    marker = root / ".batch-owner"
+    identity = root.stat()
+    expected = {"path": str(root.resolve()), "device": identity.st_dev, "inode": identity.st_ino}
+    if not marker.exists():
+        # Only finish an empty directory whose ownership was verified before interruption.
+        if receipt.is_file() and read_json(receipt) == expected:
+            root.rmdir()
+            receipt.unlink()
+            return
+        raise FileNotFoundError(f"Temporary directory owner marker missing: {marker}")
+    if marker.is_symlink() or marker.read_text() != str(task_dir):
         raise ValueError("Temporary directory owner mismatch")
     root.chmod(0o700)
     for child in root.rglob("*"):
         if not child.is_symlink():
             child.chmod(0o700 if child.is_dir() else 0o600)
-    shutil.rmtree(root)
+    # Keep the ownership marker until all potentially failing recursive work ends.
+    for child in root.iterdir():
+        if child.name == ".batch-owner":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink(missing_ok=True)
+    atomic_json(receipt, expected)
+    marker.unlink()
+    root.rmdir()
+    receipt.unlink()
 
 
 def scan_summary(store, scan_id: str) -> dict:
@@ -149,7 +186,46 @@ def scan_summary(store, scan_id: str) -> dict:
         "cleanup_status": json.loads(status.get("cleanup_summary_json", "{}")).get("status", "pending"),
         "output_dir": status.get("output_dir"),
         "error": status.get("failure_summary"),
+        "failure_code": status.get("failure_code"),
     }
+
+
+def merge_scan_summary(result: dict, summary: dict) -> None:
+    """Keep business failures distinct from the scheduler's termination reason."""
+    result.update({key: value for key, value in summary.items() if key not in {"status", "error"}})
+    if summary["status"] == "completed" or summary.get("audit_status") == "failed":
+        result["status"] = summary["status"]
+        if summary.get("error"):
+            result["error"] = summary["error"]
+        else:
+            result.pop("error", None)
+
+
+async def wait_for_cancel(task_dir: Path, attempt: str, started_at: float, timeout: float) -> str:
+    """Worker-side deadline remains a fallback if its scheduler disappears."""
+    while True:
+        cancel = task_dir / "cancel.json"
+        if cancel.exists() and read_json(cancel).get("attempt") in {attempt, "pending"}:
+            return "cancelled"
+        if time.time() - started_at >= timeout:
+            return "timed_out"
+        await asyncio.sleep(0.2)
+
+
+async def stop_audit_task(task: asyncio.Task, task_dir: Path, result: dict) -> None:
+    """Bound cancellation in this private worker, including cancellation-resistant tasks."""
+    task.cancel()
+    _, pending = await asyncio.wait({task}, timeout=10)
+    if not pending:
+        await asyncio.gather(task, return_exceptions=True)
+        return
+    result.update(cleanup_status="failed", cleanup_error="Worker audit did not stop within cancellation grace")
+    atomic_json(task_dir / "result.json", result)
+    # Do not enter asyncio.run's unbounded pending-task shutdown. The supervisor
+    # reconciles the persisted result after this worker and its tools stop.
+    if os.name == "posix" and os.getpgrp() == os.getpid():
+        os.killpg(os.getpid(), signal.SIGKILL)
+    os._exit(1)
 
 
 async def execute(root: Path, task_id: str, attempt: str) -> dict:
@@ -185,6 +261,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
             archive, source, config["max_snapshot_bytes"],
             skip_external_symlinks=config.get("skip_external_symlinks"),
             auto_exclude_external_symlinks=config.get("auto_exclude_external_symlinks", False),
+            exclude_cyclic_symlinks=config.get("exclude_cyclic_symlinks", False),
         )
         result["source_exclusions"] = exclusions
         atomic_json(task_dir / "source-exclusions.json", {"exclusions": exclusions})
@@ -213,33 +290,35 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 source_exclusions=exclusions,
                 cleanup_intermediates=True,
                 max_total_bytes=config["max_snapshot_bytes"],
+                max_files=config.get("max_snapshot_files", 50_000),
             )
 
         audit_task = asyncio.create_task(audit())
 
-        async def cancel_requested():
-            while True:
-                cancel = task_dir / "cancel.json"
-                if cancel.exists() and read_json(cancel).get("attempt") in {attempt, "pending"}:
-                    return "cancelled"
-                if time.time() - current["started_at"] >= config["task_timeout"]:
-                    return "timed_out"
-                await asyncio.sleep(0.2)
-
-        watcher = asyncio.create_task(cancel_requested())
+        watcher = asyncio.create_task(wait_for_cancel(
+            task_dir, attempt, current["started_at"], config["task_timeout"],
+        ))
         try:
             done, _ = await asyncio.wait({audit_task, watcher}, return_when=asyncio.FIRST_COMPLETED)
             if audit_task in done:
                 await audit_task
                 result.update(scan_summary(runtime.store, scan_id))
+                atomic_json(task_dir / "result.json", result)
             else:
                 result["status"] = watcher.result()
-                audit_task.cancel()
-                await asyncio.gather(audit_task, return_exceptions=True)
+                atomic_json(task_dir / "result.json", result)
         finally:
             watcher.cancel()
-            audit_task.cancel()
-            await asyncio.gather(watcher, audit_task, return_exceptions=True)
+            await asyncio.gather(watcher, return_exceptions=True)
+            if not audit_task.done():
+                if result["status"] == "failed" and not result.get("error"):
+                    result.update(status="cancelled", error="Audit cancelled")
+                stopping = asyncio.create_task(stop_audit_task(audit_task, task_dir, result))
+                try:
+                    await asyncio.shield(stopping)
+                except asyncio.CancelledError:
+                    await asyncio.shield(stopping)
+                    raise
     except asyncio.CancelledError:
         result.update(status="cancelled", error="Audit cancelled")
     except Exception as exc:
@@ -249,7 +328,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
             result["scan_id"] = scan_id
             try:
                 latest = scan_summary(runtime.store, scan_id)
-                result.update({key: value for key, value in latest.items() if key not in {"status", "error"}})
+                merge_scan_summary(result, latest)
             except Exception as exc:
                 result["state_error"] = str(exc)
         atomic_json(task_dir / "result.json", result)
@@ -279,12 +358,12 @@ def main() -> None:
         try:
             result = asyncio.run(run())
         except BaseException as exc:
-            result = {
-                "status": "cancelled" if isinstance(exc, KeyboardInterrupt) else "failed",
+            result = task_result(task_dir) or {
+                "status": "cancelled" if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)) else "failed",
                 "attempt": attempt,
                 "error": f"{type(exc).__name__}: {exc}",
-                "cleanup_status": "failed",
             }
+            result.update(cleanup_status="failed", cleanup_error=f"{type(exc).__name__}: {exc}")
             atomic_json(task_dir / "result.json", result)
         # Reconcile the isolated store and remove local files only after resource shutdown.
         from flocks.security.batch import cleanup_child_work

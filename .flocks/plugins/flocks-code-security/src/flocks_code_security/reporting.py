@@ -1125,7 +1125,7 @@ class ReportWriter:
             and merged_coverage["completeness"] == "complete"
             and not uncovered
             and not failed_files
-            and not any(item["reason"] in {"external_symlink_auto", "broken_internal_symlink"} for item in data.get("source_exclusions", []))
+            and not any(item["reason"] in {"external_symlink_auto", "broken_internal_symlink", "cyclic_symlink"} for item in data.get("source_exclusions", []))
             else "partial"
         )
         total_files = len(snapshot_files)

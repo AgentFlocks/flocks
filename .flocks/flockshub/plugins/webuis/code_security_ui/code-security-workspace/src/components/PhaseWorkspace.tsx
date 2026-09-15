@@ -21,7 +21,7 @@ import type {
   WorkerRun,
 } from "../types";
 import { Icon } from "../icons";
-import { EventStream } from "./EventStream";
+
 import { ElapsedTime } from "./ElapsedTime";
 import { StatusBadge } from "./StatusBadge";
 
@@ -76,10 +76,9 @@ const attemptStatusLabels: Record<string, string> = {
 
 export function PhaseWorkspace({
   scanId,
-  requestedPhase,
   onOpenArtifacts,
+  requestedPhase,
   phases,
-  events,
   workers,
   currentPhase,
   snapshotBoundary,
@@ -87,14 +86,10 @@ export function PhaseWorkspace({
   dynamicValidationStatus,
   finalFindingCount = null,
   finalFindingBasis = "审计完成后确定",
-  hasOlderEvents = false,
-  loadingEvents = false,
-  loadingOlderEvents = false,
-  onLoadOlderEvents = async () => undefined,
 }: {
   scanId?: string;
   requestedPhase?: { id: string };
-  onOpenArtifacts?: () => void;
+  onOpenArtifacts?: (kind?: string) => void;
   phases: PhaseRun[];
   events: AuditEvent[];
   workers: WorkerRun[];
@@ -115,7 +110,7 @@ export function PhaseWorkspace({
   const { language, t } = useCodeSecurityI18n();
   const sorted = useMemo(
     () =>
-      [...phases].sort((a, b) => {
+      phases.filter((phase) => phase.status !== "skipped").sort((a, b) => {
         const byTime = (a.started_at || a.created_at || "").localeCompare(
           b.started_at || b.created_at || "",
         );
@@ -139,7 +134,7 @@ export function PhaseWorkspace({
         ? (numberValue(phase.summary?.adjudication_round) ?? phase.ordinal)
         : phase.ordinal;
     return round > 1 ||
-      phases.filter((item) => item.phase === phase.phase).length > 1
+      sorted.filter((item) => item.phase === phase.phase).length > 1
       ? `${label} · ${t("第 {{round}} 轮", { round })}`
       : label;
   };
@@ -167,36 +162,22 @@ export function PhaseWorkspace({
       ? selected.summary?.adjudication_round
       : undefined,
   );
-  const eventsWithPhase = useMemo(() => {
-    const phaseByRunId = new Map(
-      sorted.map((phase) => [phase.phase_run_id, phase.phase]),
-    );
-    return events
-      .map((event) => {
-        // Prefer the durable run identifier. Older snapshot events predate phase metadata.
-        const phase = event.phase_run_id
-          ? phaseByRunId.get(event.phase_run_id)
-          : event.summary.phase ||
-            (event.type === "scan.snapshot_ready" ? "snapshot" : undefined);
-        return phase
-          ? { ...event, summary: { ...event.summary, phase } }
-          : event;
-      })
-      .filter(
-        (event) =>
-          selected &&
-          (event.phase_run_id
-            ? event.phase_run_id === selected.phase_run_id
-            : event.summary.phase === selected.phase &&
-              sorted.filter((p) => p.phase === selected.phase).length === 1),
-      );
-  }, [events, sorted, selected]);
+  const stageArtifactKinds: Record<string, string[]> = {
+    snapshot: ["snapshot_summary"], threat_modeling: ["threat_model"],
+    baseline: ["candidate_index"], investigation: ["candidate_index"],
+    verification: ["verification_index"], dynamic_validation: ["dynamic_validation"],
+    adjudication: ["adjudication"], targeted_rescan: ["candidate_index", "verification_index"],
+    poc_generation: ["poc_generation"],
+    finalization: ["report_markdown", "report_json", "sarif", "findings", "coverage", "scan_manifest"],
+  };
+  const stageArtifacts = (artifactBundle?.artifacts || []).filter(artifact =>
+    (stageArtifactKinds[selected?.phase || ""] || []).includes(artifact.kind));
 
   return (
     <section className="cs-execution" aria-labelledby="execution-title">
       <div className="cs-section-heading">
         <div>
-          <h2 id="execution-title">{t("阶段与实时事件")}</h2>
+          <h2 id="execution-title">{t("审计会话")}</h2>
         </div>
         <div
           className="cs-final-findings"
@@ -283,9 +264,9 @@ export function PhaseWorkspace({
         {artifactBundle && (
           <div className="cs-context-artifacts">
             <h3>{t("审计产物")}</h3>
-            {artifactBundle.artifacts.map((artifact) => (
+            {stageArtifacts.map((artifact) => (
               <div key={artifact.kind}>
-                <span>
+                <button type="button" onClick={() => onOpenArtifacts?.(artifact.kind)} disabled={!onOpenArtifacts || artifact.state === "pending"}>
                   {t(
                     (
                       {
@@ -300,75 +281,16 @@ export function PhaseWorkspace({
                       } as Record<string, string>
                     )[artifact.kind] || artifact.kind,
                   )}
-                </span>
+                </button>
                 <small>
                   {t(artifactStateLabels[artifact.state] || artifact.state)}
                 </small>
               </div>
             ))}
-            {onOpenArtifacts && (
-              <button type="button" onClick={onOpenArtifacts}>
-                {t("查看产物")}
-              </button>
-            )}
+            {stageArtifacts.length === 0 && <p className="cs-inline-empty">{t("该阶段暂无审计产物。")}</p>}
           </div>
         )}
-      </aside>
-      <div className="cs-stage-session">
-        <div className="cs-session-identity">
-          <span>R</span>
-          <strong>Rex</strong>
-          <small>{t("代码审计 · 执行记录")}</small>
-          {selectedId && (
-            <button type="button" onClick={() => setSelectedId(undefined)}>
-              {t("回到最新阶段")}
-            </button>
-          )}
-        </div>
-        {selected ? (
-          <article className="cs-current-phase" role="tabpanel">
-            <div className="cs-current-phase__header">
-              <div>
-                <span className="cs-kicker">{t("当前查看")}</span>
-                <h3>{phaseTitle(selected)}</h3>
-              </div>
-              <StatusBadge
-                status={
-                  selected.phase === "dynamic_validation" &&
-                  dynamicValidationStatus === "not_runnable"
-                    ? "not_runnable"
-                    : selected.status
-                }
-                context={t("阶段状态")}
-              />
-            </div>
-
-            {selected.status === "skipped" && (
-              <p className="cs-callout cs-callout--muted">
-                {t("启动审计时未启用动态验证。")}
-              </p>
-            )}
-            {selected.status === "partial" && (
-              <p className="cs-callout cs-callout--warning">
-                {t("该阶段仅部分完成，请结合覆盖度与限制项判断结果。")}
-              </p>
-            )}
-          </article>
-        ) : (
-          <div className="cs-inline-empty">
-            {t("阶段信息将在快照创建后出现。")}
-          </div>
-        )}
-
-        {scanId && selected && (
-          <NativePhaseSessions
-            key={`session-${selected.phase_run_id}`}
-            scanId={scanId}
-            phaseId={selected.phase_run_id}
-            running={selected.status === "running"}
-          />
-        )}
-        <details className="cs-stage-details">
+        <details className="cs-stage-details" key={selected?.phase_run_id}>
           <summary>{t("查看阶段详情与工作单元")}</summary>
           {selected && (
             <dl className="cs-metric-grid">
@@ -471,32 +393,61 @@ export function PhaseWorkspace({
             sorted.filter((p) => p.phase === selected.phase).length > 1 && (
               <p>
                 {t(
-                  "该阶段执行了多轮。当前接口未提供工作单元与轮次的关联，以下执行事件按轮次单独展示。",
+                  "该阶段执行了多轮，当前接口未提供工作单元与轮次的关联。",
                 )}
               </p>
             )}
         </details>
-        {selected && (
-          <details
-            className="cs-session-steps"
-            open
-            key={selected.phase_run_id}
-          >
-            <summary>
-              {t("查看 {{count}} 个步骤", { count: eventsWithPhase.length })}
-            </summary>
-            <EventStream
-              fixedPhase
-              key={selected?.phase_run_id || "all-events"}
-              events={eventsWithPhase}
-              selectedPhase={selected?.phase}
-              hasOlder={hasOlderEvents}
-              loading={loadingEvents}
-              loadingOlder={loadingOlderEvents}
-              onLoadOlder={onLoadOlderEvents}
-            />
-          </details>
+      </aside>
+      <div className="cs-stage-session">
+        {selectedId && (
+          <div className="cs-session-identity">
+            <button type="button" onClick={() => setSelectedId(undefined)}>
+              {t("回到最新阶段")}
+            </button>
+          </div>
         )}
+        {selected ? (
+          <article className="cs-current-phase" role="tabpanel">
+            <div className="cs-current-phase__header">
+              <div>
+                <span className="cs-kicker">{t("当前查看")}</span>
+                <h3>{phaseTitle(selected)}</h3>
+              </div>
+              <StatusBadge
+                status={
+                  selected.phase === "dynamic_validation" &&
+                  dynamicValidationStatus === "not_runnable"
+                    ? "not_runnable"
+                    : selected.status
+                }
+                context={t("阶段状态")}
+              />
+            </div>
+
+            {selected.status === "partial" && (
+              <p className="cs-callout cs-callout--warning">
+                {t("该阶段仅部分完成，请结合覆盖度与限制项判断结果。")}
+              </p>
+            )}
+          </article>
+        ) : (
+          <div className="cs-inline-empty">
+            {t("阶段信息将在快照创建后出现。")}
+          </div>
+        )}
+
+        {selected?.phase === "snapshot" ? (
+          <SnapshotOverview boundary={snapshotBoundary} completed={selected.status === "completed"} />
+        ) : scanId && selected ? (
+          <NativePhaseSessions
+            key={`session-${selected.phase_run_id}`}
+            scanId={scanId}
+            phaseId={selected.phase_run_id}
+            running={selected.status === "running"}
+          />
+        ) : null}
+
       </div>
     </section>
   );
@@ -1130,6 +1081,51 @@ function WorkerAttemptHistory({ attempts }: { attempts: WorkerAttempt[] }) {
   );
 }
 
+function SnapshotOverview({ boundary, completed }: {
+  boundary?: ScanDetail["target"];
+  completed: boolean;
+}) {
+  const { language, t } = useCodeSecurityI18n();
+  const copied = boundary?.copy_source !== false;
+  return (
+    <section className="cs-snapshot-overview" aria-label={t("源码准备概览")}>
+      <div className="cs-snapshot-intro">
+        <span className="cs-snapshot-symbol"><Icon name="files" /></span>
+        <div>
+          <h3>{t(completed ? "源码已就绪" : "源码准备情况")}</h3>
+
+        </div>
+      </div>
+      {boundary ? <>
+        <div className="cs-snapshot-target">
+          <span>{t("审计对象")}</span><strong>{boundary.display_name}</strong>
+          <small>{t(copied ? "不可变源码快照" : "直接读取源码")}</small>
+        </div>
+        <div className="cs-snapshot-stats">
+          <div><span>{t("纳入审计")}</span><strong>{boundary.file_count.toLocaleString(language)}<small>{t("个文件")}</small></strong></div>
+          <div><span>{t("源码体积")}</span><strong>{formatFileSize(boundary.total_bytes, language)}</strong></div>
+          <div><span>{t("未纳入")}</span><strong>{boundary.omitted_file_count.toLocaleString(language)}<small>{t("个文件")}</small></strong></div>
+        </div>
+        <div className="cs-snapshot-note"><Icon name="shield" /><p>{t(copied
+          ? "后续审计使用同一份固定源码，工作区文件的后续变化不会影响本次审计。"
+          : "后续审计直接读取源目录并核对摘要；已纳入文件发生变化时，会停止使用变化后的内容。")}</p></div>
+        {boundary.omitted_file_count > 0 && <p className="cs-snapshot-omissions">{t("部分文件未纳入本次审计，请结合快照摘要确认审计范围。")}</p>}
+        <dl className="cs-snapshot-paths">
+          <div><dt>{t("原始代码目录")}</dt><dd><code>{boundary.source_path || t("未记录")}</code></dd></div>
+          <div><dt>{t("快照代码路径")}</dt><dd><code>{copied ? boundary.snapshot_path || t("未记录") : t("未创建快照，直接读取原始代码目录")}</code></dd></div>
+        </dl>
+        <details className="cs-snapshot-version">
+          <summary>{t("查看源码版本与指纹")}</summary>
+          <dl><div><dt>{t("源码的Git提交版本")}</dt><dd><code>{boundary.source_revision || t("未记录源码版本")}</code></dd></div>
+          <div><dt>{t("源码快照指纹")}</dt><dd>
+            <details><summary><code>{shortId(boundary.tree_digest, 16)}</code></summary><code>{boundary.tree_digest || "—"}</code></details>
+          </dd></div></dl>
+        </details>
+      </> : <p>{t("源码信息尚未就绪，准备完成后会自动更新。")}</p>}
+    </section>
+  );
+}
+
 function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
   const { language, t } = useCodeSecurityI18n();
   const copied = boundary.copy_source !== false;
@@ -1167,7 +1163,7 @@ function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
           </dd>
         </div>
         <div>
-          <dt>{t("版本")}</dt>
+          <dt>{t("源码的Git提交版本")}</dt>
           <dd>
             <code title={boundary.source_revision || undefined}>
               {shortId(boundary.source_revision, 18)}
@@ -1175,7 +1171,7 @@ function SnapshotBoundary({ boundary }: { boundary: ScanDetail["target"] }) {
           </dd>
         </div>
         <div>
-          <dt>{t("目录摘要")}</dt>
+          <dt>{t("源码快照指纹")}</dt>
           <dd>
             <code title={boundary.tree_digest}>
               {shortId(boundary.tree_digest, 18)}

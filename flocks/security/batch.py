@@ -145,9 +145,13 @@ def prepare_batch(
     dynamic_concurrency: int = 2,
     skip_external_symlinks: list[str] | None = None,
     auto_exclude_external_symlinks: bool = False,
+    exclude_cyclic_symlinks: bool = False,
+    max_snapshot_files: int = 50_000,
 ) -> Path:
     if concurrency < 1 or task_timeout < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
         raise ValueError("Concurrency, timeout and size limit must be positive")
+    if type(max_snapshot_files) is not int or max_snapshot_files < 1:
+        raise ValueError("max_snapshot_files must be a positive integer")
     link_exclusions = parse_link_exclusions(skip_external_symlinks or [])
     source = source.expanduser().resolve(strict=True)
     tasks = {}
@@ -210,6 +214,8 @@ def prepare_batch(
                 "max_snapshot_bytes": max_snapshot_bytes,
                 "skip_external_symlinks": link_exclusions,
                 "auto_exclude_external_symlinks": auto_exclude_external_symlinks,
+                "exclude_cyclic_symlinks": exclude_cyclic_symlinks,
+                "max_snapshot_files": max_snapshot_files,
                 "tasks": tasks,
             },
         )
@@ -323,12 +329,16 @@ async def stop_process(process: asyncio.subprocess.Process) -> None:
             killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(process.pid), "/T")
             await killer.wait()
     except ProcessLookupError:
+        await process.wait()
         return
     try:
         await asyncio.wait_for(process.wait(), 20)
     except asyncio.TimeoutError:
         if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         else:
             killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(process.pid), "/T", "/F")
             await killer.wait()
@@ -429,12 +439,19 @@ async def stop_adopted(task_dir: Path) -> None:
             return
         await asyncio.sleep(0.2)
     pid, identity = current.get("pid"), current.get("process_identity")
+    if not task_running(task_dir):
+        return
     if not identity or process_identity(pid) != identity:
+        if not task_running(task_dir):
+            return
         raise RuntimeError("Cannot safely terminate adopted task: process identity is unavailable")
     if os.name == "posix":
-        if os.getpgid(pid) != pid:
-            raise RuntimeError("Adopted worker no longer owns its process group")
-        os.killpg(pid, signal.SIGKILL)
+        try:
+            if os.getpgid(pid) != pid:
+                raise RuntimeError("Adopted worker no longer owns its process group")
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # Still verify release of the task lock below.
     else:
         process = await asyncio.create_subprocess_exec("taskkill", "/PID", str(pid), "/T", "/F")
         await process.wait()
@@ -483,7 +500,7 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                 except asyncio.CancelledError:
                     await stop_adopted(task_dir)
                     result = task_result(task_dir) or {}
-                    if result.get("status") != "completed":
+                    if result.get("status") != "completed" and result.get("audit_status") != "failed":
                         result.update(status="interrupted", attempt=read_json(task_dir / "current.json")["attempt"])
                         atomic_json(task_dir / "result.json", result)
                     await cleanup_child_work(task_dir, result)
@@ -561,7 +578,11 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                         expired = time.monotonic() - started >= config["task_timeout"]
                         if cancelled or expired:
                             termination_reason = "cancelled" if cancelled else "timed_out"
-                            await stop_process(process)
+                            request_cancel(task_dir)
+                            try:
+                                await asyncio.wait_for(process.wait(), 20)
+                            except asyncio.TimeoutError:
+                                await stop_process(process)
                             break
                         try:
                             await asyncio.wait_for(process.wait(), 0.2)
@@ -580,15 +601,17 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                         "attempt": attempt,
                         "error": f"Worker exited without a result (exit {process.returncode}); resume to reconcile",
                     }
-                elif termination_reason and result["status"] != "completed":
-                    result["status"] = termination_reason
+                if termination_reason:
+                    result["termination_reason"] = termination_reason
+                    if result["status"] != "completed" and result.get("audit_status") != "failed":
+                        result["status"] = termination_reason
                 await cleanup_child_work(task_dir, result)
             except asyncio.CancelledError:
                 if process:
                     request_cancel(task_dir)
                     await stop_process(process)
                 result = task_result(task_dir) or {}
-                if result.get("status") != "completed":
+                if result.get("status") != "completed" and result.get("audit_status") != "failed":
                     result.update(status="interrupted", attempt=attempt)
                     atomic_json(task_dir / "result.json", result)
                 await cleanup_child_work(task_dir, result)

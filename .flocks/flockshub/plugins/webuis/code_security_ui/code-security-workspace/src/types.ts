@@ -18,11 +18,13 @@ export type PhaseStatus =
   | "not_runnable";
 
 export interface ProjectSummary {
+  sourceKind?: "local" | "git" | "zip" | "url" | null;
   id: string;
   name?: string;
   worktree: string;
   pathStatus?: string;
   canWrite?: boolean;
+  canDelete?: boolean;
   isShared?: boolean;
 }
 
@@ -167,6 +169,8 @@ export interface ScanDetail {
     display_name: string;
     source_revision?: string | null;
     copy_source?: boolean;
+    source_path?: string | null;
+    snapshot_path?: string | null;
     tree_digest: string;
     file_count: number;
     total_bytes: number;

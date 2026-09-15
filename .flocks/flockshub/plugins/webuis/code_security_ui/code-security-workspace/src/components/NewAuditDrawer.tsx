@@ -46,6 +46,8 @@ export function NewAuditDrawer({
   onCreated: (detail: ScanDetail) => void;
 }) {
   const { t } = useCodeSecurityI18n();
+  const ModelPicker = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.AuditModelPicker;
+  const [modelReady, setModelReady] = useState(false);
   const baselineRef = useRef<NewAuditValues | null>(null);
   const wasOpenRef = useRef(false);
   const attemptRef = useRef<{ signature: string; key: string } | null>(null);
@@ -264,8 +266,8 @@ export function NewAuditDrawer({
     if (!values.workspaceId) nextErrors.workspaceId = "请选择代码项目。";
     if (!validatePath())
       nextErrors.targetPath = "目标目录必须是工作区内的相对路径。";
-    if (values.model && !values.model.includes("/"))
-      nextErrors.model = "固定模型必须使用 provider/model 格式。";
+    if (!modelReady)
+      nextErrors.model = "请选择一个可用模型。";
     if (values.dynamicEnabled && !values.dynamicConfirmed)
       nextErrors.dynamicConfirmed = "请确认已理解动态验证的执行边界。";
     setErrors(nextErrors);
@@ -341,9 +343,6 @@ export function NewAuditDrawer({
       >
         <header>
           <div>
-            <p className="cs-eyebrow">
-              {t(values.copySource ? "不可变源码快照" : "直接源码审计")}
-            </p>
             <h2 id="new-audit-title" ref={titleRef} tabIndex={-1}>
               {t("新建代码审计")}
             </h2>
@@ -369,7 +368,7 @@ export function NewAuditDrawer({
             aria-selected={mode === "auto"}
             onClick={() => setMode("auto")}
           >
-            {t("自动选择")}
+            {t("自动模式")}
           </button>
           <button
             type="button"
@@ -378,7 +377,7 @@ export function NewAuditDrawer({
             aria-selected={mode === "manual"}
             onClick={() => setMode("manual")}
           >
-            {t("手动选择")}
+            {t("手动模式")}
           </button>
         </div>
         {mode === "auto" && (
@@ -398,7 +397,10 @@ export function NewAuditDrawer({
                 </div>
               ))}
             </div>
+            <div className="cs-workbench-composer cs-configuration-composer">
+            <div className="cs-composer-input">
             <textarea
+              rows={3}
               disabled={configuring}
               maxLength={8000}
               aria-label={t("审计需求草稿")}
@@ -419,19 +421,23 @@ export function NewAuditDrawer({
                 "例如：审计 API 中的身份认证和权限检查，排除测试目录。",
               )}
             />
+            </div>
+            <div className="cs-composer-toolbar">
+              <span className="cs-composer-context">{t("Enter 发送 · Shift+Enter 换行")}</span>
+              <button type="button" className="cs-composer-send"
+                aria-label={configuring ? t("停止") : t("发送")}
+                title={configuring ? t("停止") : t("发送")}
+                disabled={!configuring && (!intent.trim() || configurationMessages.length >= 20)}
+                onClick={() => {
+                  if (configuring) { configurationAbort.current?.abort(); setConfiguring(false); }
+                  else void sendConfiguration();
+                }}>
+                {configuring ? <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor" /></svg>
+                  : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v14" /></svg>}
+              </button>
+            </div>
+            </div>
             {configurationError && <p role="alert">{configurationError}</p>}
-            <button
-              type="button"
-              className="cs-button cs-button--primary"
-              disabled={
-                configuring ||
-                !intent.trim() ||
-                configurationMessages.length >= 20
-              }
-              onClick={sendConfiguration}
-            >
-              {configuring ? t("正在配置…") : t("发送")}
-            </button>
             {configurationMessages.length >= 20 && !configuring && (
               <button
                 type="button"
@@ -441,18 +447,6 @@ export function NewAuditDrawer({
                 {t("开始新的配置对话")}
               </button>
             )}
-            {configuring && (
-              <button
-                type="button"
-                className="cs-button cs-button--secondary"
-                onClick={() => {
-                  configurationAbort.current?.abort();
-                  setConfiguring(false);
-                }}
-              >
-                {t("停止")}
-              </button>
-            )}
             <p role="status">
               {configurationMessages.length
                 ? t("建议已同步到手动参数，请检查后再发起审计。")
@@ -460,17 +454,7 @@ export function NewAuditDrawer({
                     "描述审计目标，由 AI 协助选择项目和参数；确认前不会创建任务。",
                   )}
             </p>
-            <button
-              type="button"
-              className="cs-button cs-button--primary"
-              onClick={() => setMode("manual")}
-            >
-              {t(
-                configurationMessages.length
-                  ? "检查参数并发起审计"
-                  : "使用手动选择",
-              )}
-            </button>
+
           </section>
         )}
         <form onSubmit={submit} noValidate hidden={mode !== "manual"}>
@@ -649,20 +633,11 @@ export function NewAuditDrawer({
 
           <fieldset>
             <legend>{t("模型")}</legend>
-            <label className="cs-field" htmlFor="audit-model">
-              <span>{t("固定模型")}</span>
-              <input
-                id="audit-model"
-                value={values.model}
-                onChange={(event) => set("model", event.target.value)}
-                placeholder={t("留空使用系统默认模型")}
-                aria-invalid={Boolean(errors.model)}
-              />
-              <small>
-                {t("可选；格式为")} <code>provider/model</code>。
-              </small>
-              {errors.model && <small role="alert">{errors.model}</small>}
-            </label>
+            <div className="cs-field cs-audit-model-picker" role="group" aria-label={t("模型")}>
+              {ModelPicker ? <ModelPicker value={values.model} onChange={(value: string) => set("model", value)} onReady={setModelReady} />
+                : <p role="status">{t("请刷新页面以加载模型选择器。")}</p>}
+              {errors.model && <small role="alert">{t(errors.model)}</small>}
+            </div>
           </fieldset>
 
           <fieldset>

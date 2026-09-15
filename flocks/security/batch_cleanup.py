@@ -9,7 +9,7 @@ import sys
 
 
 def read_batch_config(task_dir: Path) -> dict:
-    from flocks.security.batch import read_json
+    from flocks.security.batch import read_json, atomic_json
 
     return read_json(task_dir.parents[1] / "batch.json")
 
@@ -54,12 +54,21 @@ def reconcile(task_dir: Path, result: dict) -> None:
         if str(source) not in sys.path:
             sys.path.insert(0, str(source))
         from flocks_code_security.store import ScanStore
-    from flocks.security.batch import read_json
-    from flocks.security.batch_worker import scan_summary
+    from flocks.security.batch import read_json, atomic_json
+    from flocks.security.batch_worker import scan_summary, merge_scan_summary
 
+    current = read_json(task_dir / "current.json")
+    if result.get("attempt") != current.get("attempt"):
+        raise ValueError("Refusing reconciliation for a superseded task attempt")
     store = ScanStore(task_dir / "data/code-security/data/code-security.db")
     store.retain_ui_history = True
     store.initialize()
+    scan_id = current.get("scan_id") or current.get("previous", {}).get("scan_id")
+    if scan_id and store.get_scan(scan_id):
+        summary = scan_summary(store, scan_id)
+        merge_scan_summary(result, summary)
+        atomic_json(task_dir / "result.json", result)
+
     with store._connect() as connection:
         scans = connection.execute("SELECT scan_id, status FROM scans").fetchall()
     dynamic = read_batch_config(task_dir).get("dynamic", False)
@@ -86,12 +95,3 @@ def reconcile(task_dir: Path, result: dict) -> None:
         summary = store.prune_scan_execution_history(scan_id)
         if summary.get("status") != "completed":
             raise RuntimeError(f"Cleanup {scan_id}: {summary}")
-
-    current = read_json(task_dir / "current.json")
-    scan_id = current.get("scan_id") or current.get("previous", {}).get("scan_id")
-    if scan_id and store.get_scan(scan_id):
-        summary = scan_summary(store, scan_id)
-        result.update({key: value for key, value in summary.items() if key not in {"status", "error"}})
-        if result["status"] == "interrupted" and summary["status"] == "completed":
-            result["status"] = "completed"
-            result.pop("error", None)

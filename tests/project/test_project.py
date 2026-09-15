@@ -293,3 +293,46 @@ async def test_corrupt_registry_returns_no_projects(project_root):
 
     assert projects == []
     assert registry_path.read_text(encoding="utf-8") == "{broken"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['local', 'git', 'zip', 'url'])
+async def test_source_kind_survives_registry_reload(project_root, kind):
+    project = await Project.create(owner_id='source-owner', name='Source demo', worktree=str(project_root / 'source'), source_kind=kind)
+    registry = Project._read_registry('source-owner')
+    entry = next(entry for entry in registry.projects if entry.id == project.id)
+    assert entry.source_kind == kind
+    assert Project._entry_to_info(entry).model_dump(by_alias=True)['sourceKind'] == kind
+
+
+@pytest.mark.asyncio
+async def test_audit_project_scope_is_persisted(project_root):
+    project = await Project.create(owner_id='audit-owner', name='Audit only', worktree=str(project_root / 'audit'), scope='code-security')
+    registry = Project._read_registry('audit-owner')
+    entry = next(item for item in registry.projects if item.id == project.id)
+    assert entry.scope == 'code-security'
+    assert Project._entry_to_info(entry).scope == 'code-security'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('original_scope', ['workbench', 'code-security'])
+async def test_readding_deleted_audit_source_creates_fresh_identity(project_root, original_scope):
+    source = project_root / 'audit-source'
+    first = await Project.create(owner_id='audit-owner', name='Demo', worktree=str(source), scope=original_scope)
+    await Project.delete(first.id, owner_id='audit-owner')
+    second = await Project.create(owner_id='audit-owner', name='Demo', worktree=str(source), scope='code-security')
+    assert second.id != first.id
+    assert first.id in Project.removed_project_ids()
+    assert second.id not in Project.removed_project_ids()
+    assert await Project.get(first.id, owner_id='audit-owner') is None
+    assert (await Project.get(second.id, owner_id='audit-owner')).scope == 'code-security'
+    assert source.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_readding_workbench_project_keeps_existing_restore_behavior(project_root):
+    source = project_root / 'workbench-source'
+    first = await Project.create(owner_id='owner', name='Demo', worktree=str(source))
+    await Project.delete(first.id, owner_id='owner')
+    second = await Project.create(owner_id='owner', name='Demo', worktree=str(source))
+    assert second.id == first.id

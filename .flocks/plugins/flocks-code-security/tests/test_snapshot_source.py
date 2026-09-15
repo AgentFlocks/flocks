@@ -37,6 +37,44 @@ def test_bulk_line_counter_preserves_splitlines_semantics(chunk_size: int) -> No
         assert counter.value == len(text.splitlines())
 
 
+@pytest.mark.parametrize("copy_source", [True, False])
+@pytest.mark.parametrize("extra_column", [False, True])
+def test_snapshot_creation_supports_extended_file_schema(
+    tmp_path: Path, copy_source: bool, extra_column: bool,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    content = "print('hello')\n"
+    (target / "app.py").write_text(content, encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    if extra_column:
+        with runtime.store._connect() as connection:
+            connection.execute(
+                "ALTER TABLE snapshot_files ADD COLUMN extension_metadata TEXT DEFAULT '{}'"
+            )
+
+    snapshot = runtime.snapshots.create(str(target), copy_source=copy_source)
+
+    assert snapshot.file_count == 1
+    assert snapshot.source_path == str(target.resolve())
+    assert runtime.store.get_snapshot(snapshot.snapshot_id).source_path == str(target.resolve())
+    assert "source_path" not in snapshot.public_dict()
+    files = runtime.store.list_snapshot_files(snapshot.snapshot_id)
+    assert len(files) == 1
+    assert files[0].relative_path == "app.py"
+    assert files[0].blob_digest == hashlib.sha256(content.encode()).hexdigest()
+    assert files[0].size_bytes == len(content.encode())
+    assert files[0].line_count == 1
+    assert not files[0].is_binary
+    if extra_column:
+        with runtime.store._connect() as connection:
+            row = connection.execute(
+                "SELECT extension_metadata FROM snapshot_files WHERE snapshot_id = ?",
+                (snapshot.snapshot_id,),
+            ).fetchone()
+        assert row["extension_metadata"] == "{}"
+
+
 def test_snapshot_total_limit_is_checked_before_reading_content(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -949,3 +987,19 @@ def test_duplicate_verdict_migration_preserves_conflict_fact(tmp_path: Path) -> 
     assert len(data["verifications"]) == 1
     assert data["verification_conflicts"][0]["candidate_id"] == "candidate"
     assert {item["verdict"] for item in data["verification_conflicts"][0]["verifications"]} == {"confirmed", "rejected"}
+
+
+def test_configurable_file_limit_counts_only_included_files(tmp_path):
+    target = tmp_path / 'source'
+    target.mkdir()
+    (target / 'main.c').write_text('code')
+    (target / 'other.c').write_text('code')
+    (target / 'large.a').write_bytes(b'x' * 30)
+    runtime = build_runtime(tmp_path / 'data')
+    with pytest.raises(ValueError, match='includes 2 files, exceeding max_files=1'):
+        runtime.snapshots.create(str(target), max_files=1, max_file_bytes=10)
+    snapshot = runtime.snapshots.create(str(target), max_files=2, max_file_bytes=10)
+    assert snapshot.file_count == 2
+    assert snapshot.omitted_file_count == 1
+    scoped = runtime.snapshots.create(str(target), max_files=1, exclude_patterns=['other.c', 'large.a'])
+    assert scoped.file_count == 1

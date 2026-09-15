@@ -736,3 +736,285 @@ def test_broken_link_exclusion_metadata_is_bounded(tmp_path):
     ])
     with pytest.raises(ValueError, match="metadata exceeds limit"):
         extract_source(archive, source, 100)
+
+
+@pytest.mark.asyncio
+async def test_stop_process_reaps_leader_when_group_already_exited(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    process = SimpleNamespace(pid=123, returncode=None, wait=AsyncMock(return_value=0))
+    monkeypatch.setattr(batch.os, 'killpg', lambda *args: (_ for _ in ()).throw(ProcessLookupError()))
+    await batch.stop_process(process)
+    process.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_process_tolerates_exit_during_hard_kill(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    process = SimpleNamespace(pid=123, returncode=None, wait=AsyncMock(side_effect=[asyncio.TimeoutError(), 0]))
+    kill = Mock(side_effect=[None, ProcessLookupError(), ProcessLookupError()])
+    monkeypatch.setattr(batch.os, 'killpg', kill)
+    await batch.stop_process(process)
+    assert process.wait.await_count == 2
+
+
+def test_reconciled_business_failure_is_not_overwritten_by_timeout():
+    from flocks.security.batch_worker import merge_scan_summary
+    result = {'status': 'timed_out', 'termination_reason': 'timed_out', 'error': 'no worker result'}
+    merge_scan_summary(result, {'status': 'failed', 'audit_status': 'failed', 'failure_code': 'audit_execution_failed', 'error': 'Missing adjudication'})
+    assert result['status'] == 'failed'
+    assert result['error'] == 'Missing adjudication'
+    assert result['termination_reason'] == 'timed_out'
+
+
+def test_cancelled_database_state_preserves_timeout_reason():
+    from flocks.security.batch_worker import merge_scan_summary
+    result = {'status': 'timed_out'}
+    merge_scan_summary(result, {'status': 'failed', 'audit_status': 'cancelled', 'error': None})
+    assert result['status'] == 'timed_out'
+
+
+def test_cleanup_keeps_owner_on_partial_failure_and_can_retry(tmp_path, monkeypatch):
+    from flocks.security import batch_worker
+    monkeypatch.setattr(batch_worker.tempfile, 'gettempdir', lambda: str(tmp_path))
+    work = tmp_path / 'flocks-batch-test'
+    work.mkdir()
+    task = tmp_path / 'task'
+    (work / '.batch-owner').write_text(str(task))
+    (work / 'source').mkdir()
+    remove = batch_worker.shutil.rmtree
+    monkeypatch.setattr(batch_worker.shutil, 'rmtree', lambda path: (_ for _ in ()).throw(OSError('busy')))
+    with pytest.raises(OSError):
+        batch_worker.cleanup_work(str(work), task)
+    assert (work / '.batch-owner').read_text() == str(task)
+    monkeypatch.setattr(batch_worker.shutil, 'rmtree', remove)
+    batch_worker.cleanup_work(str(work), task)
+    batch_worker.cleanup_work(str(work), task)
+    assert not work.exists()
+
+
+def test_cleanup_still_refuses_existing_directory_without_owner(tmp_path, monkeypatch):
+    from flocks.security import batch_worker
+    monkeypatch.setattr(batch_worker.tempfile, 'gettempdir', lambda: str(tmp_path))
+    work = tmp_path / 'flocks-batch-test'
+    work.mkdir()
+    with pytest.raises(FileNotFoundError):
+        batch_worker.cleanup_work(str(work), tmp_path / 'task')
+    assert work.exists()
+
+
+@pytest.mark.asyncio
+async def test_timeout_allows_worker_result_and_preserves_failure(tmp_path, monkeypatch):
+    root = make_batch(tmp_path, monkeypatch)
+    config = batch.read_json(root / 'batch.json')
+    config['task_timeout'] = 1
+    batch.atomic_json(root / 'batch.json', config)
+    script = '''
+import json, sys, time
+from pathlib import Path
+folder, attempt = Path(sys.argv[1]), sys.argv[2]
+while not (folder / 'cancel.json').exists():
+    time.sleep(.02)
+(folder / 'result.json').write_text(json.dumps({'attempt': attempt, 'status': 'failed', 'audit_status': 'failed', 'error': 'Missing adjudication'}))
+'''
+    monkeypatch.setattr(batch, '_worker_command', lambda root, task, attempt: [sys.executable, '-c', script, str(batch.resolve_task(root, task)), attempt])
+    result = await batch.run_batch(root, progress=lambda _: None)
+    assert result['counts'] == {'failed': 1}
+    saved = batch.task_result(batch.resolve_task(root, '0'))
+    assert saved['termination_reason'] == 'timed_out'
+    assert saved['error'] == 'Missing adjudication'
+
+
+@pytest.mark.asyncio
+async def test_worker_deadline_without_scheduler_or_cancel_file(tmp_path):
+    from flocks.security.batch_worker import wait_for_cancel
+    import time
+    assert await wait_for_cancel(tmp_path, 'attempt', time.time() - 2, 1) == 'timed_out'
+
+
+@pytest.mark.asyncio
+async def test_worker_ignores_old_attempt_cancel(tmp_path):
+    from flocks.security.batch_worker import wait_for_cancel
+    import time
+    batch.atomic_json(tmp_path / 'cancel.json', {'attempt': 'old'})
+    assert await wait_for_cancel(tmp_path, 'new', time.time() - 2, 1) == 'timed_out'
+
+
+@pytest.mark.asyncio
+async def test_timeout_does_not_treat_cancelled_error_as_business_failure(tmp_path, monkeypatch):
+    root = make_batch(tmp_path, monkeypatch)
+    config = batch.read_json(root / 'batch.json')
+    config['task_timeout'] = 1
+    batch.atomic_json(root / 'batch.json', config)
+    script = '''
+import json, sys, time
+from pathlib import Path
+folder, attempt = Path(sys.argv[1]), sys.argv[2]
+while not (folder / 'cancel.json').exists():
+    time.sleep(.02)
+(folder / 'result.json').write_text(json.dumps({'attempt': attempt, 'status': 'failed', 'error': 'CancelledError'}))
+'''
+    monkeypatch.setattr(batch, '_worker_command', lambda root, task, attempt: [sys.executable, '-c', script, str(batch.resolve_task(root, task)), attempt])
+    result = await batch.run_batch(root, progress=lambda _: None)
+    assert result['counts'] == {'timed_out': 1}
+    assert batch.task_result(batch.resolve_task(root, '0'))['error'] == 'CancelledError'
+
+
+@pytest.mark.parametrize('error', [OSError('busy'), KeyboardInterrupt()])
+def test_cleanup_can_resume_after_owner_marker_removal(tmp_path, monkeypatch, error):
+    from flocks.security import batch_worker
+    monkeypatch.setattr(batch_worker.tempfile, 'gettempdir', lambda: str(tmp_path))
+    work, task = tmp_path / 'flocks-batch-final', tmp_path / 'task'
+    work.mkdir()
+    (work / '.batch-owner').write_text(str(task))
+    original = Path.rmdir
+    def fail_final(path):
+        if path == work:
+            raise error
+        return original(path)
+    monkeypatch.setattr(Path, 'rmdir', fail_final)
+    with pytest.raises(type(error)):
+        batch_worker.cleanup_work(str(work), task)
+    assert not (work / '.batch-owner').exists()
+    assert (task / '.cleanup-flocks-batch-final.json').exists()
+    monkeypatch.setattr(Path, 'rmdir', original)
+    batch_worker.cleanup_work(str(work), task)
+    assert not work.exists()
+    assert not list(task.glob('.cleanup-*'))
+
+
+def test_cleanup_receipt_never_authorizes_nonempty_or_different_directory(tmp_path, monkeypatch):
+    from flocks.security import batch_worker
+    monkeypatch.setattr(batch_worker.tempfile, 'gettempdir', lambda: str(tmp_path))
+    work, task = tmp_path / 'flocks-batch-final', tmp_path / 'task'
+    work.mkdir()
+    info = work.stat()
+    receipt = task / '.cleanup-flocks-batch-final.json'
+    batch.atomic_json(receipt, {'path': str(work.resolve()), 'device': info.st_dev, 'inode': info.st_ino + 1})
+    with pytest.raises(FileNotFoundError):
+        batch_worker.cleanup_work(str(work), task)
+    batch.atomic_json(receipt, {'path': str(work.resolve()), 'device': info.st_dev, 'inode': info.st_ino})
+    (work / 'unrelated').write_text('keep')
+    with pytest.raises(OSError):
+        batch_worker.cleanup_work(str(work), task)
+    assert (work / 'unrelated').read_text() == 'keep'
+
+
+def test_worker_shutdown_error_preserves_saved_business_result(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from flocks.security import batch_worker
+    from flocks.cli.commands import security
+    batch.atomic_json(tmp_path / 'current.json', {'attempt': 'current'})
+    async def execute(*args):
+        result = {'attempt': 'current', 'status': 'completed', 'audit_status': 'completed'}
+        batch.atomic_json(tmp_path / 'result.json', result)
+        return result
+    async def close_failure(runner, root):
+        await runner(root)
+        raise asyncio.CancelledError()
+    async def cleanup(*args): pass
+    monkeypatch.setattr(sys, 'argv', ['worker', str(tmp_path), 'task', 'current'])
+    monkeypatch.setattr(batch_worker, 'resolve_task', lambda *args: tmp_path)
+    monkeypatch.setattr(batch_worker, 'file_lock', lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(batch_worker, 'execute', execute)
+    monkeypatch.setattr(security, '_run_audit_with_cleanup', close_failure)
+    monkeypatch.setattr(batch, 'cleanup_child_work', cleanup)
+    with pytest.raises(SystemExit) as exited:
+        batch_worker.main()
+    result = batch.read_json(tmp_path / 'result.json')
+    assert exited.value.code == 0
+    assert result['status'] == 'completed'
+    assert 'CancelledError' in result['cleanup_error']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['getpgid', 'killpg'])
+async def test_adopted_process_exit_race_still_checks_task_lock(tmp_path, monkeypatch, operation):
+    from unittest.mock import Mock, AsyncMock
+    batch.atomic_json(tmp_path / 'current.json', {'attempt': 'current', 'pid': 123, 'process_identity': 'identity'})
+    running = Mock(side_effect=[True] * 101 + [False])
+    monkeypatch.setattr(batch, 'task_running', running)
+    monkeypatch.setattr(batch, 'process_identity', lambda pid: 'identity')
+    monkeypatch.setattr(batch.asyncio, 'sleep', AsyncMock())
+    monkeypatch.setattr(batch.os, 'getpgid', Mock(return_value=123))
+    monkeypatch.setattr(batch.os, 'killpg', Mock())
+    monkeypatch.setattr(batch.os, operation, Mock(side_effect=ProcessLookupError()))
+    await batch.stop_adopted(tmp_path)
+    assert running.call_count == 102
+
+
+def test_cleanup_failure_does_not_erase_reconciled_business_failure(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from flocks.security import batch_cleanup, batch_worker
+    source = Path(__file__).resolve().parents[2] / '.flocks/plugins/flocks-code-security/src'
+    monkeypatch.syspath_prepend(str(source))
+    from flocks_code_security import store as store_module
+    batch.atomic_json(tmp_path / 'current.json', {'attempt': 'current', 'scan_id': 'scan'})
+    connection = Mock()
+    connection.execute.return_value.fetchall.return_value = [{'scan_id': 'scan', 'status': 'failed'}]
+    store = Mock()
+    store.assert_cybergym_runs_terminal = Mock()
+    store._connect.return_value = nullcontext(connection)
+    store.prune_scan_execution_history.side_effect = OSError('cleanup failed')
+    monkeypatch.setattr(store_module, 'ScanStore', lambda path: store)
+    monkeypatch.setattr(batch_cleanup, 'read_batch_config', lambda path: {})
+    monkeypatch.setattr(batch_worker, 'scan_summary', lambda *args: {'status': 'failed', 'audit_status': 'failed', 'error': 'Missing adjudication'})
+    result = {'attempt': 'current', 'status': 'timed_out'}
+    with pytest.raises(OSError):
+        batch_cleanup.reconcile(tmp_path, result)
+    persisted = batch.read_json(tmp_path / 'result.json')
+    assert persisted['status'] == 'failed'
+    assert persisted['error'] == 'Missing adjudication'
+
+
+def test_cancellation_resistant_worker_exits_and_persists_result(tmp_path):
+    script = '''
+import asyncio, sys
+from pathlib import Path
+from flocks.security.batch_worker import stop_audit_task
+async def stubborn():
+    while True:
+        try: await asyncio.sleep(1)
+        except asyncio.CancelledError: pass
+async def main():
+    task = asyncio.create_task(stubborn())
+    await asyncio.sleep(0)
+    await stop_audit_task(task, Path(sys.argv[1]), {'attempt':'current','status':'timed_out'})
+asyncio.run(main())
+'''
+    process = subprocess.Popen([sys.executable, '-c', script, str(tmp_path)], start_new_session=True)
+    try:
+        assert process.wait(timeout=20) != 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    saved = batch.read_json(tmp_path / 'result.json')
+    assert saved['status'] == 'timed_out'
+    assert saved['cleanup_status'] == 'failed'
+
+
+@pytest.mark.parametrize('target', ['.', 'loop'])
+def test_cycles_can_be_explicitly_excluded_without_losing_siblings(tmp_path, target):
+    archive = tmp_path / 'source.tar.gz'
+    with tarfile.open(archive, 'w:gz') as output:
+        file = tarfile.TarInfo('main.c')
+        file.size = 4
+        output.addfile(file, io.BytesIO(b'code'))
+        link = tarfile.TarInfo('loop')
+        link.type = tarfile.SYMTYPE
+        link.linkname = target
+        output.addfile(link)
+    strict = tmp_path / 'strict'
+    strict.mkdir()
+    with pytest.raises(ValueError, match='cyclic|Cyclic'):
+        extract_source(archive, strict, 100)
+    relaxed = tmp_path / 'relaxed'
+    relaxed.mkdir()
+    exclusions = extract_source(archive, relaxed, 100, exclude_cyclic_symlinks=True)
+    assert (relaxed / 'main.c').read_text() == 'code'
+    assert not (relaxed / 'loop').exists()
+    assert exclusions == [{'path': 'loop', 'target': target, 'reason': 'cyclic_symlink'}]

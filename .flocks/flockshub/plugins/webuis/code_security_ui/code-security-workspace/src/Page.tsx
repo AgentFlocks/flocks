@@ -118,6 +118,7 @@ function WorkspacePage() {
   const canCreate = user?.role === "admin" && !scope;
   const initialParams = new URLSearchParams(window.location.search);
   const [scans, setScans] = useState<ScanSummary[]>([]);
+  const [removedProjectIds, setRemovedProjectIds] = useState<Set<string>>(() => new Set());
   const [batchRecords, setBatchRecords] = useState<ScanSummary[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -902,7 +903,7 @@ function WorkspacePage() {
   }
 
   const batchScanIds = new Set(batchRecords.map((item) => item.scan_id));
-  const records = mergeScans(scans, batchRecords);
+  const records = mergeScans(scans, batchRecords).filter((record) => !record.workspace_ref || !removedProjectIds.has(record.workspace_ref));
   const selectedRecord = scope
     ? batchRecords.find(
         (item) =>
@@ -1015,6 +1016,12 @@ function WorkspacePage() {
           hasMore={Boolean(scanCursor)}
           onLoadMore={loadMoreScans}
           loadingMore={loadingMoreScans}
+          onProjectDeleted={(id) => {
+            setRemovedProjectIds((current) => new Set([...current, id]));
+            setProjects((current) => current.filter((project) => project.id !== id));
+            setScans((current) => current.filter((scan) => scan.workspace_ref !== id));
+            setBatchRecords((current) => current.filter((scan) => scan.workspace_ref !== id));
+          }}
           onProjectAdded={(project) =>
             setProjects((current) => [
               ...current.filter((p) => p.id !== project.id),
@@ -1207,7 +1214,7 @@ function WorkspacePage() {
                     detail.phaseRuns.filter((p) => p.status === "completed")
                       .length
                   }
-                  <small> / {detail.phaseRuns.length}</small>
+                  <small> / {detail.phaseRuns.filter((phase) => phase.status !== "skipped").length}</small>
                 </strong>
                 <small>{t("按实际执行阶段统计")}</small>
               </div>
@@ -1245,7 +1252,7 @@ function WorkspacePage() {
             <PhaseWorkspace
               key={detail.scan.scan_id}
               requestedPhase={requestedPhase}
-              onOpenArtifacts={openInspector}
+              onOpenArtifacts={(kind) => { if (kind) changeArtifact(kind); openInspector(); }}
               scanId={detail.scan.scan_id}
               phases={detail.phaseRuns}
               events={events}

@@ -101,7 +101,8 @@ def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
 
 
 # Bump this whenever initialize() adds or changes schema migrations.
-STORE_SCHEMA_VERSION = 9
+# Version 9 was also used by databases with executable_mode but no conversation tables.
+STORE_SCHEMA_VERSION = 11
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -1204,6 +1205,7 @@ class ScanStore:
                 ("include_paths_json", "TEXT NOT NULL DEFAULT '[\".\"]'"),
                 ("exclude_patterns_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("copy_source", "INTEGER NOT NULL DEFAULT 1"),
+                ("source_path", "TEXT"),
             ):
                 if column not in snapshot_columns:
                     connection.execute(f"ALTER TABLE snapshots ADD COLUMN {column} {definition}")
@@ -1320,8 +1322,8 @@ class ScanStore:
                     target_kind, display_name, include_paths_json,
                     exclude_patterns_json,
                     tree_digest, scope_digest, file_count, total_bytes,
-                    created_at, root_path, omitted_file_count, copy_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, root_path, omitted_file_count, copy_source, source_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.snapshot_id,
@@ -1339,11 +1341,15 @@ class ScanStore:
                     snapshot.root_path,
                     snapshot.omitted_file_count,
                     int(snapshot.copy_source),
+                    snapshot.source_path,
                 ),
             )
             connection.executemany(
                 """
-                INSERT INTO snapshot_files VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO snapshot_files (
+                    snapshot_id, relative_path, blob_digest, size_bytes,
+                    line_count, language, is_binary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -5425,7 +5431,7 @@ class ScanStore:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
 
-    def delete_terminal_scan(self, scan_id: str) -> dict[str, str | None]:
+    def delete_terminal_scan(self, scan_id: str, *, dry_run: bool = False) -> dict[str, str | None]:
         """Delete a terminal scan and its unreferenced snapshot in one transaction."""
         with self._lock, self._connect() as connection:
             scan = connection.execute(
@@ -5441,17 +5447,19 @@ class ScanStore:
                 "SELECT root_path, copy_source FROM snapshots WHERE snapshot_id = ?",
                 (scan["snapshot_id"],),
             ).fetchone()
-            connection.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
+            if not dry_run:
+                connection.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
             references = connection.execute(
-                "SELECT COUNT(*) FROM scans WHERE snapshot_id = ?",
-                (scan["snapshot_id"],),
+                "SELECT COUNT(*) FROM scans WHERE snapshot_id = ? AND scan_id != ?",
+                (scan["snapshot_id"], scan_id),
             ).fetchone()[0]
             snapshot_root = None
             if not references:
-                connection.execute(
-                    "DELETE FROM snapshots WHERE snapshot_id = ?",
-                    (scan["snapshot_id"],),
-                )
+                if not dry_run:
+                    connection.execute(
+                        "DELETE FROM snapshots WHERE snapshot_id = ?",
+                        (scan["snapshot_id"],),
+                    )
                 snapshot_root = (
                     snapshot["root_path"]
                     if snapshot is not None and bool(snapshot["copy_source"])
@@ -6588,7 +6596,7 @@ class ScanStore:
                     "AND event_type = 'source.archive_exclusions'", (scan_id,),
                 )
                 for item in json.loads(row["payload_json"])["exclusions"]
-                if item["reason"] in {"external_symlink_auto", "broken_internal_symlink"}
+                if item["reason"] in {"external_symlink_auto", "broken_internal_symlink", "cyclic_symlink"}
             ]
             unit_rows = connection.execute(
                 "SELECT work_unit_id, phase, role, paths_json FROM work_units "

@@ -166,8 +166,11 @@ class TargetSnapshotService:
         exclude_patterns: list[str] | None = None,
         max_file_bytes: int | None = None,
         max_total_bytes: int | None = None,
+        max_files: int = MAX_SNAPSHOT_FILES,
         copy_source: bool = True,
     ) -> SnapshotRef:
+        if type(max_files) is not int or max_files < 1:
+            raise ValueError("max_files must be a positive integer")
         raw_target = Path(target_path).expanduser()
         if not raw_target.is_absolute():
             raise ValueError("target_path must be an absolute directory path")
@@ -221,10 +224,6 @@ class TargetSnapshotService:
                 git_state,
             )
             self._assert_root_identity(target, root_identity)
-            if len(files) > MAX_SNAPSHOT_FILES:
-                raise ValueError(
-                    f"Snapshot contains more than {MAX_SNAPSHOT_FILES} files"
-                )
             initial_states = {
                 relative_path: self._source_file_signature(
                     root_descriptor,
@@ -232,6 +231,11 @@ class TargetSnapshotService:
                 )
                 for relative_path, _source_path in files
             }
+            included_count = sum(1 for signature in initial_states.values()
+                                 if max_file_bytes is None or signature[3] <= max_file_bytes)
+            if included_count > max_files:
+                raise ValueError(f"Snapshot includes {included_count} files, exceeding max_files={max_files}; "
+                                 "raise --max-snapshot-files or narrow the source scope")
             included_bytes = sum(
                 signature[3] for signature in initial_states.values()
                 if max_file_bytes is None or signature[3] <= max_file_bytes
@@ -368,6 +372,7 @@ class TargetSnapshotService:
                 total_bytes=total_bytes,
                 created_at=datetime.now(timezone.utc).isoformat(),
                 root_path=str(snapshot_root),
+                source_path=str(target),
                 omitted_file_count=len(omissions),
                 target_kind=target_kind,
                 display_name=target.name,

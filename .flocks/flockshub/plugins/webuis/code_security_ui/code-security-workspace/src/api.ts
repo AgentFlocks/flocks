@@ -26,7 +26,7 @@ function getApi(): any {
 
 export function createAuditApi(base = BASE) {
   async function listProjects(): Promise<ProjectSummary[]> {
-    const response = await getApi().get("/api/project/");
+    const response = await getApi().get("/api/project/", { params: { scope: "code-security" } });
     return response.data;
   }
 
@@ -252,6 +252,7 @@ export async function registerAuditProject(
   return (
     await getApi().post("/api/project/", {
       worktree: worktree.trim(),
+      scope: "code-security",
       name: name?.trim() || undefined,
     })
   ).data;
@@ -271,4 +272,18 @@ export async function configureAudit(
       { signal },
     )
   ).data;
+}
+
+export async function importAuditProject(kind: "git" | "zip" | "url", name: string, url: string, branch: string, file: File | null): Promise<ProjectSummary> {
+  const form = new FormData();
+  form.append("kind", kind);
+  form.append("name", name.trim());
+  form.append("url", url.trim());
+  form.append("branch", branch.trim());
+  if (file) form.append("file", file);
+  return (await getApi().post(`${BASE}/projects/import`, form, { timeout: 250_000, headers: { "Content-Type": "multipart/form-data" } })).data;
+}
+
+export async function deleteAuditProject(id: string): Promise<void> {
+  await getApi().delete(`${BASE}/projects/${encodeURIComponent(id)}`);
 }

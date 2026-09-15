@@ -280,6 +280,16 @@ describe("code security workspace contract page", () => {
           requestedPhase={{ id: phase.phase_run_id }}
         />,
       );
+      if (phase.status === "skipped") {
+        expect(apiGet).not.toHaveBeenCalledWith(`/api/code-security/v1/scans/scan_demo/phases/${phase.phase_run_id}/sessions`);
+        continue;
+      }
+      if (phase.phase === "snapshot") {
+        expect(view.container.querySelector(".cs-snapshot-overview")).not.toBeNull();
+        expect(view.container.querySelector(".cs-native-sessions")).toBeNull();
+        expect(apiGet).not.toHaveBeenCalledWith(`/api/code-security/v1/scans/scan_demo/phases/${phase.phase_run_id}/sessions`);
+        continue;
+      }
       await waitFor(() =>
         expect(apiGet).toHaveBeenCalledWith(
           `/api/code-security/v1/scans/scan_demo/phases/${phase.phase_run_id}/sessions`,
@@ -378,8 +388,9 @@ describe("code security workspace contract page", () => {
     await userEvent.click(
       screen.getAllByRole("button", { name: "添加项目" })[1],
     );
-    expect(await screen.findByText("/workspace/new")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "New service", exact: true })).toBeVisible();
     expect(apiPost).toHaveBeenCalledWith("/api/project/", {
+      scope: "code-security",
       name: "New service",
       worktree: "/workspace/new",
     });
@@ -402,7 +413,7 @@ describe("code security workspace contract page", () => {
     expect(
       await screen.findByRole("heading", { name: "Flocks 代码安全审计工作台" }),
     ).toBeVisible();
-    expect(await screen.findByText("/workspace/flocks")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Flocks", exact: true })).toBeVisible();
     expect(screen.queryByLabelText("审计指标")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "查看审计", exact: true }),
@@ -507,7 +518,7 @@ describe("code security workspace contract page", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("follows new phases until history is selected and scopes events by run id", async () => {
+  it("follows new phases until history is selected without exposing stage events", async () => {
     const first: PhaseRun = {
       phase_run_id: "round-1",
       phase: "verification",
@@ -554,7 +565,7 @@ describe("code security workspace contract page", () => {
       "true",
     );
     expect(screen.queryByText("轮次记录 1")).not.toBeInTheDocument();
-    expect(screen.getByText("轮次记录 2")).toBeVisible();
+    expect(screen.queryByText("轮次记录 2")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: /第 1 轮/ }));
     const third = {
       ...second,
@@ -574,7 +585,7 @@ describe("code security workspace contract page", () => {
       "aria-selected",
       "true",
     );
-    expect(screen.getByText("轮次记录 1")).toBeVisible();
+    expect(screen.queryByText("轮次记录 1")).not.toBeInTheDocument();
     expect(screen.queryByText("轮次记录 2")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "回到最新阶段" }));
     expect(screen.getByRole("tab", { name: /第 3 轮/ })).toHaveAttribute(
@@ -597,14 +608,14 @@ describe("code security workspace contract page", () => {
     );
     const target = screen.getByLabelText(/目标目录/);
     fireEvent.change(target, { target: { value: "src" } });
-    await userEvent.click(screen.getByRole("tab", { name: "自动选择" }));
+    await userEvent.click(screen.getByRole("tab", { name: "自动模式" }));
     await userEvent.type(screen.getByLabelText("审计需求草稿"), "检查认证模块");
     expect(
       screen.queryByRole("button", { name: "启动静态审计" }),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("tab", { name: "手动选择" }));
+    await userEvent.click(screen.getByRole("tab", { name: "手动模式" }));
     expect(target).toHaveValue("src");
-    await userEvent.click(screen.getByRole("tab", { name: "自动选择" }));
+    await userEvent.click(screen.getByRole("tab", { name: "自动模式" }));
     expect(screen.getByLabelText("审计需求草稿")).toHaveValue("检查认证模块");
     expect(created).not.toHaveBeenCalled();
   });
@@ -767,6 +778,7 @@ describe("code security workspace contract page", () => {
   beforeEach(() => {
     (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__ = {
       React,
+      AuditModelPicker: ({ onReady }: any) => { React.useEffect(() => onReady(true), [onReady]); return <button type="button">Test model</button>; },
       Markdown,
       useCurrentUser: () => ({ id: "admin-1", role: "admin" }),
       useLanguage: () => codeSecurityLanguage,
@@ -926,7 +938,7 @@ describe("code security workspace contract page", () => {
     expect(formatFileSize(1_572_864, "en-US")).toBe("1.5 MB");
   });
 
-  it("renders lifecycle, coverage, skipped dynamic phase, and durable events separately", async () => {
+  it("renders lifecycle and coverage while hiding skipped stages", async () => {
     const { container, unmount } = render(<Page />);
 
     expect(
@@ -938,7 +950,8 @@ describe("code security workspace contract page", () => {
     );
     expect(workspaceStyle?.textContent).toContain(".code-security-workspace");
     expect(screen.getAllByText("运行中").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("已跳过").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("tab", { name: /动态验证/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("启动审计时未启用动态验证。")).not.toBeInTheDocument();
     expect(screen.getByText("静态验证员")).toBeInTheDocument();
     const workerModel = screen.getByRole("group", { name: /执行模型/ });
     expect(workerModel).toHaveTextContent("deepseek / deepseek-v4-flash");
@@ -986,40 +999,19 @@ describe("code security workspace contract page", () => {
     expect(
       screen.queryByRole("heading", { name: "阶段耗时" }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "阶段事件" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("可信执行过程")).not.toBeInTheDocument();
-    expect(screen.getByText("静态验证 · 显示 1 / 1 条")).toBeInTheDocument();
-    expect(screen.getByText("独立验证 Worker 已开始")).toBeInTheDocument();
-    expect(screen.getByText("1 运行中")).toHaveAccessibleName(
-      "1 个工作单元正在运行",
-    );
-    expect(screen.queryByText("seq 2")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("按阶段筛选事件")).not.toBeInTheDocument();
-    expect(
-      screen.getByLabelText("按工作单元筛选事件").closest("label"),
-    ).toHaveClass("cs-event-filter--worker");
-    expect(
-      screen.getByLabelText("按级别筛选事件").closest("label"),
-    ).toHaveClass("cs-event-filter--level");
-    expect(workspaceStyle?.textContent).toContain(
-      ".cs-events__heading > div:first-child",
-    );
-    expect(workspaceStyle?.textContent).not.toContain(
-      ".cs-events__heading > div { display: grid;",
-    );
+    expect(screen.queryByRole("heading", { name: "阶段事件" })).not.toBeInTheDocument();
+    expect(document.querySelector(".cs-context-rail .cs-stage-details")).not.toBeNull();
+    expect(document.querySelector(".cs-stage-session .cs-stage-details")).toBeNull();
     expect(screen.queryByText("不可变源码快照已创建")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("tab", { name: /动态验证阶段/ }));
-    expect(screen.getByText("启动审计时未启用动态验证。")).toBeInTheDocument();
-    expect(screen.getByText("动态验证 · 显示 0 / 0 条")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /动态验证阶段/ })).not.toBeInTheDocument();
+
     expect(
       screen.queryByText("独立验证 Worker 已开始"),
     ).not.toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("tab", { name: /准备源码快照阶段/ }),
     );
-    expect(screen.getByText("不可变源码快照已创建")).toBeInTheDocument();
+    expect(screen.queryByText("不可变源码快照已创建")).not.toBeInTheDocument();
     expect(
       screen.queryByText("独立验证 Worker 已开始"),
     ).not.toBeInTheDocument();
@@ -1355,7 +1347,7 @@ describe("code security workspace contract page", () => {
     ).toBe(false);
   });
 
-  it("keeps the event region busy until events finish loading", async () => {
+  it("keeps stage events hidden while background events load", async () => {
     const detailRequest = deferred<{ data: typeof scanDetail }>();
     const eventsRequest = deferred<{
       data: { items: never[]; latestSeq: number; hasMore: boolean };
@@ -1390,24 +1382,9 @@ describe("code security workspace contract page", () => {
     expect(
       await screen.findByRole("heading", { name: "legacy-service" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("正在加载审计事件…")).toBeInTheDocument();
-    expect(
-      screen.getByLabelText("审计事件列表").closest("section"),
-    ).toHaveAttribute("aria-busy", "true");
-
-    await act(async () =>
-      eventsRequest.resolve({
-        data: { items: [], latestSeq: 0, hasMore: false },
-      }),
-    );
-    await waitFor(() =>
-      expect(
-        screen.getByLabelText("审计事件列表").closest("section"),
-      ).toHaveAttribute("aria-busy", "false"),
-    );
-    expect(
-      screen.getByText("当前阶段与筛选条件下还没有事件。"),
-    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("审计事件列表")).not.toBeInTheDocument();
+    await act(async () => eventsRequest.resolve({ data: { items: [], latestSeq: 0, hasMore: false } }));
+    expect(screen.queryByLabelText("审计事件列表")).not.toBeInTheDocument();
   });
 
   it("does not let an older detail request overwrite a cancellation", async () => {
@@ -1867,7 +1844,7 @@ describe("code security workspace contract page", () => {
     );
   });
 
-  it("loads earlier durable events on demand", async () => {
+  it("does not expose event pagination on the task page", async () => {
     const baseGet = apiGet.getMockImplementation()!;
     apiGet.mockImplementation((path: string, config?: any) => {
       if (path.endsWith("/events") && config?.params?.before_seq === 1) {
@@ -1909,17 +1886,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
-    await user.click(screen.getByRole("button", { name: "加载更早事件" }));
-
-    await waitFor(() =>
-      expect(apiGet).toHaveBeenCalledWith(
-        "/api/code-security/v1/scans/scan_demo/events",
-        { params: { before_seq: 1, limit: 200 } },
-      ),
-    );
-    expect(
-      screen.queryByRole("button", { name: "加载更早事件" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "加载更早事件" })).not.toBeInTheDocument();
   });
 
   it("does not refetch an artifact for unrelated event sequence updates", async () => {
@@ -2212,7 +2179,7 @@ describe("code security workspace contract page", () => {
     await user.click(copySource);
 
     expect(copySource).not.toBeChecked();
-    expect(screen.getByText("直接源码审计")).toBeInTheDocument();
+    expect(screen.queryByText("直接源码审计")).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /^动态验证/ })).toBeDisabled();
     expect(
       screen.getByText("直接源码审计不支持动态验证；重新开启源码复制后可用。"),
@@ -2538,7 +2505,7 @@ describe("code security workspace contract page", () => {
     expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "阶段事件" }),
-    ).toBeInTheDocument();
+    ).not.toBeInTheDocument();
   });
 
   it("shows packaging results instead of empty operational details", () => {
@@ -2604,7 +2571,7 @@ describe("code security workspace contract page", () => {
     expect(screen.queryByText("Worker 工作单元")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "阶段事件" }),
-    ).toBeInTheDocument();
+    ).not.toBeInTheDocument();
   });
 
   it("shows what the main agent accepted and rejected during adjudication", async () => {
@@ -2779,10 +2746,10 @@ describe("code security workspace contract page", () => {
     expect(screen.getByText("已纳入")).toBeInTheDocument();
     expect(screen.getByText("已驳回")).toBeInTheDocument();
     expect(screen.queryByText("驳回依据")).not.toBeInTheDocument();
-    expect(screen.getByText("主智能体已提交裁决")).toBeInTheDocument();
+    expect(screen.queryByText("主智能体已提交裁决")).not.toBeInTheDocument();
     expect(
-      screen.getByText("主智能体裁决 · 显示 1 / 1 条"),
-    ).toBeInTheDocument();
+      screen.queryByText("主智能体裁决 · 显示 1 / 1 条"),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText("现有安全控制已阻断攻击者输入到达危险操作。"),
     ).not.toBeInTheDocument();
@@ -3199,7 +3166,7 @@ describe("code security workspace contract page", () => {
       screen.queryByRole("heading", { name: "Audit records" }),
     ).not.toBeInTheDocument();
     expect(
-      await screen.findByRole("heading", { name: "Phases and live events" }),
+      await screen.findByRole("heading", { name: "Audit conversation" }),
     ).toBeInTheDocument();
     await userEvent.click(
       screen.getByText("View phase details and work units"),
@@ -3214,8 +3181,8 @@ describe("code security workspace contract page", () => {
       screen.getAllByRole("heading", { name: "Audit artifacts" }).length,
     ).toBeGreaterThan(0);
     expect(
-      screen.getByRole("combobox", { name: "Filter events by level" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("combobox", { name: "Filter events by level" }),
+    ).not.toBeInTheDocument();
   });
 
   it("provides English translations for every shared code security label", () => {
