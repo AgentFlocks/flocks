@@ -43,7 +43,6 @@ import asyncio
 import io
 import mimetypes
 import os
-import re
 import shutil
 import stat as stat_module
 import subprocess
@@ -57,6 +56,7 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Request, 
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from flocks.channel.media_filename import sanitize_filename
 from flocks.project.project import Project
 from flocks.server.auth import get_optional_user, require_user
 from flocks.workspace.manager import WorkspaceManager
@@ -106,17 +106,6 @@ def _get_manager() -> WorkspaceManager:
 def _workspace_root(mgr: WorkspaceManager) -> Path:
     """Return the canonical workspace root used for relative path rendering."""
     return mgr.get_workspace_dir().resolve()
-
-
-def _safe_upload_filename(raw_name: str) -> str:
-    """Return a display-safe basename for multipart upload metadata."""
-
-    decoded_name = unquote(str(raw_name or ""))
-    basename = Path(decoded_name.replace("\\", "/")).name
-    basename = re.sub(r"[\x00-\x1f\x7f]+", "_", basename).strip(" .")
-    if not basename or basename in {".", ".."}:
-        raise ValueError("Filename is invalid")
-    return basename[:200]
 
 
 def _is_allowed_upload_filename(filename: str) -> bool:
@@ -386,49 +375,51 @@ async def upload_files(
             results.append({"name": "", "error": "Filename is missing"})
             continue
 
-        try:
-            filename = _safe_upload_filename(raw_name)
-        except ValueError as exc:
-            results.append({"name": "", "error": str(exc)})
-            continue
-        if purpose == "chat" and not _is_allowed_upload_filename(filename):
-            results.append({
-                "name": filename,
-                "error": f"Unsupported file type (allowed: {_ALLOWED_UPLOAD_LABEL})",
-            })
-            continue
-
-        # Read file in chunks to enforce size limit without loading entire
-        # content into memory before checking.
-        chunks: list[bytes] = []
-        total = 0
-        too_large = False
-        while True:
-            chunk = await upload.read(65536)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                too_large = True
-                break
-            chunks.append(chunk)
-
-        if too_large:
-            results.append({"name": raw_name, "error": f"File too large (max {max_mb} MB)"})
-            continue
-
-        content = b"".join(chunks)
         if purpose == "chat":
-            from flocks.session.files import create_chat_upload_target
+            from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload
             from flocks.utils.id import Identifier
 
+            filename = sanitize_filename(unquote(raw_name), fallback="")
+            if not filename:
+                results.append({"name": "", "error": "Filename is invalid"})
+                continue
+            if not _is_allowed_upload_filename(filename):
+                results.append({
+                    "name": filename,
+                    "error": f"Unsupported file type (allowed: {_ALLOWED_UPLOAD_LABEL})",
+                })
+                continue
+
             upload_id = Identifier.ascending("part")
+            target = None
+            completed = False
+            total = 0
             try:
                 target = create_chat_upload_target(current_user.id, upload_id, filename)
-                target.write_bytes(content)
-            except (OSError, ValueError) as exc:
+                # Stream directly to this upload's exclusive staging file.
+                # Keep writes bounded and synchronous so cancellation cannot
+                # leave a background writer racing with close/cleanup.
+                with target.open("xb") as handle:
+                    while True:
+                        chunk = await upload.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            break
+                        handle.write(chunk)
+                if total > max_bytes:
+                    results.append({"name": filename, "error": f"File too large (max {max_mb} MB)"})
+                    continue
+                completed = True
+            except Exception as exc:
                 results.append({"name": filename, "error": f"Failed to stage upload: {exc}"})
                 continue
+            finally:
+                # Also runs for CancelledError. A failed create must never
+                # remove an existing upload with the same ID.
+                if target is not None and not completed:
+                    remove_staged_chat_upload(current_user.id, upload_id)
 
             is_text = WorkspaceManager.is_text_file(target)
             mime_type = upload.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -448,6 +439,27 @@ async def upload_files(
             })
             continue
 
+        filename = Path(raw_name).name  # strip any dir component from client
+        # Read regular Workspace uploads in chunks before overwriting the
+        # destination, so an oversized upload leaves existing content intact.
+        chunks: list[bytes] = []
+        total = 0
+        too_large = False
+        while True:
+            chunk = await upload.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                too_large = True
+                break
+            chunks.append(chunk)
+
+        if too_large:
+            results.append({"name": raw_name, "error": f"File too large (max {max_mb} MB)"})
+            continue
+
+        content = b"".join(chunks)
         # Keep regular Workspace paths stable across repeated uploads by
         # overwriting the existing file instead of auto-renaming it.
         target = dest_dir / filename

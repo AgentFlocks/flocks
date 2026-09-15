@@ -24,7 +24,7 @@ import SuiteInstallProgressPanel, {
   failSuiteInstallProgress,
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
-import { sessionApi, type SessionContextSnapshot } from '@/api/session';
+import { sessionApi, type SessionContextFile, type SessionContextSnapshot } from '@/api/session';
 import {
   flocksproPolicyApi,
   isSessionExecutionSettingsUnsupported,
@@ -53,6 +53,7 @@ import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import type { Message, ModelDefinitionV2, Session } from '@/types';
 import { createMessageId } from '@/utils/messageId';
+import { extractErrorMessage } from '@/utils/error';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   DEFAULT_SESSION_EXECUTION_MODE,
@@ -657,6 +658,64 @@ function SessionChatSkeleton() {
   );
 }
 
+function mergeSessionContext(
+  current: SessionContextSnapshot | null,
+  incoming: SessionContextSnapshot,
+  older: boolean,
+): SessionContextSnapshot {
+  const newest = older && current ? current : incoming;
+  const previous = older ? incoming : current;
+  const incomingIDs = new Set(incoming.messageIDs);
+  const incomingFiles = [...incoming.outputs, ...incoming.contextFiles];
+  // A fetched page replaces descriptors for its messages, including deletions.
+  // A complete head is authoritative for the whole Session, even when empty.
+  const retainedFiles = current && (older || incoming.hasMore)
+    ? [...current.outputs, ...current.contextFiles].filter((file) => !incomingIDs.has(file.sourceMessageID))
+    : [];
+  const filesByKey = new Map<string, SessionContextFile>();
+  for (const file of (older ? [...retainedFiles, ...incomingFiles] : [...incomingFiles, ...retainedFiles])) {
+    const key = file.fileKey || file.resourceID;
+    const existing = filesByKey.get(key);
+    // A page filling a gap can be newer than retained historical descriptors.
+    if (!existing || (
+      typeof file.createdAt === 'number' && typeof existing.createdAt === 'number'
+      && file.createdAt > existing.createdAt
+    )) filesByKey.set(key, file);
+  }
+  const files = [...filesByKey.values()];
+  const outputs = files.filter((file) => file.section === 'outputs');
+  const contextFiles = files.filter((file) => file.section === 'context');
+  const progressSource = (newest.progressKnown ?? newest.progress.length > 0) ? newest : previous;
+  const progress = progressSource?.progress ?? [];
+  const progressKnown = progressSource?.progressKnown ?? progress.length > 0;
+  const progressCount = Number(progress.length > 0);
+  const skills = [...new Map([
+    ...(previous?.skills ?? []).map((skill) => [skill.name, skill] as const),
+    ...newest.skills.map((skill) => [skill.name, skill] as const),
+  ]).values()];
+  // Retain the old boundary only for an overlapping partial head; otherwise
+  // use the fetched page's boundary to fill gaps or finish a complete refresh.
+  const overlapsHead = current?.messageIDs?.some((id) => incomingIDs.has(id));
+  const pagination = older || !current || !incoming.hasMore || !overlapsHead ? incoming : current;
+  return {
+    ...newest,
+    outputs,
+    contextFiles,
+    progress,
+    progressKnown,
+    skills,
+    hasMore: pagination.hasMore,
+    nextBefore: pagination.nextBefore ?? null,
+    counts: {
+      total: outputs.length + contextFiles.length + newest.roots.length + progressCount,
+      outputs: outputs.length,
+      contextFiles: contextFiles.length,
+      roots: newest.roots.length,
+      progress: progressCount,
+    },
+  };
+}
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const { user } = useAuth();
@@ -714,8 +773,19 @@ export default function SessionPage() {
   const [contextPanelWidth, setContextPanelWidth] = useState(() => getInitialSidePanelWidth());
   const [contextSnapshot, setContextSnapshot] = useState<SessionContextSnapshot | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
+  const [contextLoadingMore, setContextLoadingMore] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
-  const [requestedContextResourceID, setRequestedContextResourceID] = useState<string | null>(null);
+  const contextScope = useMemo(() => ({ sessionId: selectedSessionId, open: contextPanelOpen, active: false }), [selectedSessionId, contextPanelOpen]);
+  const contextScopeRef = useRef(contextScope);
+  contextScopeRef.current = contextScope;
+  const contextSnapshotRef = useRef<SessionContextSnapshot | null>(null);
+  const contextFlightRef = useRef<{
+    scope: typeof contextScope;
+    controller: AbortController;
+    dirty: boolean;
+    promise: Promise<void>;
+  } | null>(null);
+  const [requestedContextResource, setRequestedContextResource] = useState<{ sessionId: string | null; resourceID: string } | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -779,7 +849,6 @@ export default function SessionPage() {
   const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const contextRefetchTimerRef = useRef<number | null>(null);
-  const contextRequestSeqRef = useRef(0);
   const selectedSessionIdRef = useRef(selectedSessionId);
   selectedSessionIdRef.current = selectedSessionId;
   const previousSseStatusRef = useRef<SSEConnectionStatus | null>(null);
@@ -1172,47 +1241,75 @@ export default function SessionPage() {
     }
   }, []);
 
-  const fetchSessionContext = useCallback(async (sessionId?: string | null) => {
-    const targetSessionId = sessionId ?? selectedSessionIdRef.current;
-    if (!targetSessionId) {
-      contextRequestSeqRef.current += 1;
-      setContextSnapshot(null);
-      setContextError(null);
-      return;
+  const fetchSessionContext = useCallback((older = false): Promise<void> => {
+    const { sessionId, open } = contextScope;
+    // A stale callback must not invalidate another session, including A -> B -> A.
+    if (contextScopeRef.current !== contextScope || !contextScope.active || !sessionId || !open) return Promise.resolve();
+    if (!older && contextRefetchTimerRef.current !== null) {
+      window.clearTimeout(contextRefetchTimerRef.current);
+      contextRefetchTimerRef.current = null;
     }
-    const requestId = ++contextRequestSeqRef.current;
+    const existing = contextFlightRef.current;
+    if (existing?.scope === contextScope) {
+      if (!older) existing.dirty = true;
+      return existing.promise;
+    }
+    const snapshot = contextSnapshotRef.current;
+    let before = older ? snapshot?.nextBefore : undefined;
+    if (older && (!snapshot?.hasMore || !before)) return Promise.resolve();
+    const flight = {
+      scope: contextScope,
+      controller: new AbortController(),
+      dirty: false,
+      promise: Promise.resolve(),
+    };
+    const isCurrent = () => contextScopeRef.current === contextScope
+      && contextFlightRef.current === flight && !flight.controller.signal.aborted;
+    contextFlightRef.current = flight;
     setContextLoading(true);
-    try {
-      const snapshot = await sessionApi.getContext(targetSessionId);
-      if (
-        requestId !== contextRequestSeqRef.current
-        || targetSessionId !== selectedSessionIdRef.current
-      ) return;
-      setContextSnapshot(snapshot);
-      setContextError(null);
-    } catch (error: any) {
-      if (
-        requestId !== contextRequestSeqRef.current
-        || targetSessionId !== selectedSessionIdRef.current
-      ) return;
-      setContextError(error?.response?.data?.detail || error?.message || 'Failed to load Session Context');
-    } finally {
-      if (
-        requestId === contextRequestSeqRef.current
-        && targetSessionId === selectedSessionIdRef.current
-      ) setContextLoading(false);
-    }
-  }, []);
+    setContextLoadingMore(older);
+    flight.promise = (async () => {
+      try {
+        do {
+          flight.dirty = false;
+          try {
+            const page = await sessionApi.getContext(sessionId, before ? { before } : {}, flight.controller.signal);
+            if (!isCurrent()) return;
+            const merged = mergeSessionContext(contextSnapshotRef.current, page, Boolean(before));
+            contextSnapshotRef.current = merged;
+            setContextSnapshot(merged);
+            setContextError(null);
+          } catch (error) {
+            if (!isCurrent()) return;
+            setContextError(extractErrorMessage(error, 'Failed to load Session Context'));
+          }
+          // All refreshes received during this flight coalesce into one trailing head read.
+          before = undefined;
+          if (isCurrent()) setContextLoadingMore(false);
+        } while (isCurrent() && flight.dirty);
+      } finally {
+        if (isCurrent()) {
+          contextFlightRef.current = null;
+          setContextLoading(false);
+          setContextLoadingMore(false);
+        }
+      }
+    })();
+    return flight.promise;
+  }, [contextScope]);
 
   const scheduleContextRefetch = useCallback(() => {
-    const targetSessionId = selectedSessionIdRef.current;
-    if (!targetSessionId || contextRefetchTimerRef.current !== null) return;
+    if (contextScopeRef.current !== contextScope || !contextScope.active || !contextScope.open || !contextScope.sessionId) return;
+    if (contextFlightRef.current?.scope === contextScope) {
+      void fetchSessionContext();
+      return;
+    }
+    if (contextRefetchTimerRef.current !== null) return;
     contextRefetchTimerRef.current = window.setTimeout(() => {
       contextRefetchTimerRef.current = null;
-      if (selectedSessionIdRef.current !== targetSessionId) return;
-      void fetchSessionContext(targetSessionId);
+      void fetchSessionContext();
     }, 250);
-  }, [fetchSessionContext]);
+  }, [contextScope, fetchSessionContext]);
 
   const scheduleSessionListRefetch = useCallback(() => {
     if (sessionUpdateRefetchTimerRef.current !== null) return;
@@ -1303,17 +1400,31 @@ export default function SessionPage() {
   ]);
 
   useEffect(() => {
-    if (contextRefetchTimerRef.current !== null) {
-      window.clearTimeout(contextRefetchTimerRef.current);
-      contextRefetchTimerRef.current = null;
-    }
-    contextRequestSeqRef.current += 1;
-    setRequestedContextResourceID(null);
+    // Opening the panel must not consume the resource ID set by the message card.
+    setRequestedContextResource(null);
+    contextSnapshotRef.current = null;
     setContextSnapshot(null);
     setContextError(null);
-    setContextLoading(Boolean(selectedSessionId && contextPanelOpen));
-    if (selectedSessionId && contextPanelOpen) void fetchSessionContext(selectedSessionId);
-  }, [contextPanelOpen, fetchSessionContext, selectedSessionId]);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    contextScope.active = true;
+    setContextLoading(false);
+    setContextLoadingMore(false);
+    if (contextScope.open && contextScope.sessionId) void fetchSessionContext();
+    return () => {
+      contextScope.active = false;
+      if (contextRefetchTimerRef.current !== null) {
+        window.clearTimeout(contextRefetchTimerRef.current);
+        contextRefetchTimerRef.current = null;
+      }
+      const flight = contextFlightRef.current;
+      if (flight?.scope === contextScope) {
+        flight.controller.abort();
+        contextFlightRef.current = null;
+      }
+    };
+  }, [contextScope, fetchSessionContext]);
 
   useEffect(() => {
     const previous = previousSseStatusRef.current;
@@ -1325,7 +1436,7 @@ export default function SessionPage() {
       && sseStatus === 'connected'
       && selectedSessionId
     ) {
-      void fetchSessionContext(selectedSessionId);
+      void fetchSessionContext();
     }
   }, [contextPanelOpen, fetchSessionContext, selectedSessionId, sseStatus]);
 
@@ -1848,7 +1959,7 @@ export default function SessionPage() {
   }, [selectedSessionId]);
 
   const handleOpenContextFile = useCallback((resourceId: string) => {
-    setRequestedContextResourceID(resourceId);
+    setRequestedContextResource({ sessionId: selectedSessionIdRef.current, resourceID: resourceId });
     setContextPanelOpen(true);
   }, []);
 
@@ -1882,7 +1993,7 @@ export default function SessionPage() {
     setPendingInitialDisplayText(null);
     setContextPanelOpen(false);
     setContextSnapshot(null);
-    setRequestedContextResourceID(null);
+    setRequestedContextResource(null);
     setSelectedAgent('rex');
     setSelectedModelKey(null);
     setSseStatus('disconnected');
@@ -3979,17 +4090,20 @@ export default function SessionPage() {
               style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
             >
               <SessionContextPanel
+                key={activeChatSessionId}
                 sessionId={activeChatSessionId}
-                snapshot={contextSnapshot}
+                snapshot={contextSnapshot?.sessionID === activeChatSessionId ? contextSnapshot : null}
                 loading={contextLoading}
+                loadingMore={contextLoadingMore}
                 error={contextError}
-                requestedResourceID={requestedContextResourceID}
-                onRequestedResourceConsumed={() => setRequestedContextResourceID(null)}
+                requestedResourceID={requestedContextResource?.sessionId === activeChatSessionId ? requestedContextResource.resourceID : null}
+                onRequestedResourceConsumed={() => setRequestedContextResource(null)}
                 onClose={() => {
                   setContextPanelOpen(false);
-                  setRequestedContextResourceID(null);
+                  setRequestedContextResource(null);
                 }}
-                onRefresh={() => fetchSessionContext(activeChatSessionId)}
+                onRefresh={() => fetchSessionContext()}
+                onLoadMore={() => fetchSessionContext(true)}
                 onFocusMessage={(messageId) => setPendingFocusMessageId(messageId)}
               />
             </aside>

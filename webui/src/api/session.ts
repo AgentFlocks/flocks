@@ -110,6 +110,7 @@ export interface SessionMessageListParams {
 
 export interface SessionContextFile {
   resourceID: string;
+  fileKey: string;
   displayName: string;
   mimeType: string;
   size?: number | null;
@@ -157,10 +158,13 @@ export interface SessionContextCounts {
 export interface SessionContextSnapshot {
   sessionID: string;
   canManageFolders: boolean;
-  historyTruncated: boolean;
+  hasMore: boolean;
+  nextBefore: string | null;
+  messageIDs?: string[];
   outputs: SessionContextFile[];
   contextFiles: SessionContextFile[];
   progress: SessionContextTodo[];
+  progressKnown?: boolean;
   roots: SessionContextRoot[];
   skills: SessionContextSkill[];
   counts: SessionContextCounts;
@@ -180,6 +184,23 @@ export interface SessionContextRootNode {
   size?: number | null;
   modifiedAt?: number | null;
   isTextFile?: boolean;
+}
+
+export interface SessionContextListParams {
+  before?: string;
+  limit?: number;
+}
+
+export interface SessionContextRootListParams {
+  path?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface SessionContextRootPage {
+  items: SessionContextRootNode[];
+  hasMore: boolean;
+  nextOffset: number | null;
 }
 
 export const sessionApi = {
@@ -305,14 +326,38 @@ export const sessionApi = {
     return response.data;
   },
 
-  getContext: async (sessionId: string): Promise<SessionContextSnapshot> => {
-    const response = await client.get<SessionContextSnapshot>(`/api/session/${sessionId}/context`);
+  getContext: async (
+    sessionId: string,
+    params: SessionContextListParams = {},
+    signal?: AbortSignal,
+  ): Promise<SessionContextSnapshot> => {
+    const response = await client.get<SessionContextSnapshot>(`/api/session/${sessionId}/context`, {
+      params: { ...params, limit: Math.min(params.limit ?? 100, 200) },
+      signal,
+    });
     return response.data;
   },
 
-  readContextFile: async (sessionId: string, resourceId: string): Promise<SessionContextContent> => {
+  getContextFile: async (
+    sessionId: string,
+    resourceId: string,
+    signal?: AbortSignal,
+  ): Promise<SessionContextFile> => {
+    const response = await client.get<SessionContextFile>(
+      `/api/session/${sessionId}/context/files/${resourceId}/metadata`,
+      { signal },
+    );
+    return response.data;
+  },
+
+  readContextFile: async (
+    sessionId: string,
+    resourceId: string,
+    signal?: AbortSignal,
+  ): Promise<SessionContextContent> => {
     const response = await client.get<SessionContextContent>(
       `/api/session/${sessionId}/context/files/${resourceId}/content`,
+      { signal },
     );
     return response.data;
   },
@@ -336,10 +381,15 @@ export const sessionApi = {
     return response.data;
   },
 
-  listContextRoot: async (sessionId: string, rootId: string, path = '') => {
-    const response = await client.get<{ rootID: string; path: string; items: SessionContextRootNode[] }>(
+  listContextRoot: async (
+    sessionId: string,
+    rootId: string,
+    params: SessionContextRootListParams = {},
+    signal?: AbortSignal,
+  ): Promise<SessionContextRootPage> => {
+    const response = await client.get<SessionContextRootPage>(
       `/api/session/${sessionId}/context/roots/${rootId}/list`,
-      { params: { path } },
+      { params: { path: '', offset: 0, ...params, limit: Math.min(params.limit ?? 100, 200) }, signal },
     );
     return response.data;
   },
@@ -348,10 +398,11 @@ export const sessionApi = {
     sessionId: string,
     rootId: string,
     path: string,
+    signal?: AbortSignal,
   ): Promise<SessionContextContent> => {
     const response = await client.get<SessionContextContent>(
       `/api/session/${sessionId}/context/roots/${rootId}/content`,
-      { params: { path } },
+      { params: { path }, signal },
     );
     return response.data;
   },

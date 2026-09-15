@@ -995,6 +995,9 @@ class StreamProcessor:
                 tool_end_time = int(datetime.now().timestamp() * 1000)
                 
                 if result.success:
+                    from flocks.session.files import output_file_attachments, public_resource_id
+
+                    attachments = output_file_attachments(tool_name, getattr(result, "attachments", None))
                     # output can be str, dict, or list - ToolStateCompleted handles all
                     completed_state = ToolStateCompleted(
                         status="completed",
@@ -1003,7 +1006,7 @@ class StreamProcessor:
                         title=result.title or tool_name,
                         metadata=result.metadata or {},
                         time={"start": tool_start_time, "end": tool_end_time},
-                        attachments=getattr(result, "attachments", None),
+                        attachments=attachments,
                     )
                 else:
                     resolved_error = _resolve_tool_error(result)
@@ -1038,23 +1041,16 @@ class StreamProcessor:
                         state_dict["output"] = result.output if result.output is not None else ""
                         state_dict["title"] = result.title or tool_name
                         state_dict["metadata"] = result.metadata or {}
-                        if getattr(result, "attachments", None):
-                            if tool_name == "write":
-                                from flocks.session.files import public_resource_id
-
-                                state_dict["attachments"] = [
-                                    {
-                                        **attachment,
-                                        "resourceID": public_resource_id(
-                                            self.assistant_message.id,
-                                            str(attachment.get("id") or tool_state.part_id),
-                                        ),
-                                    }
-                                    for attachment in result.attachments
-                                    if isinstance(attachment, dict)
-                                ]
-                            else:
-                                state_dict["attachments"] = result.attachments
+                        if attachments:
+                            state_dict["attachments"] = [
+                                {
+                                    **attachment,
+                                    "resourceID": public_resource_id(
+                                        self.assistant_message.id, attachment["id"],
+                                    ),
+                                }
+                                for attachment in attachments
+                            ]
                     else:
                         state_dict["error"] = resolved_error
                         state_dict["metadata"] = result.metadata or {}

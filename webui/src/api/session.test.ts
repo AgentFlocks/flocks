@@ -102,21 +102,67 @@ describe('sessionApi message actions', () => {
     await sessionApi.getContext('session-1');
     await sessionApi.readContextFile('session-1', 'resource-1');
     await sessionApi.addContextFolder('session-1', '/srv/research', 'Research');
-    await sessionApi.listContextRoot('session-1', 'root-1', 'papers');
+    await sessionApi.listContextRoot('session-1', 'root-1', { path: 'papers' });
 
-    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context');
-    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context/files/resource-1/content');
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context', { params: { limit: 100 }, signal: undefined });
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context/files/resource-1/content', { signal: undefined });
     expect(mockPost).toHaveBeenCalledWith(
       '/api/session/session-1/context/folders',
       { path: '/srv/research', displayName: 'Research' },
     );
     expect(mockGet).toHaveBeenCalledWith(
       '/api/session/session-1/context/roots/root-1/list',
-      { params: { path: 'papers' } },
+      { params: { path: 'papers', offset: 0, limit: 100 }, signal: undefined },
     );
     expect(sessionApi.contextFileDownloadUrl('session-1', 'resource-1')).toBe(
       '/api/session/session-1/context/files/resource-1/download',
     );
+  });
+
+  it('forwards context cursors, bounded page sizes, and cancellation', async () => {
+    const { sessionApi } = await import('./session');
+    const controller = new AbortController();
+    const page = { sessionID: 'session-1', hasMore: true, nextBefore: 'msg-older' };
+    mockGet.mockResolvedValue({ data: page });
+
+    expect(await sessionApi.getContext('session-1', { before: 'msg-100', limit: 500 }, controller.signal)).toBe(page);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context', {
+      params: { before: 'msg-100', limit: 200 }, signal: controller.signal,
+    });
+    await sessionApi.getContext('session-1', { limit: 12 });
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context', {
+      params: { limit: 12 }, signal: undefined,
+    });
+  });
+
+  it('returns metadata and forwards preview read cancellation', async () => {
+    const { sessionApi } = await import('./session');
+    const signal = new AbortController().signal;
+    const metadata = { resourceID: 'resource-1', fileKey: 'stable-file' };
+    mockGet.mockResolvedValue({ data: metadata });
+    expect(await sessionApi.getContextFile('session-1', 'resource-1', signal)).toBe(metadata);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/files/resource-1/metadata', { signal });
+    await sessionApi.readContextFile('session-1', 'resource-1', signal);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/files/resource-1/content', { signal });
+    await sessionApi.readContextRootFile('session-1', 'root-1', 'papers/a.md', signal);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/roots/root-1/content', {
+      params: { path: 'papers/a.md' }, signal,
+    });
+  });
+
+  it('preserves empty raw-entry directory pages and their offsets', async () => {
+    const { sessionApi } = await import('./session');
+    const signal = new AbortController().signal;
+    const page = { items: [], hasMore: true, nextOffset: 400 };
+    mockGet.mockResolvedValue({ data: page });
+    expect(await sessionApi.listContextRoot('session-1', 'root-1', { path: 'papers', offset: 200, limit: 500 }, signal)).toBe(page);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/roots/root-1/list', {
+      params: { path: 'papers', offset: 200, limit: 200 }, signal,
+    });
+    await sessionApi.listContextRoot('session-1', 'root-1');
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/roots/root-1/list', {
+      params: { path: '', offset: 0, limit: 100 }, signal: undefined,
+    });
   });
 
   it('calls archive and restore endpoints', async () => {

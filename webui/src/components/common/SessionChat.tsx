@@ -222,6 +222,9 @@ export interface SessionChatProps {
    * provided text and any file attachments) to the new session.
    *
    * `fileParts` carries inline image data URLs or staged document upload IDs.
+   * Completion must mean the prompt was accepted, not just the session created.
+   * Propagate explicit non-acceptance errors with their original response status;
+   * timeouts and server errors are treated as unknown acceptance for upload cleanup.
    *
    * The return value is intentionally typed as ``unknown`` so callers can
    * pass ``useSessionChat().createAndSend`` (which resolves to the new
@@ -246,6 +249,13 @@ export interface SessionChatProps {
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
+type UploadOwnership = 'draft' | 'submitting' | 'submitted' | 'unknown';
+
+interface UploadSubmission {
+  start: () => void;
+  accept: () => void;
+  reject: (error: unknown) => void;
+}
 
 interface ComposerAttachment {
   id: string;
@@ -1861,9 +1871,53 @@ export default function SessionChat({
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const activeToolPartIdsRef = useRef<Set<string>>(new Set());
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const attachmentsRef = useRef(attachments);
-  attachmentsRef.current = attachments;
+  const [attachments, setAttachmentState] = useState<ComposerAttachment[]>([]);
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
+  const attachmentsMountedRef = useRef(true);
+  const attachmentScopeRef = useRef(0);
+  const uploadOwnershipRef = useRef(new Map<string, UploadOwnership>());
+  // Update the live draft synchronously, not on the next render. Upload responses,
+  // cancellation and unmount can all run before React commits the tray update.
+  const setAttachments = useCallback((next: ComposerAttachment[] | ((current: ComposerAttachment[]) => ComposerAttachment[])) => {
+    attachmentsRef.current = typeof next === 'function' ? next(attachmentsRef.current) : next;
+    if (attachmentsMountedRef.current) setAttachmentState(attachmentsRef.current);
+  }, []);
+  const disposeUpload = useCallback((uploadID: string) => {
+    if (uploadOwnershipRef.current.get(uploadID) !== 'draft') return;
+    uploadOwnershipRef.current.delete(uploadID);
+    void workspaceAPI.removeChatUpload(uploadID).catch(() => undefined);
+  }, []);
+  const discardAttachments = useCallback(() => {
+    setAttachments([]);
+    uploadOwnershipRef.current.forEach((_ownership, uploadID) => disposeUpload(uploadID));
+  }, [disposeUpload, setAttachments]);
+  const beginUploadSubmission = useCallback((documents: ComposerAttachment[]): UploadSubmission => {
+    const previous = documents.map(({ uploadID }) => [uploadID!, uploadOwnershipRef.current.get(uploadID!)] as const);
+    previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitting'));
+    let started = false;
+    let accepted = false;
+    return {
+      start: () => { started = true; },
+      accept: () => {
+        accepted = true;
+        previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitted'));
+      },
+      reject: (error) => {
+        if (accepted) return;
+        const status = (error as { response?: { status?: number } })?.response?.status;
+        // Timeouts (including gateway/client timeouts) and 5xx do not prove that
+        // the backend rejected the prompt. A later retry cannot undo that doubt.
+        const notAccepted = !started || (typeof status === 'number'
+          && status >= 400 && status < 500 && status !== 408 && status !== 499);
+        previous.forEach(([uploadID, ownership]) => {
+          uploadOwnershipRef.current.set(uploadID, notAccepted && ownership !== 'unknown' ? 'draft' : 'unknown');
+          if (!attachmentsMountedRef.current || !attachmentsRef.current.some((item) => item.uploadID === uploadID)) {
+            disposeUpload(uploadID);
+          }
+        });
+      },
+    };
+  }, [disposeUpload]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showComposerAddMenu, setShowComposerAddMenu] = useState(false);
   // Lightbox preview for composer thumbnails. Shares the same overlay
@@ -1876,13 +1930,14 @@ export default function SessionChat({
   const [dreamingMessage, setDreamingMessage] = useState('');
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
-  useEffect(() => () => {
-    attachmentsRef.current.forEach((attachment) => {
-      if (attachment.uploadID && !attachment.isImage) {
-        void workspaceAPI.removeChatUpload(attachment.uploadID).catch(() => undefined);
-      }
-    });
-  }, []);
+  useEffect(() => {
+    attachmentsMountedRef.current = true;
+    return () => {
+      attachmentsMountedRef.current = false;
+      attachmentScopeRef.current += 1;
+      discardAttachments();
+    };
+  }, [discardAttachments]);
   const {
     items: queuedPrompts,
     expanded: queueExpanded,
@@ -1893,7 +1948,6 @@ export default function SessionChat({
     actionId: queueActionId,
     refresh: fetchPromptQueue,
     applyItems: applyPromptQueueItems,
-    enqueue: enqueuePrompt,
     startEdit: startQueuedEdit,
     cancelEdit: cancelQueuedEdit,
     saveEdit: saveQueuedEdit,
@@ -2846,7 +2900,8 @@ export default function SessionChat({
   // Reset state on session change
   useEffect(() => {
     setIsStreaming(false);
-    setAttachments([]);
+    attachmentScopeRef.current += 1;
+    discardAttachments();
     setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
@@ -2874,7 +2929,7 @@ export default function SessionChat({
     setInput(readChatDraft(sessionId));
     setComposerReferences([]);
     setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
-  }, [sessionId, clearPendingQuestions]);
+  }, [sessionId, clearPendingQuestions, discardAttachments]);
 
   const handleProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
     setProcessGroupOpenState(prev => {
@@ -3023,7 +3078,7 @@ export default function SessionChat({
     setAttachments((prev) => prev.map((attachment) => (
       attachment.id === id ? updater(attachment) : attachment
     )));
-  }, []);
+  }, [setAttachments]);
 
   const uploadSelectedFiles = useCallback(async (entries: Array<{ id: string; file: File }>) => {
     if (entries.length === 0) return;
@@ -3034,26 +3089,34 @@ export default function SessionChat({
         'chat',
       );
       const uploaded = response.data.uploaded ?? [];
-      setAttachments((prev) => prev.map((attachment) => {
-        const entryIndex = entries.findIndex((entry) => entry.id === attachment.id);
-        if (entryIndex < 0) return attachment;
-        const result = uploaded[entryIndex];
-        if (!result || result.error || !result.uploadID) {
-          return {
-            ...attachment,
-            status: 'error',
-            error: result?.error || t('chat.upload.errorGeneric'),
-          };
+      entries.forEach(({ id }, index) => {
+        const result = uploaded[index];
+        const attachment = attachmentsRef.current.find((item) => item.id === id);
+        // Register every returned ID, even if its chip was cancelled or the
+        // component unmounted while this batch was in flight. Dispose per item,
+        // outside React state updaters (which may be replayed or never run).
+        if (result?.uploadID) {
+          if (!uploadOwnershipRef.current.has(result.uploadID)) {
+            uploadOwnershipRef.current.set(result.uploadID, 'draft');
+          }
+          if (!attachmentsMountedRef.current || !attachment || result.error) disposeUpload(result.uploadID);
         }
-        return {
-          ...attachment,
-          name: result.name || attachment.name,
+        if (!attachmentsMountedRef.current || !attachment) return;
+        if (attachment.uploadID && attachment.uploadID !== result?.uploadID) disposeUpload(attachment.uploadID);
+        updateAttachment(id, (current) => !result || result.error || !result.uploadID ? {
+          ...current,
+          status: 'error',
+          uploadID: undefined,
+          error: result?.error || t('chat.upload.errorGeneric'),
+        } : {
+          ...current,
+          name: result.name || current.name,
           status: 'success',
           uploadID: result.uploadID,
-          mime: result.mime || attachment.file.type || 'application/octet-stream',
+          mime: result.mime || current.file.type || 'application/octet-stream',
           error: undefined,
-        };
-      }));
+        });
+      });
     } catch (err: any) {
       const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
       setAttachments((prev) => prev.map((attachment) => (
@@ -3062,7 +3125,7 @@ export default function SessionChat({
           : attachment
       )));
     }
-  }, [t]);
+  }, [disposeUpload, setAttachments, updateAttachment, t]);
 
   const queueFilesForUpload = useCallback((files: File[], { imageBlocked = false }: { imageBlocked?: boolean } = {}) => {
     if (files.length === 0) return;
@@ -3153,7 +3216,7 @@ export default function SessionChat({
           });
       });
     }
-  }, [t, toast, uploadSelectedFiles, supportsVision]);
+  }, [t, toast, uploadSelectedFiles, supportsVision, setAttachments]);
 
   const handleFileSelection = useCallback((fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -3161,8 +3224,8 @@ export default function SessionChat({
   }, [queueFilesForUpload]);
 
   const handleRetryAttachment = useCallback((attachmentId: string) => {
-    const attachment = attachments.find((item) => item.id === attachmentId);
-    if (!attachment) return;
+    const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
+    if (!attachment || attachment.status !== 'error') return;
     updateAttachment(attachmentId, (current) => ({
       ...current,
       status: 'uploading',
@@ -3188,15 +3251,13 @@ export default function SessionChat({
     } else {
       void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
     }
-  }, [attachments, updateAttachment, uploadSelectedFiles, t]);
+  }, [setAttachments, updateAttachment, uploadSelectedFiles, t]);
 
   const handleRemoveAttachment = useCallback((attachmentId: string) => {
     const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
-    if (attachment?.uploadID && !attachment.isImage) {
-      void workspaceAPI.removeChatUpload(attachment.uploadID).catch(() => undefined);
-    }
     setAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
-  }, []);
+    if (attachment?.uploadID && !attachment.isImage) disposeUpload(attachment.uploadID);
+  }, [disposeUpload, setAttachments]);
 
   const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData?.files ?? []);
@@ -3288,6 +3349,7 @@ export default function SessionChat({
     fileParts: FilePartData[] = [],
     agentOverride?: string,
     options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -3345,7 +3407,9 @@ export default function SessionChat({
       if (options?.displayText) payload.displayText = options.displayText;
       payload.executionMode = executionMode;
 
+      uploadSubmission?.start();
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
+      uploadSubmission?.accept();
       if (executionMode === 'goal' && text.trim()) {
         goalHydrationVersionRef.current += 1;
         writeDismissedGoalKey(sessionId, '');
@@ -3379,18 +3443,25 @@ export default function SessionChat({
     fileParts: FilePartData[] = [],
     agentOverride?: string,
     options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
     try {
       await ensureAutoModelSession();
-      await enqueuePrompt({
+      uploadSubmission?.start();
+      await sessionApi.enqueuePrompt(sessionId, {
         parts: buildPromptParts(text, fileParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
         executionMode,
       });
+      // Acceptance transfers ownership before the queue refresh or a parent
+      // callback can switch/unmount this composer.
+      uploadSubmission?.accept();
+      await fetchPromptQueue();
+      setQueueExpanded(true);
       onExecutionModeAccepted?.(executionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
@@ -3410,7 +3481,7 @@ export default function SessionChat({
     setInput('');
     setShowCommandDropdown(false);
     setMentionRange(null);
-    setAttachments([]);
+    discardAttachments();
 
     if (sessionId && isStreaming) {
       try {
@@ -3460,17 +3531,35 @@ export default function SessionChat({
     const referencesToSend = [...composerReferences];
     const referenceText = referencesToSend.map(formatComposerReference).join(' ');
     const rawText = [referenceText, draftText].filter(Boolean).join(' ');
-    const docAttachmentsToSend = [...successfulDocAttachments];
-    const imageAttachmentsToSend = [...successfulImageAttachments];
+    const docAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.uploadID && !item.isImage);
+    const imageAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.isImage && item.dataUrl);
+    if (docAttachmentsToSend.some(({ uploadID }) => {
+      const ownership = uploadOwnershipRef.current.get(uploadID!);
+      return ownership === 'submitting' || ownership === 'submitted';
+    })) return;
     const text = buildMessageText(rawText);
     const mentionedAgent = resolveReferencedAgentName(rawText, mentionAgents);
+    const scope = attachmentScopeRef.current;
     const restoreDraft = () => {
+      if (!attachmentsMountedRef.current || scope !== attachmentScopeRef.current) return;
       setInput(draftText);
       setComposerReferences(referencesToSend);
     };
 
     // Need either text content or at least one uploaded file.
     if (!text && docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0) return;
+
+    // Reserve IDs synchronously, before create, model selection or enqueue can
+    // yield. Tray removal/unmount must never DELETE a possibly accepted upload.
+    const uploadSubmission = beginUploadSubmission(docAttachmentsToSend);
+    const sentAttachmentIds = new Set([...docAttachmentsToSend, ...imageAttachmentsToSend].map(({ id }) => id));
+    const clearSentAttachments = () => setAttachments((current) => current.filter(({ id }) => !sentAttachmentIds.has(id)));
+    const rejectSubmission = (error: unknown) => {
+      uploadSubmission.reject(error);
+      restoreDraft();
+      // The live tray still owns retryable attachments. Do not resurrect chips
+      // explicitly removed in flight or replace uploads added during the send.
+    };
 
     setInput('');
     setComposerReferences([]);
@@ -3503,11 +3592,10 @@ export default function SessionChat({
 
     if (sessionId && isStreaming) {
       try {
-        await enqueueText(text, fileParts, mentionedAgent || undefined);
-        setAttachments([]);
-      } catch {
-        restoreDraft();
-        setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
+        await enqueueText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+        clearSentAttachments();
+      } catch (error) {
+        rejectSubmission(error);
       }
       return;
     }
@@ -3533,6 +3621,9 @@ export default function SessionChat({
         try {
           const effectiveAgent = mentionedAgent || agentName;
           setPendingAgentName(effectiveAgent || 'rex');
+          // The parent's opaque create-and-send promise must resolve only after
+          // acceptance and propagate explicit rejection errors unchanged.
+          uploadSubmission.start();
           await onCreateAndSend(
             text,
             fileParts,
@@ -3541,24 +3632,25 @@ export default function SessionChat({
             undefined,
             executionMode,
           );
+          uploadSubmission.accept();
           onExecutionModeAccepted?.(executionMode);
-          setAttachments([]);
-        } catch {
-          restoreDraft();
-          setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
+          clearSentAttachments();
+        } catch (error) {
+          rejectSubmission(error);
         } finally {
           setSending(false);
         }
+      } else {
+        rejectSubmission(undefined);
       }
       return;
     }
 
     try {
-      await sendText(text, fileParts, mentionedAgent || undefined);
-      setAttachments([]);
-    } catch {
-      restoreDraft();
-      setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
+      await sendText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+      clearSentAttachments();
+    } catch (error) {
+      rejectSubmission(error);
     }
   };
 

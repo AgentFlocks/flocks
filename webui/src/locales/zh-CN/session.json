@@ -466,7 +466,11 @@
     "fullscreen": "全屏预览",
     "viewAll": "在上下文中查看全部",
     "loadFailed": "加载会话上下文失败",
-    "recentHistoryOnly": "当前展示最近 1,000 条消息中的资源，更早的文件仍可从对应消息卡片打开。",
+    "loadEarlier": "加载更早的资源",
+    "loadMore": "加载更多",
+    "loadingMore": "正在加载更多……",
+    "back": "返回",
+    "close": "关闭上下文",
     "searchPlaceholder": "搜索文件……",
     "filter": {
       "all": "全部"

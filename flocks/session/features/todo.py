@@ -148,24 +148,23 @@ class Todo:
         Returns:
             List of todo items (empty list if none)
         """
+        return await cls.get_snapshot(session_id) or []
+
+    @classmethod
+    async def get_snapshot(cls, session_id: str) -> Optional[List[TodoInfo]]:
+        """Read todos, distinguishing an explicit clear from missing legacy state."""
         try:
             # Storage.get returns raw dict/list data, not a Pydantic model
             data = await Storage.get(f"todo:{session_id}")
-            if not data:
-                return []
-            
-            # Convert dict items to TodoInfo models
             if isinstance(data, list):
-                todos = [TodoInfo(**item) if isinstance(item, dict) else item for item in data]
-                return todos
-            
-            return []
+                return [TodoInfo(**item) if isinstance(item, dict) else item for item in data]
+            return None
         except Exception as e:
             log.warn("todo.get.error", {
                 "session_id": session_id,
                 "error": str(e),
             })
-            return []
+            return None
     
     @classmethod
     async def add(cls, session_id: str, todo: TodoInfo) -> List[TodoInfo]:

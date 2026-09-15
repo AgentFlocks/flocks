@@ -718,6 +718,84 @@ class TestToolCallExecution:
         }]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mime", ["application/pdf", "image/png"])
+    async def test_read_large_attachments_do_not_enter_storage_or_sse(self, mime):
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        proc.tool_end_callback = AsyncMock()
+        attachment = {
+            "type": "file", "mime": mime, "filename": "large-document",
+            "url": f"data:{mime};base64," + "A" * (2 * 1024 * 1024),
+        }
+        result = ToolResult(success=True, output="read preview", attachments=[attachment])
+        original_attachments = result.attachments
+        store_part = AsyncMock()
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=store_part),
+            patch("flocks.session.streaming.stream_processor.ToolRegistry.execute", new=AsyncMock(return_value=result)),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_read_large", tool_name="read"))
+            await proc.process_event(ToolCallEvent(
+                tool_call_id="tc_read_large", tool_name="read", input={"filePath": "document"},
+            ))
+        completed_part = store_part.await_args.args[2]
+        assert completed_part.state.status == "completed"
+        assert completed_part.state.attachments is None
+        states = [call.args[1]["part"].get("state", {}) for call in event_callback.await_args_list]
+        assert states[-1]["status"] == "completed"
+        assert all("attachments" not in state for state in states)
+        proc.tool_end_callback.assert_awaited_once_with("read", result)
+        assert result.attachments is original_attachments
+        assert result.attachments == [attachment]
+        assert len(result.attachments[0]["url"]) > 2 * 1024 * 1024
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("success", [False, True])
+    async def test_write_storage_and_sse_share_only_successful_lightweight_descriptors(self, success):
+        from flocks.session.files import output_file_attachments
+
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        proc.tool_end_callback = AsyncMock()
+        attachment = {
+            "id": "prt_bounded", "sessionID": proc.session_id, "messageID": proc.assistant_message.id,
+            "type": "file", "mime": "text/markdown", "filename": "report.md", "origin": "agent_output",
+            "source": {"root": "workspace-output", "path": "report.md", "username": None, "unbounded": {"x": "A" * 10000}},
+            "url": "data:application/pdf;base64," + "A" * 10000,
+            "unknown": {"binary": b"data"},
+        }
+        result = ToolResult(
+            success=success, output="ok" if success else None,
+            error=None if success else "write failed", attachments=[attachment] * 40,
+        )
+        projected = output_file_attachments("write", result.attachments)
+        store_part = AsyncMock()
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=store_part),
+            patch("flocks.session.streaming.stream_processor.ToolRegistry.execute", new=AsyncMock(return_value=result)),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_bounded", tool_name="write"))
+            await proc.process_event(ToolCallEvent(
+                tool_call_id="tc_bounded", tool_name="write", input={"filePath": "report.md", "content": "report"},
+            ))
+        stored = store_part.await_args.args[2]
+        final_state = event_callback.await_args.args[1]["part"]["state"]
+        assert len(result.attachments) == 40
+        assert "url" in result.attachments[0]
+        proc.tool_end_callback.assert_awaited_once_with("write", result)
+        if success:
+            assert stored.state.attachments == projected
+            assert len(projected) == 32
+            assert final_state["attachments"] == [
+                {**item, "resourceID": public_resource_id(proc.assistant_message.id, item["id"])}
+                for item in projected
+            ]
+        else:
+            assert stored.state.status == "error"
+            assert not getattr(stored.state, "attachments", None)
+            assert "attachments" not in final_state
+
+    @pytest.mark.asyncio
     async def test_tool_call_passes_session_abort_event_to_tool_context(self):
         abort_event = asyncio.Event()
         proc = _make_processor(abort_event=abort_event)

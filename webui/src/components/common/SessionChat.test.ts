@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ContextUsageSnapshot } from '@/api/session';
 import type { Message } from '@/types';
@@ -1766,6 +1766,357 @@ describe('SessionChat composer controls', () => {
     await user.click(screen.getByRole('button', { name: '选择 Explore' }));
 
     expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+  });
+});
+
+describe('SessionChat staged upload lifecycle', () => {
+  const modes = ['create', 'send', 'queue'] as const;
+  type Mode = typeof modes[number];
+  const uploadUrl = (name = 'draft.md') => `/api/workspace/upload/chat/prt-${name}`;
+  const uploadResponse = (...names: string[]) => ({
+    data: { uploaded: names.map((name) => ({ name, uploadID: `prt-${name}`, mime: 'text/markdown' })) },
+  });
+  const selectDocuments = (container: HTMLElement, ...names: string[]) => {
+    fireEvent.change(container.querySelector('input[type="file"]')!, {
+      target: { files: names.map((name) => new File(['draft'], name, { type: 'text/markdown' })) },
+    });
+  };
+  const removeDocument = (name = 'draft.md') => {
+    const chip = screen.getByText(name).parentElement!.parentElement!;
+    fireEvent.click(within(chip).getByTitle('chat.upload.remove'));
+  };
+  const submit = () => {
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'review' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+  };
+
+  beforeEach(() => {
+    vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.mocked(window.alert).mockRestore();
+  });
+
+  async function setupSubmission(mode: Mode, overrides: Partial<React.ComponentProps<typeof SessionChat>> = {}) {
+    const request = deferred<unknown>();
+    const createAndSend = vi.fn(() => request.promise);
+    clientPostMock.mockImplementation((url: string, body: FormData) => url === '/api/workspace/upload'
+      ? Promise.resolve(uploadResponse(...body.getAll('files').map((file) => (file as File).name)))
+      : request.promise);
+    sessionApiEnqueuePromptMock.mockReturnValue(request.promise);
+    const props = {
+      sessionId: mode === 'create' ? null : 'sess-1',
+      onCreateAndSend: createAndSend,
+      live: true,
+      ...overrides,
+    };
+    const view = render(React.createElement(SessionChat, props));
+    await act(async () => {
+      selectDocuments(view.container, 'draft.md');
+    });
+    if (mode === 'queue') {
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+    }
+    const expectRequested = () => {
+      const parts = expect.arrayContaining([expect.objectContaining({ uploadID: 'prt-draft.md' })]);
+      if (mode === 'create') {
+        expect(createAndSend).toHaveBeenCalledWith('review', parts, undefined, undefined, undefined, 'build');
+      } else if (mode === 'queue') {
+        expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith('sess-1', expect.objectContaining({ parts }));
+      } else {
+        expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/prompt_async', expect.objectContaining({ parts }));
+      }
+    };
+    return { ...view, props, request, createAndSend, expectRequested };
+  }
+
+  it.each(modes)('protects IDs before the first %s await and after an unmounted acceptance', async (mode) => {
+    const view = await setupSubmission(mode);
+    act(() => {
+      submit();
+      view.unmount();
+    });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await waitFor(view.expectRequested);
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it('reserves uploads before the create callback synchronously switches away', async () => {
+    const view = await setupSubmission('create');
+    view.createAndSend.mockImplementation(() => {
+      view.unmount();
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+      return view.request.promise;
+    });
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve('sess-created'); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('transfers accepted %s uploads before a parent callback unmounts the tray', async (mode) => {
+    const onAccepted = vi.fn(() => view.unmount());
+    const view = await setupSubmission(mode, { onExecutionModeAccepted: onAccepted });
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(onAccepted).toHaveBeenCalledOnce();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'queue'] as const)('reserves %s uploads throughout deferred model selection', async (mode) => {
+    const modelUpdate = deferred<unknown>();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    const view = await setupSubmission(mode, { modelAuto: true });
+    act(() => { submit(); });
+    expect(sessionApiUpdateMock).toHaveBeenCalledOnce();
+    expect(clientPostMock.mock.calls.filter(([url]) => url.endsWith('/prompt_async'))).toHaveLength(0);
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    removeDocument();
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { modelUpdate.resolve({}); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'queue'] as const)('cleans unmounted %s drafts when model selection fails before any prompt request', async (mode) => {
+    const modelUpdate = deferred<unknown>();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    const view = await setupSubmission(mode, { modelAuto: true });
+    act(() => { submit(); });
+    view.unmount();
+    await act(async () => { modelUpdate.reject({ response: { status: 503 } }); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    expect(clientPostMock.mock.calls.filter(([url]) => url.endsWith('/prompt_async'))).toHaveLength(0);
+  });
+
+  it('keeps accepted queue uploads while queue refresh is pending and the session switches', async () => {
+    const view = await setupSubmission('queue');
+    const refresh = deferred<unknown>();
+    sessionApiListPromptQueueMock.mockReturnValueOnce(refresh.promise);
+    await act(async () => { submit(); });
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(sessionApiListPromptQueueMock).toHaveBeenCalledTimes(2);
+    removeDocument();
+    view.rerender(React.createElement(SessionChat, { ...view.props, sessionId: 'sess-2' }));
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { refresh.resolve({ items: [] }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('restores a rejected %s draft, retries the same IDs and transfers accepted ownership', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.reject({ response: { status: 409 } }); });
+    expect(screen.getByRole('textbox')).toHaveValue('review');
+    expect(screen.getByText('draft.md')).toBeInTheDocument();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    const retry = deferred<unknown>();
+    view.createAndSend.mockReturnValue(retry.promise);
+    sessionApiEnqueuePromptMock.mockReturnValue(retry.promise);
+    clientPostMock.mockReturnValue(retry.promise);
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { retry.resolve({ status: 202, data: {} }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('cleans a recovered %s draft on unmount without waiting for another render', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    await act(async () => {
+      view.request.reject({ response: { status: 422 } });
+      await view.request.promise.catch(() => undefined);
+      view.unmount();
+    });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(modes)('cleans an unmounted %s upload only after an explicit non-acceptance', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { view.request.reject({ response: { status: 400 } }); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(modes)('does not resurrect a %s chip cancelled while submitting if the request is rejected', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    removeDocument();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { view.request.reject({ response: { status: 403 } }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toHaveValue('review');
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe.each(modes)('%s acceptance uncertainty', (mode) => {
+    it.each([
+      ['network timeout', { code: 'ECONNABORTED', message: 'timeout' }],
+      ['server error', { response: { status: 503 } }],
+      ['HTTP timeout', { response: { status: 408 } }],
+    ])('retains IDs after %s, even on removal and unmount', async (_label, error) => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      await act(async () => { view.request.reject(error); });
+      expect(screen.getByRole('textbox')).toHaveValue('review');
+      removeDocument();
+      view.unmount();
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+
+    it('retains IDs when a server error arrives after unmount', async () => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      view.unmount();
+      await act(async () => { view.request.reject({ response: { status: 500 } }); });
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+
+    it('does not downgrade an earlier unknown acceptance when a retry gets a 4xx', async () => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      await act(async () => { view.request.reject(new Error('network disconnected')); });
+      const retry = deferred<unknown>();
+      view.createAndSend.mockReturnValue(retry.promise);
+      sessionApiEnqueuePromptMock.mockReturnValue(retry.promise);
+      clientPostMock.mockReturnValue(retry.promise);
+      await act(async () => { submit(); });
+      view.unmount();
+      await act(async () => { retry.reject({ response: { status: 422 } }); });
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('does not restore an old rejected draft into a different session', async () => {
+    const view = await setupSubmission('send');
+    await act(async () => { submit(); });
+    view.rerender(React.createElement(SessionChat, { ...view.props, sessionId: 'sess-2' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'new draft' } });
+    await act(async () => { view.request.reject({ response: { status: 422 } }); });
+    expect(screen.getByRole('textbox')).toHaveValue('new draft');
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it('cleans a draft whose upload resolves before its next render on unmount', async () => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockReturnValue(upload.promise);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'draft.md');
+    await act(async () => {
+      upload.resolve(uploadResponse('draft.md'));
+      await upload.promise;
+      view.unmount();
+    });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(['cancel', 'unmount'] as const)('disposes every late batch ID after %s, once under StrictMode', async (action) => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockReturnValue(upload.promise);
+    const view = render(React.createElement(React.StrictMode, null,
+      React.createElement(SessionChat, { sessionId: 'sess-1' })));
+    selectDocuments(view.container, 'a.md', 'b.md');
+    if (action === 'cancel') {
+      removeDocument('a.md');
+      removeDocument('b.md');
+    } else {
+      view.unmount();
+    }
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { upload.resolve(uploadResponse('a.md', 'b.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+    expect(clientDeleteMock).toHaveBeenCalledWith(uploadUrl('a.md'));
+    expect(clientDeleteMock).toHaveBeenCalledWith(uploadUrl('b.md'));
+    if (action === 'cancel') {
+      expect(screen.queryByText('a.md')).not.toBeInTheDocument();
+      expect(screen.queryByText('b.md')).not.toBeInTheDocument();
+      view.unmount();
+    }
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('disposes only the cancelled item from a late batch and sends the remaining document', async () => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockImplementation((url: string) => url === '/api/workspace/upload'
+      ? upload.promise : Promise.resolve({ status: 202, data: {} }));
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'a.md', 'b.md');
+    removeDocument('a.md');
+    await act(async () => { upload.resolve(uploadResponse('a.md', 'b.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl('a.md'));
+    expect(screen.queryByText('a.md')).not.toBeInTheDocument();
+    expect(screen.getByText('b.md')).toBeInTheDocument();
+    await act(async () => { submit(); });
+    const payload = clientPostMock.mock.calls.find(([url]) => url.endsWith('/prompt_async'))?.[1];
+    expect(payload.parts.filter((part: { type: string }) => part.type === 'file')).toEqual([
+      expect.objectContaining({ uploadID: 'prt-b.md' }),
+    ]);
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('tracks late IDs after repeated failed upload retries without reviving a cancelled chip', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const third = deferred<unknown>();
+    clientPostMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'draft.md');
+    await act(async () => { first.reject(new Error('upload failed')); });
+    fireEvent.click(screen.getByTitle('chat.upload.retry'));
+    await act(async () => { second.reject(new Error('upload failed again')); });
+    fireEvent.click(screen.getByTitle('chat.upload.retry'));
+    removeDocument();
+    view.unmount();
+    await act(async () => { third.resolve(uploadResponse('draft.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    expect(clientPostMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('disposes IDs included in failed upload results and tracks the retry ID separately', async () => {
+    clientPostMock.mockResolvedValueOnce({ data: { uploaded: [{
+      name: 'draft.md', uploadID: 'prt-failed', error: 'processing failed',
+    }] } });
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await act(async () => { selectDocuments(view.container, 'draft.md'); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith('/api/workspace/upload/chat/prt-failed');
+    clientPostMock.mockResolvedValueOnce(uploadResponse('draft.md'));
+    await act(async () => { fireEvent.click(screen.getByTitle('chat.upload.retry')); });
+    expect(screen.queryByTitle('chat.upload.retry')).not.toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+    expect(clientDeleteMock).toHaveBeenLastCalledWith(uploadUrl());
+  });
+
+  it('keeps ownership of newly added drafts when an earlier queue submission completes', async () => {
+    const view = await setupSubmission('queue');
+    await act(async () => { submit(); });
+    await act(async () => { selectDocuments(view.container, 'next.md'); });
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(screen.getByText('next.md')).toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl('next.md'));
   });
 });
 

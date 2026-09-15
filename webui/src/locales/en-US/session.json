@@ -465,7 +465,11 @@
     "fullscreen": "Full screen",
     "viewAll": "View all in Context",
     "loadFailed": "Failed to load Session Context",
-    "recentHistoryOnly": "Showing resources from the most recent 1,000 messages. Older files remain available from their message cards.",
+    "loadEarlier": "Load earlier resources",
+    "loadMore": "Load more",
+    "loadingMore": "Loading more…",
+    "back": "Back",
+    "close": "Close Context",
     "searchPlaceholder": "Search files...",
     "filter": {
       "all": "All"

@@ -187,6 +187,10 @@ async def _build_output_attachment(
             "source": {
                 "root": "workspace-output",
                 "path": target.relative_to(outputs_root).as_posix(),
+                "username": (
+                    WorkspaceManager.normalize_username_for_path(owner_username)
+                    if owner_username else None
+                ),
             },
         }
     except (OSError, RuntimeError, ValueError) as exc:

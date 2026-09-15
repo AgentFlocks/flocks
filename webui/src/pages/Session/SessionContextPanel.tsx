@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, ChevronDown, Download, FileText, Folder, FolderPlus,
   Maximize2, RefreshCw, Search, SlidersHorizontal, Sparkles, X,
@@ -20,6 +20,7 @@ import {
 } from '@/components/common/FilePreview';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { TodoList } from '@/components/common/TodoList';
+import { extractErrorMessage } from '@/utils/error';
 
 interface PreviewState {
   node: WorkspaceNode;
@@ -34,6 +35,8 @@ export interface SessionContextPanelProps {
   sessionId: string;
   snapshot: SessionContextSnapshot | null;
   loading: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => Promise<void> | void;
   error?: string | null;
   requestedResourceID?: string | null;
   onRequestedResourceConsumed?: () => void;
@@ -47,11 +50,6 @@ type FileSort = 'updated' | 'name' | 'size';
 
 function fileTimestamp(file: SessionContextFile): number {
   return file.modifiedAt || file.createdAt || 0;
-}
-
-function getErrorMessage(error: unknown): string {
-  const candidate = error as any;
-  return candidate?.response?.data?.detail || candidate?.message || 'Request failed';
 }
 
 function toWorkspaceNode(file: SessionContextFile): WorkspaceNode {
@@ -113,6 +111,8 @@ export default function SessionContextPanel({
   sessionId,
   snapshot,
   loading,
+  loadingMore = false,
+  onLoadMore,
   error,
   requestedResourceID,
   onRequestedResourceConsumed,
@@ -131,23 +131,75 @@ export default function SessionContextPanel({
   const [rootPath, setRootPath] = useState('');
   const [rootItems, setRootItems] = useState<SessionContextRootNode[]>([]);
   const [rootLoading, setRootLoading] = useState(false);
+  const [rootHasMore, setRootHasMore] = useState(false);
+  const [rootNextOffset, setRootNextOffset] = useState<number | null>(null);
   const [showFolderInput, setShowFolderInput] = useState(false);
   const [folderPath, setFolderPath] = useState('');
   const [folderBusy, setFolderBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const previewRequestRef = useRef(0);
-  const rootRequestRef = useRef(0);
+  const scope = useMemo(() => ({ sessionId, active: true }), [sessionId]);
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  const navigationRef = useRef<AbortController | null>(null);
+  const consumedResourceRef = useRef<string | null>(null);
+
+  const cancelNavigation = useCallback(() => {
+    navigationRef.current?.abort();
+    navigationRef.current = null;
+    setPreviewLoading(false);
+    setRootLoading(false);
+    setFullscreen(false);
+    setActionError(null);
+  }, []);
+
+  const beginNavigation = useCallback(() => {
+    if (scopeRef.current !== scope || !scope.active) return null;
+    cancelNavigation();
+    const controller = new AbortController();
+    navigationRef.current = controller;
+    return {
+      signal: controller.signal,
+      isCurrent: () => scopeRef.current === scope && scope.active
+        && navigationRef.current === controller && !controller.signal.aborted,
+    };
+  }, [cancelNavigation, scope]);
 
   useEffect(() => {
-    previewRequestRef.current += 1;
-    rootRequestRef.current += 1;
+    scope.active = true;
+    consumedResourceRef.current = null;
+    cancelNavigation();
     setPreview(null);
     setRoot(null);
     setRootPath('');
     setRootItems([]);
-    setFullscreen(false);
-    setActionError(null);
-  }, [sessionId]);
+    setRootHasMore(false);
+    setRootNextOffset(null);
+    setFolderBusy(false);
+    setFolderPath('');
+    setShowFolderInput(false);
+    return () => {
+      scope.active = false;
+      navigationRef.current?.abort();
+      navigationRef.current = null;
+    };
+  }, [cancelNavigation, scope]);
+
+  const closePanel = () => {
+    cancelNavigation();
+    onClose();
+  };
+  const backFromPreview = () => {
+    cancelNavigation();
+    setPreview(null);
+  };
+  const backFromRoot = () => {
+    cancelNavigation();
+    setRoot(null);
+    setRootItems([]);
+    setRootPath('');
+    setRootHasMore(false);
+    setRootNextOffset(null);
+  };
 
   const files = useMemo(() => {
     const all = [...(snapshot?.outputs || []), ...(snapshot?.contextFiles || [])];
@@ -174,20 +226,24 @@ export default function SessionContextPanel({
     [files],
   );
 
-  const openResource = useCallback(async (file: SessionContextFile) => {
-    const requestId = ++previewRequestRef.current;
-    const node = toWorkspaceNode(file);
-    const fileAccess: PreviewFileAccess = {
-      previewUrl: (resourceId) => sessionApi.contextFilePreviewUrl(sessionId, resourceId),
-      downloadUrl: (resourceId) => sessionApi.contextFileDownloadUrl(sessionId, resourceId),
-    };
-    setActionError(null);
+  const openResource = useCallback(async (resource: SessionContextFile | string) => {
+    const request = beginNavigation();
+    if (!request) return;
     setPreviewLoading(true);
     try {
+      const file = typeof resource === 'string'
+        ? await sessionApi.getContextFile(sessionId, resource, request.signal)
+        : resource;
+      if (!request.isCurrent()) return;
+      const node = toWorkspaceNode(file);
+      const fileAccess: PreviewFileAccess = {
+        previewUrl: (resourceId) => sessionApi.contextFilePreviewUrl(sessionId, resourceId),
+        downloadUrl: (resourceId) => sessionApi.contextFileDownloadUrl(sessionId, resourceId),
+      };
       const content = file.isTextFile && file.status !== 'missing'
-        ? await sessionApi.readContextFile(sessionId, file.resourceID)
+        ? await sessionApi.readContextFile(sessionId, file.resourceID, request.signal)
         : null;
-      if (requestId !== previewRequestRef.current) return;
+      if (!request.isCurrent()) return;
       setPreview({
         node,
         fileAccess,
@@ -197,26 +253,34 @@ export default function SessionContextPanel({
         downloadUrl: fileAccess.downloadUrl(file.resourceID),
       });
       setRoot(null);
-      setFullscreen(false);
     } catch (error) {
-      if (requestId === previewRequestRef.current) setActionError(getErrorMessage(error));
+      if (request.isCurrent()) setActionError(extractErrorMessage(error, 'Request failed'));
     } finally {
-      if (requestId === previewRequestRef.current) setPreviewLoading(false);
+      if (request.isCurrent()) {
+        navigationRef.current = null;
+        setPreviewLoading(false);
+      }
     }
-  }, [sessionId]);
+  }, [beginNavigation, sessionId]);
 
   useEffect(() => {
-    if (!requestedResourceID || !snapshot) return;
-    const file = [...snapshot.outputs, ...snapshot.contextFiles]
-      .find((item) => item.resourceID === requestedResourceID);
-    if (file) {
-      onRequestedResourceConsumed?.();
-      void openResource(file);
+    if (!requestedResourceID) {
+      consumedResourceRef.current = null;
+      return;
     }
-  }, [onRequestedResourceConsumed, openResource, requestedResourceID, snapshot]);
+    if (consumedResourceRef.current === requestedResourceID) return;
+    consumedResourceRef.current = requestedResourceID;
+    const file = snapshot?.sessionID === sessionId
+      ? [...snapshot.outputs, ...snapshot.contextFiles].find((item) => item.resourceID === requestedResourceID)
+      : undefined;
+    onRequestedResourceConsumed?.();
+    // Message cards may point outside the loaded history. Resolve metadata directly.
+    void openResource(file ?? requestedResourceID);
+  }, [onRequestedResourceConsumed, openResource, requestedResourceID, sessionId, snapshot]);
 
   const openRootFile = useCallback(async (selectedRoot: SessionContextRoot, item: SessionContextRootNode) => {
-    const requestId = ++previewRequestRef.current;
+    const request = beginNavigation();
+    if (!request) return;
     const node: WorkspaceNode = {
       name: item.name,
       path: item.path,
@@ -233,9 +297,9 @@ export default function SessionContextPanel({
     setPreviewLoading(true);
     try {
       const content = item.isTextFile
-        ? await sessionApi.readContextRootFile(sessionId, selectedRoot.id, item.path)
+        ? await sessionApi.readContextRootFile(sessionId, selectedRoot.id, item.path, request.signal)
         : null;
-      if (requestId !== previewRequestRef.current) return;
+      if (!request.isCurrent()) return;
       setPreview({
         node,
         fileAccess,
@@ -246,29 +310,45 @@ export default function SessionContextPanel({
       });
       setFullscreen(false);
     } catch (error) {
-      if (requestId === previewRequestRef.current) setActionError(getErrorMessage(error));
+      if (request.isCurrent()) setActionError(extractErrorMessage(error, 'Request failed'));
     } finally {
-      if (requestId === previewRequestRef.current) setPreviewLoading(false);
+      if (request.isCurrent()) {
+        navigationRef.current = null;
+        setPreviewLoading(false);
+      }
     }
-  }, [sessionId]);
+  }, [beginNavigation, sessionId]);
 
-  const loadRoot = useCallback(async (selectedRoot: SessionContextRoot, path = '') => {
-    const requestId = ++rootRequestRef.current;
-    setActionError(null);
+  const loadRoot = useCallback(async (selectedRoot: SessionContextRoot, path = '', offset = 0) => {
+    if (offset > 0 && navigationRef.current) return;
+    const request = beginNavigation();
+    if (!request) return;
     setRootLoading(true);
-    try {
-      const response = await sessionApi.listContextRoot(sessionId, selectedRoot.id, path);
-      if (requestId !== rootRequestRef.current) return;
-      setRoot(selectedRoot);
-      setRootPath(response.path);
-      setRootItems(response.items);
-      setPreview(null);
-    } catch (error) {
-      if (requestId === rootRequestRef.current) setActionError(getErrorMessage(error));
-    } finally {
-      if (requestId === rootRequestRef.current) setRootLoading(false);
+    setRoot(selectedRoot);
+    setRootPath(path);
+    setPreview(null);
+    if (offset === 0) {
+      setRootItems([]);
+      setRootHasMore(false);
+      setRootNextOffset(null);
     }
-  }, [sessionId]);
+    try {
+      const response = await sessionApi.listContextRoot(sessionId, selectedRoot.id, { path, offset }, request.signal);
+      if (!request.isCurrent()) return;
+      setRootItems((current) => offset === 0 ? response.items : [
+        ...current, ...response.items.filter((item) => !current.some((loaded) => loaded.path === item.path)),
+      ]);
+      setRootHasMore(response.hasMore);
+      setRootNextOffset(response.nextOffset);
+    } catch (error) {
+      if (request.isCurrent()) setActionError(extractErrorMessage(error, 'Request failed'));
+    } finally {
+      if (request.isCurrent()) {
+        navigationRef.current = null;
+        setRootLoading(false);
+      }
+    }
+  }, [beginNavigation, sessionId]);
 
   const addFolder = useCallback(async () => {
     const path = folderPath.trim();
@@ -277,21 +357,24 @@ export default function SessionContextPanel({
     setFolderBusy(true);
     try {
       await sessionApi.addContextFolder(sessionId, path);
+      if (scopeRef.current !== scope || !scope.active) return;
       setFolderPath('');
       setShowFolderInput(false);
       await onRefresh();
     } catch (error) {
-      setActionError(getErrorMessage(error));
+      if (scopeRef.current === scope && scope.active) setActionError(extractErrorMessage(error, 'Request failed'));
     } finally {
-      setFolderBusy(false);
+      if (scopeRef.current === scope && scope.active) setFolderBusy(false);
     }
-  }, [folderPath, onRefresh, sessionId]);
+  }, [folderPath, onRefresh, scope, sessionId]);
 
   const removeFolder = useCallback(async (selectedRoot: SessionContextRoot) => {
     setActionError(null);
     try {
       await sessionApi.removeContextFolder(sessionId, selectedRoot.id);
+      if (scopeRef.current !== scope || !scope.active) return;
       if (root?.id === selectedRoot.id) {
+        cancelNavigation();
         setRoot(null);
         setRootItems([]);
         setRootPath('');
@@ -299,15 +382,19 @@ export default function SessionContextPanel({
       }
       await onRefresh();
     } catch (error) {
-      setActionError(getErrorMessage(error));
+      if (scopeRef.current === scope && scope.active) setActionError(extractErrorMessage(error, 'Request failed'));
     }
-  }, [onRefresh, root?.id, sessionId]);
+  }, [cancelNavigation, onRefresh, root?.id, scope, sessionId]);
+
+  const previewPending = previewLoading && (
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 top-[52px] z-10 grid place-items-center bg-white/60 dark:bg-zinc-900/60"><LoadingSpinner /></div>
+  );
 
   if (preview) {
     return (
       <div className="relative flex h-full min-h-0 flex-col bg-white dark:bg-[#242b33]">
         <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800">
-          <button type="button" onClick={() => setPreview(null)} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <button type="button" onClick={backFromPreview} aria-label={t('context.back')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
             <ArrowLeft className="h-4 w-4" />
           </button>
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">{preview.node.name}</span>
@@ -317,32 +404,38 @@ export default function SessionContextPanel({
           <button type="button" onClick={() => setFullscreen(true)} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800" title={t('context.fullscreen')}>
             <Maximize2 className="h-4 w-4" />
           </button>
-          <button type="button" onClick={onClose} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
             <X className="h-4 w-4" />
           </button>
         </div>
         {actionError && <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError}</div>}
         <div className="min-h-0 flex-1">
-          <FilePreviewRenderer
-            node={preview.node}
-            content={preview.content}
-            editing={false}
-            editContent={null}
-            truncated={preview.truncated}
-            previewLimitBytes={preview.previewLimitBytes}
-            fileAccess={preview.fileAccess}
-            onEditChange={() => undefined}
-          />
+          {/* Loading preview translations must not suspend and reset the Session panel. */}
+          <Suspense fallback={<LoadingSpinner className="py-10" />}>
+            <FilePreviewRenderer
+              node={preview.node}
+              content={preview.content}
+              editing={false}
+              editContent={null}
+              truncated={preview.truncated}
+              previewLimitBytes={preview.previewLimitBytes}
+              fileAccess={preview.fileAccess}
+              onEditChange={() => undefined}
+            />
+          </Suspense>
         </div>
+        {previewPending}
         {fullscreen && (
-          <PreviewModal
-            node={preview.node}
-            content={preview.content}
-            truncated={preview.truncated}
-            previewLimitBytes={preview.previewLimitBytes}
-            fileAccess={preview.fileAccess}
-            onClose={() => setFullscreen(false)}
-          />
+          <Suspense fallback={null}>
+            <PreviewModal
+              node={preview.node}
+              content={preview.content}
+              truncated={preview.truncated}
+              previewLimitBytes={preview.previewLimitBytes}
+              fileAccess={preview.fileAccess}
+              onClose={() => setFullscreen(false)}
+            />
+          </Suspense>
         )}
       </div>
     );
@@ -353,14 +446,14 @@ export default function SessionContextPanel({
     return (
       <div className="relative flex h-full min-h-0 flex-col bg-white dark:bg-[#242b33]">
         <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800">
-          <button type="button" onClick={() => { setRoot(null); setRootItems([]); }} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <button type="button" onClick={backFromRoot} aria-label={t('context.back')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">{root.displayName}</div>
             {rootPath && <div className="truncate text-[10px] text-zinc-400">{rootPath}</div>}
           </div>
-          <button type="button" onClick={onClose} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X className="h-4 w-4" /></button>
+          <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X className="h-4 w-4" /></button>
         </div>
         {actionError && <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -370,7 +463,7 @@ export default function SessionContextPanel({
               {t('context.parentFolder')}
             </button>
           )}
-          {rootLoading ? <div className="py-8"><LoadingSpinner /></div> : rootItems.length === 0 ? (
+          {rootLoading && rootItems.length === 0 ? <div className="py-8"><LoadingSpinner /></div> : rootItems.length === 0 && !rootHasMore ? (
             <EmptySection>{t('context.emptyFolder')}</EmptySection>
           ) : (
             <div className="space-y-1">
@@ -390,7 +483,13 @@ export default function SessionContextPanel({
               ))}
             </div>
           )}
+          {rootHasMore && rootNextOffset != null && (
+            <button type="button" disabled={rootLoading || previewLoading} onClick={() => void loadRoot(root, rootPath, rootNextOffset)} className="mt-3 w-full rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-600 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300">
+              {t(rootLoading ? 'context.loadingMore' : 'context.loadMore')}
+            </button>
+          )}
         </div>
+        {previewPending}
       </div>
     );
   }
@@ -398,12 +497,14 @@ export default function SessionContextPanel({
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-white dark:bg-[#242b33]">
       <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800">
-        <Sparkles className="h-4 w-4 text-violet-500" />
+        {previewLoading ? (
+          <button type="button" onClick={cancelNavigation} aria-label={t('context.back')} className="rounded p-1.5 text-zinc-500"><ArrowLeft className="h-4 w-4" /></button>
+        ) : <Sparkles className="h-4 w-4 text-violet-500" />}
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">{t('context.title')}</span>
         <button type="button" onClick={() => void onRefresh()} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800" title={t('context.refresh')}>
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
-        <button type="button" onClick={onClose} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X className="h-4 w-4" /></button>
+        <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X className="h-4 w-4" /></button>
       </div>
 
       <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
@@ -431,10 +532,10 @@ export default function SessionContextPanel({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {(actionError || error) && <div className="m-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError || error}</div>}
-        {snapshot?.historyTruncated && (
-          <div className="mx-3 mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            {t('context.recentHistoryOnly')}
-          </div>
+        {snapshot?.hasMore && snapshot?.nextBefore && onLoadMore && (
+          <button type="button" disabled={loading} onClick={() => void onLoadMore()} className="mx-3 mt-3 rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-600 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300">
+            {t(loadingMore ? 'context.loadingMore' : 'context.loadEarlier')}
+          </button>
         )}
         {loading && !snapshot ? <div className="py-10"><LoadingSpinner /></div> : (
           <>
@@ -502,7 +603,7 @@ export default function SessionContextPanel({
           </>
         )}
       </div>
-      {previewLoading && <div className="absolute inset-0 z-10 grid place-items-center bg-white/60 dark:bg-zinc-900/60"><LoadingSpinner /></div>}
+      {previewPending}
     </div>
   );
 }
@@ -522,7 +623,7 @@ function FileRows({
   return (
     <div className="space-y-1">
       {files.map((file) => (
-        <div key={file.resourceID} className="group flex items-center gap-1 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800">
+        <div key={file.fileKey || file.resourceID} className="group flex items-center gap-1 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800">
           <button type="button" disabled={file.status === 'missing'} onClick={() => void onOpen(file)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:opacity-50">
             <FileText className="h-4 w-4 text-zinc-500" />
             <span className="min-w-0 flex-1">

@@ -88,6 +88,30 @@ async def test_get_empty_todos():
 
 
 @pytest.mark.asyncio
+async def test_snapshot_distinguishes_missing_state_and_explicit_clear():
+    session_id = "test_snapshot"
+    assert await Todo.get_snapshot(session_id) is None
+    assert await Todo.get(session_id) == []
+    await Todo.update(session_id, [TodoInfo(id="1", content="Task")])
+    assert (await Todo.get_snapshot(session_id))[0].content == "Task"
+    await Todo.clear(session_id)
+    assert await Todo.get_snapshot(session_id) == []
+    assert await Todo.get(session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reads_storage_once():
+    from unittest.mock import AsyncMock, patch
+
+    with patch.object(Storage, "get", new=AsyncMock(return_value=[])) as get:
+        assert await Todo.get_snapshot("test_snapshot") == []
+    get.assert_awaited_once_with("todo:test_snapshot")
+    with patch.object(Storage, "get", new=AsyncMock(return_value=None)) as get:
+        assert await Todo.get("test_snapshot") == []
+    get.assert_awaited_once_with("todo:test_snapshot")
+
+
+@pytest.mark.asyncio
 async def test_add_todo():
     """Test adding a single todo"""
     session_id = "test_add"
