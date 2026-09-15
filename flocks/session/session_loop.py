@@ -2270,9 +2270,9 @@ class SessionLoop:
         """
         Check if loop should exit
         
-        Ported from original exit logic:
-        - Exit if assistant has responded with finish != tool-calls
-        - Exit if assistant message is after user message
+        Exit only when a finished assistant answered the current user message.
+        Message IDs may be supplied by API clients and are not sortable clocks.
+        Prefer the reply's parentID; legacy parentless messages use creation time.
         """
         if not last_assistant:
             return False
@@ -2286,10 +2286,19 @@ class SessionLoop:
         # Check finish reason
         if last_assistant.finish:
             if last_assistant.finish not in ("tool-calls", "unknown", "summary"):
-                # Assistant finished with stop/error/etc
-                if last_user.id < last_assistant.id:
-                    # Assistant responded after user
-                    return True
+                parent_id = getattr(last_assistant, "parentID", None)
+                if parent_id:
+                    return parent_id == last_user.id
+
+                user_created = (getattr(last_user, "time", None) or {}).get("created")
+                assistant_created = (getattr(last_assistant, "time", None) or {}).get("created")
+                # Without a parent link, equal/missing timestamps cannot prove
+                # that the current user has been answered. Never fall back to IDs.
+                return (
+                    user_created is not None
+                    and assistant_created is not None
+                    and assistant_created > user_created
+                )
         
         return False
     

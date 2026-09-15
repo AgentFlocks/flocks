@@ -135,10 +135,15 @@ async def _run_agent_until_candidate_ready(
     generic_runner: Callable[[str, SessionInfo, UserInputEvent, str], Awaitable[None]],
     on_recovery: Callable[[int], Awaitable[None]],
 ) -> None:
+    # Keep errors from prior tasks for history, but never attribute them to this
+    # generation. Include archived messages so compaction cannot change scope.
+    existing_message_ids = {
+        message.id for message in await Message.list(session.id, include_archived=True)
+    }
     current_event = event
     for turn_index in range(MAX_AGENT_RECOVERY_TURNS + 1):
         await generic_runner(session.id, session, current_event, working_directory)
-        await _raise_persisted_agent_error(session.id)
+        await _raise_persisted_agent_error(session.id, existing_message_ids=existing_message_ids)
         recovery_turn = turn_index + 1
         if recovery_turn > MAX_AGENT_RECOVERY_TURNS:
             return
@@ -154,10 +159,13 @@ async def _run_agent_until_candidate_ready(
         current_event = recovery_event
 
 
-async def _raise_persisted_agent_error(session_id: str) -> None:
-    messages = await Message.list(session_id)
+async def _raise_persisted_agent_error(
+    session_id: str, *, existing_message_ids: set[str],
+) -> None:
+    """Surface errors created by this task, including its recovery turns."""
+    messages = await Message.list(session_id, include_archived=True)
     for message in reversed(messages):
-        if message.role != MessageRole.ASSISTANT or not message.error:
+        if message.id in existing_message_ids or message.role != MessageRole.ASSISTANT or not message.error:
             continue
         error = message.error
         if hasattr(error, "model_dump"):

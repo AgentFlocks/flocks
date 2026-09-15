@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flocks.input.events import UserInputEvent
+from flocks.session.message import MessageRole
 from flocks.situation_report.product import orchestrator
 
 
@@ -100,6 +101,7 @@ async def test_agent_runner_continues_after_needs_revision(tmp_path: Path, monke
         "_raise_persisted_agent_error",
         AsyncMock(),
     )
+    monkeypatch.setattr(orchestrator.Message, "list", AsyncMock(return_value=[]))
 
     await orchestrator._run_agent_until_candidate_ready(
         session=session,
@@ -133,3 +135,67 @@ def test_recovery_rewrites_candidate_when_evidence_map_is_missing(tmp_path: Path
     assert recovered is not None
     assert "internal evidence map is missing" in recovered.text
     assert f"expected_sha256={orchestrator.file_sha256(candidate)}" in recovered.text
+
+
+def _assistant(message_id: str, error=None):
+    return SimpleNamespace(id=message_id, role=MessageRole.ASSISTANT, error=error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("historical_error", [{"name": "APIError", "message": "HTTP 400"}, "connection failed"])
+async def test_new_task_can_recover_despite_historical_model_error(tmp_path, monkeypatch, historical_error):
+    """Deterministic orchestration regression, not a live model quality test."""
+    history = [_assistant("msg_old_error", historical_error)]
+    list_messages = AsyncMock(side_effect=lambda *args, **kwargs: list(history))
+    monkeypatch.setattr(orchestrator.Message, "list", list_messages)
+    event = _event("gen_retry")
+    recovery = orchestrator._build_agent_recovery_event(
+        event=event, workspace_dir=tmp_path, generation_id="gen_retry", recovery_turn=1,
+    )
+    monkeypatch.setattr(
+        orchestrator, "_build_agent_recovery_event",
+        lambda **kwargs: recovery if len(history) == 2 else None,
+    )
+    calls = []
+
+    async def runner(*args):
+        calls.append(args[2])
+        history.append(_assistant(f"msg_current_{len(calls)}"))
+
+    on_recovery = AsyncMock()
+    await orchestrator._run_agent_until_candidate_ready(
+        session=SimpleNamespace(id="ses_recovery"), event=event,
+        generation_id="gen_retry", workspace_dir=tmp_path,
+        working_directory=str(tmp_path), generic_runner=runner, on_recovery=on_recovery,
+    )
+    assert len(calls) == 2
+    assert calls[1].synthetic is True
+    assert history[0].error == historical_error  # Do not erase history to permit retry.
+    on_recovery.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_on_call", [1, 2])
+async def test_new_model_error_still_fails_in_initial_or_recovery_turn(tmp_path, monkeypatch, fail_on_call):
+    error = {"name": "APIError", "message": "HTTP 400"}
+    history = [_assistant("msg_old_error", error)]
+    monkeypatch.setattr(orchestrator.Message, "list", AsyncMock(side_effect=lambda *args, **kwargs: list(history)))
+    calls = []
+
+    async def runner(*args):
+        calls.append(args[2])
+        if len(calls) == fail_on_call:
+            # Same error text but a new message must not be mistaken for history.
+            history.append(_assistant("msg_current_error", dict(error)))
+            history.append(_assistant("msg_after_error"))
+
+    on_recovery = AsyncMock()
+    with pytest.raises(orchestrator.ProductAgentExecutionError, match="APIError: HTTP 400"):
+        await orchestrator._run_agent_until_candidate_ready(
+            session=SimpleNamespace(id="ses_recovery"), event=_event("gen_current"),
+            generation_id="gen_current", workspace_dir=tmp_path,
+            working_directory=str(tmp_path), generic_runner=runner, on_recovery=on_recovery,
+        )
+    assert len(calls) == fail_on_call
+    assert on_recovery.await_count == fail_on_call - 1
+    assert any(m.id == "msg_current_error" for m in history)

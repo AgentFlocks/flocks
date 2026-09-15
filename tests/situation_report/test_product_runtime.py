@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from flocks.input.events import UserInputEvent
-from flocks.session.message import Message
+from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session, SessionInfo
 from flocks.situation_report.product.backend_sync import (
     BackendReportSyncError,
@@ -850,9 +850,12 @@ async def test_a1_orchestrator_runs_preflight_publish_and_event_end_to_end(
 
     monkeypatch.setattr("flocks.situation_report.product.events.publish_event", capture_event)
     monkeypatch.setattr("flocks.situation_report.product.orchestrator.publish_event", capture_event)
-    monkeypatch.setattr(
-        "flocks.situation_report.product.orchestrator._raise_persisted_agent_error",
-        AsyncMock(),
+    historical_error = await Message.create(
+        session_id=product_session.id,
+        role=MessageRole.ASSISTANT,
+        content="Previous task failed",
+        error={"name": "APIError", "message": "Previous model request returned HTTP 400"},
+        finish="error",
     )
 
     async def deterministic_a1_boundary(
@@ -913,6 +916,8 @@ async def test_a1_orchestrator_runs_preflight_publish_and_event_end_to_end(
     assert Path(output["path"]).read_bytes()
     assert _sha256(Path(output["path"]).read_bytes()) == output["sha256"]
     terminal = statuses[-1]
+    preserved_error = await Message.get(product_session.id, historical_error.id)
+    assert preserved_error is not None and preserved_error.error == historical_error.error
     assert terminal["messageID"].startswith("msg_")
     assert terminal["messagePartID"].startswith("prt_")
     result_message = await Message.get_with_parts(product_session.id, terminal["messageID"])

@@ -279,33 +279,63 @@ class TestShouldExitWithInject:
     """Test that _should_exit correctly handles injected user messages."""
 
     @staticmethod
-    def _make_msg(msg_id: str, role: str, finish: str = None):
+    def _make_msg(msg_id: str, role: str, finish: str = None, *, created=1, parent_id=None):
         """Create a minimal message-like object for testing."""
         msg = type("Msg", (), {})()
         msg.id = msg_id
         msg.role = role
         msg.finish = finish
+        msg.time = {"created": created}
+        msg.parentID = parent_id
         return msg
 
     def test_exit_when_assistant_after_user_and_finished(self):
         """Should exit if last assistant finished after last user."""
         last_user = self._make_msg("msg_001", "user")
-        last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        last_assistant = self._make_msg("msg_002", "assistant", finish="stop", created=2)
 
-        # assistant.id > user.id → user.id < assistant.id → True → should exit
+        # Legacy messages without parentID use creation time, not ID ordering.
         assert SessionLoop._should_exit(last_user, last_assistant) is True
 
     def test_no_exit_when_user_injected_after_assistant(self):
         """Should NOT exit when a new user message appears after the assistant.
 
-        This is the core inject scenario: the injected user message has a
-        higher ID than the last assistant message, so the loop should continue.
+        The injected user message is newer than the last assistant response,
+        so the loop should continue regardless of the message ID format.
         """
-        last_user = self._make_msg("msg_003", "user")  # injected message
-        last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        last_user = self._make_msg("msg_003", "user", created=3)
+        last_assistant = self._make_msg("msg_002", "assistant", finish="stop", created=2)
 
-        # user.id > assistant.id → user.id < assistant.id → False → don't exit
         assert SessionLoop._should_exit(last_user, last_assistant) is False
+
+    @pytest.mark.parametrize("request_id", ["2beb9361e5e84341ba600629f9230c96", "req_new", "z_external"])
+    def test_new_external_user_does_not_reuse_previous_finished_answer(self, request_id):
+        user = self._make_msg(request_id, "user", created=200)
+        previous = self._make_msg(
+            "msg_previous", "assistant", finish="stop", created=100, parent_id="old_request",
+        )
+        assert SessionLoop._should_exit(user, previous) is False
+
+    @pytest.mark.parametrize("finish", ["stop", "error"])
+    def test_current_answer_uses_parent_link_even_with_equal_timestamps(self, finish):
+        user = self._make_msg("z_external", "user", created=200)
+        answer = self._make_msg(
+            "msg_current", "assistant", finish=finish, created=200, parent_id=user.id,
+        )
+        assert SessionLoop._should_exit(user, answer) is True
+
+    def test_injected_user_is_not_answered_by_late_response_to_previous_user(self):
+        user = self._make_msg("new_request", "user", created=200)
+        previous_answer = self._make_msg(
+            "msg_late", "assistant", finish="stop", created=300, parent_id="old_request",
+        )
+        assert SessionLoop._should_exit(user, previous_answer) is False
+
+    @pytest.mark.parametrize("user_time,assistant_time,expected", [(200, 100, False), (100, 200, True), (100, 100, False), (None, None, False)])
+    def test_legacy_parentless_messages_never_compare_opaque_ids(self, user_time, assistant_time, expected):
+        user = self._make_msg("000-external-id", "user", created=user_time)
+        answer = self._make_msg("msg_answer", "assistant", finish="stop", created=assistant_time)
+        assert SessionLoop._should_exit(user, answer) is expected
 
     def test_no_exit_when_assistant_has_tool_calls(self):
         """Should NOT exit when assistant finish is 'tool-calls'."""
@@ -819,7 +849,8 @@ class TestTurnLifecycle:
         assert event_names == ["turn.started", "turn.stopped"]
 
     @pytest.mark.asyncio
-    async def test_run_loop_breaks_on_exit_condition_without_tool_parts(self):
+    @pytest.mark.parametrize("new_user_id", [None, "2beb9361e5e84341ba600629f9230c96", "req_next"])
+    async def test_run_loop_only_exits_for_answered_user_without_tool_parts(self, new_user_id):
         session = SimpleNamespace(
             id="loop_exit_condition_session",
             agent="rex",
@@ -836,6 +867,9 @@ class TestTurnLifecycle:
             self._make_msg("msg_001", "user"),
             self._make_msg("msg_002", "assistant", finish="stop"),
         ]
+        messages[1].parentID = messages[0].id
+        if new_user_id:
+            messages.append(self._make_msg(new_user_id, "user"))
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(return_value=messages)
         )
@@ -858,10 +892,13 @@ class TestTurnLifecycle:
 
         assert result.action == "stop"
         assert result.last_message is messages[1]
-        assert process_step.await_count == 0
-        assert any(call.args and call.args[0] == "loop.exit_condition" for call in log_info.call_args_list)
+        assert process_step.await_count == (1 if new_user_id else 0)
+        exited = any(call.args and call.args[0] == "loop.exit_condition" for call in log_info.call_args_list)
+        assert exited is (new_user_id is None)
+        if new_user_id:
+            assert process_step.await_args.args[1].id == new_user_id
         event_names = [call.args[0] for call in event_callback.await_args_list]
-        assert event_names == ["turn.started"]
+        assert event_names == (["turn.started", "turn.stopped"] if new_user_id else ["turn.started"])
 
 
 class TestExecuteSubtask:
