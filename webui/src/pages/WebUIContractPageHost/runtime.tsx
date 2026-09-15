@@ -1,3 +1,5 @@
+import AuditWorkbenchChat from '@/components/common/AuditWorkbenchChat';
+import AuditWorkbenchPanel from '@/components/common/AuditWorkbenchPanel';
 import React, { lazy, Suspense, type ComponentType, type ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
 import { useTranslation } from 'react-i18next';
@@ -67,6 +69,8 @@ export interface WebUIContractPageSdk {
   Card: typeof Card;
   Markdown: typeof Markdown;
   AuditSessionTranscript: typeof AuditSessionTranscript;
+  AuditWorkbenchPanel: typeof AuditWorkbenchPanel;
+  AuditWorkbenchChat: typeof AuditWorkbenchChat;
   AuditModelPicker: typeof AuditModelPicker;
   useCurrentUser: typeof useCurrentUser;
   useLanguage: typeof useLanguage;
@@ -167,6 +171,8 @@ export function installWebUIContractPageRuntime(pageId: string): void {
     Card,
     Markdown,
     AuditSessionTranscript,
+    AuditWorkbenchPanel,
+    AuditWorkbenchChat,
     AuditModelPicker,
     useCurrentUser,
     useLanguage,

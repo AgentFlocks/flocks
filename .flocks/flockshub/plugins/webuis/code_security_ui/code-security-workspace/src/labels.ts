@@ -13,7 +13,7 @@ export const phaseLabels: Record<string, string> = {
   cybergym_solving: "动态验证",
   adjudication: "主智能体裁决",
   targeted_rescan: "定向复扫",
-  finalization: "产物封装",
+  finalization: "产物生成",
 };
 
 export const roleLabels: Record<string, string> = {

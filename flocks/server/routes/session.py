@@ -272,6 +272,7 @@ class SessionResponse(BaseModel):
     model_auto: bool = Field(False, description="Whether WebUI Auto mode is selected")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
     ownerUsername: Optional[str] = Field(None, description="Session owner username")
+    codeSecurityScanID: Optional[str] = None
     canWrite: bool = Field(False, description="Whether current user can continue this session")
     canDelete: bool = Field(False, description="Whether current user can delete this session")
     isShared: bool = Field(False, description="Whether this session is locally shared")
@@ -300,6 +301,7 @@ class SessionListItem(BaseModel):
     model_auto: bool = False
     ownerUserID: Optional[str] = None
     ownerUsername: Optional[str] = None
+    codeSecurityScanID: Optional[str] = None
     canWrite: bool = False
     canDelete: bool = False
     isShared: bool = False
@@ -372,6 +374,7 @@ def _session_to_response(
         model_auto=session.model_auto,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
+        codeSecurityScanID=session.metadata.get("code_security_chat_scan_id") if session.agent == "code-security-reader" else None,
         canWrite=can_write,
         canDelete=can_delete,
         isShared=is_shared,
@@ -419,6 +422,7 @@ def _session_to_list_item(
         model_auto=session.model_auto,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
+        codeSecurityScanID=session.metadata.get("code_security_chat_scan_id") if session.agent == "code-security-reader" else None,
         canWrite=session.status == "active" and SessionPolicy.can_write(session, current_user),
         canDelete=SessionPolicy.can_delete(session, current_user),
         isShared=SessionPolicy.is_shared(session, shared_project_ids),
@@ -690,6 +694,8 @@ async def _prepare_session_agent_before_bootstrap(
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
     """Return whether a session should be excluded from manager listings."""
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    if session.agent == "code-security-reader" and metadata.get("code_security_chat_scan_id"):
+        return False
     return bool(
         metadata.get("hideFromSessionManager")
         or metadata.get("code_security_scan_id")

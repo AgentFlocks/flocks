@@ -1,3 +1,4 @@
+import AuditWorkbenchPanel from '../components/common/AuditWorkbenchPanel';
 import React from "react";
 import {
   act,
@@ -433,6 +434,8 @@ describe("code security workspace contract page", () => {
       screen.getByRole("button", { name: "查看审计 flocks" }),
     );
     expect(await screen.findByLabelText("审计指标")).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "审计结果追问" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "工作台", exact: true }));
     expect(
       screen.getByRole("textbox", { name: "审计结果追问" }),
     ).toBeDisabled();
@@ -587,7 +590,9 @@ describe("code security workspace contract page", () => {
     );
     expect(screen.queryByText("轮次记录 1")).not.toBeInTheDocument();
     expect(screen.queryByText("轮次记录 2")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "回到最新阶段" }));
+    expect(screen.queryByRole("heading", { name: "审计会话" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "回到最新阶段" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: /第 3 轮/ }));
     expect(screen.getByRole("tab", { name: /第 3 轮/ })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -780,6 +785,8 @@ describe("code security workspace contract page", () => {
       React,
       AuditModelPicker: ({ onReady }: any) => { React.useEffect(() => onReady(true), [onReady]); return <button type="button">Test model</button>; },
       Markdown,
+      AuditWorkbenchPanel,
+      AuditWorkbenchChat: ({ disabled }: any) => <textarea aria-label="审计结果追问" disabled={disabled} />,
       useCurrentUser: () => ({ id: "admin-1", role: "admin" }),
       useLanguage: () => codeSecurityLanguage,
       api: { get: apiGet, post: apiPost, delete: apiDelete },
@@ -938,6 +945,84 @@ describe("code security workspace contract page", () => {
     expect(formatFileSize(1_572_864, "en-US")).toBe("1.5 MB");
   });
 
+  it("shows adjudication in the left snapshot-style card without loading sessions", () => {
+    render(<PhaseWorkspace scanId="scan_demo" phases={[
+      { phase_run_id: "decision", phase: "adjudication", ordinal: 1, status: "completed",
+        summary: { action: "finalize", adjudication_round: 1, accepted_candidate_ids: [], rejected_candidates: [] },
+      } as PhaseRun,
+    ]} workers={[]} events={[]} />);
+    const heading = screen.getByRole("heading", { name: "裁决内容与结果" });
+    expect(heading.closest("section")).toHaveClass("cs-snapshot-overview");
+    expect(heading.closest(".cs-stage-session")).not.toBeNull();
+    expect(heading.closest("details")).toBeNull();
+    expect(screen.getByText("完成审计定稿")).toBeInTheDocument();
+    expect(document.querySelector(".cs-context-rail .cs-phase-rail")).not.toBeNull();
+    expect(screen.queryByRole("region", { name: "阶段会话" })).not.toBeInTheDocument();
+    expect(apiGet.mock.calls.some(([path]) => String(path).includes("/sessions"))).toBe(false);
+  });
+
+  it("shows the report only in finalization and preserves other stages", async () => {
+    apiGet.mockResolvedValue({ data: { kind: "findings", state: "sealed", content: { findings: [
+      { findingId: "F1", title: "Unsafe input", summary: "First finding details", severity: { level: "high" }, validation: { conclusion: "confirmed" }, codeEvidence: [{ id: "E1", path: "api.py", startLine: 1, endLine: 2, code: "unsafe(value)" }] },
+      { findingId: "F2", title: "Missing check", summary: "Second finding details", severity: { level: "medium" }, validation: { staticConclusion: "confirmed", dynamicConclusion: "not_reproduced" } },
+    ] } } });
+    const detail = { ...scanDetail, scan: { ...scanDetail.scan, integrity_status: "valid" }, artifacts: [{ kind: "findings", state: "sealed" }, { kind: "report_markdown", state: "sealed" }] } as any;
+    render(<PhaseWorkspace detail={detail} phases={[
+      { phase_run_id: "verify", phase: "verification", ordinal: 1, status: "completed" },
+      { phase_run_id: "final", phase: "finalization", ordinal: 1, status: "completed" },
+    ] as PhaseRun[]} workers={[]} events={[]} artifactBundle={{ artifacts: detail.artifacts, integrityStatus: "valid" }} />);
+    const showModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    const close = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value() { this.setAttribute("open", ""); } });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value() { this.removeAttribute("open"); } });
+    try {
+      await screen.findByText("Unsafe input");
+      expect(screen.queryByRole("button", { name: "工作台", exact: true })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.queryByText("First finding details")).not.toBeInTheDocument();
+      const first = screen.getAllByRole("button", { name: "查看详情" })[0];
+      await userEvent.click(first);
+      expect(screen.getByRole("dialog", { name: "漏洞详情" })).toHaveAttribute("open");
+      expect(screen.getByText("unsafe(value)")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "关闭", exact: true }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(first).toHaveFocus();
+      await userEvent.click(screen.getAllByRole("button", { name: "查看详情" })[1]);
+      expect(screen.getByText("Second finding details")).toBeInTheDocument();
+      expect(screen.queryByText("First finding details")).not.toBeInTheDocument();
+      fireEvent(screen.getByRole("dialog"), new Event("cancel", { bubbles: true }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await userEvent.click(first);
+      fireEvent.click(screen.getByRole("dialog"));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "下载报告" })).not.toBeInTheDocument();
+      expect(document.querySelector(".cs-context-rail .cs-phase-rail")).not.toBeNull();
+    } finally {
+      if (showModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", showModal);
+      else delete (HTMLDialogElement.prototype as any).showModal;
+      if (close) Object.defineProperty(HTMLDialogElement.prototype, "close", close);
+      else delete (HTMLDialogElement.prototype as any).close;
+    }
+    await userEvent.click(screen.getByRole("tab", { name: /静态验证阶段/ }));
+    expect(document.querySelector(".cs-final-report")).toBeNull();
+    expect(document.querySelector(".cs-context-rail .cs-context-artifacts")).not.toBeNull();
+  });
+
+  it("shows a generation state instead of zero findings before the report exists", () => {
+    render(<PhaseWorkspace detail={{ ...scanDetail, artifacts: [{ kind: "findings", state: "pending" }] } as any}
+      phases={[{ phase_run_id: "final", phase: "finalization", ordinal: 1, status: "running" }] as PhaseRun[]} workers={[]} events={[]} />);
+    expect(screen.getByRole("status")).toHaveTextContent("报告生成后将在此展示。");
+    expect(screen.queryByText("未发现可报告的漏洞。")).not.toBeInTheDocument();
+    expect(apiGet.mock.calls.some(([path]) => String(path).endsWith("/findings"))).toBe(false);
+  });
+
+  it("does not load a report that failed integrity checks", () => {
+    render(<PhaseWorkspace detail={{ ...scanDetail, scan: { ...scanDetail.scan, integrity_status: "invalid" }, artifacts: [{ kind: "findings", state: "invalid" }] } as any}
+      phases={[{ phase_run_id: "final", phase: "finalization", ordinal: 1, status: "completed" }] as PhaseRun[]} workers={[]} events={[]} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("产物未通过校验");
+    expect(apiGet.mock.calls.some(([path]) => String(path).endsWith("/findings"))).toBe(false);
+  });
+
   it("renders lifecycle and coverage while hiding skipped stages", async () => {
     const { container, unmount } = render(<Page />);
 
@@ -1018,7 +1103,7 @@ describe("code security workspace contract page", () => {
     expect(
       screen.queryByText("不使用不可解释的总体百分比"),
     ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("漏洞数，审计完成后确定")).toBeInTheDocument();
+    expect(screen.queryByLabelText("漏洞数，审计完成后确定")).not.toBeInTheDocument();
     expect(apiGet).toHaveBeenCalledWith(
       "/api/code-security/v1/scans/scan_demo/events",
       { params: { recent: true, limit: 200 } },
@@ -2393,7 +2478,7 @@ describe("code security workspace contract page", () => {
       ["dynamic_validation", "动态验证", "Dynamic validation"],
       ["adjudication", "主智能体裁决", "Primary agent adjudication"],
       ["targeted_rescan", "定向复扫", "Targeted rescan"],
-      ["finalization", "产物封装", "Artifact packaging"],
+      ["finalization", "产物生成", "Artifact generation"],
       ["future_internal_phase", "未知阶段", "Unknown phase"],
     ].flatMap(([phase, chinese, english]) => [
       [phase, "zh-CN", chinese],
@@ -2418,7 +2503,8 @@ describe("code security workspace contract page", () => {
       />,
     );
     expect(screen.getByRole("tab")).toHaveTextContent(title);
-    expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
+    if (phase === "finalization") expect(screen.queryByRole("heading", { name: title })).not.toBeInTheDocument();
+    else expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
     expect(screen.queryByText(phase)).not.toBeInTheDocument();
   });
 
@@ -3166,8 +3252,8 @@ describe("code security workspace contract page", () => {
       screen.queryByRole("heading", { name: "Audit records" }),
     ).not.toBeInTheDocument();
     expect(
-      await screen.findByRole("heading", { name: "Audit conversation" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("heading", { name: "Audit conversation" }),
+    ).not.toBeInTheDocument();
     await userEvent.click(
       screen.getByText("View phase details and work units"),
     );

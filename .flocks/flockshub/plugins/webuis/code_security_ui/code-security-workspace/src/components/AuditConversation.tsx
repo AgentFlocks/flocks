@@ -3,6 +3,21 @@ import { useEffect, useRef, useState } from "react";
 import { useAuditApi } from "../BatchContext";
 import { createIdempotencyKey, readApiFailure } from "../api";
 import type { ScanDetail } from "../types";
+import { Icon } from "../icons";
+import { roleLabels } from "../labels";
+import { StatusBadge } from "./StatusBadge";
+
+type PhaseSession = {
+  attempt_id: string;
+  work_unit_id: string;
+  session_id: string | null;
+  ordinal: number;
+  role: string;
+  status: string;
+  model_id: string | null;
+  available: boolean;
+  messages: { role: string; [key: string]: unknown }[];
+};
 
 export function AuditMarkdown({ text }: { text: string }) {
   const Markdown = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.Markdown;
@@ -24,10 +39,33 @@ export function NativePhaseSessions({
 }) {
   const { t } = useCodeSecurityI18n();
   const api = useAuditApi();
-  const Transcript = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.AuditSessionTranscript;
-  const [data, setData] = useState<any>(null);
+  const Transcript = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__
+    ?.AuditSessionTranscript;
+  const [data, setData] = useState<{
+    items: PhaseSession[];
+    complete: boolean;
+    reason?: string;
+  } | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const picker = pickerRef.current;
+    const selected = picker?.querySelector<HTMLElement>(
+      '[aria-pressed="true"]',
+    );
+    if (!picker || !selected) return;
+    const container = picker.getBoundingClientRect();
+    const button = selected.getBoundingClientRect();
+    if (button.left < container.left)
+      picker.scrollLeft += button.left - container.left - 3;
+    else if (button.right > container.right)
+      picker.scrollLeft += button.right - container.right + 3;
+  }, [selectedId]);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    setSelectedId(null);
+  }, [scanId, phaseId]);
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -38,6 +76,11 @@ export function NativePhaseSessions({
         const next = await api.getPhaseSessions(scanId, phaseId);
         if (!disposed) {
           setData(next);
+          setSelectedId((current) =>
+            next.items.some((item: PhaseSession) => item.attempt_id === current)
+              ? current
+              : (next.items.at(-1)?.attempt_id ?? null),
+          );
           setError("");
         }
       } catch (reason) {
@@ -58,9 +101,33 @@ export function NativePhaseSessions({
       clearTimeout(timer);
     };
   }, [api, scanId, phaseId, running, retry, t]);
+  const workers = new Map<string, PhaseSession[]>();
+  for (const session of data?.items ?? []) {
+    const key = session.work_unit_id || session.attempt_id;
+    const attempts = workers.get(key) ?? [];
+    attempts.push(session);
+    workers.set(key, attempts);
+  }
+  const groups = [...workers.values()].map((attempts) =>
+    attempts.sort((a, b) => a.ordinal - b.ordinal),
+  );
+  const session = data?.items.find((item) => item.attempt_id === selectedId);
+  const selectedWorker = groups.findIndex(
+    (attempts) => session != null && attempts.includes(session),
+  );
+  const attempts = groups[selectedWorker] ?? [];
+  // Worker setup stays in storage for queries; show only the conversation here.
+  const firstOutput =
+    session?.messages.findIndex((message) => message.role === "assistant") ??
+    -1;
+  const visibleMessages =
+    firstOutput < 0 ? [] : session!.messages.slice(firstOutput);
   return (
     <section className="cs-native-sessions" aria-label={t("阶段会话")}>
-      <h3>{t("阶段 Session")}</h3>
+      <h3>
+        {t("专家会话")}{" "}
+        <span className="cs-expert-count">{groups.length || ""}</span>
+      </h3>
       {error && (
         <p role="status">
           {error}{" "}
@@ -84,34 +151,98 @@ export function NativePhaseSessions({
       {data?.items?.length === 0 && data.complete && (
         <p>{t("该阶段暂无智能体会话。")}</p>
       )}
-      {data?.items?.map((session: any, index: number) => {
-        // The leading user messages are worker setup instructions, not user conversation.
-        // Keep them in the stored transcript and full audit context, but omit them here.
-        const firstOutput = session.messages.findIndex((message: any) => message.role === "assistant");
-        const visibleMessages = firstOutput < 0 ? [] : session.messages.slice(firstOutput);
-        return (
-        <details
-          key={session.attempt_id}
-          open={index === data.items.length - 1}
-          className="cs-native-session"
+      {groups.length > 0 && (
+        <div
+          ref={pickerRef}
+          className="cs-expert-picker"
+          role="group"
+          aria-label={t("选择专家")}
         >
-          <summary>
-            {session.role} ·{" "}
-            {t("第 {{ordinal}} 次执行", { ordinal: session.ordinal })} ·{" "}
-            {session.model_id || t("默认模型")}
-          </summary>
-          {!session.available && <p>{t("此会话已不可用。")}</p>}
-          {session.available && !visibleMessages.length && (
-            <p>{t("等待会话输出…")}</p>
+          {groups.map((attempts, index) => {
+            const latest = attempts[attempts.length - 1];
+            return (
+              <button
+                type="button"
+                key={latest.work_unit_id || latest.attempt_id}
+                className="cs-expert-option"
+                aria-pressed={index === selectedWorker}
+                onClick={() => setSelectedId(latest.attempt_id)}
+              >
+                <span className="cs-expert-avatar">
+                  <Icon name="expert" />
+                </span>
+                <span className="cs-expert-label">
+                  {t(roleLabels[latest.role] || latest.role)} {index + 1}
+                </span>
+                <StatusBadge
+                  status={
+                    latest.status === "recovering" ? "running" : latest.status
+                  }
+                />
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {session && (
+        <div className="cs-native-session" key={session.attempt_id}>
+          <div className="cs-session-heading">
+            <strong>
+              {t(roleLabels[session.role] || session.role)} {selectedWorker + 1}
+            </strong>
+            {attempts.length > 1 ? (
+              <label className="cs-session-attempt">
+                {t("执行轮次")}
+                <select
+                  value={session.attempt_id}
+                  onChange={(event) => setSelectedId(event.target.value)}
+                >
+                  {attempts.map((attempt) => (
+                    <option key={attempt.attempt_id} value={attempt.attempt_id}>
+                      {t("第 {{ordinal}} 次执行", { ordinal: attempt.ordinal })}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <span>
+                {t("第 {{ordinal}} 次执行", { ordinal: session.ordinal })}
+              </span>
+            )}
+            <StatusBadge
+              status={
+                session.status === "recovering" ? "running" : session.status
+              }
+            />
+            <span>{session.model_id || t("默认模型")}</span>
+          </div>
+          {session.session_id && (
+            <p className="cs-session-id">
+              Session ID · <code>{session.session_id}</code>
+            </p>
           )}
-          {Transcript ? (
-            <Transcript messages={visibleMessages} running={running && ["pending", "running", "recovering"].includes(session.status)} />
+          {!session.available ? (
+            <p>{t("此会话已不可用。")}</p>
           ) : (
-            <p role="status">{t("请刷新页面以加载工作台会话组件。")}</p>
+            <>
+              {!visibleMessages.length && <p>{t("等待会话输出…")}</p>}
+              {Transcript ? (
+                <Transcript
+                  messages={visibleMessages}
+                  running={
+                    running &&
+                    ["pending", "running", "recovering"].includes(
+                      session.status,
+                    )
+                  }
+                />
+              ) : (
+                <p role="status">{t("请刷新页面以加载工作台会话组件。")}</p>
+              )}
+            </>
           )}
-        </details>
-        );
-      })}
+        </div>
+      )}
     </section>
   );
 }
@@ -119,10 +250,44 @@ export function NativePhaseSessions({
 type Citation = { id: string; title: string; phase_run_id?: string };
 type Turn = {
   request_id: string;
+  answer_part_id?: string | null;
   question: string;
   answer: string;
   sources: Citation[];
 };
+type ConversationState = {
+  sessions?: { session_id: string }[];
+  ready: boolean;
+  session_id?: string | null;
+  processing?: boolean;
+  reason?: string;
+  turns: Turn[];
+};
+
+function mergeConversation(
+  current: ConversationState,
+  next: ConversationState,
+): ConversationState {
+  if (
+    current.session_id &&
+    next.session_id &&
+    current.session_id !== next.session_id
+  )
+    return next;
+  // A polling response may precede the POST response already shown on screen.
+  return {
+    ...next,
+    session_id: next.session_id ?? current.session_id,
+    turns: [
+      ...next.turns,
+      ...current.turns.filter(
+        (turn) =>
+          !next.turns.some((item) => item.request_id === turn.request_id),
+      ),
+    ],
+  };
+}
+
 export function AuditConversation({
   detail,
   onPhase,
@@ -134,56 +299,23 @@ export function AuditConversation({
 }) {
   const { t } = useCodeSecurityI18n();
   const api = useAuditApi();
-  const Transcript = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.AuditSessionTranscript;
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const conversationRef = useRef<HTMLElement>(null);
-  const dockRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const section = conversationRef.current;
-    const dock = dockRef.current;
-    if (!section || !dock) return;
-    const position = () => {
-      const bounds = section.getBoundingClientRect();
-      const left = Math.max(12, bounds.left);
-      const right = Math.min(window.innerWidth - 12, bounds.right);
-      const width = Math.max(0, Math.min(760, right - left));
-      dock.style.width = `${width}px`;
-      dock.style.left = `${left + (right - left - width) / 2}px`;
-      section.style.paddingBottom = `${dock.getBoundingClientRect().height + 32}px`;
-    };
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
-    observer?.observe(section);
-    observer?.observe(dock);
-    const workspace = section.closest(".code-security-workspace");
-    if (workspace) observer?.observe(workspace);
-    window.addEventListener("resize", position);
-    window.addEventListener("scroll", position, true);
-    position();
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", position);
-      window.removeEventListener("scroll", position, true);
-    };
-  }, []);
+  const sdk = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__;
+  const Chat = sdk?.AuditWorkbenchChat;
+  const currentUser = sdk?.useCurrentUser?.();
+  const [state, setState] = useState<ConversationState>({
+    ready: false,
+    turns: [],
+  });
 
-  const [state, setState] = useState<{
-    ready: boolean;
-    reason?: string;
-    turns: Turn[];
-  }>({ ready: false, turns: [] });
+  const [selectedSession, setSelectedSession] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
-  const [question, setQuestion] = useState("");
-  useEffect(() => {
-    const input = inputRef.current;
-    if (input) { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 240)}px`; }
-  }, [question]);
-
+  const [pendingQuestion, setPendingQuestion] = useState("");
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
-  const attempt = useRef<{ question: string; id: string } | undefined>(
-    undefined,
-  );
+  const attempt = useRef<
+    { question: string; model?: string; id: string } | undefined
+  >(undefined);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -206,9 +338,9 @@ export function AuditConversation({
     setState((current) => ({ ...current, ready: false }));
     setError("");
     api
-      .getConversation(detail.scan.scan_id)
+      .getConversation(detail.scan.scan_id, selectedSession)
       .then((next) => {
-        if (!disposed) setState(next);
+        if (!disposed) setState((current) => mergeConversation(current, next));
       })
       .catch((reason) => {
         if (!disposed) {
@@ -227,29 +359,57 @@ export function AuditConversation({
     detail.scan.scan_id,
     detail.scan.lifecycle_status,
     detail.latestEventSeq,
+    selectedSession,
     retry,
     t,
   ]);
-  const send = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    if (!sending && !state.processing) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        const next = await api.getConversation(
+          detail.scan.scan_id,
+          selectedSession,
+        );
+        if (!disposed) setState((current) => mergeConversation(current, next));
+      } catch (reason) {
+        if (!disposed)
+          setError(readApiFailure(reason, t("会话请求失败，请重试")).message);
+      } finally {
+        if (!disposed) timer = setTimeout(refresh, 1500);
+      }
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [api, detail.scan.scan_id, selectedSession, sending, state.processing, t]);
+  const send = async (question: string, model?: string) => {
     const text = question.trim();
     if (
       !text ||
       sending ||
+      state.processing ||
       !state.ready ||
       loading ||
       detail.scan.lifecycle_status !== "completed"
     )
       return;
-    if (attempt.current?.question !== text)
-      attempt.current = { question: text, id: createIdempotencyKey() };
+    if (attempt.current?.question !== text || attempt.current?.model !== model)
+      attempt.current = { question: text, model, id: createIdempotencyKey() };
     setSending(true);
+    setPendingQuestion(text);
     setError("");
     try {
       const turn = await api.askConversation(
         detail.scan.scan_id,
         text,
         attempt.current!.id,
+        model,
+        state.session_id,
       );
       if (mounted.current) {
         setState((current) => ({
@@ -259,115 +419,96 @@ export function AuditConversation({
             turn,
           ],
         }));
-        setQuestion("");
+
         attempt.current = undefined;
       }
     } catch (reason) {
       if (mounted.current)
         setError(readApiFailure(reason, t("会话请求失败，请重试")).message);
+      throw reason;
     } finally {
-      if (mounted.current) setSending(false);
+      // A fast reply can finish before the first poll discovers its session.
+      try {
+        const next = await api.getConversation(
+          detail.scan.scan_id,
+          selectedSession,
+        );
+        if (mounted.current)
+          setState((current) => mergeConversation(current, next));
+      } catch {
+        // Keep the last result and any send error if the refresh is unavailable.
+      }
+      if (mounted.current) {
+        setSending(false);
+        setPendingQuestion("");
+      }
     }
   };
+  if (!Chat) return <p role="alert">{t("请刷新页面加载工作台")}</p>;
   return (
-    <section ref={conversationRef} className="cs-result-conversation" aria-label={t("审计结果会话")}>
-      {state.turns.map((turn) => (
-        <article className="cs-answer-turn" key={turn.request_id}>
-          {Transcript ? (
-            <Transcript messages={[
-              { id: `${turn.request_id}-user`, role: "user", parts: [{ type: "text", text: turn.question }] },
-              { id: `${turn.request_id}-answer`, role: "assistant", finish: "stop", parts: [{ type: "text", text: turn.answer }] },
-            ]} />
-          ) : (
-            <><div className="cs-user-question">{turn.question}</div><AuditMarkdown text={turn.answer} /></>
-          )}
-          <div className="cs-answer-sources">
-            {turn.sources.map((source) =>
-              source.phase_run_id ? (
-                <button
-                  key={source.id}
-                  type="button"
-                  onClick={() => onPhase(source.phase_run_id!)}
-                >
-                  {source.title}
-                </button>
-              ) : source.id.startsWith("artifact:") ? (
-                <button
-                  key={source.id}
-                  type="button"
-                  onClick={() => onArtifact(source.id.slice(9))}
-                >
-                  {source.title}
-                </button>
-              ) : (
-                <span key={source.id}>{source.title}</span>
-              ),
-            )}
-          </div>
-        </article>
-      ))}
-      <div ref={dockRef} className="cs-conversation-dock">
-      <form className="cs-qa-composer cs-workbench-composer" onSubmit={send} aria-busy={sending}>
-        <div className="cs-composer-input">
-        <textarea
-          ref={inputRef}
-          rows={1}
-          aria-label={t("审计结果追问")}
-          maxLength={8000}
-          disabled={!state.ready || sending || loading}
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => {
-            if (
-              e.key === "Enter" &&
-              !e.shiftKey &&
-              !e.nativeEvent.isComposing
-            ) {
-              e.preventDefault();
-              e.currentTarget.form?.requestSubmit();
-            }
-          }}
-          placeholder={
-            loading
-              ? t("正在准备全部阶段的会话与产物…")
-              : state.ready
-                ? t("追问 Agent…（Enter 发送，Shift+Enter 换行）")
-                : state.reason || t("问答上下文尚未就绪")
+    <Chat
+      key={state.session_id || "new"}
+      taskKey={`audit:${currentUser?.id || "local"}:${detail.scan.scan_id}:${state.session_id || "new"}`}
+      sessionId={state.session_id}
+      onStop={() => api.stopConversation(detail.scan.scan_id, state.session_id)}
+      sessions={state.sessions}
+      onSelectSession={(id: string) => {
+        attempt.current = undefined;
+        setSelectedSession(id);
+        setState({ ready: false, turns: [] });
+      }}
+      onNewSession={async () => {
+        setLoading(true);
+        try {
+          const next = await api.newConversation(detail.scan.scan_id);
+          if (mounted.current) {
+            attempt.current = undefined;
+            setState(next);
+            setSelectedSession(next.session_id);
           }
-        />
-        </div>
-        <div className="cs-composer-toolbar">
-          <span className="cs-composer-context">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z" /></svg>
-            {state.ready
-              ? t("基于全部阶段会话与审计产物 · 只读问答")
-              : state.reason || t("正在检查会话条件")}
-          </span>
-          <button
-            type="submit"
-            className="cs-composer-send"
-            aria-label={sending ? t("正在回答…") : t("发送")}
-            title={sending ? t("正在回答…") : t("发送")}
-            disabled={!state.ready || loading || sending || !question.trim()}
-          >
-            {sending ? <svg className="cs-composer-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-8-8" /></svg>
-              : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v14" /></svg>}
-          </button>
-        </div>
-      </form>
-      {error && <p role="alert">{error}</p>}
-        {detail.scan.lifecycle_status === "completed" &&
-          !loading &&
-          !sending && (
-            <button
-              type="button"
-              className="cs-conversation-refresh"
-              onClick={() => setRetry((v) => v + 1)}
-            >
-              {t("刷新上下文")}
-            </button>
-          )}
-      </div>
-    </section>
+        } catch (reason) {
+          if (mounted.current)
+            setError(readApiFailure(reason, t("会话请求失败，请重试")).message);
+        } finally {
+          if (mounted.current) setLoading(false);
+        }
+      }}
+      turns={state.turns}
+      pendingQuestion={pendingQuestion}
+      disabled={!state.ready || loading || sending || state.processing}
+      placeholder={
+        loading
+          ? t("正在准备审计问答…")
+          : state.ready
+            ? t("追问 Agent…（Enter 发送，Shift+Enter 换行）")
+            : state.reason || t("问答上下文尚未就绪")
+      }
+      error={error}
+      onSend={send}
+      onRetry={
+        !state.ready && !loading
+          ? () => setRetry((value) => value + 1)
+          : undefined
+      }
+      retryLabel={t("重试")}
+      onSource={(source: Turn["sources"][number]) => {
+        if (source.phase_run_id) onPhase(source.phase_run_id);
+        else if (source.id.startsWith("artifact:"))
+          onArtifact(source.id.slice(9));
+      }}
+      labels={{
+        title: t("Rex 审计助手"),
+        description: t(
+          "基于本次审计结果，查询阶段、专家会话与产物，帮助你理解问题和修复建议。",
+        ),
+        agent: t("审计助手"),
+        sources: t("本次查询来源"),
+        suggestions: [
+          t("本次审计发现了多少漏洞？"),
+          t("总结高危漏洞及修复建议"),
+          t("解释各阶段的审计结果"),
+        ],
+      }}
+    />
   );
 }

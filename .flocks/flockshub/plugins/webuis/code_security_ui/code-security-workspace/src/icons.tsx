@@ -1,6 +1,7 @@
 import type { ReactElement, SVGProps } from "react";
 
 export type IconName =
+  | "expert"
   | "shield"
   | "plus"
   | "search"
@@ -21,6 +22,12 @@ export type IconName =
   | "panel";
 
 const paths: Record<IconName, ReactElement> = {
+  expert: (
+    <>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
+    </>
+  ),
   shield: (
     <>
       <path d="M12 3 5 6v5c0 4.4 2.8 8.1 7 10 4.2-1.9 7-5.6 7-10V6l-7-3Z" />

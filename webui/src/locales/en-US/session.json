@@ -1,4 +1,18 @@
 {
+  "audit": {
+    "newSession": "New conversation",
+    "sessions": "Audit conversations",
+    "session": "Conversation",
+    "failed": "Conversation request failed. Please retry.",
+    "placeholder": "Ask about this audit…",
+    "title": "Rex audit assistant",
+    "description": "Explore results, expert sessions and artifacts for this audit.",
+    "agent": "Audit assistant",
+    "sources": "Query sources",
+    "summary": "How many findings were identified?",
+    "remediation": "Summarize high-severity findings and fixes",
+    "phases": "Explain the results of each stage"
+  },
   "managementTitle": "Workbench",
   "sessionCount": "{{count}} tasks",
   "clearSearch": "Clear search",

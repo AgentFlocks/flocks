@@ -493,3 +493,17 @@ async def test_summarize_chunked_zero_concurrency_overhead():
     assert provider.peak_in_flight <= 1, (
         f"unexpected concurrency in iterative path: peak_in_flight = {provider.peak_in_flight}"
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_disabled_session_never_flushes(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from flocks.session.session import Session
+
+    monkeypatch.setattr(Session, "get_by_id_unfiltered", AsyncMock(return_value=SimpleNamespace(memory_enabled=False)))
+    flush = AsyncMock()
+    _patch_flush(monkeypatch, flush)
+    await _dispatch("isolated-audit")
+    flush.assert_not_awaited()
+    assert not compaction_mod._pending_flush_tasks

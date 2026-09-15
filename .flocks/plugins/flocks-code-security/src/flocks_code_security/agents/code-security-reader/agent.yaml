@@ -1,0 +1,11 @@
+name: code-security-reader
+description: Read-only conversations about one code-security audit.
+mode: primary
+hidden: true
+delegatable: false
+prompt_profile: isolated
+session_directory: ~/.flocks/workspace/code-security/runtime
+memory_enabled: false
+require_dedicated_session: true
+tools:
+  - code_audit_query

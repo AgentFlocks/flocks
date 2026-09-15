@@ -1,4 +1,18 @@
 {
+  "audit": {
+    "newSession": "新建会话",
+    "sessions": "审计会话",
+    "session": "会话",
+    "failed": "会话请求失败，请重试",
+    "placeholder": "追问 Agent…（Enter 发送，Shift+Enter 换行）",
+    "title": "Rex 审计助手",
+    "description": "基于本次审计结果，查询阶段、专家会话与产物。",
+    "agent": "审计助手",
+    "sources": "本次查询来源",
+    "summary": "本次审计发现了多少漏洞？",
+    "remediation": "总结高危漏洞及修复建议",
+    "phases": "解释各阶段的审计结果"
+  },
   "managementTitle": "工作台",
   "sessionCount": "{{count}} 个任务",
   "clearSearch": "清空搜索",

@@ -671,7 +671,7 @@ function CandidateList({
   );
 }
 
-function StructuredValue({ value }: { value: unknown }) {
+export function StructuredValue({ value }: { value: unknown }) {
   const { t } = useCodeSecurityI18n();
   if (Array.isArray(value)) {
     return (

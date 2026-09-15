@@ -31,6 +31,7 @@ export interface Session {
   model_auto?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
+  codeSecurityScanID?: string;
   canWrite?: boolean;
   canDelete?: boolean;
   isShared?: boolean;

@@ -1,3 +1,4 @@
+import WorkbenchSidePanel from '@/components/common/WorkbenchSidePanel';
 import { useState, Component, type ReactNode, type ErrorInfo } from 'react';
 import { Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -139,10 +140,7 @@ export default function RightPanel({
   ];
 
   return (
-    <div
-      className="relative z-10 flex min-w-0 flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out"
-      style={{ width: open ? width : 0 }}
-    >
+    <WorkbenchSidePanel open={open} width={width}>
       {/* Tab bar */}
       <div className="flex border-b border-gray-100 flex-shrink-0">
         {TABS.map((tab) => (
@@ -211,6 +209,6 @@ export default function RightPanel({
           </button>
         </div>
       )}
-    </div>
+    </WorkbenchSidePanel>
   );
 }

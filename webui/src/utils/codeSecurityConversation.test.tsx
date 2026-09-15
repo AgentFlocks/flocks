@@ -14,6 +14,15 @@ import {
 } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/AuditConversation";
 import { NewAuditDrawer } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/NewAuditDrawer";
 
+function TestWorkbenchChat({ turns, pendingQuestion, disabled, error, onSend, onSource }: any) {
+  const [draft, setDraft] = React.useState("");
+  return <div>{turns.map((turn: any) => <div key={turn.request_id}>{turn.answer}{turn.sources.map((source: any) => <button key={source.id} onClick={() => onSource(source)}>{source.title}</button>)}</div>)}
+    {pendingQuestion}<textarea aria-label="审计结果追问" value={draft} disabled={disabled} onChange={e => setDraft(e.target.value)} />
+    <button disabled={disabled || !draft.trim()} onClick={async () => { try { await onSend(draft); setDraft(""); } catch {} }}>发送</button>
+    {error && <p role="alert">{error}</p>}
+  </div>;
+}
+
 const get = vi.fn();
 const post = vi.fn();
 const detail = (status = "completed") =>
@@ -45,6 +54,7 @@ beforeEach(() => {
     React,
     AuditModelPicker: ({ onReady }: any) => { React.useEffect(() => onReady(true), [onReady]); return <button type="button">Test model</button>; },
     AuditSessionTranscript,
+    AuditWorkbenchChat: TestWorkbenchChat,
     useLanguage: () => "zh-CN",
     api: { get, post },
   };

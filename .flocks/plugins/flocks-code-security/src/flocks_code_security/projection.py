@@ -13,6 +13,7 @@ RESOLVER_NAME = "flocks-code-security"
 # Security ceiling for callable tools. Agent YAML declares the intended tools;
 # tests require those declarations to match this independent runtime boundary.
 AGENT_TOOLS = {
+    "code-security-reader": ["code_audit_query"],
     "code-security": [
         "audit_prepare",
         "audit_run_workers",

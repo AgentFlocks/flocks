@@ -475,7 +475,10 @@ async def download_artifact(request: Request, scan_id: str, artifact_name: str):
         raise _map_service_error(exc, AuditServiceError) from exc
     return Response(
         content=contents,
-        media_type="application/octet-stream",
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            if filename == "report.docx" else "application/octet-stream"
+        ),
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Content-Type-Options": "nosniff",
@@ -484,6 +487,8 @@ async def download_artifact(request: Request, scan_id: str, artifact_name: str):
 
 
 class AuditQuestionRequest(BaseModel):
+    session_id: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=512, pattern=r"^[^/]+/.+$")
     question: str = Field(min_length=1, max_length=8000)
     request_id: str = Field(alias="requestId", min_length=1, max_length=128)
 
@@ -502,12 +507,12 @@ async def get_phase_sessions(request: Request, scan_id: str, phase_run_id: str):
 
 @router.get("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/conversation")
 @router.get("/scans/{scan_id}/conversation")
-async def get_audit_conversation(request: Request, scan_id: str):
+async def get_audit_conversation(request: Request, scan_id: str, session_id: str | None = None):
     user = require_user(request)
     service, caller_type, _, error_type = _service_types(request)
     try:
         conversation = importlib.import_module("flocks_code_security.conversation")
-        return await conversation.readiness(service, scan_id, _caller(user, caller_type=caller_type))
+        return await conversation.readiness(service, scan_id, _caller(user, caller_type=caller_type), **({"session_id": session_id} if session_id else {}))
     except Exception as exc:
         raise _map_service_error(exc, error_type) from exc
 
@@ -521,7 +526,31 @@ async def ask_audit_conversation(request: Request, scan_id: str, payload: AuditQ
         if not payload.question.strip():
             raise HTTPException(422, detail="Question must not be blank")
         conversation = importlib.import_module("flocks_code_security.conversation")
-        return await conversation.ask(service, scan_id, _caller(user, caller_type=caller_type), payload.question.strip(), payload.request_id)
+        return await conversation.ask(service, scan_id, _caller(user, caller_type=caller_type), payload.question.strip(), payload.request_id, **({"session_id": payload.session_id} if payload.session_id else {}), **({"model": payload.model} if payload.model else {}))
+    except Exception as exc:
+        raise _map_service_error(exc, error_type) from exc
+
+
+@router.post("/scans/{scan_id}/conversation/new")
+@router.post("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/conversation/new")
+async def new_audit_conversation(request: Request, scan_id: str):
+    user = require_user(request)
+    service, caller_type, _, error_type = _service_types(request)
+    try:
+        conversation = importlib.import_module("flocks_code_security.conversation")
+        return await conversation.create_conversation(service, scan_id, _caller(user, caller_type=caller_type))
+    except Exception as exc:
+        raise _map_service_error(exc, error_type) from exc
+
+
+@router.post("/scans/{scan_id}/conversation/stop")
+@router.post("/batches/{batch_id}/tasks/{task_id}/scans/{scan_id}/conversation/stop")
+async def stop_audit_conversation(request: Request, scan_id: str, session_id: str | None = None):
+    user = require_user(request)
+    service, caller_type, _, error_type = _service_types(request)
+    try:
+        conversation = importlib.import_module("flocks_code_security.conversation")
+        return await conversation.stop(service, scan_id, _caller(user, caller_type=caller_type), session_id)
     except Exception as exc:
         raise _map_service_error(exc, error_type) from exc
 

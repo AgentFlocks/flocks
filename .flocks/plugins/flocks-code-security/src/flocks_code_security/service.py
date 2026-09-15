@@ -1242,6 +1242,17 @@ class AuditService:
                 status_code=409,
             )
 
+        # Persistent result conversations belong to this audit, including
+        # conversations started by other authorized administrators.
+        from flocks_code_security.cleanup import _delete_session
+
+        with self.store._connect() as connection:
+            chat_ids = {row[0] for row in connection.execute(
+                "SELECT session_id FROM audit_chat_sessions WHERE scan_id=?", (scan_id,)
+            )}
+        for session_id in chat_ids:
+            await _delete_session(session_id, chat_ids)
+
         output = find_output_directory(scan_id)
         try:
             deleted = await asyncio.to_thread(self.store.delete_terminal_scan, scan_id, dry_run=strict_cleanup)
@@ -1524,13 +1535,26 @@ class AuditService:
         caller: AuditCaller,
     ) -> tuple[str, bytes]:
         scan = self._require_visible_scan(scan_id, caller)
-        kind = next((key for key, filename in ARTIFACT_FILENAMES.items() if filename == artifact_name), None)
+        source_name = "report.md" if artifact_name == "report.docx" else artifact_name
+        kind = next((key for key, filename in ARTIFACT_FILENAMES.items() if filename == source_name), None)
         if kind is None:
             raise AuditServiceError("artifact_not_allowed", "Artifact is not downloadable", status_code=404)
         path = self._artifact_file(scan_id, kind)
         if path is None:
             raise AuditServiceError("artifact_not_found", "Artifact is not available", status_code=404)
         contents = await asyncio.to_thread(self._read_verified_artifact, scan, path)
+        if artifact_name == "report.docx":
+            try:
+                from flocks_code_security.docx_report import render_docx
+            except ImportError as exc:
+                logger.exception("DOCX export dependency unavailable for scan %s", scan_id)
+                raise AuditServiceError(
+                    "docx_export_unavailable",
+                    "Word 导出依赖不可用，请在服务运行环境执行 uv sync 后重试。",
+                    status_code=503,
+                ) from exc
+
+            return artifact_name, await asyncio.to_thread(render_docx, contents.decode("utf-8"), report_escapes=True)
         return path.name, contents
 
     async def _create_execution_context(

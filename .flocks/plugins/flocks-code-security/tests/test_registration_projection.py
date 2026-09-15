@@ -311,7 +311,7 @@ def test_all_audit_tools_register() -> None:
 
 
 def test_ruleset_digest_is_derived_from_declarative_rules() -> None:
-    assert set(ROLE_AGENTS.values()) == set(AGENT_TOOLS)
+    assert set(ROLE_AGENTS.values()) == set(AGENT_TOOLS) - {"code-security-reader"}
     assert RULESET_DIGEST == _ruleset_digest()
     assert len(RULESET_DIGEST) == 64
 

@@ -11,6 +11,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
+import AuditSessionWorkbench from '@/components/common/AuditSessionWorkbench';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
@@ -3113,6 +3114,9 @@ export default function SessionPage() {
         {/* Chat — powered by unified SessionChat */}
         {resolvingSelectedSession ? (
           <SessionChatSkeleton />
+        ) : selectedSession?.codeSecurityScanID ? (
+          <AuditSessionWorkbench key={selectedSession.id} sessionId={selectedSession.id} scanId={selectedSession.codeSecurityScanID} readOnly={selectedSession.canWrite === false}
+            onCreated={(id) => { setSelectedSessionId(id); void refetchSessions(); }} />
         ) : (
           <SessionChat
             key={activeChatSessionId ?? 'empty-session'}

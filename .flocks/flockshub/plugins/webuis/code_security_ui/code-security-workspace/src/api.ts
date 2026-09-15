@@ -147,21 +147,27 @@ export function createAuditApi(base = BASE) {
           `${base}/scans/${encodeURIComponent(scanId)}/phases/${encodeURIComponent(phaseId)}/sessions`,
         )
       ).data,
-    getConversation: async (scanId: string) =>
+    getConversation: async (scanId: string, sessionId?: string | null) =>
       (
         await getApi().get(
           `${base}/scans/${encodeURIComponent(scanId)}/conversation`,
+          { params: sessionId ? { session_id: sessionId } : undefined },
         )
       ).data,
+    newConversation: async (scanId: string) => (await getApi().post(`${base}/scans/${encodeURIComponent(scanId)}/conversation/new`, {})).data,
+    stopConversation: async (scanId: string, sessionId?: string | null) => (await getApi().post(`${base}/scans/${encodeURIComponent(scanId)}/conversation/stop`, {}, { params: sessionId ? { session_id: sessionId } : undefined })).data,
     askConversation: async (
       scanId: string,
       question: string,
       requestId: string,
+      model?: string,
+      sessionId?: string | null,
     ) =>
       (
         await getApi().post(
           `${base}/scans/${encodeURIComponent(scanId)}/conversation`,
-          { question, requestId },
+          { question, requestId, ...(sessionId ? { session_id: sessionId } : {}), ...(model ? { model } : {}) },
+          { timeout: 0 },
         )
       ).data,
     listProjects,

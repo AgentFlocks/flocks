@@ -102,7 +102,7 @@ def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
 
 # Bump this whenever initialize() adds or changes schema migrations.
 # Version 9 was also used by databases with executable_mode but no conversation tables.
-STORE_SCHEMA_VERSION = 11
+STORE_SCHEMA_VERSION = 14
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -818,6 +818,12 @@ class ScanStore:
                     attempt_id TEXT PRIMARY KEY REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
                     phase_run_id TEXT NOT NULL REFERENCES scan_phase_runs(phase_run_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS audit_chat_sessions (
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    subject TEXT NOT NULL,
+                    session_id TEXT NOT NULL UNIQUE,
+                    PRIMARY KEY(scan_id, subject)
+                );
                 CREATE TABLE IF NOT EXISTS audit_chat_turns (
                     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
                     subject TEXT NOT NULL,
@@ -1239,6 +1245,15 @@ class ScanStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS verifications_one_per_candidate ON verifications(candidate_id)"
             )
             connection.execute("DROP INDEX IF EXISTS verification_subject_once")
+            if "answer_part_id" not in {row[1] for row in connection.execute("PRAGMA table_info(audit_chat_turns)")}:
+                connection.execute("ALTER TABLE audit_chat_turns ADD COLUMN answer_part_id TEXT")
+            if "session_id" not in {row[1] for row in connection.execute("PRAGMA table_info(audit_chat_turns)")}:
+                connection.execute("ALTER TABLE audit_chat_turns ADD COLUMN session_id TEXT")
+                connection.execute("UPDATE audit_chat_turns SET session_id=(SELECT session_id FROM audit_chat_sessions s WHERE s.scan_id=audit_chat_turns.scan_id AND s.subject=audit_chat_turns.subject)")
+                connection.execute("ALTER TABLE audit_chat_sessions RENAME TO audit_chat_sessions_old")
+                connection.execute("CREATE TABLE audit_chat_sessions (scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE, subject TEXT NOT NULL, session_id TEXT NOT NULL PRIMARY KEY)")
+                connection.execute("INSERT INTO audit_chat_sessions SELECT scan_id, subject, session_id FROM audit_chat_sessions_old")
+                connection.execute("DROP TABLE audit_chat_sessions_old")
             connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
             self._restrict_database_files()
 

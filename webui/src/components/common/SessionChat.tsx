@@ -137,6 +137,11 @@ function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false):
 }
 
 export interface SessionChatProps {
+  /** Domain-authorized transport; shares the workbench UI without generic session writes. */
+  transport?: { messages?: Message[]; disabled?: boolean; send: (text: string) => Promise<unknown>; stop?: () => Promise<unknown> };
+  draftKey?: string;
+  renderMessageFooter?: (message: Message) => React.ReactNode;
+
   /** When null/undefined, only welcomeContent + input are rendered (lazy session). */
   sessionId?: string | null;
   /** Subscribe to SSE for live streaming updates */
@@ -1811,6 +1816,9 @@ function formatComposerReference(reference: ComposerReference): string {
 }
 
 export default function SessionChat({
+  transport,
+  draftKey,
+  renderMessageFooter,
   sessionId,
   live = false,
   placeholder,
@@ -1880,7 +1888,7 @@ export default function SessionChat({
   // Restore any persisted draft on first mount so navigating away (e.g.
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
-  const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
+  const [input, setInput] = useState<string>(() => readChatDraft(draftKey ?? sessionId));
   const [submittedModelPromptSessionId, setSubmittedModelPromptSessionId] = useState<string | null>(null);
   const [pendingContextUsage, setPendingContextUsage] = useState<PendingContextUsageState>({
     sessionId: null,
@@ -2178,7 +2186,7 @@ export default function SessionChat({
     [successfulDocAttachments, successfulImageAttachments],
   );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !hasUploadingFiles &&
+  const canSend = !transport?.disabled && !sending && !hasUploadingFiles &&
     (
       !!input.trim()
       || composerReferences.length > 0
@@ -2222,7 +2230,7 @@ export default function SessionChat({
   }, []);
 
   const {
-    messages,
+    messages: sessionMessages,
     loading,
     error: messagesError,
     refetch,
@@ -2236,6 +2244,7 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+  const messages = transport?.messages ?? sessionMessages;
 
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
@@ -2905,7 +2914,6 @@ export default function SessionChat({
     // Swap the draft when the session changes — needed for callers that
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
-    setInput(readChatDraft(sessionId));
     setComposerReferences([]);
     setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
   }, [sessionId, clearPendingQuestions]);
@@ -2929,13 +2937,17 @@ export default function SessionChat({
     });
   }, [fetchPendingPermissions]);
 
+  useEffect(() => {
+    setInput(readChatDraft(draftKey ?? sessionId));
+  }, [draftKey ?? sessionId]);
+
   // Persist the draft on every keystroke. localStorage writes are synchronous
   // and cheap, so debouncing isn't worth the added latency on send (which
   // depends on the draft being flushed). Drafts are removed when ``input``
   // becomes empty (e.g. after a successful send).
   useEffect(() => {
-    writeChatDraft(sessionId, input);
-  }, [sessionId, input]);
+    writeChatDraft(draftKey ?? sessionId, input);
+  }, [draftKey ?? sessionId, input]);
 
   // Recover streaming state after page refresh / session switch
   useEffect(() => {
@@ -3442,7 +3454,15 @@ export default function SessionChat({
 
   const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed || sending || transport?.disabled) return;
+    if (transport) {
+      setSending(true);
+      setInput('');
+      try { await transport.send(trimmed); }
+      catch { setInput(trimmed); }
+      finally { setSending(false); }
+      return;
+    }
 
     setInput('');
     setShowCommandDropdown(false);
@@ -3493,6 +3513,16 @@ export default function SessionChat({
 
   const handleSend = async () => {
     if (!canSend) return;
+    if (transport) {
+      const text = input.trim();
+      if (!text) return;
+      setSending(true);
+      setInput('');
+      try { await transport.send(text); }
+      catch { setInput(text); }
+      finally { setSending(false); }
+      return;
+    }
     const draftText = input.trim();
     const referencesToSend = [...composerReferences];
     const referenceText = referencesToSend.map(formatComposerReference).join(' ');
@@ -3757,7 +3787,8 @@ export default function SessionChat({
     setIsStreaming(false);
     setSending(false);
     try {
-      await client.post(`/api/session/${sessionId}/abort`);
+      if (transport?.stop) await transport.stop();
+      else await client.post(`/api/session/${sessionId}/abort`);
       if (lastAsstMsg?.id) {
         markMessageStopped(lastAsstMsg.id);
       }
@@ -3773,7 +3804,7 @@ export default function SessionChat({
         if (sending) setSending(true);
       }
     }
-  }, [isStreaming, markMessageStopped, sending, sessionId]);
+  }, [isStreaming, markMessageStopped, sending, sessionId, transport?.stop]);
 
   const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
     startQueuedEdit(item);
@@ -4176,6 +4207,7 @@ export default function SessionChat({
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
             <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
               items={historyItems}
               pendingQuestions={pendingQuestions}
               onQuestionAnswer={handleQuestionAnswer}
@@ -4201,6 +4233,7 @@ export default function SessionChat({
               onRegenerate={handleRegenerateMessage}
             />
             <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
               items={tailItems}
               pendingQuestions={pendingQuestions}
               onQuestionAnswer={handleQuestionAnswer}
@@ -4458,9 +4491,9 @@ export default function SessionChat({
               onSelect={(agent) => insertMention(agent.name)}
             />
             <div
-              onDragOver={handleComposerDragOver}
+              onDragOver={transport ? undefined : handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
-              onDrop={handleComposerDrop}
+              onDrop={transport ? undefined : handleComposerDrop}
               className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
@@ -4690,7 +4723,7 @@ export default function SessionChat({
                     onBlur={() => { setTimeout(() => { setShowCommandDropdown(false); setMentionRange(null); }, 100); }}
                     onCompositionStart={() => { isComposingRef.current = true; }}
                     onCompositionEnd={() => { isComposingRef.current = false; }}
-                    onPaste={handleComposerPaste}
+                    onPaste={transport ? undefined : handleComposerPaste}
                     onKeyDown={handleKeyDown}
                     placeholder={
                       isCompacting
@@ -4708,18 +4741,18 @@ export default function SessionChat({
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
                       maxHeight: `${effectiveComposerTextareaMaxHeight}px`,
                     }}
-                    disabled={sending}
+                    disabled={sending || transport?.disabled}
                     rows={1}
                   />
                 </div>
 
                 {/* Bottom toolbar inside the composer card */}
                 <div className="flex items-center gap-1 px-2 pb-2">
-                  <div className="relative" data-composer-add-menu>
+                  <div className="relative" data-composer-add-menu hidden={!!transport}>
                     <button
                       type="button"
                       onClick={toggleComposerAddMenu}
-                      disabled={sending}
+                      disabled={sending || transport?.disabled}
                       title={t('chat.addMenu.title')}
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"
@@ -4934,10 +4967,12 @@ export interface ChatMessageBubbleProps {
 
 interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
   items: ChatTimelineItem[];
+  renderMessageFooter?: (message: Message) => React.ReactNode;
 }
 
 function ChatMessageTimelineInner({
   items,
+  renderMessageFooter,
   pendingQuestions,
   onQuestionAnswer,
   onQuestionReject,
@@ -4991,6 +5026,7 @@ function ChatMessageTimelineInner({
             onEditSend={onEditSend}
             onRegenerate={onRegenerate}
           />
+          {renderMessageFooter?.(message)}
         </div>
       ))}
     </>

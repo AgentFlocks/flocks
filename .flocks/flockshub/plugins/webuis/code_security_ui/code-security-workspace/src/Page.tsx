@@ -126,6 +126,8 @@ function WorkspacePage() {
     initialParams.get("scan_id"),
   );
   const [detail, setDetail] = useState<ScanDetail | null>(null);
+  const WorkbenchPanel = (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.AuditWorkbenchPanel;
+  const [workbenchTask, setWorkbenchTask] = useState<string | null>(null);
   const [requestedPhase, setRequestedPhase] = useState<{ id: string }>();
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1185,6 +1187,9 @@ function WorkspacePage() {
                   <Icon name="panel" />
                   {t("查看产物")}
                 </button>
+                <button type="button" className="cs-button cs-button--secondary" aria-expanded={workbenchTask === detail.scan.scan_id} onClick={() => setWorkbenchTask(detail.scan.scan_id)}>
+                  <Icon name="panel" />{t("工作台")}
+                </button>
               </div>
             </header>
             <div className="cs-audit-metrics" aria-label={t("审计指标")}>
@@ -1252,6 +1257,7 @@ function WorkspacePage() {
             <PhaseWorkspace
               key={detail.scan.scan_id}
               requestedPhase={requestedPhase}
+              detail={detail}
               onOpenArtifacts={(kind) => { if (kind) changeArtifact(kind); openInspector(); }}
               scanId={detail.scan.scan_id}
               phases={detail.phaseRuns}
@@ -1273,6 +1279,12 @@ function WorkspacePage() {
               loadingOlderEvents={loadingOlderEvents}
               onLoadOlderEvents={loadOlderEvents}
             />
+            {WorkbenchPanel && <WorkbenchPanel
+              key={`workbench-${detail.scan.scan_id}`}
+              open={workbenchTask === detail.scan.scan_id}
+              title={t("审计工作台")} closeLabel={t("关闭工作台")} resizeLabel={t("调整工作台宽度")}
+              onClose={() => setWorkbenchTask(null)}
+            >
             <AuditConversation
               key={`conversation-${detail.scan.scan_id}`}
               detail={detail}
@@ -1287,6 +1299,7 @@ function WorkspacePage() {
                 openInspector();
               }}
             />
+            </WorkbenchPanel>}
           </>
         )}
       </section>

@@ -1102,10 +1102,21 @@ async def test_delete_scan_requires_admin_and_a_terminal_status(
     store.append_scan_event(scan_id, "scan.status", "Completed", {})
     store.mark_scan_terminal(scan_id, "completed")
 
+    from unittest.mock import AsyncMock
+    from flocks_code_security import cleanup
+
+    delete_session = AsyncMock(return_value=1)
+    monkeypatch.setattr(cleanup, "_delete_session", delete_session)
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO audit_chat_sessions(scan_id,subject,session_id) VALUES (?,?,?)",
+            (scan_id, "admin-1", "audit-chat-session"),
+        )
     await service.delete_scan(
         scan_id,
         AuditCaller(subject="admin-1", source="webui", is_admin=True),
     )
+    delete_session.assert_awaited_once_with("audit-chat-session", {"audit-chat-session"})
 
     assert store.get_scan(scan_id) is None
     assert store.get_snapshot("snapshot_test") is None

@@ -76,7 +76,8 @@ dependencies = [
     "slack-sdk>=3.38.0",
     "python-socks>=2.8.1",
     "pytz>=2026.1.post1",
-    # docs parser
+    # docs parser and report export
+    "python-docx>=1.1.2",
     "pypdf>=6.8.0",
     "markitdown>=0.1.5",
     "pymupdf>=1.27.2.2",
@@ -91,6 +92,7 @@ dependencies = [
     # Kafka ingest (workflow input/output)
     "aiokafka>=0.14.0",
     "ddddocr>=1.6.1",
+    "markdown-it-py>=3.0.0",
 ]
 
 [dependency-groups]

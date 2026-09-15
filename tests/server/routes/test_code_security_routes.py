@@ -219,3 +219,17 @@ async def test_project_purge_only_removes_registration_after_cleanup(monkeypatch
         await code_security.delete_audit_project(SimpleNamespace(), 'project')
         cleanup.assert_awaited_once_with({'project', 'old'}, user)
         purge.assert_awaited_once_with('owner', {'project', 'old'})
+
+
+@pytest.mark.asyncio
+async def test_docx_download_has_word_media_type_and_attachment_name(monkeypatch):
+    from unittest.mock import AsyncMock
+    user = SimpleNamespace(id="owner")
+    service = SimpleNamespace(download_artifact=AsyncMock(return_value=("report.docx", b"word document")))
+    monkeypatch.setattr(code_security, "require_user", lambda request: user)
+    monkeypatch.setattr(code_security, "_service_types", lambda request: (service, object, object, ValueError))
+    monkeypatch.setattr(code_security, "_caller", lambda *args, **kwargs: user)
+    response = await code_security.download_artifact(SimpleNamespace(), "scan", "report.docx")
+    assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert response.headers["content-disposition"] == 'attachment; filename="report.docx"'
+    service.download_artifact.assert_awaited_once_with("scan", "report.docx", user)

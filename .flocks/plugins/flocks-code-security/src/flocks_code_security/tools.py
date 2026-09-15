@@ -133,6 +133,7 @@ REGISTERED_AUDIT_TOOLS: dict[
     tuple[Tool, Callable[..., Awaitable[ToolResult]]],
 ] = {}
 AUDIT_TOOL_NAMES = (
+    "code_audit_query",
     "audit_prepare",
     "audit_knowledge_base",
     "audit_repository_summary",
@@ -3481,4 +3482,15 @@ def register_tools() -> None:
                 default=30,
             ),
         ],
+    )
+
+    from flocks_code_security.chat_runtime import query_tool
+    from flocks_code_security.conversation import AuditQuery
+
+    _register(
+        "code_audit_query",
+        "Read the current audit: overview lists stages and artifacts; phase requires phase_run_id; "
+        "artifact requires artifact_kind; session requires session_id. Follow next_offset to read more.",
+        query_tool,
+        [_parameter("query", ParameterType.OBJECT, "Audit query and optional character offset.", json_schema=AuditQuery.model_json_schema())],
     )

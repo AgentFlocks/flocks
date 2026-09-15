@@ -1,3 +1,4 @@
+import { GeneratedReport } from "./GeneratedReport";
 import { NativePhaseSessions } from "./AuditConversation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -76,6 +77,7 @@ const attemptStatusLabels: Record<string, string> = {
 
 export function PhaseWorkspace({
   scanId,
+  detail,
   onOpenArtifacts,
   requestedPhase,
   phases,
@@ -84,10 +86,9 @@ export function PhaseWorkspace({
   snapshotBoundary,
   artifactBundle,
   dynamicValidationStatus,
-  finalFindingCount = null,
-  finalFindingBasis = "审计完成后确定",
 }: {
   scanId?: string;
+  detail?: ScanDetail;
   requestedPhase?: { id: string };
   onOpenArtifacts?: (kind?: string) => void;
   phases: PhaseRun[];
@@ -174,33 +175,7 @@ export function PhaseWorkspace({
     (stageArtifactKinds[selected?.phase || ""] || []).includes(artifact.kind));
 
   return (
-    <section className="cs-execution" aria-labelledby="execution-title">
-      <div className="cs-section-heading">
-        <div>
-          <h2 id="execution-title">{t("审计会话")}</h2>
-        </div>
-        <div
-          className="cs-final-findings"
-          aria-label={
-            finalFindingCount === null
-              ? t("漏洞数，{{basis}}", { basis: t(finalFindingBasis) })
-              : t("漏洞数 {{count}} 个，{{basis}}", {
-                  count: finalFindingCount,
-                  basis: t(finalFindingBasis),
-                })
-          }
-        >
-          <div>
-            <span>{t("漏洞数")}</span>
-            <small>{t(finalFindingBasis)}</small>
-          </div>
-          <strong className="cs-tabular">
-            {finalFindingCount === null ? "—" : finalFindingCount}
-            {finalFindingCount !== null && <small>{t("个")}</small>}
-          </strong>
-        </div>
-      </div>
-
+    <section className="cs-execution" aria-label={t("审计阶段")}>
       <aside className="cs-context-rail">
         <h3>{t("审计阶段")}</h3>
         <div
@@ -261,7 +236,7 @@ export function PhaseWorkspace({
           })}
         </div>
 
-        {artifactBundle && (
+        {artifactBundle && selected?.phase !== "finalization" && (
           <div className="cs-context-artifacts">
             <h3>{t("审计产物")}</h3>
             {stageArtifacts.map((artifact) => (
@@ -364,17 +339,7 @@ export function PhaseWorkspace({
                 {t("封装结果将在最终产物生成后出现。")}
               </div>
             )
-          ) : selected?.phase === "adjudication" ? (
-            <AdjudicationSummary
-              scanId={scanId}
-              phase={selected}
-              workers={
-                sorted.filter((p) => p.phase === selected.phase).length === 1
-                  ? workers
-                  : []
-              }
-            />
-          ) : (
+          ) : selected?.phase === "adjudication" ? null : (
             <WorkerList
               dynamicValidationStatus={dynamicValidationStatus}
               workers={
@@ -400,14 +365,7 @@ export function PhaseWorkspace({
         </details>
       </aside>
       <div className="cs-stage-session">
-        {selectedId && (
-          <div className="cs-session-identity">
-            <button type="button" onClick={() => setSelectedId(undefined)}>
-              {t("回到最新阶段")}
-            </button>
-          </div>
-        )}
-        {selected ? (
+        {selected ? (selected.phase === "finalization" ? null :
           <article className="cs-current-phase" role="tabpanel">
             <div className="cs-current-phase__header">
               <div>
@@ -439,6 +397,15 @@ export function PhaseWorkspace({
 
         {selected?.phase === "snapshot" ? (
           <SnapshotOverview boundary={snapshotBoundary} completed={selected.status === "completed"} />
+        ) : selected?.phase === "adjudication" ? (
+          <AdjudicationSummary
+            key={selected.phase_run_id}
+            scanId={scanId}
+            phase={selected}
+            workers={sorted.filter((phase) => phase.phase === selected.phase).length === 1 ? workers : []}
+          />
+        ) : selected?.phase === "finalization" && detail ? (
+          <GeneratedReport key={detail.scan.scan_id} detail={detail} />
         ) : scanId && selected ? (
           <NativePhaseSessions
             key={`session-${selected.phase_run_id}`}
@@ -577,13 +544,13 @@ function AdjudicationSummary({
 
   return (
     <section
-      className="cs-phase-summary cs-adjudication-summary"
+      className="cs-phase-summary cs-adjudication-summary cs-snapshot-overview"
       aria-labelledby="adjudication-summary-title"
     >
-      <div className="cs-subsection-heading cs-phase-summary__heading">
+      <div className="cs-snapshot-intro">
+        <span className="cs-snapshot-symbol"><Icon name="shield" /></span>
         <div>
           <h3 id="adjudication-summary-title">
-            <Icon name="shield" />
             {t("裁决内容与结果")}
           </h3>
           <span>
@@ -594,7 +561,11 @@ function AdjudicationSummary({
                   ? "主智能体已完成{{round}}裁决并要求补充验证"
                   : phase.status === "failed"
                     ? "主智能体未能提交有效裁决"
-                    : "主智能体正在审阅候选漏洞与验证结论",
+                    : phase.status === "completed"
+                      ? "裁决已完成"
+                      : phase.status === "pending"
+                        ? "等待主智能体裁决"
+                        : "主智能体正在审阅候选漏洞与验证结论",
               {
                 round: round ? t("第 {{round}} 轮", { round }) : "",
               },

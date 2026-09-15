@@ -5829,3 +5829,30 @@ describe('areChatMessagePartsRenderEqual', () => {
     )).toBe(false);
   });
 });
+
+it('uses an authorized transport with native messages and restores failed drafts', async () => {
+  const send = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(undefined);
+  const messages: Message[] = [{ id: 'answer', sessionID: '', role: 'assistant', timestamp: 0, finish: 'stop', parts: [{ id: 'text', type: 'text', text: 'Audit result: seven findings' }] }];
+  const view = render(React.createElement(SessionChat, { transport: { messages, send, disabled: true } }));
+  expect(await screen.findByText('Audit result: seven findings')).toBeVisible();
+  view.rerender(React.createElement(SessionChat, { transport: { messages, send } }));
+  const input = screen.getByPlaceholderText('请输入消息');
+  await userEvent.type(input, 'explain{enter}');
+  await waitFor(() => expect(input).toHaveValue('explain'));
+  expect(send).toHaveBeenCalledWith('explain');
+  await userEvent.type(input, '{enter}');
+  await waitFor(() => expect(input).toHaveValue(''));
+  expect(send).toHaveBeenCalledTimes(2);
+});
+
+it('keeps a task draft when its native session arrives and after reopening', async () => {
+  const draftKey = 'audit:task-draft';
+  const transport = { send: vi.fn() };
+  const view = render(React.createElement(SessionChat, { draftKey, transport }));
+  await userEvent.type(screen.getByPlaceholderText('请输入消息'), 'pending question');
+  view.rerender(React.createElement(SessionChat, { draftKey, sessionId: 'native-audit', transport }));
+  expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('pending question');
+  view.unmount();
+  render(React.createElement(SessionChat, { draftKey, sessionId: 'native-audit', transport }));
+  expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('pending question');
+});

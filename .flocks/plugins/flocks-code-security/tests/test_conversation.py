@@ -7,9 +7,23 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flocks_code_security import conversation as chat
+from flocks_code_security import chat_runtime
 from flocks_code_security.service import AuditCaller, AuditServiceError
 from flocks_code_security.store import ScanStore, STORE_SCHEMA_VERSION
 from test_service_store import _store
+
+
+def answer_mock(*results):
+    pending = iter(results)
+
+    async def reply(service, scan_id, caller, question, turns, query, **kwargs):
+        await query(chat.AuditQuery(view="overview"))
+        result = next(pending)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    return AsyncMock(side_effect=reply)
 
 
 @pytest.fixture
@@ -37,10 +51,11 @@ def audit(tmp_path):
     return service, scan_id, caller, scan, detail
 
 
-@pytest.mark.parametrize("existing_version", [8, 9, 10])
+@pytest.mark.parametrize("existing_version", [8, 9, 10, 11, 12])
 def test_existing_database_migrates_without_losing_scans(audit, existing_version):
     service, sid, *_ = audit
     with service.store._connect() as connection:
+        connection.execute("DROP TABLE audit_chat_sessions")
         connection.execute("DROP TABLE scan_phase_sessions")
         connection.execute("DROP TABLE audit_chat_turns")
         connection.execute(f"PRAGMA user_version = {existing_version}")
@@ -48,6 +63,7 @@ def test_existing_database_migrates_without_losing_scans(audit, existing_version
     with service.store._connect() as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA_VERSION
         assert connection.execute("SELECT scan_id FROM scans").fetchone()[0] == sid
+        assert connection.execute("SELECT COUNT(*) FROM audit_chat_sessions").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM audit_chat_turns").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM scan_phase_sessions").fetchone()[0] == 0
 
@@ -83,7 +99,7 @@ async def test_cannot_bypass_completion_gate(audit, monkeypatch, status):
     service, sid, caller, _, detail = audit
     detail["scan"]["lifecycle_status"] = status
     model = AsyncMock()
-    monkeypatch.setattr(chat, "model_reply", model)
+    monkeypatch.setattr(chat_runtime, "answer", model)
     with pytest.raises(AuditServiceError, match="全部审计流程"):
         await chat.ask(service, sid, caller, "why", "request")
     model.assert_not_called()
@@ -115,38 +131,48 @@ async def test_legacy_repeated_phases_are_not_guessed(audit, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("setting", ["read_only", "cleanup_intermediates", "missing_session", "active_worker"])
-async def test_incomplete_context_never_unlocks(audit, monkeypatch, setting):
-    service, sid, caller, scan, _ = audit
+@pytest.mark.parametrize("setting", ["read_only", "invalid_artifacts", "active_worker"])
+async def test_unready_results_never_unlock(audit, monkeypatch, setting):
+    service, sid, caller, _, detail = audit
     if setting == "read_only":
         service.read_only = True
-    elif setting == "cleanup_intermediates":
-        scan[setting] = True
+    elif setting == "invalid_artifacts":
+        detail["scan"]["integrity_status"] = "invalid"
     else:
-        monkeypatch.setattr(
-            chat,
-            "phase_sessions",
-            AsyncMock(
-                return_value={
-                    "complete": setting != "missing_session",
-                    "items": [{"status": "running"}] if setting == "active_worker" else [],
-                }
-            ),
-        )
-    result = await chat.readiness(service, sid, caller)
-    assert result["ready"] is False
+        monkeypatch.setattr(service.store, "phase_session_attempts", lambda _: [{"status": "running"}])
+    assert (await chat.readiness(service, sid, caller))["ready"] is False
 
 
 @pytest.mark.asyncio
-async def test_answers_include_all_artifacts_persist_and_retry_idempotently(audit, monkeypatch):
+async def test_readiness_allows_cleaned_sessions_without_reading_evidence(audit, monkeypatch):
+    service, sid, caller, scan, _ = audit
+    scan["cleanup_intermediates"] = True
+    scan["cleanup_summary_json"] = '{"status":"completed"}'
+    read = AsyncMock(side_effect=AssertionError("transcript must not be read"))
+    monkeypatch.setattr(chat, "_read_session", read)
+    assert (await chat.readiness(service, sid, caller))["ready"] is True
+    monkeypatch.setattr(chat_runtime, "answer", answer_mock("Summary [audit]"))
+    assert (await chat.ask(service, sid, caller, "summarize", "request"))["answer"] == "Summary [audit]"
+    read.assert_not_called()
+    service.get_artifact.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_answers_query_artifacts_on_demand_and_retry_idempotently(audit, monkeypatch):
     service, sid, caller, _, detail = audit
     detail["artifacts"] = [{"kind": "findings", "state": "sealed"}]
     service.get_artifact.return_value = {"content": "evidence"}
-    model = AsyncMock(return_value="Evidence supports this [artifact:findings].")
-    monkeypatch.setattr(chat, "model_reply", model)
+
+    async def reply(service, scan_id, caller, question, turns, query, **kwargs):
+        service.get_artifact.assert_not_called()
+        page = await query(chat.AuditQuery(view="artifact", artifact_kind="findings"))
+        assert "evidence" in page["content"]
+        return "Evidence supports this [artifact:findings]."
+
+    model = AsyncMock(side_effect=reply)
+    monkeypatch.setattr(chat_runtime, "answer", model)
     result = await chat.ask(service, sid, caller, "why", "request")
     assert result["sources"] == [{"id": "artifact:findings", "title": "findings"}]
-    assert "evidence" in model.call_args.args[0][1].content
     assert await chat.ask(service, sid, caller, "why", "request") == result
     assert model.await_count == 1
     with pytest.raises(AuditServiceError) as conflict:
@@ -157,8 +183,8 @@ async def test_answers_include_all_artifacts_persist_and_retry_idempotently(audi
 @pytest.mark.asyncio
 async def test_failed_request_can_retry_same_id(audit, monkeypatch):
     service, sid, caller, *_ = audit
-    model = AsyncMock(side_effect=[RuntimeError("offline"), "No findings [audit]."])
-    monkeypatch.setattr(chat, "model_reply", model)
+    model = answer_mock(RuntimeError("offline"), "No findings [audit].")
+    monkeypatch.setattr(chat_runtime, "answer", model)
     with pytest.raises(RuntimeError):
         await chat.ask(service, sid, caller, "why", "request")
     assert (await chat.ask(service, sid, caller, "why", "request"))["answer"] == "No findings [audit]."
@@ -168,7 +194,7 @@ async def test_failed_request_can_retry_same_id(audit, monkeypatch):
 @pytest.mark.parametrize("answer", ["No references", "Fake [session:missing]"])
 async def test_unverifiable_answers_are_not_saved(audit, monkeypatch, answer):
     service, sid, caller, *_ = audit
-    monkeypatch.setattr(chat, "model_reply", AsyncMock(return_value=answer))
+    monkeypatch.setattr(chat_runtime, "answer", AsyncMock(return_value=answer))
     with pytest.raises(AuditServiceError) as error:
         await chat.ask(service, sid, caller, "why", "request")
     assert error.value.code == "invalid_citation"
@@ -245,21 +271,134 @@ async def test_abandoned_pending_request_can_be_retried(audit, monkeypatch):
             "INSERT INTO audit_chat_turns(scan_id,subject,request_id,question,status,created_at) VALUES (?,?,?,?,?,?)",
             (sid, caller.subject, "request", "why", "pending", "2020-01-01T00:00:00+00:00"),
         )
-    monkeypatch.setattr(chat, "model_reply", AsyncMock(return_value="Answer [audit]"))
+    monkeypatch.setattr(chat_runtime, "answer", answer_mock("Answer [audit]"))
     assert (await chat.ask(service, sid, caller, "why", "request"))["answer"] == "Answer [audit]"
 
 
 @pytest.mark.asyncio
-async def test_model_has_no_tools_and_refuses_oversized_context(monkeypatch):
+async def test_configuration_helper_has_no_tools_or_tokenizer(monkeypatch):
     monkeypatch.setattr(chat, "_resolve_model", AsyncMock(return_value=("provider", "model")))
-    provider = SimpleNamespace(
-        chat=AsyncMock(return_value=SimpleNamespace(content="answer", finish_reason="stop", tool_calls=[]))
-    )
+    provider = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content="answer", finish_reason="stop", tool_calls=[])))
     monkeypatch.setattr(chat.Provider, "get", lambda _: provider)
-    monkeypatch.setattr(chat.Provider, "resolve_model_info", lambda *_: (32768, 4096, None))
-    await chat.model_reply([chat.ChatMessage(role="user", content="question")])
+    assert await chat.model_reply([chat.ChatMessage(role="user", content="question")]) == "answer"
     assert provider.chat.call_args.kwargs["tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_phase_query_returns_only_its_sessions_without_reading_messages(audit, monkeypatch):
+    service, sid, caller, _, detail = audit
+    phases = []
+    for ordinal in (1, 2):
+        unit = service.store.create_work_unit(scan_id=sid, phase="verification", role="verifier", paths=["."])
+        attempt = service.store.create_work_attempt(
+            work_unit_id=unit, session_id=f"worker-{ordinal}", agent_name="verifier"
+        )
+        phase = service.store.start_phase_run(sid, "verification", ordinal=ordinal)
+        with service.store._connect() as connection:
+            connection.execute(
+                "INSERT INTO scan_phase_sessions(attempt_id, phase_run_id) VALUES (?, ?)",
+                (attempt["attempt_id"], phase["phase_run_id"]),
+            )
+        phases.append(phase)
+    detail["phase_runs"] = phases
+    detail["artifacts"] = [{"kind": "verification_index"}, {"kind": "threat_model"}]
+    read = AsyncMock(side_effect=AssertionError("listing must not read transcripts"))
+    monkeypatch.setattr(chat, "_read_session", read)
+    page = await chat.code_audit_query(
+        service, sid, caller, chat.AuditQuery(view="phase", phase_run_id=phases[1]["phase_run_id"])
+    )
+    content = json.loads(page["content"])
+    assert [s["session_id"] for s in content["sessions"]["items"]] == ["worker-2"]
+    assert "messages" not in content["sessions"]["items"][0]
+    assert content["artifacts"] == [{"kind": "verification_index"}]
+    assert page["phase_run_id"] == phases[1]["phase_run_id"]
+    read.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("view", ["overview", "phase", "artifact", "session"])
+async def test_query_checks_audit_access_before_reading(audit, monkeypatch, view):
+    service, sid, _, *_ = audit
+    read = AsyncMock()
+    monkeypatch.setattr(chat, "_read_session", read)
     with pytest.raises(AuditServiceError) as error:
-        await chat.model_reply([chat.ChatMessage(role="user", content="x" * 40000)])
-    assert error.value.status_code == 413
-    assert provider.chat.await_count == 1
+        await chat.code_audit_query(service, sid, AuditCaller(subject="other", source="web"), chat.AuditQuery(view=view))
+    assert error.value.status_code == 404
+    read.assert_not_called()
+    service.get_artifact.assert_not_called()
+    service.get_scan.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_arbitrary_session_id_cannot_read_other_sessions(audit, monkeypatch):
+    service, sid, caller, scan, _ = audit
+    scan["parent_session_id"] = "unowned-parent"
+    read = AsyncMock()
+    monkeypatch.setattr(chat, "_read_session", read)
+    for session_id in ("another-audit", "unowned-parent"):
+        with pytest.raises(AuditServiceError) as error:
+            await chat.code_audit_query(service, sid, caller, chat.AuditQuery(view="session", session_id=session_id))
+        assert error.value.status_code == 404
+    read.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("view", ["artifact", "session"])
+async def test_large_evidence_is_paged_without_losing_content(audit, monkeypatch, view):
+    service, sid, caller, scan, _ = audit
+    text = "中文工具输出\\n" * 12000
+    if view == "artifact":
+        service.get_artifact.return_value = {"state": "sealed", "content": text}
+        args = {"view": view, "artifact_kind": "findings"}
+        expected = {"state": "sealed", "content": text}
+    else:
+        scan.update(task_owner_token="owned", parent_session_id="coordinator")
+        expected = [{"id": "message-1", "parts": [{"type": "tool", "output": text}]}]
+        monkeypatch.setattr(chat, "_read_session", AsyncMock(return_value=expected))
+        args = {"view": view, "session_id": "coordinator"}
+    chunks = []
+    offset = 0
+    while True:
+        page = await chat.code_audit_query(service, sid, caller, chat.AuditQuery(**args, offset=offset))
+        assert len(page["content"]) <= chat.QUERY_PAGE_CHARS
+        assert page["offset"] == offset
+        chunks.append(page["content"])
+        if not page["has_more"]:
+            assert page["next_offset"] is None
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert len(chunks) > 1
+    assert json.loads("".join(chunks)) == expected
+
+
+@pytest.mark.asyncio
+async def test_missing_session_does_not_prevent_artifact_query(audit, monkeypatch):
+    service, sid, caller, scan, _ = audit
+    scan.update(task_owner_token="owned", parent_session_id="coordinator")
+    monkeypatch.setattr(chat, "_read_session", AsyncMock(return_value=None))
+    with pytest.raises(AuditServiceError) as error:
+        await chat.code_audit_query(service, sid, caller, chat.AuditQuery(view="session", session_id="coordinator"))
+    assert error.value.code == "session_unavailable"
+    service.get_artifact.return_value = {"content": "retained findings"}
+    page = await chat.code_audit_query(service, sid, caller, chat.AuditQuery(view="artifact", artifact_kind="findings"))
+    assert "retained findings" in page["content"]
+
+
+@pytest.mark.asyncio
+async def test_missing_citation_keeps_answer_with_actual_query_provenance(audit, monkeypatch):
+    service, sid, caller, *_ = audit
+    monkeypatch.setattr(chat_runtime, "answer", answer_mock("There are seven findings."))
+    turn = await chat.ask(service, sid, caller, "How many findings?", "request")
+    assert turn["answer"] == "There are seven findings."
+    assert [source["id"] for source in turn["sources"]] == ["audit"]
+
+
+@pytest.mark.asyncio
+async def test_query_provenance_does_not_allow_fabricated_citations(audit, monkeypatch):
+    service, sid, caller, *_ = audit
+    monkeypatch.setattr(chat_runtime, "answer", answer_mock("Seven findings [session:invented]"))
+    with pytest.raises(AuditServiceError) as error:
+        await chat.ask(service, sid, caller, "How many findings?", "request")
+    assert error.value.code == "invalid_citation"
+    assert chat.history(service, sid, caller) == []
