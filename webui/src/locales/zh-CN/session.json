@@ -458,6 +458,45 @@
       }
     }
   },
+  "context": {
+    "title": "上下文",
+    "refresh": "刷新上下文",
+    "preview": "预览",
+    "download": "下载",
+    "fullscreen": "全屏预览",
+    "viewAll": "在上下文中查看全部",
+    "loadFailed": "加载会话上下文失败",
+    "loadEarlier": "加载更早的资源",
+    "loadMore": "加载更多",
+    "loadingMore": "正在加载更多……",
+    "back": "返回",
+    "close": "关闭上下文",
+    "searchPlaceholder": "搜索文件……",
+    "filter": {
+      "all": "全部"
+    },
+    "sort": {
+      "updated": "最近更新",
+      "name": "名称",
+      "size": "大小"
+    },
+    "progress": "进度",
+    "outputs": "输出文件",
+    "contextFiles": "上下文",
+    "skills": "Skills",
+    "noProgress": "暂无任务进度",
+    "noOutputs": "暂无输出文件",
+    "noContext": "暂无上下文文件或文件夹",
+    "addFolder": "添加文件夹",
+    "folderPathPlaceholder": "服务器文件夹路径",
+    "add": "添加",
+    "parentFolder": "返回上级",
+    "emptyFolder": "文件夹为空",
+    "project": "项目",
+    "folder": "文件夹",
+    "loaded": "已加载",
+    "locateMessage": "定位到来源消息"
+  },
   "groupToday": "今天",
   "groupYesterday": "昨天",
   "groupThisWeek": "本周",

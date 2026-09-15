@@ -31,6 +31,8 @@ export interface WorkspaceStats {
 
 export interface UploadResult {
   name: string;
+  uploadID?: string;
+  mime?: string;
   path?: string;
   abs_path?: string;
   size?: number;
@@ -81,6 +83,9 @@ export const workspaceAPI = {
       validateStatus: (status) => (status >= 200 && status < 300) || status === 409,
     });
   },
+
+  removeChatUpload: (uploadID: string) =>
+    client.delete<{ uploadID: string; removed: boolean }>(`/api/workspace/upload/chat/${uploadID}`),
 
   readFile: (path: string) =>
     client.get<WorkspaceFileContentResponse>('/api/workspace/file', { params: { path } }),

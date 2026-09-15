@@ -284,10 +284,6 @@ class SystemPrompt:
         )
         is_git = vcs == "git"
 
-        from flocks.workspace.manager import WorkspaceManager
-        ws = WorkspaceManager.get_instance()
-        outputs_dir = str(ws.get_default_outputs_dir())
-
         env_info = [
             "Here is some useful information about the environment you are running in:",
             "<env>",
@@ -313,15 +309,15 @@ class SystemPrompt:
         """Build dynamic runtime metadata that should stay near the prompt tail."""
         del directory, vcs  # Reserved for future runtime metadata.
 
-        from flocks.workspace.manager import WorkspaceManager
-
-        ws = WorkspaceManager.get_instance()
         now = datetime.now()
-        outputs_dir = str(ws.get_workspace_dir() / "outputs" / now.strftime("%Y-%m-%d"))
 
         lines = [
             "## Runtime Metadata",
             f"Today's date: {now.strftime('%A %b %d, %Y')}",
+            (
+                "Agent outputs: use a filename-only path unless the user specifies a path; "
+                "the write tool routes it to this Session's dated Workspace outputs directory."
+            ),
             f"Platform hint: {platform.system().lower()}",
         ]
         if session_id:

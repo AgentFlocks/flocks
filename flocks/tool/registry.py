@@ -199,7 +199,7 @@ class ToolResult(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
     title: Optional[str] = Field(None, description="Result title for display")
     truncated: bool = Field(False, description="Whether output was truncated")
-    attachments: Optional[List[Dict[str, Any]]] = Field(None, description="File attachments (images, PDFs)")
+    attachments: Optional[List[Dict[str, Any]]] = Field(None, description="File attachments")
 
 
 @dataclass

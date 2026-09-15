@@ -11,12 +11,21 @@ Verifies file writing behavior:
 import os
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 import datetime as dt
 
 from flocks.tool.registry import ToolRegistry, ToolContext
 from flocks.tool.path_utils import resolve_tool_path
 from flocks.workspace.manager import WorkspaceManager
+
+
+@pytest.fixture(autouse=True)
+def isolate_write_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-home"))
+    monkeypatch.setenv("FLOCKS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setattr(WorkspaceManager, "_instance", None)
 
 
 def _make_ctx(**extra_kwargs) -> ToolContext:
@@ -193,6 +202,20 @@ async def test_filename_only_redirects_to_default_outputs(tmp_path, monkeypatch)
     assert expected.exists()
     assert expected.read_text() == "hello"
     assert not (project_dir / "hello.txt").exists()
+    assert result.attachments is not None
+    assert len(result.attachments) == 1
+    attachment = result.attachments[0]
+    assert attachment["type"] == "file"
+    assert attachment["filename"] == "hello.txt"
+    assert attachment["mime"] == "text/plain"
+    assert attachment["size"] == len("hello")
+    assert attachment["origin"] == "agent_output"
+    assert attachment["source"] == {
+        "root": "workspace-output",
+        "path": f"{dt.date.today().isoformat()}/hello.txt",
+        "username": None,
+    }
+    assert str(tmp_path) not in str(attachment)
 
 
 @pytest.mark.asyncio
@@ -231,9 +254,10 @@ async def test_relative_with_subdir_keeps_project_path(tmp_path):
     assert result.success, f"write failed: {result.error}"
     assert target.exists()
     assert target.read_text() == "x"
+    assert result.attachments is None
 
 
-def test_filepath_parameter_references_env():
+def test_filepath_parameter_describes_output_routing():
     """filePath parameter description must contain directory routing rules."""
     from flocks.tool.registry import ToolRegistry
 
@@ -242,5 +266,90 @@ def test_filepath_parameter_references_env():
     desc = filepath_param.description
 
     assert "Workspace outputs directory" in desc
-    assert "<env>" in desc
-    assert "Source code directory" in desc
+    assert "filename-only path" in desc
+    assert "Project source files" in desc
+    assert "<env>" not in desc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_owner", [None, "service"])
+async def test_output_scope_tracks_authenticated_writer_not_session_owner(tmp_path, session_owner):
+    from flocks.session.files import (
+        build_session_context,
+        public_resource_id,
+        resolve_session_resource,
+        session_outputs_root,
+    )
+    from flocks.auth.context import AuthUser
+    from flocks.session.message import ToolPart, ToolStateCompleted
+
+    ctx = _make_ctx(extra={"workspace_dir": str(tmp_path / "project")})
+    session = SimpleNamespace(
+        id=ctx.session_id,
+        project_id="global",
+        owner_user_id="api-token-service",
+        owner_username=session_owner,
+        directory="",
+        metadata={},
+    )
+    relative = f"{dt.date.today().isoformat()}/report.md"
+    wrong_file = session_outputs_root(session) / relative
+    wrong_file.parent.mkdir(parents=True, exist_ok=True)
+    wrong_file.write_text("different owner's file", encoding="utf-8")
+
+    with (
+        patch("flocks.auth.context.get_current_auth_user", return_value=AuthUser(id="admin", username="admin team", role="admin")),
+        patch("flocks.session.session.Session.get_by_id", new=AsyncMock(return_value=session)),
+    ):
+        result = await ToolRegistry.execute("write", ctx, filePath="report.md", content="admin output")
+
+    assert result.success, result.error
+    attachment = result.attachments[0]
+    assert attachment["source"] == {
+        "root": "workspace-output",
+        "path": relative,
+        "username": "admin_team",
+    }
+    target = tmp_path / "workspace" / "users" / "admin_team" / "outputs" / relative
+    assert target.read_text() == "admin output"
+    assert wrong_file.read_text() == "different owner's file"
+    part = ToolPart(
+        id="prt_write",
+        sessionID=session.id,
+        messageID=ctx.message_id,
+        callID=ctx.call_id,
+        tool="write",
+        state=ToolStateCompleted(
+            input={}, output="ok", title="report.md", metadata=result.metadata,
+            time={"start": 1, "end": 2}, attachments=result.attachments,
+        ),
+    )
+    message = SimpleNamespace(
+        info=SimpleNamespace(id=ctx.message_id, role="assistant", time={"created": 1}),
+        parts=[part],
+    )
+    resource_id = public_resource_id(ctx.message_id, attachment["id"])
+    with (
+        patch("flocks.session.files._messages_with_parts", new=AsyncMock(return_value=([message], False, None))),
+        patch("flocks.session.message.Message.get_with_parts_lazy", new=AsyncMock(return_value=message)),
+        patch("flocks.session.features.todo.Todo.get_snapshot", new=AsyncMock(return_value=[])),
+    ):
+        resource = await resolve_session_resource(session, resource_id)
+        assert resource.path == target.resolve()
+        assert resource.path.read_text() == "admin output"
+        context = await build_session_context(session, include_roots=False)
+        assert context["outputs"][0]["resourceID"] == resource_id
+        assert context["outputs"][0]["status"] == "ready"
+
+        target.unlink()
+        context = await build_session_context(session, include_roots=False)
+        assert context["outputs"][0]["status"] == "missing"
+        assert (await resolve_session_resource(session, resource_id)).path != wrong_file
+
+        # A pre-binding descriptor is only compatible in the owner's root;
+        # conflicting metadata cannot silently map it onto the same-name file.
+        attachment["source"].pop("username")
+        part.state.attachments = [attachment]
+        assert (await build_session_context(session, include_roots=False))["outputs"] == []
+        with pytest.raises(FileNotFoundError):
+            await resolve_session_resource(session, resource_id)
