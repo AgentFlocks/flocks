@@ -193,6 +193,19 @@ async def test_filename_only_redirects_to_default_outputs(tmp_path, monkeypatch)
     assert expected.exists()
     assert expected.read_text() == "hello"
     assert not (project_dir / "hello.txt").exists()
+    assert result.attachments is not None
+    assert len(result.attachments) == 1
+    attachment = result.attachments[0]
+    assert attachment["type"] == "file"
+    assert attachment["filename"] == "hello.txt"
+    assert attachment["mime"] == "text/plain"
+    assert attachment["size"] == len("hello")
+    assert attachment["origin"] == "agent_output"
+    assert attachment["source"] == {
+        "root": "workspace-output",
+        "path": f"{dt.date.today().isoformat()}/hello.txt",
+    }
+    assert str(tmp_path) not in str(attachment)
 
 
 @pytest.mark.asyncio
@@ -231,9 +244,10 @@ async def test_relative_with_subdir_keeps_project_path(tmp_path):
     assert result.success, f"write failed: {result.error}"
     assert target.exists()
     assert target.read_text() == "x"
+    assert result.attachments is None
 
 
-def test_filepath_parameter_references_env():
+def test_filepath_parameter_describes_output_routing():
     """filePath parameter description must contain directory routing rules."""
     from flocks.tool.registry import ToolRegistry
 
@@ -242,5 +256,6 @@ def test_filepath_parameter_references_env():
     desc = filepath_param.description
 
     assert "Workspace outputs directory" in desc
-    assert "<env>" in desc
-    assert "Source code directory" in desc
+    assert "filename-only path" in desc
+    assert "Project source files" in desc
+    assert "<env>" not in desc

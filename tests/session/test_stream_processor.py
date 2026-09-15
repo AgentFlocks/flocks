@@ -17,6 +17,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from flocks.tool.registry import ToolResult
+from flocks.session.files import public_resource_id
 from flocks.session.streaming.stream_processor import StreamProcessor, ToolCallState
 from flocks.session.streaming.stream_events import (
     FinishEvent,
@@ -663,6 +664,58 @@ class TestToolCallExecution:
             )
 
         assert "tc_exec" in proc.tool_calls
+
+    @pytest.mark.asyncio
+    async def test_tool_call_persists_and_publishes_attachments(self):
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        attachment = {
+            "id": "file_output_1",
+            "sessionID": proc.session_id,
+            "messageID": proc.assistant_message.id,
+            "type": "file",
+            "mime": "text/markdown",
+            "filename": "report.md",
+            "origin": "agent_output",
+            "source": {"root": "workspace-output", "path": "2026-09-14/report.md"},
+        }
+        store_part = AsyncMock()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=store_part),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(return_value=ToolResult(
+                    success=True,
+                    output="Wrote file successfully.",
+                    title="report.md",
+                    metadata={},
+                    attachments=[attachment],
+                )),
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_attachment", tool_name="write"))
+            await proc.process_event(ToolCallEvent(
+                tool_call_id="tc_attachment",
+                tool_name="write",
+                input={"filePath": "report.md", "content": "# Report"},
+            ))
+
+        completed_part = store_part.await_args.args[2]
+        assert completed_part.state.attachments == [attachment]
+        completed_events = [
+            call.args[1]["part"]
+            for call in event_callback.await_args_list
+            if (
+                call.args[0] == "message.part.updated"
+                and call.args[1].get("part", {}).get("state", {}).get("status") == "completed"
+            )
+        ]
+        assert completed_events[-1]["state"]["attachments"] == [{
+            **attachment,
+            "resourceID": public_resource_id("msg_sp_001", "file_output_1"),
+        }]
 
     @pytest.mark.asyncio
     async def test_tool_call_passes_session_abort_event_to_tool_context(self):

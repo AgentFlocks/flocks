@@ -172,8 +172,16 @@ class InteractionQueue:
     @classmethod
     async def clear(cls, session_id: str) -> None:
         async with cls._lock_for(session_id):
-            cls._queues.pop(session_id, None)
+            items = cls._queues.pop(session_id, [])
             cls._paused.discard(session_id)
+
+        from flocks.session.files import remove_staged_chat_uploads_from_parts
+
+        for item in items:
+            execution_context = item.execution_context or {}
+            owner_id = str(execution_context.get("_uploaderUserID") or "").strip()
+            if owner_id:
+                remove_staged_chat_uploads_from_parts(owner_id, item.parts)
 
     @classmethod
     async def pause(cls, session_id: str) -> None:

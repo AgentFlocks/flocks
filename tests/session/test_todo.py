@@ -242,3 +242,28 @@ async def test_todo_event_published():
     assert received[0]["type"] == "todo.updated"
     assert received[0]["properties"]["sessionID"] == session_id
     assert len(received[0]["properties"]["todos"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_todo_update_publishes_web_event_without_affecting_storage():
+    """WebUI progress receives todo.updated after the durable write succeeds."""
+    from unittest.mock import AsyncMock, patch
+
+    publish_event = AsyncMock()
+    todos = [TodoInfo(id="1", content="Test", status="in_progress")]
+    with patch("flocks.server.routes.event.publish_event", new=publish_event):
+        await Todo.update("test_web_event", todos)
+
+    publish_event.assert_awaited_once_with(
+        "todo.updated",
+        {
+            "sessionID": "test_web_event",
+            "todos": [{
+                "id": "1",
+                "content": "Test",
+                "status": "in_progress",
+                "priority": "medium",
+            }],
+        },
+    )
+    assert await Todo.get("test_web_event") == todos

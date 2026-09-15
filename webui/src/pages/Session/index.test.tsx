@@ -42,8 +42,18 @@ const {
     archive: vi.fn(),
     delete: vi.fn(),
     get: vi.fn(),
+    getContext: vi.fn(),
     getMessages: vi.fn(),
     moveToProject: vi.fn(),
+    readContextFile: vi.fn(),
+    contextFilePreviewUrl: vi.fn((sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/preview`),
+    contextFileDownloadUrl: vi.fn((sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/download`),
+    listContextRoot: vi.fn(),
+    readContextRootFile: vi.fn(),
+    contextRootPreviewUrl: vi.fn(),
+    contextRootDownloadUrl: vi.fn(),
+    addContextFolder: vi.fn(),
+    removeContextFolder: vi.fn(),
     update: vi.fn(),
   },
   updateSessionTitle: vi.fn(),
@@ -459,6 +469,17 @@ describe('SessionPage session actions menu', () => {
     client.patch.mockResolvedValue({ data: { id: 'prj_project2', worktree: '/tmp/labs', name: 'Renamed Project' } });
     client.post.mockResolvedValue({ data: secondSession });
     sessionApi.get.mockResolvedValue(session);
+    sessionApi.getContext.mockResolvedValue({
+      sessionID: session.id,
+      canManageFolders: true,
+      historyTruncated: false,
+      outputs: [],
+      contextFiles: [],
+      progress: [],
+      roots: [],
+      skills: [],
+      counts: { total: 0, outputs: 0, contextFiles: 0, roots: 0, progress: 0 },
+    });
     sessionApi.getMessages.mockResolvedValue([
       {
         info: {
@@ -487,6 +508,19 @@ describe('SessionPage session actions menu', () => {
     expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
     expect(agentIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
     expect(agentIconContainer?.className).not.toContain('shadow-');
+  });
+
+  it('opens the Session Context panel from the header', async () => {
+    const user = userEvent.setup();
+    renderSessionPage('/sessions?session=session-1');
+
+    const button = await screen.findByRole('button', { name: 'context.title' });
+    expect(sessionApi.getContext).not.toHaveBeenCalled();
+    await user.click(button);
+
+    expect(sessionApi.getContext).toHaveBeenCalledWith('session-1');
+    expect(screen.getAllByText('context.outputs').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('context.contextFiles').length).toBeGreaterThan(0);
   });
 
   it('persists Plan per session', async () => {

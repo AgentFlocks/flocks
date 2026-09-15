@@ -21,6 +21,7 @@ export interface SessionMessagePartPayload {
   url?: string | null;
   mime?: string;
   filename?: string;
+  resourceID?: string;
 }
 
 export interface QueuedPrompt {
@@ -105,6 +106,80 @@ export interface SessionMessageListParams {
   before?: string | null;
   page?: boolean;
   include_archived?: boolean;
+}
+
+export interface SessionContextFile {
+  resourceID: string;
+  displayName: string;
+  mimeType: string;
+  size?: number | null;
+  modifiedAt?: number | null;
+  createdAt?: number | null;
+  status: 'ready' | 'changed' | 'missing' | string;
+  previewStatus: 'text' | 'inline' | 'unsupported' | string;
+  canPreview: boolean;
+  isTextFile: boolean;
+  origin: 'user_upload' | 'agent_output' | string;
+  section: 'outputs' | 'context';
+  sourceMessageID: string;
+  logicalPath: string;
+}
+
+export interface SessionContextTodo {
+  id: string;
+  content: string;
+  activeForm?: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+  priority?: 'high' | 'medium' | 'low';
+}
+
+export interface SessionContextRoot {
+  id: string;
+  kind: 'project' | 'folder';
+  displayName: string;
+  status: 'available' | 'missing' | string;
+}
+
+export interface SessionContextSkill {
+  name: string;
+  description?: string | null;
+  status: 'loaded' | 'loading' | string;
+}
+
+export interface SessionContextCounts {
+  total: number;
+  outputs: number;
+  contextFiles: number;
+  roots: number;
+  progress: number;
+}
+
+export interface SessionContextSnapshot {
+  sessionID: string;
+  canManageFolders: boolean;
+  historyTruncated: boolean;
+  outputs: SessionContextFile[];
+  contextFiles: SessionContextFile[];
+  progress: SessionContextTodo[];
+  roots: SessionContextRoot[];
+  skills: SessionContextSkill[];
+  counts: SessionContextCounts;
+}
+
+export interface SessionContextContent {
+  content: string;
+  truncated?: boolean;
+  size?: number;
+  previewLimitBytes?: number;
+}
+
+export interface SessionContextRootNode {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  size?: number | null;
+  modifiedAt?: number | null;
+  isTextFile?: boolean;
 }
 
 export const sessionApi = {
@@ -230,12 +305,69 @@ export const sessionApi = {
     return response.data;
   },
 
+  getContext: async (sessionId: string): Promise<SessionContextSnapshot> => {
+    const response = await client.get<SessionContextSnapshot>(`/api/session/${sessionId}/context`);
+    return response.data;
+  },
+
+  readContextFile: async (sessionId: string, resourceId: string): Promise<SessionContextContent> => {
+    const response = await client.get<SessionContextContent>(
+      `/api/session/${sessionId}/context/files/${resourceId}/content`,
+    );
+    return response.data;
+  },
+
+  contextFilePreviewUrl: (sessionId: string, resourceId: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/files/${resourceId}/preview`,
+
+  contextFileDownloadUrl: (sessionId: string, resourceId: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/files/${resourceId}/download`,
+
+  addContextFolder: async (sessionId: string, path: string, displayName?: string) => {
+    const response = await client.post(`/api/session/${sessionId}/context/folders`, {
+      path,
+      ...(displayName ? { displayName } : {}),
+    });
+    return response.data;
+  },
+
+  removeContextFolder: async (sessionId: string, rootId: string) => {
+    const response = await client.delete(`/api/session/${sessionId}/context/folders/${rootId}`);
+    return response.data;
+  },
+
+  listContextRoot: async (sessionId: string, rootId: string, path = '') => {
+    const response = await client.get<{ rootID: string; path: string; items: SessionContextRootNode[] }>(
+      `/api/session/${sessionId}/context/roots/${rootId}/list`,
+      { params: { path } },
+    );
+    return response.data;
+  },
+
+  readContextRootFile: async (
+    sessionId: string,
+    rootId: string,
+    path: string,
+  ): Promise<SessionContextContent> => {
+    const response = await client.get<SessionContextContent>(
+      `/api/session/${sessionId}/context/roots/${rootId}/content`,
+      { params: { path } },
+    );
+    return response.data;
+  },
+
+  contextRootPreviewUrl: (sessionId: string, rootId: string, path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/roots/${rootId}/preview?path=${encodeURIComponent(path)}`,
+
+  contextRootDownloadUrl: (sessionId: string, rootId: string, path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/roots/${rootId}/download?path=${encodeURIComponent(path)}`,
+
   /**
    * 发送消息
    */
   sendMessage: async (sessionId: string, data: {
     role?: string;
-    parts: Array<{ type: string; text: string }>;
+    parts: Array<Record<string, unknown>>;
     noReply?: boolean;
     mockReply?: string;
   }) => {

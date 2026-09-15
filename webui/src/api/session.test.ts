@@ -11,6 +11,7 @@ vi.mock('./client', () => ({
     post: (...args: unknown[]) => mockPost(...args),
     patch: (...args: unknown[]) => mockPatch(...args),
     delete: (...args: unknown[]) => mockDelete(...args),
+    defaults: { baseURL: '' },
   },
 }));
 
@@ -93,6 +94,29 @@ describe('sessionApi message actions', () => {
     );
     expect(mockDelete).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-1');
     expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-2/run_now');
+  });
+
+  it('uses Session-scoped Context endpoints without accepting host paths', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.getContext('session-1');
+    await sessionApi.readContextFile('session-1', 'resource-1');
+    await sessionApi.addContextFolder('session-1', '/srv/research', 'Research');
+    await sessionApi.listContextRoot('session-1', 'root-1', 'papers');
+
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context');
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context/files/resource-1/content');
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/session-1/context/folders',
+      { path: '/srv/research', displayName: 'Research' },
+    );
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/session/session-1/context/roots/root-1/list',
+      { params: { path: 'papers' } },
+    );
+    expect(sessionApi.contextFileDownloadUrl('session-1', 'resource-1')).toBe(
+      '/api/session/session-1/context/files/resource-1/download',
+    );
   });
 
   it('calls archive and restore endpoints', async () => {

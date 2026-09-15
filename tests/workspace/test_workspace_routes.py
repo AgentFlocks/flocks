@@ -354,7 +354,13 @@ class TestUpload:
         result = response.json()["uploaded"][0]
         assert result.get("error") is None
         assert result["name"] == filename
-        assert (_ws(workspace_client) / filename).exists()
+        assert result.get("uploadID")
+        assert "path" not in result
+        assert "abs_path" not in result
+        from flocks.session.files import resolve_staged_chat_upload
+
+        staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+        assert staged.read_bytes() == source.read_bytes()
 
     def test_upload_multiple_files(self, workspace_client):
         client = _client(workspace_client)
@@ -382,6 +388,18 @@ class TestUpload:
         # The file should be saved as just "evil.txt" in the workspace root
         uploaded = r.json()["uploaded"]
         assert uploaded[0]["name"] == "evil.txt"
+
+    def test_chat_upload_sanitizes_windows_separators_and_control_characters(self, workspace_client):
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("folder\\report\x01.pdf", b"report", "application/pdf"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result["name"] == "report_.pdf"
+        assert "\\" not in result["name"]
+        assert "\x01" not in result["name"]
 
     def test_upload_to_nonexistent_dest_creates_it(self, workspace_client):
         client = _client(workspace_client)
@@ -421,9 +439,17 @@ class TestUpload:
         assert response.status_code == 200
         result = response.json()["uploaded"][0]
         assert result.get("error") is None
-        assert result["path"] == "uploads/report.pdf"
-        assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
-        assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
+        if purpose == "chat":
+            from flocks.session.files import resolve_staged_chat_upload
+
+            assert "path" not in result
+            assert "abs_path" not in result
+            staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+            assert staged.read_bytes() == b"report"
+        else:
+            assert result["path"] == "uploads/report.pdf"
+            assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
+            assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
 
     def test_upload_to_root_when_workspace_root_is_symlink(
         self,
@@ -472,7 +498,7 @@ class TestUpload:
         assert second_item["path"] == "uploads/report.pdf"
         assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
 
-    def test_chat_upload_overwrites_duplicate_file(self, workspace_client):
+    def test_chat_upload_keeps_duplicate_filenames_isolated(self, workspace_client):
         client = _client(workspace_client)
         first = client.post(
             "/api/workspace/upload?dest=uploads&purpose=chat",
@@ -488,9 +514,32 @@ class TestUpload:
         second_item = second.json()["uploaded"][0]
         assert first_item["name"] == "report.pdf"
         assert second_item["name"] == "report.pdf"
-        assert first_item["path"] == "uploads/report.pdf"
-        assert second_item["path"] == "uploads/report.pdf"
-        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
+        assert first_item["uploadID"] != second_item["uploadID"]
+        assert "path" not in first_item
+        assert "abs_path" not in first_item
+
+        from flocks.session.files import resolve_staged_chat_upload
+
+        assert resolve_staged_chat_upload("usr_workspace", first_item["uploadID"]).read_bytes() == b"first"
+        assert resolve_staged_chat_upload("usr_workspace", second_item["uploadID"]).read_bytes() == b"second"
+
+    def test_discard_chat_upload_removes_staged_file(self, workspace_client):
+        client = _client(workspace_client)
+        uploaded = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("draft.md", b"draft", "text/markdown"))],
+        ).json()["uploaded"][0]
+
+        response = client.delete(
+            f"/api/workspace/upload/chat/{uploaded['uploadID']}"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["removed"] is True
+        from flocks.session.files import resolve_staged_chat_upload
+
+        with pytest.raises(FileNotFoundError):
+            resolve_staged_chat_upload("usr_workspace", uploaded["uploadID"])
 
     def test_upload_too_large_file_rejected(self, workspace_client, monkeypatch):
         # Set the limit to 0 MB; _max_upload_bytes() reads the env var at

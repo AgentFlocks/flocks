@@ -1003,6 +1003,7 @@ class StreamProcessor:
                         title=result.title or tool_name,
                         metadata=result.metadata or {},
                         time={"start": tool_start_time, "end": tool_end_time},
+                        attachments=getattr(result, "attachments", None),
                     )
                 else:
                     resolved_error = _resolve_tool_error(result)
@@ -1037,6 +1038,23 @@ class StreamProcessor:
                         state_dict["output"] = result.output if result.output is not None else ""
                         state_dict["title"] = result.title or tool_name
                         state_dict["metadata"] = result.metadata or {}
+                        if getattr(result, "attachments", None):
+                            if tool_name == "write":
+                                from flocks.session.files import public_resource_id
+
+                                state_dict["attachments"] = [
+                                    {
+                                        **attachment,
+                                        "resourceID": public_resource_id(
+                                            self.assistant_message.id,
+                                            str(attachment.get("id") or tool_state.part_id),
+                                        ),
+                                    }
+                                    for attachment in result.attachments
+                                    if isinstance(attachment, dict)
+                                ]
+                            else:
+                                state_dict["attachments"] = result.attachments
                     else:
                         state_dict["error"] = resolved_error
                         state_dict["metadata"] = result.metadata or {}

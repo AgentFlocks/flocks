@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -72,6 +72,7 @@ const translations: Record<string, string> = {
   'files.preview.htmlSandbox': 'HTML sandboxed',
   'files.preview.jsonParseFailed': 'JSON parse failed',
   'files.preview.jsonlParseFailed': '{{count}} JSONL lines failed',
+  'files.preview.csvTruncated': 'Preview limited to {{rows}} rows and {{columns}} columns.',
   'files.preview.pdfLoading': 'Loading PDF',
   'files.preview.pdfRendering': 'Rendering page',
   'files.preview.pdfLoadFailed': 'Failed to load PDF preview',
@@ -113,6 +114,9 @@ vi.mock('react-i18next', () => ({
       }
       if (key === 'files.preview.jsonlParseFailed') {
         return `${params?.count ?? ''} JSONL lines failed`;
+      }
+      if (key === 'files.preview.csvTruncated') {
+        return `Preview limited to ${params?.rows ?? ''} rows and ${params?.columns ?? ''} columns.`;
       }
       if (key === 'files.preview.pageIndicator') {
         return `${params?.page ?? ''} / ${params?.total ?? ''}`;
@@ -390,6 +394,27 @@ describe('WorkspacePage', () => {
     expect(screen.getByText(/name,count/)).toBeInTheDocument();
   });
 
+  it('limits large CSV previews to a bounded number of rows', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('large.csv', 'large.csv')],
+    });
+    const content = ['name,count', ...Array.from({ length: 1_100 }, (_, index) => `row-${index},${index}`)].join('\n');
+    mocks.readFile.mockResolvedValue({
+      data: { path: 'large.csv', content, truncated: false },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+    await user.click(await screen.findByText('large.csv'));
+
+    expect(await screen.findByText('Preview limited to 1000 rows and 100 columns.')).toBeInTheDocument();
+    const previewTable = screen.getAllByRole('table').find(
+      (table) => within(table).queryByText('row-0'),
+    );
+    expect(previewTable).toBeDefined();
+    expect(within(previewTable!).getAllByRole('row')).toHaveLength(1_000);
+  });
+
   it('PDF 文件使用 inline preview 地址展示', async () => {
     mocks.list.mockResolvedValue({
       data: [file('report.pdf', 'report.pdf', false)],
@@ -411,6 +436,27 @@ describe('WorkspacePage', () => {
     expect(pdfMocks.renderPage).toHaveBeenCalled();
     expect(screen.getByTitle('Previous page')).toBeDisabled();
     expect(screen.getByTitle('Next page')).toBeEnabled();
+  });
+
+  it('mounts only the active PDF page window for very large documents', async () => {
+    pdfMocks.getDocument.mockReturnValueOnce({
+      promise: Promise.resolve({
+        numPages: 2_000,
+        getPage: pdfMocks.getPage,
+        destroy: pdfMocks.destroyDocument,
+      }),
+      destroy: pdfMocks.destroyTask,
+    });
+    mocks.list.mockResolvedValue({
+      data: [file('large.pdf', 'large.pdf', false)],
+    });
+
+    const user = userEvent.setup();
+    const { container } = renderWithRouter(<WorkspacePage />);
+    await user.click(await screen.findByText('large.pdf'));
+    await screen.findByText('1 / 2000');
+
+    expect(container.querySelectorAll('canvas').length).toBeLessThanOrEqual(5);
   });
 
   it('Memory Markdown 文件复用预览渲染和全屏预览', async () => {

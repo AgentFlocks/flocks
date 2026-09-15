@@ -14,7 +14,6 @@ import {
   buildTodoSummary,
   ChatMessageBubble,
   ChatToolPart,
-  dedupeUploadedDocumentAttachments,
   default as SessionChat,
   getCompactionDividerClassName,
   getEditingActionBarClassName,
@@ -31,7 +30,6 @@ import {
   getUserAvatarSpacerClassName,
   hasActiveToolPart,
   isActiveSessionStatus,
-  listUploadedDocumentPaths,
   shouldRenderMessage,
   shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
@@ -42,6 +40,7 @@ import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();
+const clientDeleteMock = vi.fn();
 const sessionApiListPromptQueueMock = vi.fn();
 const sessionApiEnqueuePromptMock = vi.fn();
 const sessionApiUpdateQueuedPromptMock = vi.fn();
@@ -211,6 +210,7 @@ vi.mock('@/api/client', () => ({
   default: {
     get: (...args: unknown[]) => clientGetMock(...args),
     post: (...args: unknown[]) => clientPostMock(...args),
+    delete: (...args: unknown[]) => clientDeleteMock(...args),
   },
   getApiBase: () => '',
 }));
@@ -228,6 +228,8 @@ vi.mock('@/api/session', () => ({
     resendMessage: (...args: unknown[]) => sessionApiResendMessageMock(...args),
     regenerateMessage: (...args: unknown[]) => sessionApiRegenerateMessageMock(...args),
     getContextUsage: (...args: unknown[]) => sessionApiGetContextUsageMock(...args),
+    contextFilePreviewUrl: (sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/preview`,
+    contextFileDownloadUrl: (sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/download`,
   },
 }));
 
@@ -254,6 +256,7 @@ beforeEach(() => {
   });
   clientGetMock.mockResolvedValue({ data: {} });
   clientPostMock.mockResolvedValue({ data: {} });
+  clientDeleteMock.mockResolvedValue({ data: { removed: true } });
   sessionApiListPromptQueueMock.mockResolvedValue({ items: [] });
   sessionApiEnqueuePromptMock.mockResolvedValue({});
   sessionApiUpdateQueuedPromptMock.mockResolvedValue({});
@@ -581,6 +584,42 @@ describe('ChatToolPart file operation titles', () => {
     expect(container).toHaveTextContent(firstPath);
   });
 
+  it('renders output attachments with separate preview and download actions', () => {
+    const onOpenContextFile = vi.fn();
+    render(React.createElement(ChatMessageBubble, {
+      message: {
+        id: 'msg-output',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        timestamp: Date.now(),
+        parts: [{
+          id: 'tool-write-output',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'write',
+          state: {
+            status: 'completed',
+            input: { filePath: 'report.md' },
+            output: 'Wrote file successfully.',
+            attachments: [{
+              id: 'prt-output',
+              resourceID: 'res-output',
+              filename: 'report.md',
+              mime: 'text/markdown',
+              origin: 'agent_output',
+            }],
+          },
+        }],
+      } as any,
+      onOpenContextFile,
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: /report\.md/i }));
+    expect(onOpenContextFile).toHaveBeenCalledWith('res-output');
+    const download = screen.getByTitle('context.download');
+    expect(download).toHaveAttribute('href', '/api/session/sess-1/context/files/res-output/download');
+  });
+
   it('does not change summaries for non-file tools', () => {
     const { container } = render(React.createElement(ChatToolPart, {
       part: {
@@ -596,31 +635,6 @@ describe('ChatToolPart file operation titles', () => {
     }));
 
     expect(container.querySelector('summary')).toHaveTextContent('path=/api/v1/incidents');
-  });
-});
-
-describe('dedupeUploadedDocumentAttachments', () => {
-  it('keeps the latest successful document for a workspace path', () => {
-    const items = dedupeUploadedDocumentAttachments([
-      { id: 'old', status: 'success', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
-      { id: 'image', status: 'success', isImage: true, workspacePath: '/tmp/uploads/diagram.png' },
-      { id: 'new', status: 'success', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
-      { id: 'error', status: 'error', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
-    ]);
-
-    expect(items.map((item) => item.id)).toEqual(['image', 'new', 'error']);
-  });
-});
-
-describe('listUploadedDocumentPaths', () => {
-  it('returns unique successful document paths in attachment order', () => {
-    expect(listUploadedDocumentPaths([
-      { status: 'success', workspacePath: '/tmp/uploads/a.pdf', isImage: false },
-      { status: 'success', workspacePath: '/tmp/uploads/a.pdf', isImage: false },
-      { status: 'success', workspacePath: '/tmp/uploads/b.pdf', isImage: false },
-      { status: 'success', workspacePath: '/tmp/uploads/image.png', isImage: true },
-      { status: 'error', workspacePath: '/tmp/uploads/c.pdf', isImage: false },
-    ])).toEqual(['/tmp/uploads/a.pdf', '/tmp/uploads/b.pdf']);
   });
 });
 
@@ -1630,6 +1644,78 @@ describe('SessionChat composer controls', () => {
 
     expect(screen.queryByRole('menu', { name: '添加' })).not.toBeInTheDocument();
     expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('sends uploaded documents as file parts without embedding a host path', async () => {
+    clientPostMock.mockImplementation((url: string) => {
+      if (url === '/api/workspace/upload') {
+        return Promise.resolve({
+          data: {
+            uploaded: [{
+              uploadID: 'prt-upload-1',
+              name: 'paper.md',
+              mime: 'text/markdown',
+              size: 7,
+              is_text_file: true,
+            }],
+          },
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['# Paper'], 'paper.md', { type: 'text/markdown' });
+
+    fireEvent.change(input, { target: { files: [file] } });
+    await screen.findByText('paper.md');
+    await userEvent.type(screen.getByPlaceholderText('请输入消息'), 'review{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: expect.arrayContaining([
+            { type: 'text', text: 'review' },
+            expect.objectContaining({
+              type: 'file',
+              uploadID: 'prt-upload-1',
+              mime: 'text/markdown',
+              filename: 'paper.md',
+            }),
+          ]),
+        }),
+      );
+    });
+    const promptCall = clientPostMock.mock.calls.find(([url]) => url === '/api/session/sess-1/prompt_async');
+    expect(JSON.stringify(promptCall?.[1])).not.toContain('Attached files:');
+    expect(JSON.stringify(promptCall?.[1])).not.toContain('/Users/');
+  });
+
+  it('deletes an abandoned staged document when the user removes it', async () => {
+    clientPostMock.mockResolvedValue({
+      data: {
+        uploaded: [{
+          uploadID: 'prt-upload-remove',
+          name: 'draft.md',
+          mime: 'text/markdown',
+          size: 5,
+          is_text_file: true,
+        }],
+      },
+    });
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+
+    fireEvent.change(input, {
+      target: { files: [new File(['draft'], 'draft.md', { type: 'text/markdown' })] },
+    });
+    await screen.findByText('draft.md');
+    fireEvent.click(screen.getByTitle('chat.upload.remove'));
+
+    await waitFor(() => {
+      expect(clientDeleteMock).toHaveBeenCalledWith('/api/workspace/upload/chat/prt-upload-remove');
+    });
   });
 
   it('keeps a selected subagent reference when the default agent changes', async () => {

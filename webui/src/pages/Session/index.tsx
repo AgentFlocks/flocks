@@ -15,6 +15,8 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionContextPanel from './SessionContextPanel';
+import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import { useSSE } from '@/hooks/useSSE';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
@@ -22,7 +24,7 @@ import SuiteInstallProgressPanel, {
   failSuiteInstallProgress,
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
-import { sessionApi } from '@/api/session';
+import { sessionApi, type SessionContextSnapshot } from '@/api/session';
 import {
   flocksproPolicyApi,
   isSessionExecutionSettingsUnsupported,
@@ -44,7 +46,7 @@ import {
 } from '@/hooks/useChatModelResources';
 import client, { getApiBase } from '@/api/client';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
-import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
+import { buildPromptParts, type FilePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
@@ -708,6 +710,12 @@ export default function SessionPage() {
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
   const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
+  const [contextPanelOpen, setContextPanelOpen] = useState(false);
+  const [contextPanelWidth, setContextPanelWidth] = useState(() => getInitialSidePanelWidth());
+  const [contextSnapshot, setContextSnapshot] = useState<SessionContextSnapshot | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [requestedContextResourceID, setRequestedContextResourceID] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -770,6 +778,11 @@ export default function SessionPage() {
   const folderBrowserRequestIdRef = useRef(0);
   const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  const contextRefetchTimerRef = useRef<number | null>(null);
+  const contextRequestSeqRef = useRef(0);
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  selectedSessionIdRef.current = selectedSessionId;
+  const previousSseStatusRef = useRef<SSEConnectionStatus | null>(null);
   const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
   const composerResourcesLoadedRef = useRef(false);
@@ -1159,6 +1172,48 @@ export default function SessionPage() {
     }
   }, []);
 
+  const fetchSessionContext = useCallback(async (sessionId?: string | null) => {
+    const targetSessionId = sessionId ?? selectedSessionIdRef.current;
+    if (!targetSessionId) {
+      contextRequestSeqRef.current += 1;
+      setContextSnapshot(null);
+      setContextError(null);
+      return;
+    }
+    const requestId = ++contextRequestSeqRef.current;
+    setContextLoading(true);
+    try {
+      const snapshot = await sessionApi.getContext(targetSessionId);
+      if (
+        requestId !== contextRequestSeqRef.current
+        || targetSessionId !== selectedSessionIdRef.current
+      ) return;
+      setContextSnapshot(snapshot);
+      setContextError(null);
+    } catch (error: any) {
+      if (
+        requestId !== contextRequestSeqRef.current
+        || targetSessionId !== selectedSessionIdRef.current
+      ) return;
+      setContextError(error?.response?.data?.detail || error?.message || 'Failed to load Session Context');
+    } finally {
+      if (
+        requestId === contextRequestSeqRef.current
+        && targetSessionId === selectedSessionIdRef.current
+      ) setContextLoading(false);
+    }
+  }, []);
+
+  const scheduleContextRefetch = useCallback(() => {
+    const targetSessionId = selectedSessionIdRef.current;
+    if (!targetSessionId || contextRefetchTimerRef.current !== null) return;
+    contextRefetchTimerRef.current = window.setTimeout(() => {
+      contextRefetchTimerRef.current = null;
+      if (selectedSessionIdRef.current !== targetSessionId) return;
+      void fetchSessionContext(targetSessionId);
+    }, 250);
+  }, [fetchSessionContext]);
+
   const scheduleSessionListRefetch = useCallback(() => {
     if (sessionUpdateRefetchTimerRef.current !== null) return;
     sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
@@ -1175,9 +1230,36 @@ export default function SessionPage() {
       window.clearTimeout(sessionUpdateRefetchTimerRef.current);
       sessionUpdateRefetchTimerRef.current = null;
     }
+    if (contextRefetchTimerRef.current !== null) {
+      window.clearTimeout(contextRefetchTimerRef.current);
+      contextRefetchTimerRef.current = null;
+    }
   }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    const eventSessionId = event.properties?.sessionID
+      || event.properties?.part?.sessionID
+      || event.properties?.info?.sessionID;
+    const updatedPart = event.properties?.part;
+    const contextPartUpdated = event.type === 'message.part.updated' && (
+      updatedPart?.type === 'file'
+      || (
+        updatedPart?.type === 'tool'
+        && updatedPart?.tool === 'write'
+        && (updatedPart?.state?.status === 'completed' || updatedPart?.state?.status === 'error')
+      )
+    );
+    if (
+      contextPanelOpen
+      && eventSessionId === selectedSessionId
+      && (
+        contextPartUpdated
+        || event.type === 'todo.updated'
+        || event.type === 'session.context.updated'
+      )
+    ) {
+      scheduleContextRefetch();
+    }
     if (
       event.type === 'session.execution_mode.changed'
       && event.properties?.sessionID === selectedSessionId
@@ -1211,12 +1293,41 @@ export default function SessionPage() {
       scheduleSessionListRefetch();
     }
   }, [
+    contextPanelOpen,
+    scheduleContextRefetch,
     scheduleSessionListRefetch,
     selectedSessionId,
     t,
     toast,
     updateSessionTitle,
   ]);
+
+  useEffect(() => {
+    if (contextRefetchTimerRef.current !== null) {
+      window.clearTimeout(contextRefetchTimerRef.current);
+      contextRefetchTimerRef.current = null;
+    }
+    contextRequestSeqRef.current += 1;
+    setRequestedContextResourceID(null);
+    setContextSnapshot(null);
+    setContextError(null);
+    setContextLoading(Boolean(selectedSessionId && contextPanelOpen));
+    if (selectedSessionId && contextPanelOpen) void fetchSessionContext(selectedSessionId);
+  }, [contextPanelOpen, fetchSessionContext, selectedSessionId]);
+
+  useEffect(() => {
+    const previous = previousSseStatusRef.current;
+    previousSseStatusRef.current = sseStatus;
+    if (
+      contextPanelOpen
+      && previous
+      && previous !== 'connected'
+      && sseStatus === 'connected'
+      && selectedSessionId
+    ) {
+      void fetchSessionContext(selectedSessionId);
+    }
+  }, [contextPanelOpen, fetchSessionContext, selectedSessionId, sseStatus]);
 
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);
@@ -1736,12 +1847,42 @@ export default function SessionPage() {
     );
   }, [selectedSessionId]);
 
+  const handleOpenContextFile = useCallback((resourceId: string) => {
+    setRequestedContextResourceID(resourceId);
+    setContextPanelOpen(true);
+  }, []);
+
+  const handleResizeContextPanel = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (window.innerWidth < 1024) return;
+    const startX = event.clientX;
+    const startWidth = contextPanelWidth;
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const onMove = (moveEvent: PointerEvent) => {
+      const next = startWidth + startX - moveEvent.clientX;
+      setContextPanelWidth(Math.min(getMaxSidePanelWidth(), Math.max(SIDE_PANEL_MIN_WIDTH, next)));
+    };
+    const onEnd = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd, { once: true });
+  }, [contextPanelWidth]);
+
   const handleStartNewSession = useCallback(() => {
     writeLastSelectedSessionId(null);
     setSelectedSessionId(null);
     setSelectedSessionFallback(null);
     setPendingInitialMessage(null);
     setPendingInitialDisplayText(null);
+    setContextPanelOpen(false);
+    setContextSnapshot(null);
+    setRequestedContextResourceID(null);
     setSelectedAgent('rex');
     setSelectedModelKey(null);
     setSseStatus('disconnected');
@@ -1837,7 +1978,7 @@ export default function SessionPage() {
 
   const handleCreateAndSend = useCallback(async (
     text: string,
-    imageParts?: ImagePartData[],
+    fileParts?: FilePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
@@ -1862,18 +2003,18 @@ export default function SessionPage() {
           ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
         });
       }
-      imageParts?.forEach((image, index) => {
+      fileParts?.forEach((file, index) => {
         optimisticParts.push({
-          id: `temp-${messageId}-img-${index}`,
+          id: file.id || `temp-${messageId}-file-${index}`,
           type: 'file',
-          url: image.url,
-          mime: image.mime,
-          filename: image.filename,
+          url: file.url,
+          mime: file.mime,
+          filename: file.filename,
         });
       });
 
       const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
+        parts: buildPromptParts(text, fileParts),
         messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
@@ -3108,8 +3249,32 @@ export default function SessionPage() {
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
           )}
+
+          <div className="ml-auto flex items-center">
+            <button
+              type="button"
+              disabled={!activeChatSessionId}
+              onClick={() => setContextPanelOpen((open) => !open)}
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                contextPanelOpen
+                  ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200'
+                  : 'text-[#7b8087] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white'
+              }`}
+              aria-label={t('context.title')}
+              title={t('context.title')}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>{t('context.title')}</span>
+              {(contextSnapshot?.counts.total || 0) > 0 && (
+                <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[10px]">
+                  {contextSnapshot!.counts.total}
+                </span>
+              )}
+            </button>
+          </div>
         </header>
 
+        <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Chat — powered by unified SessionChat */}
         {resolvingSelectedSession ? (
           <SessionChatSkeleton />
@@ -3139,6 +3304,8 @@ export default function SessionPage() {
           initialOptimisticMessage={pendingOptimisticMessage}
           focusMessageId={pendingFocusMessageId}
           onFocusMessageConsumed={() => setPendingFocusMessageId(null)}
+          onOpenContextFile={handleOpenContextFile}
+          onOpenContext={() => setContextPanelOpen(true)}
           onInitialMessageConsumed={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
@@ -3799,6 +3966,36 @@ export default function SessionPage() {
           }
           />
         )}
+        {contextPanelOpen && activeChatSessionId && (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              onPointerDown={handleResizeContextPanel}
+              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-zinc-200/70 transition-colors hover:bg-violet-300 lg:block dark:bg-zinc-700 dark:hover:bg-violet-500"
+            />
+            <aside
+              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-zinc-200 lg:static lg:z-auto lg:w-[var(--session-context-width)] dark:border-zinc-700"
+              style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
+            >
+              <SessionContextPanel
+                sessionId={activeChatSessionId}
+                snapshot={contextSnapshot}
+                loading={contextLoading}
+                error={contextError}
+                requestedResourceID={requestedContextResourceID}
+                onRequestedResourceConsumed={() => setRequestedContextResourceID(null)}
+                onClose={() => {
+                  setContextPanelOpen(false);
+                  setRequestedContextResourceID(null);
+                }}
+                onRefresh={() => fetchSessionContext(activeChatSessionId)}
+                onFocusMessage={(messageId) => setPendingFocusMessageId(messageId)}
+              />
+            </aside>
+          </>
+        )}
+        </div>
       </div>
 
       {projectDialogMode && (

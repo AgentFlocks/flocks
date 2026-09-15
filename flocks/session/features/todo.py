@@ -100,6 +100,18 @@ class Todo:
             "sessionID": session_id,
             "todos": validated_todos,
         })
+        try:
+            from flocks.server.routes.event import publish_event
+
+            await publish_event("todo.updated", {
+                "sessionID": session_id,
+                "todos": [todo.model_dump(exclude_none=True) for todo in validated_todos],
+            })
+        except Exception as exc:
+            log.warn("todo.sse_publish_failed", {
+                "session_id": session_id,
+                "error": str(exc),
+            })
         log.info("todo.updated", {
             "session_id": session_id,
             "count": len(validated_todos),

@@ -457,6 +457,41 @@
       }
     }
   },
+  "context": {
+    "title": "Context",
+    "refresh": "Refresh Context",
+    "preview": "Preview",
+    "download": "Download",
+    "fullscreen": "Full screen",
+    "viewAll": "View all in Context",
+    "loadFailed": "Failed to load Session Context",
+    "recentHistoryOnly": "Showing resources from the most recent 1,000 messages. Older files remain available from their message cards.",
+    "searchPlaceholder": "Search files...",
+    "filter": {
+      "all": "All"
+    },
+    "sort": {
+      "updated": "Recent",
+      "name": "Name",
+      "size": "Size"
+    },
+    "progress": "Progress",
+    "outputs": "Outputs",
+    "contextFiles": "Context",
+    "skills": "Skills",
+    "noProgress": "No active progress",
+    "noOutputs": "No output files",
+    "noContext": "No context files or folders",
+    "addFolder": "Add folder",
+    "folderPathPlaceholder": "Server folder path",
+    "add": "Add",
+    "parentFolder": "Parent folder",
+    "emptyFolder": "This folder is empty",
+    "project": "Project",
+    "folder": "Folder",
+    "loaded": "Loaded",
+    "locateMessage": "Locate source message"
+  },
   "groupToday": "Today",
   "groupYesterday": "Yesterday",
   "groupThisWeek": "This Week",

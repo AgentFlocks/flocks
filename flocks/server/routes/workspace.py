@@ -43,6 +43,7 @@ import asyncio
 import io
 import mimetypes
 import os
+import re
 import shutil
 import stat as stat_module
 import subprocess
@@ -50,6 +51,7 @@ import sys
 import zipfile
 from pathlib import Path
 from typing import List, Optional, Literal
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
@@ -104,6 +106,17 @@ def _get_manager() -> WorkspaceManager:
 def _workspace_root(mgr: WorkspaceManager) -> Path:
     """Return the canonical workspace root used for relative path rendering."""
     return mgr.get_workspace_dir().resolve()
+
+
+def _safe_upload_filename(raw_name: str) -> str:
+    """Return a display-safe basename for multipart upload metadata."""
+
+    decoded_name = unquote(str(raw_name or ""))
+    basename = Path(decoded_name.replace("\\", "/")).name
+    basename = re.sub(r"[\x00-\x1f\x7f]+", "_", basename).strip(" .")
+    if not basename or basename in {".", ".."}:
+        raise ValueError("Filename is invalid")
+    return basename[:200]
 
 
 def _is_allowed_upload_filename(filename: str) -> bool:
@@ -228,11 +241,12 @@ def _inline_preview_response(target: Path) -> FileResponse:
     )
 
 
-def _download_response(target: Path) -> FileResponse:
+def _download_response(target: Path, *, filename: Optional[str] = None) -> FileResponse:
     return FileResponse(
         path=str(target),
-        filename=target.name,
+        filename=filename or target.name,
         media_type="application/octet-stream",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -347,10 +361,12 @@ async def delete_dir(
 
 @router.post("/upload", summary="Upload file(s)")
 async def upload_files(
+    request: Request,
     dest: str = Query("", description="Destination directory (relative)"),
     purpose: Optional[Literal["chat"]] = Query(None, description="Upload purpose"),
     files: List[UploadFile] = File(...),
 ):
+    current_user = require_user(request) if purpose == "chat" else None
     mgr = _get_manager()
     workspace_root = _workspace_root(mgr)
     try:
@@ -370,7 +386,11 @@ async def upload_files(
             results.append({"name": "", "error": "Filename is missing"})
             continue
 
-        filename = Path(raw_name).name  # strip any dir component from client
+        try:
+            filename = _safe_upload_filename(raw_name)
+        except ValueError as exc:
+            results.append({"name": "", "error": str(exc)})
+            continue
         if purpose == "chat" and not _is_allowed_upload_filename(filename):
             results.append({
                 "name": filename,
@@ -398,8 +418,38 @@ async def upload_files(
             continue
 
         content = b"".join(chunks)
-        # Keep attachment paths stable across repeated uploads by overwriting the
-        # existing file instead of auto-renaming to "name (1).ext".
+        if purpose == "chat":
+            from flocks.session.files import create_chat_upload_target
+            from flocks.utils.id import Identifier
+
+            upload_id = Identifier.ascending("part")
+            try:
+                target = create_chat_upload_target(current_user.id, upload_id, filename)
+                target.write_bytes(content)
+            except (OSError, ValueError) as exc:
+                results.append({"name": filename, "error": f"Failed to stage upload: {exc}"})
+                continue
+
+            is_text = WorkspaceManager.is_text_file(target)
+            mime_type = upload.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            log.info("workspace.chat_file.staged", {
+                "upload_id": upload_id,
+                "name": filename,
+                "size": total,
+                "is_text": is_text,
+            })
+            results.append({
+                "uploadID": upload_id,
+                "name": filename,
+                "mime": mime_type,
+                "size": total,
+                "is_text_file": is_text,
+                "preview_warning": None if is_text else "Binary file — download only",
+            })
+            continue
+
+        # Keep regular Workspace paths stable across repeated uploads by
+        # overwriting the existing file instead of auto-renaming it.
         target = dest_dir / filename
         target.write_bytes(content)
 
@@ -421,6 +471,18 @@ async def upload_files(
         })
 
     return {"uploaded": results}
+
+
+@router.delete("/upload/chat/{upload_id}", summary="Discard staged chat upload")
+async def discard_chat_upload(upload_id: str, request: Request):
+    from flocks.session.files import remove_staged_chat_upload
+
+    current_user = require_user(request)
+    try:
+        removed = remove_staged_chat_upload(current_user.id, upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"uploadID": upload_id, "removed": removed}
 
 
 @router.get("/file", summary="Read text file content")
