@@ -68,7 +68,7 @@ const snapshot: SessionContextSnapshot = {
     origin: 'agent_output',
     section: 'outputs',
     sourceMessageID: 'msg-output',
-    logicalPath: 'Outputs/2026-09-14/report.md',
+    logicalPath: 'users/admin/outputs/2026-09-14/report.md',
   }],
   contextFiles: [{
     resourceID: 'ctx-1',
@@ -134,6 +134,7 @@ describe('SessionContextPanel', () => {
     renderPanel();
 
     expect(screen.getByText('report.md')).toBeInTheDocument();
+    expect(screen.getByText('users/admin/outputs/2026-09-14/report.md')).toBeInTheDocument();
     expect(screen.getByText('paper.pdf')).toBeInTheDocument();
     expect(screen.getByText('Write report')).toBeInTheDocument();
     expect(screen.getByText('Research')).toBeInTheDocument();
@@ -164,7 +165,7 @@ describe('SessionContextPanel', () => {
       fileKey: 'file-3',
       displayName: 'latest.md',
       sourceMessageID: 'msg-output-2',
-      logicalPath: 'Outputs/2026-09-14/latest.md',
+      logicalPath: 'users/admin/outputs/2026-09-14/latest.md',
     };
     renderPanel({ snapshot: { ...snapshot, outputs: [snapshot.outputs[0], secondFile] } });
 

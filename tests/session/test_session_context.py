@@ -426,7 +426,7 @@ async def test_context_derives_uploads_and_deduplicated_outputs(tmp_path, monkey
     assert parse_public_resource_id(
         context["outputs"][0]["resourceID"]
     ) == ("msg_agent_2", "prt_output_2")
-    assert context["outputs"][0]["logicalPath"] == "Outputs/2026-09-14/report.md"
+    assert context["outputs"][0]["logicalPath"] == "outputs/2026-09-14/report.md"
     assert str(tmp_path) not in str(context)
 
 
@@ -545,6 +545,46 @@ def _write_part(session, attachment, *, filepath=None, message_id="msg_agent"):
             attachments=[attachment] if attachment is not None else None,
         ),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind, writer, owner, prefix", [
+    ("bound", "admin", "session-owner", "users/admin/outputs"),
+    ("bound", None, "session-owner", "outputs"),
+    ("legacy-attachment", "admin", "admin", "users/admin/outputs"),
+    ("legacy-attachment", None, None, "outputs"),
+    ("legacy-metadata", "admin", "admin", "users/admin/outputs"),
+    ("legacy-metadata", None, None, "outputs"),
+])
+async def test_output_logical_path_shows_actual_workspace_scope(tmp_path, monkeypatch, source_kind, writer, owner, prefix):
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setattr(WorkspaceManager, "_instance", None)
+    session = _session(tmp_path)
+    session.owner_username = owner
+    relative = "2026-09-15/report.md"
+    manager = WorkspaceManager.get_instance()
+    target = manager.get_default_outputs_dir(username=writer, include_today=False) / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("Report", encoding="utf-8")
+    source = {"root": "workspace-output", "path": relative}
+    if source_kind == "bound":
+        source["username"] = writer
+    attachment = None if source_kind == "legacy-metadata" else _output_attachment(
+        sessionID=session.id, messageID="msg_agent", source=source,
+    )
+    message = _message("msg_agent", "assistant", [_write_part(session, attachment, filepath=str(target))])
+    with (
+        patch("flocks.session.files._messages_with_parts", new=AsyncMock(return_value=([message], False, None))),
+        patch("flocks.session.message.Message.get_with_parts_lazy", new=AsyncMock(return_value=message)),
+    ):
+        context = await build_session_context(session, include_roots=False)
+        descriptor = context["outputs"][0]
+        assert descriptor["logicalPath"] == f"{prefix}/{relative}"
+        resource = await resolve_session_resource(session, descriptor["resourceID"])
+        assert resource.logical_path == descriptor["logicalPath"]
+        assert resource.path == target.resolve()
+        assert resource.path.read_text(encoding="utf-8") == "Report"
+        assert str(tmp_path) not in descriptor["logicalPath"]
 
 
 def test_output_projection_drops_unbounded_payload_and_limits_fields():
@@ -723,7 +763,7 @@ async def test_same_path_across_pages_has_stable_key_and_same_name_different_pat
     assert len(head["outputs"]) == 2
     assert len({item["fileKey"] for item in head["outputs"]}) == 2
     assert {item["displayName"] for item in head["outputs"]} == {"report.md"}
-    matching = next(item for item in head["outputs"] if item["logicalPath"] == "Outputs/first/report.md")
+    matching = next(item for item in head["outputs"] if item["logicalPath"] == "outputs/first/report.md")
     assert matching["fileKey"] == tail["outputs"][0]["fileKey"]
     assert matching["resourceID"] != tail["outputs"][0]["resourceID"]
 

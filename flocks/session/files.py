@@ -707,6 +707,16 @@ async def _messages_with_parts(
     )
 
 
+def _output_logical_path(relative_path: str, username: str | None) -> str:
+    """Show an output's path relative to the Workspace root, including its user scope."""
+
+    manager = WorkspaceManager.get_instance()
+    workspace = manager.get_workspace_dir()
+    username = str(username or "").strip()
+    root = manager.get_user_workspace_dir(username) if username else workspace
+    return (root / "outputs" / relative_path).relative_to(workspace).as_posix()
+
+
 def _message_resources(session: Any, message: Any) -> Iterable[ResolvedSessionFile]:
     """Share eligibility and provenance rules between listings and downloads."""
 
@@ -729,10 +739,14 @@ def _message_resources(session: Any, message: Any) -> Iterable[ResolvedSessionFi
                 if path is None:
                     continue
                 filename = attachment["filename"]
+                source = attachment["source"]
+                logical_path = _output_logical_path(
+                    source["path"], source.get("username", getattr(session, "owner_username", None)),
+                )
                 yield ResolvedSessionFile(
                     public_resource_id(message_id, attachment["id"]), path, filename,
                     attachment["mime"], "agent_output", message_id,
-                    f"Outputs/{attachment['source']['path']}", created_at,
+                    logical_path, created_at,
                     attachment.get("size"), attachment.get("modifiedAt"),
                 )
             # Legacy filepath is never a fallback for a rejected bound source.
@@ -743,7 +757,8 @@ def _message_resources(session: Any, message: Any) -> Iterable[ResolvedSessionFi
                     yield ResolvedSessionFile(
                         public_resource_id(message_id, str(part.id)), path, path.name,
                         mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                        "agent_output", message_id, f"Outputs/{relative}", created_at,
+                        "agent_output", message_id,
+                        _output_logical_path(relative, getattr(session, "owner_username", None)), created_at,
                     )
 
 
