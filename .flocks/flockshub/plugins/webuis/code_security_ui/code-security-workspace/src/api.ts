@@ -141,6 +141,29 @@ export function createAuditApi(base = BASE) {
   }
 
   return {
+    getPhaseSessions: async (scanId: string, phaseId: string) =>
+      (
+        await getApi().get(
+          `${base}/scans/${encodeURIComponent(scanId)}/phases/${encodeURIComponent(phaseId)}/sessions`,
+        )
+      ).data,
+    getConversation: async (scanId: string) =>
+      (
+        await getApi().get(
+          `${base}/scans/${encodeURIComponent(scanId)}/conversation`,
+        )
+      ).data,
+    askConversation: async (
+      scanId: string,
+      question: string,
+      requestId: string,
+    ) =>
+      (
+        await getApi().post(
+          `${base}/scans/${encodeURIComponent(scanId)}/conversation`,
+          { question, requestId },
+        )
+      ).data,
     listProjects,
     listScans,
     getScan,
@@ -231,5 +254,21 @@ export async function registerAuditProject(
       worktree: worktree.trim(),
       name: name?.trim() || undefined,
     })
+  ).data;
+}
+
+export async function configureAudit(
+  message: string,
+  values: NewAuditValues,
+  history: { role: string; content: string }[],
+  signal?: AbortSignal,
+) {
+  const { dynamicConfirmed: _consent, ...draft } = values;
+  return (
+    await getApi().post(
+      `${BASE}/configuration`,
+      { message, values: draft, history },
+      { signal },
+    )
   ).data;
 }

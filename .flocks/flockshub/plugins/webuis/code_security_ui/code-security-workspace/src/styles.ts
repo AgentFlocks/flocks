@@ -1030,21 +1030,29 @@ const styles = String.raw`
 }
 /* Workbench presentation: retain existing audit behavior and evidence viewers. */
 .code-security-workspace.cs-workbench {
-  --cs-border: #e9eaee;
-  --cs-surface: #fcfcfd;
-  --cs-surface-subtle: #f5f6f8;
-  --cs-surface-selected: #eff0f3;
-  --cs-text: #262d39;
-  --cs-text-secondary: #667080;
-  grid-template-columns: 248px minmax(0, 1fr);
+  --cs-border: #e8ebef;
+  --cs-surface: #ffffff;
+  --cs-surface-subtle: #f6f7f9;
+  --cs-surface-selected: #e5edff;
+  --cs-overview-tint: #f0f5ff;
+  --cs-chrome: #f0f3f9;
+  --cs-text: #202630;
+  --cs-text-secondary: #626c7a;
+  --cs-primary: #245fbe;
+  --cs-primary-hover: #1c4c98;
+  grid-template-columns: 224px minmax(0, 1fr);
 }
 .dark .code-security-workspace.cs-workbench {
   --cs-border: #424954;
   --cs-surface: #252c35;
   --cs-surface-subtle: #303842;
-  --cs-surface-selected: #3a434e;
+  --cs-surface-selected: #344967;
+  --cs-overview-tint: #28384d;
+  --cs-chrome: #29323f;
   --cs-text: #edf0f5;
   --cs-text-secondary: #abb4c2;
+  --cs-primary: #8ebcff;
+  --cs-primary-hover: #b5d2ff;
 }
 .cs-workbench [hidden] {
   display: none !important;
@@ -1073,17 +1081,17 @@ const styles = String.raw`
   cursor: pointer;
 }
 .cs-workbench .cs-scan-header {
-  background: transparent;
+  background: var(--cs-surface);
   padding: 16px 24px;
   border: 0;
 }
 .cs-workbench .cs-header-meta {
-  font-size: 11px;
+  font-size: 12px;
 }
 .cs-workbench .cs-audit-metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  padding: 18px 28px 22px;
+  padding: 24px 32px 28px;
   gap: 24px;
   border-bottom: 1px solid var(--cs-border);
 }
@@ -1099,7 +1107,9 @@ const styles = String.raw`
   color: var(--cs-text-secondary);
 }
 .cs-audit-metrics strong {
-  font-size: 28px;
+  font-size: 30px;
+  line-height: 1.2;
+  letter-spacing: -0.8px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -1109,7 +1119,7 @@ const styles = String.raw`
 }
 .cs-workbench .cs-execution {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 260px;
+  grid-template-columns: minmax(0, 1fr) 248px;
   gap: 0;
   padding: 0;
   align-items: start;
@@ -1253,33 +1263,36 @@ const styles = String.raw`
 .cs-workbench.cs-home-view {
   display: block;
   overflow-y: auto;
-  background: var(--cs-surface-subtle);
+  background: var(--cs-surface);
 }
 .cs-project-home {
-  margin: 36px auto;
-  padding: 28px 32px;
-  max-width: 1360px;
-  width: calc(100% - 64px);
-  background: var(--cs-surface-elevated);
-  border-radius: 12px;
+  margin: 48px auto;
+  padding: 0;
+  max-width: 1240px;
+  width: calc(100% - 80px);
+  background: transparent;
+  border-radius: 0;
 }
 .cs-project-home > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding-bottom: 24px;
+  padding-bottom: 36px;
 }
 .cs-project-home h1 {
-  font-size: 19px;
+  font-size: 26px;
+  letter-spacing: -0.6px;
+  font-weight: 600;
   margin: 0;
 }
 .cs-project-home h2 {
-  font-size: 14px;
+  font-size: 15px;
   margin: 0;
 }
 .cs-project-home p {
-  font-size: 13px;
+  font-size: 14px;
+  margin: 10px 0 0;
   color: var(--cs-text-secondary);
 }
 .cs-project-toolbar {
@@ -1287,7 +1300,8 @@ const styles = String.raw`
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 18px 0;
+  padding: 20px 0;
+  border-top: 1px solid var(--cs-border);
 }
 .cs-project-toolbar > div {
   display: flex;
@@ -1314,11 +1328,12 @@ const styles = String.raw`
 .cs-project-table th {
   font-weight: 500;
   color: var(--cs-text-secondary);
-  background: var(--cs-surface-subtle);
+  background: transparent;
+  font-size: 12px;
 }
 .cs-project-table th,
 .cs-project-table td {
-  padding: 16px 12px;
+  padding: 20px 16px;
   border-bottom: 1px solid var(--cs-border);
 }
 .cs-project-table td:first-child {
@@ -1327,8 +1342,8 @@ const styles = String.raw`
 .cs-project-table td small {
   display: block;
   color: var(--cs-text-secondary);
-  font-size: 11px;
-  margin-top: 5px;
+  font-size: 12px;
+  margin-top: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1567,7 +1582,7 @@ const styles = String.raw`
   grid-column: 2;
   grid-row: 2;
   border-left: 1px solid var(--cs-border);
-  padding: 26px 16px;
+  padding: 24px 16px;
   min-width: 0;
 }
 .cs-context-rail h3 {
@@ -1718,6 +1733,154 @@ const styles = String.raw`
     display: block;
   }
 }
+
+.cs-native-sessions { margin: 24px 0; font-size: 13px; }
+.cs-native-sessions h3 { font-size: 13px; }
+.cs-native-session > summary,.cs-native-tool > summary { cursor: pointer; color: var(--cs-text-secondary); padding: 10px 0; }
+.cs-native-message { padding: 12px 0; line-height: 1.7; overflow-wrap: anywhere; }
+.cs-native-message > small { color: var(--cs-text-secondary); }
+.cs-native-message--user { padding: 14px; border-radius: 12px; background: var(--cs-surface-subtle); }
+.cs-native-tool pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font-size: 11px; }
+.cs-result-conversation { margin: 12px 284px 24px 32px; min-width: 0; }
+.cs-workbench .cs-result-conversation .cs-qa-composer { margin: 20px 0 0; position: static; }
+.cs-qa-composer > div { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.cs-answer-turn { padding: 20px 0; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.cs-user-question { padding: 14px 18px; border-radius: 16px; background: var(--cs-surface-subtle); margin-bottom: 20px; white-space: pre-wrap; }
+.cs-answer-sources { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; }
+.cs-answer-sources button,.cs-native-sessions button { border: 0; background: none; color: var(--cs-primary); cursor: pointer; }
+.cs-configuration-messages { text-align: left; max-height: 300px; overflow-y: auto; }
+.cs-configuration-message { padding: 12px; line-height: 1.6; white-space: pre-wrap; }
+.cs-configuration-message--user { background: var(--cs-surface-subtle); border-radius: 12px; }
+.cs-configuration-message small { color: var(--cs-text-secondary); }
+@media(max-width:1100px) {.cs-result-conversation { margin-right:230px; }}
+@media(max-width:700px) {.cs-result-conversation { margin:16px; }}
+/* Audit navigation and overview use a quiet, flat visual hierarchy.
+   Session identity, tool steps and message rendering retain the workbench style. */
+.cs-workbench .cs-button { border-radius: 7px; font-size: 13px; font-weight: 500; min-height: 38px; }
+.cs-workbench .cs-button--primary { background: var(--cs-primary); border-color: var(--cs-primary); }
+.cs-workbench .cs-button--primary:hover:not(:disabled) { background: var(--cs-primary-hover); }
+.dark .cs-workbench .cs-button--primary { color: #162238; }
+.cs-workbench .cs-button--secondary:hover:not(:disabled),
+.cs-workbench .cs-icon-button:hover:not(:disabled) { background: var(--cs-surface-subtle); }
+.cs-workbench .cs-scan-panel { background: var(--cs-chrome); gap: 10px; padding: 24px 14px 16px; }
+.cs-workbench .cs-panel-heading { padding: 0 8px 12px; }
+.cs-workbench .cs-panel-heading h2 { font-size: 16px; font-weight: 600; }
+.cs-workbench .cs-eyebrow { font-size: 12px; font-weight: 400; margin-bottom: 6px; }
+.cs-workbench .cs-scan-panel > .cs-button { justify-content: flex-start; padding: 9px 12px; width: 100%; margin: 0; }
+.cs-workbench .cs-scan-panel > .cs-button--full:last-of-type { background: var(--cs-surface); margin: 4px 0 10px; }
+.cs-workbench .cs-search { border-color: transparent; background: var(--cs-surface); min-height: 38px; }
+.cs-workbench .cs-search input { border: 0; border-radius: 0; background: none; font-size: 12px; box-shadow: none; }
+.cs-workbench .cs-filter-label { grid-template-columns: auto 1fr; align-items: center; gap: 8px; padding: 2px 6px 8px; }
+.cs-workbench .cs-filter-label > span { font-weight: 400; }
+.cs-workbench .cs-filter-label select { background: transparent; border: 0; font-size: 12px; padding: 0 4px; width: 100%; }
+.cs-workbench .cs-scan-item { border: 0; border-radius: 6px; }
+.cs-workbench .cs-scan-item.is-selected { background: var(--cs-surface-selected); }
+.cs-workbench .cs-scan-item.is-selected::before { background: var(--cs-primary); width: 3px; }
+.cs-workbench .cs-scan-item__top strong { font-weight: 500; }
+.cs-breadcrumbs { display: flex; align-items: center; gap: 2px; padding: 12px 24px 0; }
+.cs-workbench .cs-breadcrumbs .cs-home-link { padding: 6px 8px; font-size: 12px; }
+.cs-breadcrumbs > span { color: var(--cs-text-muted); font-size: 12px; }
+.cs-workbench .cs-scan-header { padding: 20px 32px 20px; border-bottom: 1px solid var(--cs-border); }
+.cs-workbench .cs-scan-header h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.4px; }
+.cs-workbench .cs-scan-header .cs-button--danger { background: transparent; border-color: transparent; color: var(--cs-text-secondary); }
+.cs-workbench .cs-scan-header .cs-button--danger:hover { color: var(--cs-danger); background: var(--cs-danger-soft); }
+.cs-workbench .cs-audit-metrics > div + div { padding-left: 24px; border-left: 1px solid var(--cs-border); }
+.cs-workbench .cs-audit-metrics small { font-size: 12px; line-height: 1.5; }
+.cs-workbench .cs-audit-metrics .cs-metric-text { letter-spacing: 0; }
+.cs-workbench .cs-execution > .cs-section-heading { padding: 20px 32px 0; }
+.cs-workbench .cs-execution > .cs-section-heading h2 { font-size: 13px; }
+.cs-workbench .cs-context-rail .cs-phase-rail { counter-reset: audit-stage; gap: 4px; }
+.cs-workbench .cs-context-rail .cs-phase-step { position: relative; display: grid; grid-template-columns: 1fr; gap: 6px; min-height: 86px; padding: 12px 10px 12px 38px; border-radius: 6px; }
+.cs-workbench .cs-context-rail .cs-phase-step::before { counter-increment: audit-stage; content: counter(audit-stage, decimal-leading-zero); position: absolute; top: 14px; left: 12px; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--cs-text-secondary); }
+.cs-workbench .cs-context-rail .cs-phase-step > strong { grid-row: 1; font-size: 13px; font-weight: 500; }
+.cs-workbench .cs-context-rail .cs-phase-step > .cs-status { grid-row: 2; }
+.cs-workbench .cs-context-rail .cs-phase-step > span:last-child { font-size: 11px; text-align: left; }
+.cs-workbench .cs-context-rail .cs-phase-step.is-selected { background: var(--cs-surface-selected); }
+.cs-workbench .cs-context-rail .cs-phase-step.is-selected::before { color: var(--cs-primary); }
+.cs-context-artifacts { padding-top: 24px; border-top: 1px solid var(--cs-border); margin-top: 24px; }
+.cs-context-artifacts > div { margin: 16px 12px; gap: 12px; }
+.cs-context-artifacts small { font-size: 11px; }
+.cs-project-home .cs-project-toolbar input { width: 260px; }
+.cs-project-home .cs-project-toolbar input, .cs-project-home .cs-project-toolbar select { min-height: 38px; font-size: 13px; }
+.cs-project-home .cs-project-toolbar small { margin-left: 10px; color: var(--cs-text-secondary); font-size: 12px; font-weight: 400; }
+.cs-project-table thead th { padding-top: 12px; padding-bottom: 12px; }
+.cs-project-table td:first-child strong { font-size: 14px; font-weight: 500; }
+.cs-project-table td:first-child, .cs-project-table th:first-child { padding-left: 0; }
+.cs-project-table td:last-child, .cs-project-table th:last-child { text-align: right; padding-right: 0; }
+.cs-project-table tbody tr:hover { background: var(--cs-surface-subtle); }
+.cs-project-table tbody td { font-variant-numeric: tabular-nums; }
+.cs-project-home > footer { margin-top: 24px; }
+.cs-project-home > .cs-home-link { padding: 0 0 24px; font-size: 12px; }
+.cs-workbench .cs-new-audit { border-radius: 12px; max-width: 720px; }
+.cs-workbench .cs-new-audit > header { padding: 28px 32px 16px; }
+.cs-workbench .cs-new-audit h2 { font-size: 21px; font-weight: 600; }
+.cs-workbench .cs-mode-switch { gap: 28px; padding-bottom: 12px; }
+.cs-workbench .cs-mode-switch button { font-size: 14px; }
+.cs-workbench .cs-mode-switch button[aria-selected="true"] { color: var(--cs-primary); border-bottom-color: var(--cs-primary); }
+.cs-workbench .cs-new-audit form { padding-left: 32px; padding-right: 32px; }
+.cs-workbench .cs-new-audit fieldset { padding: 20px 0; }
+.cs-workbench .cs-new-audit form > footer { margin: 0; padding: 20px 0; }
+.cs-workbench .cs-new-audit .cs-field > label { font-weight: 500; }
+@media (max-width: 1100px) and (min-width: 701px) {
+  .code-security-workspace.cs-workbench { grid-template-columns: 200px minmax(0, 1fr); }
+  .cs-workbench .cs-audit-metrics { padding: 24px; gap: 12px; }
+  .cs-workbench .cs-audit-metrics > div + div { padding-left: 12px; }
+}
+@media (max-width: 700px) {
+  .code-security-workspace.cs-workbench { grid-template-columns: minmax(0, 1fr); }
+  .cs-project-home { width: auto; margin: 24px 20px; padding: 0; }
+  .cs-project-home > header { align-items: flex-start; padding-bottom: 24px; }
+  .cs-project-home h1 { font-size: 22px; }
+  .cs-project-home .cs-project-toolbar { align-items: stretch; }
+  .cs-project-home .cs-project-toolbar > div { flex-wrap: wrap; }
+  .cs-project-home .cs-project-toolbar input { width: 100%; min-width: 0; }
+  .cs-breadcrumbs { padding: 10px 12px 0; }
+  .cs-workbench .cs-scan-header { padding: 16px; }
+  .cs-workbench .cs-audit-metrics { padding: 20px 16px; gap: 20px; }
+  .cs-workbench .cs-audit-metrics > div + div { padding-left: 0; border-left: 0; }
+  .cs-workbench .cs-context-rail .cs-phase-step { flex: 0 0 180px; min-height: 96px; }
+  .cs-workbench .cs-new-audit > header { padding: 24px 20px 12px; }
+  .cs-workbench .cs-new-audit form { padding-left: 20px; padding-right: 20px; }
+}
+
+/* Color belongs to the audit chrome; the conversation stays on a neutral canvas. */
+.cs-workbench .cs-breadcrumbs { border-top: 3px solid var(--cs-primary); background: linear-gradient(100deg, var(--cs-overview-tint), var(--cs-surface) 70%); padding-top: 10px; }
+.cs-workbench .cs-audit-metrics { background: linear-gradient(100deg, var(--cs-overview-tint), var(--cs-surface) 110%); padding-top: 24px; padding-bottom: 26px; }
+.cs-workbench .cs-audit-metrics strong { color: var(--cs-primary); }
+.cs-workbench .cs-audit-metrics .cs-metric-findings.has-findings strong { color: var(--cs-danger); }
+.cs-workbench .cs-audit-metrics .cs-metric-text { color: var(--cs-text); }
+.cs-workbench .cs-audit-metrics > div + div { border-color: color-mix(in srgb, var(--cs-primary) 14%, transparent); }
+.cs-workbench .cs-execution > .cs-section-heading h2 { display: flex; align-items: center; gap: 8px; color: var(--cs-text); font-weight: 600; }
+.cs-workbench .cs-execution > .cs-section-heading h2::before { content: ""; width: 3px; height: 14px; background: var(--cs-primary); border-radius: 2px; }
+.cs-workbench .cs-context-rail { background: linear-gradient(180deg, var(--cs-overview-tint), var(--cs-surface) 400px); margin: 16px 16px 0 0; border: 0; border-radius: 12px; }
+.cs-workbench .cs-context-rail .cs-phase-step.is-selected { background: var(--cs-surface); box-shadow: inset 3px 0 var(--cs-primary), 0 3px 12px color-mix(in srgb, var(--cs-primary) 8%, transparent); }
+.cs-workbench .cs-context-rail .cs-phase-step.is-selected > strong { color: var(--cs-primary); font-weight: 600; }
+.cs-workbench.cs-home-view { background: linear-gradient(180deg, var(--cs-overview-tint), var(--cs-surface) 440px); }
+.cs-project-home > header { padding: 28px 28px 32px; margin: -12px -28px 16px; border-top: 3px solid var(--cs-primary); background: linear-gradient(110deg, var(--cs-surface), color-mix(in srgb, var(--cs-overview-tint) 50%, transparent)); border-radius: 0 0 12px 12px; }
+.cs-project-home > header h1 { color: var(--cs-text); }
+.cs-project-home .cs-project-toolbar { border-top: 0; }
+.cs-project-home .cs-project-table th { background: var(--cs-overview-tint); }
+.cs-project-home .cs-project-table th:first-child { padding-left: 16px; border-radius: 8px 0 0 8px; }
+.cs-project-home .cs-project-table th:last-child { padding-right: 16px; border-radius: 0 8px 8px 0; }
+.cs-project-home .cs-project-table td:first-child { padding-left: 16px; }
+.cs-project-home .cs-project-table td:last-child { padding-right: 16px; }
+.cs-project-home .cs-project-table tbody { background: var(--cs-surface); }
+.cs-project-home .cs-project-table tbody tr:hover { background: var(--cs-overview-tint); }
+.cs-workbench .cs-new-audit > header { background: linear-gradient(110deg, var(--cs-overview-tint), var(--cs-surface)); }
+@media(max-width:700px) {
+  .cs-project-home > header { margin: 0 0 12px; padding: 20px 0; background: transparent; }
+  .cs-workbench .cs-context-rail { margin: 12px 12px 0; width: calc(100% - 24px); }
+}
+
+.cs-project-home .cs-project-path { font-size: 12px; overflow-wrap: anywhere; margin-top: 14px; }
+.cs-project-home > header .cs-eyebrow { color: var(--cs-primary); margin: 0 0 10px; font-size: 12px; }
+.cs-breadcrumbs { flex-wrap: wrap; }
+.code-security-workspace.cs-workbench.cs-task-view { grid-template-columns: minmax(0, 1fr); }
+.cs-task-view .cs-main-column { grid-column: 1 / -1; }
+.cs-task-view .cs-scan-header { grid-template-columns: minmax(0, 1fr) auto; }
+.cs-project-table .cs-record-delete { margin-left: 12px; color: var(--cs-text-secondary); vertical-align: middle; }
+.cs-record-delete svg { width: 16px; height: 16px; }
+@media(max-width:767px) { .cs-task-view .cs-scan-header { grid-template-columns: 1fr; } }
 `;
 
 export default styles;

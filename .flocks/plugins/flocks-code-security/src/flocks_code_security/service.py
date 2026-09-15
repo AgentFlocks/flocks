@@ -358,11 +358,15 @@ class _ProgressRecorder:
                     phase_run_id = run["phase_run_id"]
                     self.phase_runs[phase] = phase_run_id
                 self.phase_runs[str(payload.get("batch_id") or phase)] = phase_run_id
+                if payload.get("batch_id"):
+                    self.store.bind_phase_sessions(self.scan_id, phase_run_id, str(payload["batch_id"]))
                 event_type = "dynamic.planning_started" if phase == "dynamic_validation" else "phase.started"
         elif event == "batch.status":
             phase = _public_phase(str(payload.get("phase") or ""))
             batch_key = str(payload.get("batch_id") or phase or "")
             phase_run_id = self.phase_runs.get(batch_key)
+            if phase_run_id and payload.get("batch_id"):
+                self.store.bind_phase_sessions(self.scan_id, phase_run_id, str(payload["batch_id"]))
             status = str(payload.get("status") or "running")
             if phase == "dynamic_validation" and status in {
                 "completed",

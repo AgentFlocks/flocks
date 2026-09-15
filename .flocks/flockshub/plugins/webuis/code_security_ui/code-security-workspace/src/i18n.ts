@@ -7,6 +7,58 @@ interface ContractRuntime {
 }
 
 const englishMessages: Record<string, string> = {
+  返回任务列表: "Back to task list",
+  查看项目: "View project",
+  项目详情: "Project details",
+  项目审计记录: "Project audits",
+  返回项目详情: "Back to project",
+  "正在加载项目…": "Loading project…",
+  "项目不存在或当前不可访问。": "Project not found or unavailable.",
+  "查看此项目的审计记录，选择任务查看执行过程与结果。":
+    "Review this project's audits. Select a task to view its execution and results.",
+  "阶段会话加载失败，可重试或查看下方执行事件。":
+    "Stage sessions could not be loaded. Retry or review execution events below.",
+  页面导航: "Page navigation",
+  无法读取阶段会话: "Unable to load stage sessions",
+  阶段会话: "Stage sessions",
+  "阶段 Session": "Stage sessions",
+  "正在读取阶段会话…": "Loading stage sessions\u2026",
+  "此任务的会话位于独立批次存储，当前仅展示执行事件。":
+    "Sessions are stored in an isolated batch. Execution events are available below.",
+  "中间会话已清理，可查看保留的审计产物。":
+    "Intermediate sessions have been cleaned up. Retained artifacts remain available.",
+  "部分会话不可用或缺少执行轮次关联，以下仅展示可确认归属的内容。":
+    "Some sessions are unavailable or cannot be associated with a run. Only verified associations are shown.",
+  "该阶段暂无智能体会话，执行过程见下方步骤。":
+    "No agent sessions for this stage yet. See execution steps below.",
+  "此会话已不可用。": "This session is no longer available.",
+  "等待会话输出…": "Waiting for session output\u2026",
+  审计任务指令: "Audit instructions",
+  无法准备问答上下文: "Unable to prepare conversation context",
+  "会话请求失败，请重试": "Conversation failed. Please retry.",
+  "正在准备全部阶段的会话与产物…":
+    "Preparing sessions and artifacts from all stages\u2026",
+  "基于全部阶段与产物继续追问…":
+    "Ask a question about all stages and artifacts\u2026",
+  问答上下文尚未就绪: "Conversation context is not ready",
+  "基于全部阶段会话与审计产物 · 只读问答":
+    "All stage sessions and audit artifacts \u00b7 Read-only conversation",
+  正在检查会话条件: "Checking conversation readiness",
+  "正在回答…": "Answering\u2026",
+  发送: "Send",
+  刷新上下文: "Refresh context",
+  无法生成审计配置: "Unable to generate audit configuration",
+  你: "You",
+  审计助手: "Audit assistant",
+  "正在配置…": "Configuring\u2026",
+  停止: "Stop",
+  开始新的配置对话: "Start a new configuration conversation",
+  "建议已同步到手动参数，请检查后再发起审计。":
+    "Suggestions have been applied to the manual form. Review them before starting the audit.",
+  "描述审计目标，由 AI 协助选择项目和参数；确认前不会创建任务。":
+    "Describe your audit target. AI will help configure it; no task starts before confirmation.",
+  检查参数并发起审计: "Review parameters and start audit",
+
   审计列表: "Audit list",
   返回审计列表: "Back to audit list",
   "查看所有审计任务的执行进度与结果。":

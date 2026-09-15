@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { NativePhaseSessions } from "./AuditConversation";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { readApiFailure } from "../api";
 import { useAuditApi } from "../BatchContext";
@@ -75,6 +76,7 @@ const attemptStatusLabels: Record<string, string> = {
 
 export function PhaseWorkspace({
   scanId,
+  requestedPhase,
   onOpenArtifacts,
   phases,
   events,
@@ -91,6 +93,7 @@ export function PhaseWorkspace({
   onLoadOlderEvents = async () => undefined,
 }: {
   scanId?: string;
+  requestedPhase?: { id: string };
   onOpenArtifacts?: () => void;
   phases: PhaseRun[];
   events: AuditEvent[];
@@ -150,6 +153,9 @@ export function PhaseWorkspace({
       ?.phase_run_id ||
     sorted[0]?.phase_run_id;
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (requestedPhase) setSelectedId(requestedPhase.id);
+  }, [requestedPhase]);
   const selected =
     sorted.find((phase) => phase.phase_run_id === selectedId) ||
     sorted.find((phase) => phase.phase_run_id === defaultId);
@@ -354,6 +360,14 @@ export function PhaseWorkspace({
           </div>
         )}
 
+        {scanId && selected && (
+          <NativePhaseSessions
+            key={`session-${selected.phase_run_id}`}
+            scanId={scanId}
+            phaseId={selected.phase_run_id}
+            running={selected.status === "running"}
+          />
+        )}
         <details className="cs-stage-details">
           <summary>{t("查看阶段详情与工作单元")}</summary>
           {selected && (

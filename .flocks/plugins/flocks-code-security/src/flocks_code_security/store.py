@@ -101,7 +101,7 @@ def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
 
 
 # Bump this whenever initialize() adds or changes schema migrations.
-STORE_SCHEMA_VERSION = 8
+STORE_SCHEMA_VERSION = 9
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -812,6 +812,21 @@ class ScanStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(scan_id, phase, ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS scan_phase_sessions (
+                    attempt_id TEXT PRIMARY KEY REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
+                    phase_run_id TEXT NOT NULL REFERENCES scan_phase_runs(phase_run_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS audit_chat_turns (
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    subject TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    answer TEXT,
+                    sources_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(scan_id, subject, request_id)
                 );
                 CREATE TABLE IF NOT EXISTS scan_events (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4995,6 +5010,29 @@ class ScanStore:
                 (phase_run_id,),
             ).fetchone()
         return self._decode_phase_run(updated)
+
+    def bind_phase_sessions(self, scan_id: str, phase_run_id: str, batch_id: str) -> None:
+        """Bind already launched attempts when their durable phase event arrives."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO scan_phase_sessions (attempt_id, phase_run_id)
+                   SELECT a.attempt_id, p.phase_run_id FROM work_attempts a
+                   JOIN worker_batch_units b ON b.work_unit_id = a.work_unit_id
+                   JOIN work_units w ON w.work_unit_id = a.work_unit_id
+                   JOIN scan_phase_runs p ON p.scan_id = w.scan_id
+                   WHERE w.scan_id = ? AND p.phase_run_id = ? AND b.batch_id = ?""",
+                (scan_id, phase_run_id, batch_id),
+            )
+
+    def phase_session_attempts(self, scan_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """SELECT a.*, w.phase, w.role, b.phase_run_id FROM work_attempts a
+                   JOIN work_units w ON w.work_unit_id = a.work_unit_id
+                   LEFT JOIN scan_phase_sessions b ON b.attempt_id = a.attempt_id
+                   WHERE w.scan_id = ? ORDER BY a.created_at, a.attempt_id""", (scan_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_phase_runs(self, scan_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:

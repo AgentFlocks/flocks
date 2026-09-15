@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { createIdempotencyKey, createScan, readApiFailure } from "../api";
+import {
+  configureAudit,
+  createIdempotencyKey,
+  createScan,
+  readApiFailure,
+} from "../api";
 import { Icon } from "../icons";
 import { useCodeSecurityI18n } from "../i18n";
 import type { NewAuditValues, ProjectSummary, ScanDetail } from "../types";
@@ -30,11 +35,13 @@ const CREATE_ERROR_MESSAGES: Record<string, string> = {
 export function NewAuditDrawer({
   open,
   projects,
+  initialProjectId,
   onClose,
   onCreated,
 }: {
   open: boolean;
   projects: ProjectSummary[];
+  initialProjectId?: string;
   onClose: () => void;
   onCreated: (detail: ScanDetail) => void;
 }) {
@@ -49,6 +56,47 @@ export function NewAuditDrawer({
   });
   const [mode, setMode] = useState<"auto" | "manual">("manual");
   const [intent, setIntent] = useState("");
+  const [configurationMessages, setConfigurationMessages] = useState<
+    { role: string; content: string }[]
+  >([]);
+  const [configuring, setConfiguring] = useState(false);
+  const [configurationError, setConfigurationError] = useState("");
+  const configurationAbort = useRef<AbortController | null>(null);
+  useEffect(() => {
+    if (!open) configurationAbort.current?.abort();
+    return () => configurationAbort.current?.abort();
+  }, [open]);
+  const sendConfiguration = async () => {
+    const text = intent.trim();
+    if (!text || configuring) return;
+    const controller = new AbortController();
+    configurationAbort.current = controller;
+    setConfiguring(true);
+    setConfigurationError("");
+    try {
+      const result = await configureAudit(
+        text,
+        values,
+        configurationMessages,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setValues({ ...result.values, dynamicConfirmed: false });
+      setConfigurationMessages((current) => [
+        ...current,
+        { role: "user", content: text },
+        { role: "assistant", content: result.reply },
+      ]);
+      setIntent("");
+    } catch (reason) {
+      if (!controller.signal.aborted)
+        setConfigurationError(
+          readApiFailure(reason, t("无法生成审计配置")).message,
+        );
+    } finally {
+      if (configurationAbort.current === controller) setConfiguring(false);
+    }
+  };
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -92,11 +140,27 @@ export function NewAuditDrawer({
 
   useEffect(() => {
     if (open && !wasOpenRef.current) {
-      setValues((current) => ({ ...current, dynamicConfirmed: false }));
+      setValues((current) => {
+        const next = {
+          ...current,
+          dynamicConfirmed: false,
+          ...(initialProjectId &&
+          availableProjects.some((project) => project.id === initialProjectId)
+            ? {
+                workspaceId: initialProjectId,
+                ...(current.workspaceId !== initialProjectId
+                  ? { targetPath: ".", includePaths: ".", excludePatterns: "" }
+                  : {}),
+              }
+            : {}),
+        };
+        if (initialProjectId) baselineRef.current = next;
+        return next;
+      });
       setErrors((current) => ({ ...current, dynamicConfirmed: "" }));
     }
     wasOpenRef.current = open;
-  }, [open]);
+  }, [open, initialProjectId, availableProjects]);
 
   useEffect(() => {
     if (!open) return;
@@ -301,6 +365,7 @@ export function NewAuditDrawer({
           <button
             type="button"
             role="tab"
+            disabled={configuring}
             aria-selected={mode === "auto"}
             onClick={() => setMode("auto")}
           >
@@ -309,6 +374,7 @@ export function NewAuditDrawer({
           <button
             type="button"
             role="tab"
+            disabled={configuring}
             aria-selected={mode === "manual"}
             onClick={() => setMode("manual")}
           >
@@ -319,25 +385,91 @@ export function NewAuditDrawer({
           <section className="cs-auto-config" role="tabpanel">
             <h3>{t("描述你想审计的代码")}</h3>
             <p>{t("用对话配置审计范围和关注点。")}</p>
+            <div className="cs-configuration-messages">
+              {configurationMessages.map((message, index) => (
+                <div
+                  key={index}
+                  className={`cs-configuration-message cs-configuration-message--${message.role}`}
+                >
+                  <small>
+                    {message.role === "user" ? t("你") : t("审计助手")}
+                  </small>
+                  <p>{message.content}</p>
+                </div>
+              ))}
+            </div>
             <textarea
+              disabled={configuring}
+              maxLength={8000}
               aria-label={t("审计需求草稿")}
               value={intent}
               onChange={(e) => setIntent(e.target.value)}
+              onKeyDown={(e) => {
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing
+                ) {
+                  e.preventDefault();
+                  if (configurationMessages.length < 20)
+                    void sendConfiguration();
+                }
+              }}
               placeholder={t(
                 "例如：审计 API 中的身份认证和权限检查，排除测试目录。",
               )}
             />
+            {configurationError && <p role="alert">{configurationError}</p>}
+            <button
+              type="button"
+              className="cs-button cs-button--primary"
+              disabled={
+                configuring ||
+                !intent.trim() ||
+                configurationMessages.length >= 20
+              }
+              onClick={sendConfiguration}
+            >
+              {configuring ? t("正在配置…") : t("发送")}
+            </button>
+            {configurationMessages.length >= 20 && !configuring && (
+              <button
+                type="button"
+                className="cs-button cs-button--secondary"
+                onClick={() => setConfigurationMessages([])}
+              >
+                {t("开始新的配置对话")}
+              </button>
+            )}
+            {configuring && (
+              <button
+                type="button"
+                className="cs-button cs-button--secondary"
+                onClick={() => {
+                  configurationAbort.current?.abort();
+                  setConfiguring(false);
+                }}
+              >
+                {t("停止")}
+              </button>
+            )}
             <p role="status">
-              {t(
-                "自动配置服务尚未接入。需求草稿会在切换时保留，请使用手动选择发起审计。",
-              )}
+              {configurationMessages.length
+                ? t("建议已同步到手动参数，请检查后再发起审计。")
+                : t(
+                    "描述审计目标，由 AI 协助选择项目和参数；确认前不会创建任务。",
+                  )}
             </p>
             <button
               type="button"
               className="cs-button cs-button--primary"
               onClick={() => setMode("manual")}
             >
-              {t("使用手动选择")}
+              {t(
+                configurationMessages.length
+                  ? "检查参数并发起审计"
+                  : "使用手动选择",
+              )}
             </button>
           </section>
         )}

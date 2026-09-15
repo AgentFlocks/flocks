@@ -50,9 +50,28 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function openTaskList() {
+  act(() => {
+    window.history.pushState({}, "", "/?view=audits");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  if (vi.isFakeTimers()) screen.getByRole("heading", { name: "审计列表", exact: true });
+  else await screen.findByRole("heading", { name: "审计列表", exact: true });
+}
+async function openCreateAudit() {
+  act(() => {
+    window.history.pushState({}, "", "/");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await userEvent.click(
+    await screen.findByRole("button", { name: "发起审计", exact: true }),
+  );
+}
+
 const scanDetail = {
   schemaVersion: "flocks.code-security.tool.v1",
   scan: {
+    workspace_ref: "project-1",
     scan_id: "scan_demo",
     lifecycle_status: "running",
     current_phase: "verification",
@@ -205,6 +224,73 @@ const scanDetail = {
 };
 
 describe("code security workspace contract page", () => {
+  it.each(["首页", "审计列表"])(
+    "keeps %s selected across repeated admin polling",
+    async (destination) => {
+      vi.useFakeTimers();
+      const view = render(<Page />);
+      try {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        if (destination === "首页")
+          fireEvent.click(
+            screen.getByRole("button", { name: "首页", exact: true }),
+          );
+        else await openTaskList();
+        const expectedUrl = window.location.search;
+        const listCalls = () =>
+          apiGet.mock.calls.filter(
+            ([path]) => path === "/api/code-security/v1/scans",
+          ).length;
+        const before = listCalls();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(6500);
+        });
+        expect(listCalls()).toBeGreaterThan(before);
+        expect(window.location.search).toBe(expectedUrl);
+        expect(screen.queryByLabelText("审计指标")).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("heading", {
+            name:
+              destination === "首页" ? "Flocks 代码安全审计工作台" : "审计列表",
+            exact: true,
+          }),
+        ).toBeVisible();
+      } finally {
+        view.unmount();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not leave duplicate session errors after switching stages", async () => {
+    const phases = scanDetail.phaseRuns;
+    const props = { scanId: "scan_demo", phases, events: [], workers: [] };
+    const view = render(
+      <PhaseWorkspace
+        {...props}
+        requestedPhase={{ id: phases[0].phase_run_id }}
+      />,
+    );
+    for (const phase of [...phases, ...phases]) {
+      view.rerender(
+        <PhaseWorkspace
+          {...props}
+          requestedPhase={{ id: phase.phase_run_id }}
+        />,
+      );
+      await waitFor(() =>
+        expect(apiGet).toHaveBeenCalledWith(
+          `/api/code-security/v1/scans/scan_demo/phases/${phase.phase_run_id}/sessions`,
+        ),
+      );
+      expect(
+        view.container.querySelectorAll(".cs-native-sessions"),
+      ).toHaveLength(1);
+    }
+  });
+
   it("keeps the audit list separate from the project home and returns from task detail", async () => {
     window.history.replaceState({}, "", "/?view=audits");
     render(<Page />);
@@ -221,7 +307,7 @@ describe("code security workspace contract page", () => {
     expect(new URLSearchParams(window.location.search).get("view")).toBe(
       "audits",
     );
-    await userEvent.click(screen.getByRole("button", { name: "返回审计列表" }));
+    await openTaskList();
     expect(
       await screen.findByRole("heading", { name: "审计列表", exact: true }),
     ).toBeVisible();
@@ -247,9 +333,7 @@ describe("code security workspace contract page", () => {
       "/?batch_id=batch_a&task_id=1&scan_id=scan_demo&artifact=coverage&keep=1#evidence",
     );
     render(<Page />);
-    await userEvent.click(
-      screen.getByRole("button", { name: "← 代码审计首页" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "首页" }));
     expect(
       await screen.findByRole("heading", { name: "Flocks 代码安全审计工作台" }),
     ).toBeVisible();
@@ -320,12 +404,31 @@ describe("code security workspace contract page", () => {
     ).toBeVisible();
     expect(await screen.findByText("/workspace/flocks")).toBeVisible();
     expect(screen.queryByLabelText("审计指标")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByText("其他审计记录"));
-    await userEvent.click(screen.getByRole("button", { name: /^flocks/ }));
+    expect(
+      screen.queryByRole("button", { name: "查看审计", exact: true }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "查看项目", exact: true }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Flocks", exact: true }),
+    ).toBeVisible();
+    expect(window.location.search).toContain("project_id=project-1");
+    expect(
+      screen.queryByRole("button", { name: "查看审计 legacy-service" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("审计指标")).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "查看审计 flocks" }),
+    );
     expect(await screen.findByLabelText("审计指标")).toBeVisible();
     expect(
       screen.getByRole("textbox", { name: "审计结果追问" }),
     ).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "返回任务列表" }));
+    expect(
+      await screen.findByRole("heading", { name: "Flocks", exact: true }),
+    ).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /代码审计首页/ }));
     expect(
       screen.getByRole("heading", { name: "Flocks 代码安全审计工作台" }),
@@ -333,6 +436,75 @@ describe("code security workspace contract page", () => {
     expect(new URLSearchParams(window.location.search).has("scan_id")).toBe(
       false,
     );
+  });
+
+  it("opens an empty project and preselects it when starting an audit", async () => {
+    const original = apiGet.getMockImplementation()!;
+    apiGet.mockImplementation((path: string, config?: unknown) =>
+      path === "/api/project/"
+        ? Promise.resolve({
+            data: [
+              {
+                id: "empty",
+                name: "Empty project",
+                worktree: "/empty",
+                pathStatus: "available",
+              },
+              {
+                id: "project-1",
+                name: "Flocks",
+                worktree: "/workspace/flocks",
+                pathStatus: "available",
+              },
+            ],
+          })
+        : original(path, config),
+    );
+    window.history.replaceState({}, "", "/?view=project&project_id=empty");
+    render(<Page />);
+    expect(
+      await screen.findByRole("heading", { name: "Empty project" }),
+    ).toBeVisible();
+    expect(screen.getByText("还没有审计任务")).toBeVisible();
+    expect(screen.queryByText("legacy-service")).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "发起审计", exact: true }),
+    );
+    expect(screen.getByRole("combobox", { name: /代码项目/ })).toHaveValue(
+      "empty",
+    );
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("keeps the project deep link after refreshes without selecting an audit", async () => {
+    window.history.replaceState({}, "", "/?view=project&project_id=project-1");
+    vi.useFakeTimers();
+    const view = render(<Page />);
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6500);
+      });
+      expect(
+        screen.getByRole("heading", { name: "Flocks", exact: true }),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "查看审计 flocks" }),
+      ).toBeVisible();
+      expect(window.location.search).toBe("?view=project&project_id=project-1");
+      expect(screen.queryByLabelText("审计指标")).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fall back to all tasks for an unavailable project", async () => {
+    window.history.replaceState({}, "", "/?view=project&project_id=missing");
+    render(<Page />);
+    expect(await screen.findByText("项目不存在或当前不可访问。")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "查看审计 flocks" }),
+    ).not.toBeInTheDocument();
   });
 
   it("follows new phases until history is selected and scopes events by run id", async () => {
@@ -488,20 +660,26 @@ describe("code security workspace contract page", () => {
     });
     const user = userEvent.setup();
     render(<Page />);
-    await screen.findByRole("button", { name: /任务 1065.*运行中/ });
+    await openTaskList();
+    await screen.findByRole("button", { name: /查看审计 任务 1065/ });
     expect(
-      screen.getByRole("button", { name: /^任务 1066/ }),
+      screen.getByRole("button", { name: /查看审计 任务 1066/ }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /flocks.*运行中/ }),
+      screen.getByRole("button", { name: /查看审计 flocks/ }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("combobox", { name: "批量审计" }),
     ).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /任务 1065.*运行中/ }));
+    await user.click(
+      screen.getByRole("button", { name: /查看审计 任务 1065/ }),
+    );
     await screen.findByRole("heading", { name: "source-1065" });
     expect(window.location.search).toContain("task_id=1065");
-    await user.click(await screen.findByRole("button", { name: /^任务 1066/ }));
+    await openTaskList();
+    await user.click(
+      await screen.findByRole("button", { name: /查看审计 任务 1066/ }),
+    );
     await screen.findByRole("heading", { name: "任务 1066" });
     expect(
       apiGet.mock.calls.some(([url]) => url.includes("/scans/batch_a")),
@@ -512,7 +690,8 @@ describe("code security workspace contract page", () => {
       { name: "source-1066" },
       { timeout: 4000 },
     );
-    await user.click(screen.getByRole("button", { name: /flocks.*运行中/ }));
+    await openTaskList();
+    await user.click(screen.getByRole("button", { name: /查看审计 flocks/ }));
     await screen.findByRole("heading", { name: "flocks" });
     expect(window.location.search).not.toContain("batch_id");
   });
@@ -625,6 +804,7 @@ describe("code security workspace contract page", () => {
             items: [
               {
                 scan_id: "scan_demo",
+                workspace_ref: "project-1",
                 display_name: "flocks",
                 lifecycle_status: "running",
                 current_phase: "verification",
@@ -959,30 +1139,20 @@ describe("code security workspace contract page", () => {
     ).toHaveLength(2);
   });
 
-  it("keeps the current audit visible when its selected history card is clicked again", async () => {
-    const pushState = vi.spyOn(window.history, "pushState");
-    render(<Page />);
-
+  it("shows only home and return-to-list navigation inside a task", async () => {
+    const view = render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+    expect(view.container.querySelector(".cs-scan-panel")).toBeNull();
+    expect(screen.queryByLabelText("切换审计")).not.toBeInTheDocument();
+    const navigation = screen.getByRole("navigation", { name: "页面导航" });
+    expect(navigation.querySelectorAll("button")).toHaveLength(2);
     expect(
-      await screen.findByRole("heading", { name: "flocks" }),
-    ).toBeInTheDocument();
-    const selectedCard = screen.getByRole("button", {
-      name: "flocks · 运行中",
-    });
-    const detailRequestsBeforeClick = apiGet.mock.calls.filter(
-      ([path]) => path === "/api/code-security/v1/scans/scan_demo",
-    ).length;
-
-    await userEvent.click(selectedCard);
-
-    expect(selectedCard).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("heading", { name: "flocks" })).toBeInTheDocument();
-    const detailRequestsAfterClick = apiGet.mock.calls.filter(
-      ([path]) => path === "/api/code-security/v1/scans/scan_demo",
-    ).length;
-    expect(detailRequestsAfterClick).toBe(detailRequestsBeforeClick);
-    expect(pushState).not.toHaveBeenCalled();
-    pushState.mockRestore();
+      screen.getByRole("button", { name: "首页", exact: true }),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "返回任务列表" }));
+    expect(
+      await screen.findByRole("heading", { name: "Flocks", exact: true }),
+    ).toBeVisible();
   });
 
   it("reuses a terminal audit view when switching back to it", async () => {
@@ -1023,15 +1193,17 @@ describe("code security workspace contract page", () => {
     const user = userEvent.setup();
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
 
     await user.click(
-      screen.getByRole("button", { name: /legacy-service.*运行中/ }),
+      screen.getByRole("button", { name: /查看审计 legacy-service/ }),
     );
     expect(
       await screen.findByRole("heading", { name: "legacy-service" }),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /flocks.*已完成/ }));
+    await openTaskList();
+    await user.click(screen.getByRole("button", { name: /查看审计 flocks/ }));
     expect(screen.getByRole("heading", { name: "flocks" })).toBeInTheDocument();
     expect(
       apiGet.mock.calls.filter(
@@ -1070,8 +1242,9 @@ describe("code security workspace contract page", () => {
     const user = userEvent.setup();
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
     const olderButton = screen.getByRole("button", {
-      name: /legacy-service.*运行中/,
+      name: /查看审计 legacy-service/,
     });
 
     fireEvent.pointerEnter(olderButton);
@@ -1103,6 +1276,7 @@ describe("code security workspace contract page", () => {
             items: [
               {
                 scan_id: "scan_demo",
+                workspace_ref: "project-1",
                 display_name: "flocks",
                 lifecycle_status: "running",
                 current_phase: "verification",
@@ -1145,11 +1319,12 @@ describe("code security workspace contract page", () => {
     });
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
     const olderButton = screen.getByRole("button", {
-      name: /legacy-service.*运行中/,
+      name: /查看审计 legacy-service/,
     });
     const thirdButton = screen.getByRole("button", {
-      name: /third-service.*运行中/,
+      name: /查看审计 third-service/,
     });
 
     fireEvent.pointerEnter(olderButton);
@@ -1205,9 +1380,10 @@ describe("code security workspace contract page", () => {
     const user = userEvent.setup();
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
 
     await user.click(
-      screen.getByRole("button", { name: /legacy-service.*运行中/ }),
+      screen.getByRole("button", { name: /查看审计 legacy-service/ }),
     );
     await act(async () => detailRequest.resolve({ data: olderDetail }));
 
@@ -1397,15 +1573,14 @@ describe("code security workspace contract page", () => {
     const download = await screen.findByRole("link", { name: "下载报告" });
     expect(download).toHaveClass("cs-button--secondary");
     expect(download).not.toHaveClass("cs-button--primary");
-    for (const button of screen.getAllByRole("button", { name: "新建审计" })) {
-      expect(button).toHaveClass("cs-button--secondary");
-      expect(button).not.toHaveClass("cs-button--primary");
-    }
-    expect(screen.getByText("0 个漏洞")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "新建审计" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("审计指标")).toHaveTextContent("漏洞数量0");
     expect(screen.queryByText("1 个候选")).not.toBeInTheDocument();
   });
 
-  it("restores batch deletion inside task scope and keeps running tasks protected", async () => {
+  it("deletes batch records from the task list and keeps running tasks protected", async () => {
     const baseGet = apiGet.getMockImplementation()!;
     let deleted = false;
     apiGet.mockImplementation((path: string, options?: any) => {
@@ -1451,6 +1626,7 @@ describe("code security workspace contract page", () => {
       "/?batch_id=batch_a&task_id=1&scan_id=scan_demo",
     );
     render(<Page />);
+    await openTaskList();
     const button = await screen.findByRole("button", {
       name: "删除审计 任务 1",
     });
@@ -1484,6 +1660,7 @@ describe("code security workspace contract page", () => {
             items: [
               {
                 scan_id: "scan_demo",
+                workspace_ref: "project-1",
                 display_name: "flocks",
                 lifecycle_status: "running",
                 current_phase: "verification",
@@ -1508,6 +1685,7 @@ describe("code security workspace contract page", () => {
     });
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
 
     const deleteButton = screen.getByRole("button", {
       name: "删除审计 legacy-service",
@@ -1530,7 +1708,7 @@ describe("code security workspace contract page", () => {
       ),
     );
     expect(
-      screen.queryByRole("button", { name: /legacy-service.*已完成/ }),
+      screen.queryByRole("button", { name: /查看审计 legacy-service/ }),
     ).not.toBeInTheDocument();
     expect(
       screen.getByText("已删除 legacy-service 的审计记录。"),
@@ -1564,6 +1742,7 @@ describe("code security workspace contract page", () => {
             items: [
               {
                 scan_id: "scan_demo",
+                workspace_ref: "project-1",
                 display_name: "flocks",
                 lifecycle_status: "running",
                 current_phase: "verification",
@@ -1595,9 +1774,10 @@ describe("code security workspace contract page", () => {
     const user = userEvent.setup();
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
 
     fireEvent.pointerEnter(
-      screen.getByRole("button", { name: /legacy-service.*已完成/ }),
+      screen.getByRole("button", { name: /查看审计 legacy-service/ }),
     );
     await waitFor(() => expect(olderDetailRequests).toBe(1));
     await user.click(
@@ -1606,7 +1786,7 @@ describe("code security workspace contract page", () => {
     await user.click(screen.getByRole("button", { name: "永久删除" }));
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: /legacy-service.*已完成/ }),
+        screen.queryByRole("button", { name: /查看审计 legacy-service/ }),
       ).not.toBeInTheDocument(),
     );
 
@@ -1865,6 +2045,7 @@ describe("code security workspace contract page", () => {
     });
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
 
     source!.onmessage?.({
       data: JSON.stringify({
@@ -1876,7 +2057,7 @@ describe("code security workspace contract page", () => {
     await waitFor(
       () =>
         expect(
-          screen.getByRole("button", { name: /legacy-service.*已完成/ }),
+          screen.getByRole("button", { name: /查看审计 legacy-service/ }),
         ).toBeInTheDocument(),
       { timeout: 2_000 },
     );
@@ -1911,7 +2092,7 @@ describe("code security workspace contract page", () => {
     const user = userEvent.setup();
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
-    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await openCreateAudit();
 
     expect(
       screen.queryByRole("option", { name: "Shared" }),
@@ -1945,6 +2126,7 @@ describe("code security workspace contract page", () => {
             items: [
               {
                 scan_id: "scan_demo",
+                workspace_ref: "project-1",
                 display_name: "flocks",
                 lifecycle_status: "running",
                 current_phase: "verification",
@@ -1961,6 +2143,7 @@ describe("code security workspace contract page", () => {
     const user = userEvent.setup();
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
+    await openTaskList();
 
     await user.click(
       screen.getAllByRole("button", { name: "加载更多审计记录" })[0],
@@ -1999,7 +2182,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
-    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await openCreateAudit();
     await user.click(screen.getByRole("checkbox", { name: /^动态验证/ }));
 
     expect(
@@ -2021,7 +2204,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
-    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await openCreateAudit();
     screen.getByText("高级设置").closest("details")!.open = true;
     const copySource = screen.getByRole("checkbox", {
       name: /^复制源码到只读快照/,
@@ -2047,7 +2230,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
-    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await openCreateAudit();
     const dynamicEnabled = screen.getByRole("checkbox", { name: /^动态验证/ });
     await user.click(dynamicEnabled);
     const consent = screen.getByLabelText(
@@ -2067,7 +2250,7 @@ describe("code security workspace contract page", () => {
     await user.click(
       screen.getAllByRole("button", { name: "关闭新建审计" }).at(-1)!,
     );
-    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await openCreateAudit();
     expect(
       screen.getByLabelText(
         "我理解动态验证会执行快照中的受限代码，并同意继续。",
@@ -2088,7 +2271,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
-    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await openCreateAudit();
     screen.getByText("高级设置").closest("details")!.open = true;
     const voteCount = screen.getByLabelText("独立复核票数");
     await user.selectOptions(voteCount, "3");
@@ -2126,7 +2309,7 @@ describe("code security workspace contract page", () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
 
-    await user.click(screen.getAllByRole("button", { name: "新建审计" })[0]);
+    await openCreateAudit();
     await user.click(screen.getByRole("button", { name: "启动静态审计" }));
 
     await screen.findAllByText("目标目录不存在或不是文件夹，请检查相对路径。");
@@ -2162,15 +2345,18 @@ describe("code security workspace contract page", () => {
       screen.getByRole("button", { name: "取消审计" }),
     ).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText("切换审计"), "scan_older");
+    await openTaskList();
+    await user.click(
+      screen.getByRole("button", { name: "查看审计 legacy-service" }),
+    );
 
     expect(
       screen.queryByRole("button", { name: "取消审计" }),
     ).not.toBeInTheDocument();
     expect(screen.getByLabelText("正在加载扫描详情")).toBeInTheDocument();
     expect(
-      screen.getByRole("navigation", { name: "扫描列表" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("navigation", { name: "扫描列表" }),
+    ).not.toBeInTheDocument();
     expect(apiPost).not.toHaveBeenCalled();
   });
 
@@ -3004,14 +3190,14 @@ describe("code security workspace contract page", () => {
     render(<Page />);
 
     expect(
-      await screen.findByRole("heading", { name: "Audit records" }),
-    ).toBeInTheDocument();
+      await screen.findByRole("button", { name: "Home", exact: true }),
+    ).toBeVisible();
     expect(
-      screen.getByPlaceholderText("Search target or scan_id"),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Back to task list" }),
+    ).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "New audit" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("heading", { name: "Audit records" }),
+    ).not.toBeInTheDocument();
     expect(
       await screen.findByRole("heading", { name: "Phases and live events" }),
     ).toBeInTheDocument();

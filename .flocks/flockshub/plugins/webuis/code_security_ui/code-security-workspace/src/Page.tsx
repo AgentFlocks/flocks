@@ -1,3 +1,4 @@
+import { AuditConversation } from "./components/AuditConversation";
 import { AuditTaskList } from "./components/AuditTaskList";
 import { AuditHome } from "./components/AuditHome";
 import {
@@ -22,7 +23,6 @@ import { DeleteScanDialog } from "./components/DeleteScanDialog";
 import { ElapsedTime } from "./components/ElapsedTime";
 import { NewAuditDrawer } from "./components/NewAuditDrawer";
 import { PhaseWorkspace } from "./components/PhaseWorkspace";
-import { ScanListPanel } from "./components/ScanListPanel";
 import { StatusBadge } from "./components/StatusBadge";
 import { Icon } from "./icons";
 import { useCodeSecurityI18n } from "./i18n";
@@ -120,10 +120,12 @@ function WorkspacePage() {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [batchRecords, setBatchRecords] = useState<ScanSummary[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(
     initialParams.get("scan_id"),
   );
   const [detail, setDetail] = useState<ScanDetail | null>(null);
+  const [requestedPhase, setRequestedPhase] = useState<{ id: string }>();
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(true);
@@ -141,7 +143,6 @@ function WorkspacePage() {
   );
   const [liveMessage, setLiveMessage] = useState("");
   const [cancelling, setCancelling] = useState(false);
-  const [scanPanelOpen, setScanPanelOpen] = useState(false);
   const [scanCursor, setScanCursor] = useState<string | null>(null);
   const [loadingMoreScans, setLoadingMoreScans] = useState(false);
   const [hasOlderEvents, setHasOlderEvents] = useState(false);
@@ -156,7 +157,6 @@ function WorkspacePage() {
   const refreshQueuedRef = useRef(new Set<string>());
   const drawerOpenerRef = useRef<HTMLElement | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
-  const scanPanelOpenerRef = useRef<HTMLElement | null>(null);
   const loadingMoreScansRef = useRef(false);
   const listRefreshTimerRef = useRef<number | null>(null);
   const queuedScanRefreshRef = useRef(new Set<string>());
@@ -178,29 +178,45 @@ function WorkspacePage() {
     setDrawerOpen(true);
   }, []);
 
-  const showOverview = useCallback((view: "home" | "audits") => {
-    const url = new URL(window.location.href);
-    for (const key of ["scan_id", "batch_id", "task_id", "artifact", "view"])
-      url.searchParams.delete(key);
-    if (view === "audits") url.searchParams.set("view", "audits");
-    url.hash = "";
-    selectedIdRef.current = null;
-    setSelectedId(null);
-    setDetail(null);
-    setEvents([]);
-    setError("");
-    setLoading(false);
-    setInspectorOpen(false);
-    setScanPanelOpen(false);
-    setActiveArtifact("overview");
-    window.history.pushState({}, "", url);
-    // Synchronize both the outer batch scope and the host router.
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  }, []);
+  const showOverview = useCallback(
+    (view: "home" | "audits" | "project", projectId?: string) => {
+      const url = new URL(window.location.href);
+      for (const key of [
+        "scan_id",
+        "batch_id",
+        "task_id",
+        "artifact",
+        "view",
+        "project_id",
+      ])
+        url.searchParams.delete(key);
+      if (view !== "home") url.searchParams.set("view", view);
+      if (view === "project" && projectId)
+        url.searchParams.set("project_id", projectId);
+      url.hash = "";
+      selectedIdRef.current = null;
+      setSelectedId(null);
+      setDetail(null);
+      setEvents([]);
+      setError("");
+      setLoading(false);
+      setInspectorOpen(false);
+      setActiveArtifact("overview");
+      window.history.pushState({}, "", url);
+      // Synchronize both the outer batch scope and the host router.
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    },
+    [],
+  );
 
   const returnHome = useCallback(() => showOverview("home"), [showOverview]);
   const returnAuditList = useCallback(
     () => showOverview("audits"),
+    [showOverview],
+  );
+
+  const openProject = useCallback(
+    (projectId: string) => showOverview("project", projectId),
     [showOverview],
   );
 
@@ -220,19 +236,6 @@ function WorkspacePage() {
   const closeInspector = useCallback(() => {
     setInspectorOpen(false);
     window.setTimeout(() => inspectorOpenerRef.current?.focus(), 0);
-  }, []);
-
-  const openScanPanel = useCallback(() => {
-    scanPanelOpenerRef.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    setScanPanelOpen(true);
-  }, []);
-
-  const closeScanPanel = useCallback(() => {
-    setScanPanelOpen(false);
-    window.setTimeout(() => scanPanelOpenerRef.current?.focus(), 0);
   }, []);
 
   const openDeleteDialog = useCallback(
@@ -549,9 +552,11 @@ function WorkspacePage() {
   }, [applySelection]);
 
   useEffect(() => {
+    let disposed = false;
     const timer = window.setTimeout(() => setShowSkeleton(true), 180);
     reloadList()
       .then((nextScans) => {
+        if (disposed) return;
         const currentSelection = selectedIdRef.current;
         const candidate =
           currentSelection || (scope ? nextScans[0]?.scan_id : null) || null;
@@ -568,17 +573,26 @@ function WorkspacePage() {
         setLoading(false);
       });
     if (!scope) {
+      setProjectsLoading(true);
       listProjects()
-        .then(setProjects)
+        .then((next) => {
+          if (!disposed) setProjects(next);
+        })
         .catch((reason) =>
           setError(
             reason?.response?.data?.detail?.message ||
               reason?.message ||
               t("无法加载可审计项目列表"),
           ),
-        );
+        )
+        .finally(() => {
+          if (!disposed) setProjectsLoading(false);
+        });
     }
-    return () => window.clearTimeout(timer);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
   }, [canCreate, reloadList, replaceSelection, t]);
 
   useEffect(() => {
@@ -658,7 +672,7 @@ function WorkspacePage() {
         if (disposed) return;
         const id = selectedIdRef.current;
         if (id) await refreshChangedScan(id);
-        else if (next[0]) replaceSelection(next[0].scan_id);
+        else if (scope && next[0]) replaceSelection(next[0].scan_id);
         if (!disposed) setConnection("connected");
       } catch {
         if (!disposed) setConnection("reconnecting");
@@ -806,7 +820,7 @@ function WorkspacePage() {
           window.setTimeout(
             () =>
               document
-                .querySelector<HTMLElement>(".cs-scan-item__select")
+                .querySelector<HTMLElement>(".cs-audit-open")
                 ?.focus(),
             0,
           );
@@ -853,7 +867,7 @@ function WorkspacePage() {
         window.setTimeout(
           () =>
             document
-              .querySelector<HTMLElement>(".cs-scan-item__select")
+              .querySelector<HTMLElement>(".cs-audit-open")
               ?.focus(),
           0,
         );
@@ -913,11 +927,19 @@ function WorkspacePage() {
     window.dispatchEvent(new PopStateEvent("popstate"));
   };
 
+  const projectId = initialParams.get("project_id");
+  const selectedProject = projects.find((project) => project.id === projectId);
+  const taskProjectId =
+    detail?.scan.workspace_ref ||
+    records.find((record) => record.scan_id === selectedRecordId)
+      ?.workspace_ref ||
+    projectId;
+  const taskProject = projects.find((project) => project.id === taskProjectId);
   const finalFindingMetric = detail ? deriveFinalFindingMetric(detail) : null;
 
   return (
     <main
-      className={`code-security-workspace cs-workbench${!selectedId && !scope ? " cs-home-view" : ""}`}
+      className={`code-security-workspace cs-workbench${!selectedId && !scope ? " cs-home-view" : " cs-task-view"}`}
     >
       <div
         className="cs-live-region"
@@ -932,8 +954,48 @@ function WorkspacePage() {
           {error}
         </div>
       )}
-      {!selectedId && !scope && initialParams.get("view") === "audits" ? (
+      {!selectedId && !scope && initialParams.get("view") === "project" ? (
+        selectedProject ? (
+          <AuditTaskList
+            canManage={user?.role === "admin"}
+            onDelete={openDeleteDialog}
+            onPrefetch={(id) => {
+              if (!scope && !batchScanIds.has(id)) prefetchScan(id);
+            }}
+            key={selectedProject.id}
+            project={selectedProject}
+            scans={records.filter(
+              (record) => record.workspace_ref === selectedProject.id,
+            )}
+            onSelect={selectRecord}
+            onHome={returnHome}
+            onNewAudit={openDrawer}
+            canCreate={canCreate}
+            hasMore={Boolean(scanCursor)}
+            loadingMore={loadingMoreScans}
+            onLoadMore={loadMoreScans}
+          />
+        ) : (
+          <section className="cs-project-home">
+            <button className="cs-home-link" type="button" onClick={returnHome}>
+              {t("← 代码审计首页")}
+            </button>
+            <p role="status">
+              {t(
+                projectsLoading
+                  ? "正在加载项目…"
+                  : "项目不存在或当前不可访问。",
+              )}
+            </p>
+          </section>
+        )
+      ) : !selectedId && !scope && initialParams.get("view") === "audits" ? (
         <AuditTaskList
+          canManage={user?.role === "admin"}
+          onDelete={openDeleteDialog}
+          onPrefetch={(id) => {
+            if (!scope && !batchScanIds.has(id)) prefetchScan(id);
+          }}
           scans={records}
           onSelect={selectRecord}
           onHome={returnHome}
@@ -949,7 +1011,7 @@ function WorkspacePage() {
           scans={records}
           canCreate={canCreate}
           onNewAudit={openDrawer}
-          onSelect={selectRecord}
+          onProjectSelect={openProject}
           hasMore={Boolean(scanCursor)}
           onLoadMore={loadMoreScans}
           loadingMore={loadingMoreScans}
@@ -960,47 +1022,24 @@ function WorkspacePage() {
             ])
           }
         />
-      ) : (
-        <ScanListPanel
-          scans={records}
-          selectedId={selectedRecordId}
-          onSelect={selectRecord}
-          onHome={returnHome}
-          onAuditList={returnAuditList}
-          onNewAudit={openDrawer}
-          canCreate={canCreate}
-          canManage={user?.role === "admin"}
-          open={scanPanelOpen}
-          onClose={closeScanPanel}
-          hasMore={Boolean(scanCursor)}
-          loadingMore={loadingMoreScans}
-          onLoadMore={loadMoreScans}
-          onDelete={openDeleteDialog}
-          onPrefetch={(id) => {
-            if (!scope && !batchScanIds.has(id)) prefetchScan(id);
-          }}
-        />
-      )}
-      {scanPanelOpen && (
-        <button
-          type="button"
-          className="cs-scan-panel-scrim"
-          aria-label={t("关闭审计列表")}
-          onClick={closeScanPanel}
-        />
-      )}
+      ) : null}
 
       <section className="cs-main-column" hidden={!selectedId && !scope}>
-        <button type="button" className="cs-home-link" onClick={returnHome}>
-          {t("← 代码审计首页")}
-        </button>
-        <button
-          type="button"
-          className="cs-home-link"
-          onClick={returnAuditList}
-        >
-          {t("返回审计列表")}
-        </button>
+        <nav className="cs-breadcrumbs" aria-label={t("页面导航")}>
+          <button type="button" className="cs-home-link" onClick={returnHome}>
+            {t("首页")}
+          </button>
+          <span aria-hidden="true">/</span>
+          <button
+            type="button"
+            className="cs-home-link"
+            onClick={() =>
+              taskProject ? openProject(taskProject.id) : returnAuditList()
+            }
+          >
+            {t("返回任务列表")}
+          </button>
+        </nav>
         {connection !== "connected" && (
           <div
             className={`cs-connection cs-connection--${connection}`}
@@ -1075,39 +1114,6 @@ function WorkspacePage() {
         ) : (
           <>
             <header className="cs-scan-header">
-              <div className="cs-mobile-scan-select">
-                <label htmlFor="mobile-scan-select">{t("切换审计")}</label>
-                <select
-                  id="mobile-scan-select"
-                  value={selectedRecordId || ""}
-                  onChange={(event) => selectRecord(event.target.value)}
-                >
-                  {records.map((scan) => (
-                    <option key={scan.scan_id} value={scan.scan_id}>
-                      {scan.display_name} ·{" "}
-                      {t(lifecycleLabels[scan.lifecycle_status] || "未知状态")}
-                    </option>
-                  ))}
-                </select>
-                {scanCursor && (
-                  <button
-                    type="button"
-                    className="cs-button cs-button--secondary cs-mobile-load-more"
-                    onClick={loadMoreScans}
-                    disabled={loadingMoreScans}
-                  >
-                    {loadingMoreScans ? t("正在加载…") : t("加载更多审计记录")}
-                  </button>
-                )}
-              </div>
-              <button
-                className="cs-icon-button cs-scan-drawer-trigger"
-                type="button"
-                onClick={openScanPanel}
-                aria-label={t("打开审计列表")}
-              >
-                <Icon name="panel" />
-              </button>
               <div className="cs-scan-title">
                 <div className="cs-scan-title__line">
                   <h1 ref={titleRef} tabIndex={-1}>
@@ -1144,16 +1150,6 @@ function WorkspacePage() {
                 </div>
               </div>
               <div className="cs-header-actions">
-                {canCreate && (
-                  <button
-                    className="cs-button cs-button--secondary cs-header-new-audit"
-                    type="button"
-                    onClick={openDrawer}
-                  >
-                    <Icon name="plus" />
-                    {t("新建审计")}
-                  </button>
-                )}
                 {detail.scan.can_cancel && (
                   <button
                     className="cs-button cs-button--danger"
@@ -1185,7 +1181,9 @@ function WorkspacePage() {
               </div>
             </header>
             <div className="cs-audit-metrics" aria-label={t("审计指标")}>
-              <div>
+              <div
+                className={`cs-metric-findings${(finalFindingMetric?.count ?? 0) > 0 ? " has-findings" : ""}`}
+              >
                 <span>{t("漏洞数量")}</span>
                 <strong>{finalFindingMetric?.count ?? "—"}</strong>
                 <small>
@@ -1246,6 +1244,7 @@ function WorkspacePage() {
             )}
             <PhaseWorkspace
               key={detail.scan.scan_id}
+              requestedPhase={requestedPhase}
               onOpenArtifacts={openInspector}
               scanId={detail.scan.scan_id}
               phases={detail.phaseRuns}
@@ -1267,24 +1266,20 @@ function WorkspacePage() {
               loadingOlderEvents={loadingOlderEvents}
               onLoadOlderEvents={loadOlderEvents}
             />
-            <div className="cs-qa-composer" aria-label={t("审计结果会话")}>
-              <textarea
-                disabled
-                aria-label={t("审计结果追问")}
-                placeholder={t(
-                  detail.scan.lifecycle_status === "completed"
-                    ? "结果会话尚未接入，可先查看各阶段记录和审计报告"
-                    : "全部流程执行完成后，才能基于审计结果会话",
-                )}
-              />
-              <span>
-                {t(
-                  detail.scan.lifecycle_status === "completed"
-                    ? "当前版本仅支持查看执行记录与产物"
-                    : "审计期间仅可查看执行过程",
-                )}
-              </span>
-            </div>
+            <AuditConversation
+              key={`conversation-${detail.scan.scan_id}`}
+              detail={detail}
+              onPhase={(id) => {
+                setRequestedPhase({ id });
+                document
+                  .querySelector(".cs-execution")
+                  ?.scrollIntoView?.({ block: "start" });
+              }}
+              onArtifact={(kind) => {
+                changeArtifact(kind);
+                openInspector();
+              }}
+            />
           </>
         )}
       </section>
@@ -1311,6 +1306,11 @@ function WorkspacePage() {
       <NewAuditDrawer
         open={drawerOpen}
         projects={projects}
+        initialProjectId={
+          !selectedId && initialParams.get("view") === "project"
+            ? selectedProject?.id
+            : undefined
+        }
         onClose={closeDrawer}
         onCreated={handleCreated}
       />

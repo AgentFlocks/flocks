@@ -9,7 +9,7 @@ export function AuditHome({
   scans,
   canCreate,
   onNewAudit,
-  onSelect,
+  onProjectSelect,
   hasMore,
   onLoadMore,
   loadingMore,
@@ -19,7 +19,7 @@ export function AuditHome({
   scans: ScanSummary[];
   canCreate: boolean;
   onNewAudit: () => void;
-  onSelect: (id: string) => void;
+  onProjectSelect: (id: string) => void;
   onProjectAdded: (project: ProjectSummary) => void;
   hasMore: boolean;
   onLoadMore: () => void;
@@ -71,18 +71,18 @@ export function AuditHome({
           <div className="cs-home-actions">
             <button
               type="button"
-              className="cs-button cs-button--primary"
-              onClick={onNewAudit}
-            >
-              {t("发起审计")}
-            </button>
-            <button
-              type="button"
               className="cs-button cs-button--secondary"
               aria-expanded={adding}
               onClick={() => setAdding(!adding)}
             >
               {t("添加项目")}
+            </button>
+            <button
+              type="button"
+              className="cs-button cs-button--primary"
+              onClick={onNewAudit}
+            >
+              {t("发起审计")}
             </button>
           </div>
         )}
@@ -217,16 +217,12 @@ export function AuditHome({
                   <td>{latest?.final_finding_count ?? "—"}</td>
                   <td>{count}</td>
                   <td>
-                    {latest ? (
-                      <button
-                        type="button"
-                        onClick={() => onSelect(latest.scan_id)}
-                      >
-                        {t("查看审计")}
-                      </button>
-                    ) : (
-                      <span>—</span>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => onProjectSelect(project.id)}
+                    >
+                      {t("查看项目")}
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -276,30 +272,6 @@ export function AuditHome({
         >
           {loadingMore ? "正在加载…" : "加载更多审计记录"}
         </button>
-      )}
-      {scans.some(
-        (s) =>
-          !s.workspace_ref || !projects.some((p) => p.id === s.workspace_ref),
-      ) && (
-        <details className="cs-history-records">
-          <summary>{t("其他审计记录")}</summary>
-          {scans
-            .filter(
-              (s) =>
-                !s.workspace_ref ||
-                !projects.some((p) => p.id === s.workspace_ref),
-            )
-            .map((s) => (
-              <button
-                type="button"
-                key={s.scan_id}
-                onClick={() => onSelect(s.scan_id)}
-              >
-                {s.display_name}
-                <StatusBadge status={s.lifecycle_status} />
-              </button>
-            ))}
-        </details>
       )}
     </section>
   );
