@@ -579,6 +579,7 @@ const styles = String.raw`
 .cs-adjudication-group--rejected .cs-adjudication-group__header > strong { background: var(--cs-danger-soft); color: var(--cs-danger); }
 .cs-adjudication-group > p { color: var(--cs-text-muted); font-size: 12px; line-height: 18px; margin: 0; padding: 14px 11px; }
 .cs-adjudication-group ul { background: var(--cs-surface-subtle); display: grid; gap: 8px; list-style: none; margin: 0; padding: 10px; }
+.cs-adjudication-group ul.cs-adjudication-group__scroll { overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; align-content: start; }
 .cs-adjudication-group--accepted ul, .cs-adjudication-group--rejected ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .cs-adjudication-group li { background: var(--cs-surface-elevated); border: 1px solid var(--cs-border); border-left-width: 3px; border-radius: 7px; display: grid; min-width: 0; overflow: hidden; }
 .cs-adjudication-group--accepted li { border-left-color: var(--cs-success); }
@@ -1114,7 +1115,6 @@ const styles = String.raw`
   font-variant-numeric: tabular-nums;
 }
 .cs-audit-metrics .cs-metric-text {
-  font-size: 15px;
   overflow-wrap: anywhere;
 }
 .cs-workbench .cs-execution {
@@ -1805,7 +1805,6 @@ const styles = String.raw`
 .cs-workbench .cs-scan-header .cs-button--danger:hover { color: var(--cs-danger); background: var(--cs-danger-soft); }
 .cs-workbench .cs-audit-metrics > div + div { padding-left: 24px; border-left: 1px solid var(--cs-border); }
 .cs-workbench .cs-audit-metrics small { font-size: 12px; line-height: 1.5; }
-.cs-workbench .cs-audit-metrics .cs-metric-text { letter-spacing: 0; }
 .cs-workbench .cs-execution > .cs-section-heading { padding: 20px 32px 0; }
 .cs-workbench .cs-execution > .cs-section-heading h2 { font-size: 13px; }
 .cs-workbench .cs-context-rail .cs-phase-rail { counter-reset: audit-stage; gap: 4px; }
@@ -1868,7 +1867,6 @@ const styles = String.raw`
 .cs-workbench .cs-audit-metrics { background: linear-gradient(100deg, var(--cs-overview-tint), var(--cs-surface) 110%); padding-top: 24px; padding-bottom: 26px; }
 .cs-workbench .cs-audit-metrics strong { color: var(--cs-primary); }
 .cs-workbench .cs-audit-metrics .cs-metric-findings.has-findings strong { color: var(--cs-danger); }
-.cs-workbench .cs-audit-metrics .cs-metric-text { color: var(--cs-text); }
 .cs-workbench .cs-audit-metrics > div + div { border-color: color-mix(in srgb, var(--cs-primary) 14%, transparent); }
 .cs-workbench .cs-execution > .cs-section-heading h2 { display: flex; align-items: center; gap: 8px; color: var(--cs-text); font-weight: 600; }
 .cs-workbench .cs-execution > .cs-section-heading h2::before { content: ""; width: 3px; height: 14px; background: var(--cs-primary); border-radius: 2px; }
@@ -2161,6 +2159,9 @@ const styles = String.raw`
 }
 .cs-native-workbench-panel .cs-answer-turn { min-width: 0; overflow-wrap: anywhere; }
 .cs-native-workbench-panel { background: var(--cs-surface); color: var(--cs-text); box-shadow: -8px 0 28px rgba(22,27,34,.08); }
+
+.cs-snapshot-stats.cs-dynamic-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media(max-width:767px) { .cs-snapshot-stats.cs-dynamic-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 `;
 
 export default styles;

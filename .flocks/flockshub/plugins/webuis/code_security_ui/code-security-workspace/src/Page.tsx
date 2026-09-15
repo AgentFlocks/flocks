@@ -312,7 +312,16 @@ function WorkspacePage() {
   const loadSelected = useCallback(
     (scanId: string, afterSeq = 0) => {
       const load = async () => {
-        const detailRequest = getScan(scanId).then((nextDetail) => {
+        const detailRequest = getScan(scanId).catch((reason) => {
+          if (reason?.response?.status === 404) {
+            deletedScanIdsRef.current.add(scanId);
+            authoritativeDetailsRef.current.delete(scanId);
+            scanViewCacheRef.current.delete(scanId);
+            setScans(current => current.filter(scan => scan.scan_id !== scanId));
+            if (selectedIdRef.current === scanId) { setDetail(null); setEvents([]); }
+          }
+          throw reason;
+        }).then((nextDetail) => {
           const displayDetail =
             authoritativeDetailsRef.current.get(scanId) || nextDetail;
           if (!scope && !deletedScanIdsRef.current.has(scanId)) {
@@ -320,7 +329,7 @@ function WorkspacePage() {
               mergeScans(current, [summaryFromDetail(displayDetail)]),
             );
           }
-          if (selectedIdRef.current === scanId) {
+          if (selectedIdRef.current === scanId && !deletedScanIdsRef.current.has(scanId)) {
             hasPresentedDetailRef.current = true;
             setDetail(displayDetail);
             setLoading(false);
@@ -449,12 +458,12 @@ function WorkspacePage() {
     [loadSelected],
   );
 
-  const reloadList = useCallback(async () => {
+  const reloadList = useCallback(async (reset = false) => {
     const ordinary = listGlobalScans().then((page) => {
       const items = page.items.filter(
         (scan) => !deletedScanIdsRef.current.has(scan.scan_id),
       );
-      setScans((current) => mergeScans(current, items));
+      setScans((current) => reset || !page.nextCursor ? items : mergeScans(current, items));
       setScanCursor(page.nextCursor);
       return items;
     });
@@ -480,6 +489,11 @@ function WorkspacePage() {
           .map((item) => ({ ...item, scan_id: item.audit_scan_id! }))
       : visibleItems;
   }, []);
+
+  useEffect(() => {
+    if (selectedId || scope) return;
+    void reloadList(true).catch((reason) => setError(reason?.message || t("无法加载更多审计记录")));
+  }, [selectedId, scope, reloadList, t]);
 
   const loadMoreScans = useCallback(async () => {
     if (!scanCursor || loadingMoreScansRef.current) return;
@@ -605,7 +619,7 @@ function WorkspacePage() {
       setLoading(false);
       setLoadingEvents(false);
       window.setTimeout(() => titleRef.current?.focus(), 0);
-      if (isTerminalScan(cached.detail)) return;
+
     } else {
       setLoading(true);
       setLoadingEvents(true);

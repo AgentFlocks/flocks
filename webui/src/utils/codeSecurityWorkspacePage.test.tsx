@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1232,7 +1233,73 @@ describe("code security workspace contract page", () => {
     ).toBeVisible();
   });
 
-  it("reuses a terminal audit view when switching back to it", async () => {
+  it("removes an externally deleted audit when returning to the history list", async () => {
+    const baseGet = apiGet.getMockImplementation()!;
+    let removed = false;
+    apiGet.mockImplementation(async (path: string, config?: unknown) => {
+      const result = await baseGet(path, config);
+      if (path === "/api/code-security/v1/scans" && removed) {
+        return { data: { ...result.data, items: result.data.items.filter((item: any) => item.scan_id !== "scan_demo"), nextCursor: null } };
+      }
+      return result;
+    });
+    render(<Page />);
+    await screen.findByRole("heading", { name: "flocks" });
+    removed = true;
+    await openTaskList();
+    await waitFor(() => expect(screen.queryByRole("button", { name: /查看审计 flocks/ })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /查看审计 legacy-service/ })).toBeInTheDocument();
+  });
+
+  it("shows dynamic validation counts in an overview card without claiming reproduction", () => {
+    render(<PhaseWorkspace detail={{ ...scanDetail, dynamicValidation: { status: "completed", ready: 0, completed: 3, inconclusive: 1, not_runnable: 2 } }} phases={[{ phase_run_id: "dynamic", phase: "dynamic_validation", ordinal: 1, status: "completed" }] as PhaseRun[]} workers={[]} events={[]} />);
+    const card = screen.getByRole("region", { name: "动态验证概览" });
+    expect(within(card).getByRole("heading", { name: "动态验证结果" })).toBeInTheDocument();
+    expect(within(card).getByText("3")).toBeInTheDocument();
+    expect(within(card).getByText(/已完成不代表漏洞已成功复现/)).toBeInTheDocument();
+  });
+
+  it.each([
+    ["skipped", { reason: "disabled_by_request" }, "本次未启用动态验证"],
+    ["failed", { error_type: "TimeoutError" }, "TimeoutError"],
+  ])("shows %s dynamic stage details without replacing them with scan status", (status, summary, reason) => {
+    render(<PhaseWorkspace detail={{ ...scanDetail, dynamicValidation: { status: "completed" } }} phases={[{ phase_run_id: "dynamic", phase: "dynamic_validation", ordinal: 1, status, summary }] as PhaseRun[]} workers={[]} events={[]} />);
+    if (status === "skipped") {
+      expect(screen.queryByRole("region", { name: "动态验证概览" })).not.toBeInTheDocument();
+      return;
+    }
+    const card = screen.getByRole("region", { name: "动态验证概览" });
+    expect(within(card).getByText(reason)).toBeInTheDocument();
+    expect(within(card).getByText(status === "skipped" ? "已跳过" : "执行失败")).toBeInTheDocument();
+    expect(within(card).queryByText("已完成")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["not_runnable", "无法动态执行"],
+    ["inconclusive", "结论不明确"],
+  ])("uses the recorded %s result when revisiting an older dynamic phase", (status, label) => {
+    render(<PhaseWorkspace detail={{ ...scanDetail, dynamicValidation: { status: "completed", completed: 9 } }} requestedPhase={{ id: "old-dynamic" }} phases={[
+      { phase_run_id: "old-dynamic", phase: "dynamic_validation", ordinal: 1, status: "completed", summary: { status } },
+      { phase_run_id: "new-dynamic", phase: "dynamic_validation", ordinal: 2, status: "completed" },
+    ] as PhaseRun[]} workers={[]} events={[]} />);
+    const card = screen.getByRole("region", { name: "动态验证概览" });
+    const intro = within(card).getByRole("heading", { name: "动态验证结果" }).parentElement!;
+    expect(within(intro).getByText(label)).toBeInTheDocument();
+    expect(within(intro).queryByText("已完成")).not.toBeInTheDocument();
+    expect(within(card).queryByText("9")).not.toBeInTheDocument();
+  });
+
+  it("does not show latest dynamic totals in an older phase", () => {
+    render(<PhaseWorkspace detail={{ ...scanDetail, dynamicValidation: { status: "completed", completed: 9 } }} requestedPhase={{ id: "old-dynamic" }} phases={[
+      { phase_run_id: "old-dynamic", phase: "dynamic_validation", ordinal: 1, status: "completed" },
+      { phase_run_id: "new-dynamic", phase: "dynamic_validation", ordinal: 2, status: "completed" },
+    ] as PhaseRun[]} workers={[]} events={[]} />);
+    const card = screen.getByRole("region", { name: "动态验证概览" });
+    expect(within(card).queryByText("9")).not.toBeInTheDocument();
+    expect(within(card).getByText(/该轮次未提供独立验证统计/)).toBeInTheDocument();
+  });
+
+  it("revalidates a cached terminal audit when switching back to it", async () => {
     const baseGet = apiGet.getMockImplementation()!;
     apiGet.mockImplementation((path: string, config?: unknown) => {
       if (path === "/api/code-security/v1/scans/scan_demo") {
@@ -1286,7 +1353,7 @@ describe("code security workspace contract page", () => {
       apiGet.mock.calls.filter(
         ([path]) => path === "/api/code-security/v1/scans/scan_demo",
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       apiGet.mock.calls.filter(
         ([path]) => path === "/api/code-security/v1/scans/scan_older",

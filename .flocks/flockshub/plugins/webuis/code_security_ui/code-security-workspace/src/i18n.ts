@@ -7,6 +7,20 @@ interface ContractRuntime {
 }
 
 const englishMessages: Record<string, string> = {
+  "该轮次未提供独立验证统计，请查看阶段详情或验证记录。": "Separate validation counts are unavailable for this run. See the stage details or validation records.",
+  "已完成验证": "Completed validations",
+  "动态验证概览": "Dynamic validation overview",
+  "动态验证结果": "Dynamic validation results",
+  "等待静态确认": "Waiting for static confirmation",
+  "等待探测方案": "Waiting for probe plan",
+  "结论不明确": "Inconclusive",
+  "待执行": "Ready to run",
+  "执行说明": "Execution details",
+  "查看验证记录": "View validation records",
+  "该阶段已跳过，未执行动态验证。": "This stage was skipped; dynamic validation was not performed.",
+  "本次未启用动态验证": "Dynamic validation was not enabled for this audit",
+  "统计为本次审计累计执行记录；已完成不代表漏洞已成功复现，请以验证结论为准。": "Counts summarize execution records across this audit. Completed runs do not necessarily mean a vulnerability was reproduced; refer to the validation conclusions.",
+
   "请刷新页面加载工作台": "Refresh the page to load the workbench",
   "Rex 审计助手": "Rex audit assistant",
   "本次查询来源": "Sources queried",

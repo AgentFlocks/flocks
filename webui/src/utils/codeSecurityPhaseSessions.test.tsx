@@ -1,5 +1,5 @@
 import React from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { NativePhaseSessions } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/AuditConversation";
 
@@ -64,4 +64,18 @@ it("shows unavailable sessions without rendering stale transcript content", asyn
   render(<NativePhaseSessions scanId="scan" phaseId="phase" running={false} />);
   expect(await screen.findByText("此会话已不可用。")).toBeInTheDocument();
   expect(screen.queryByText("Output a")).not.toBeInTheDocument();
+});
+
+
+it("hides an empty dynamic conversation list after a successful load", async () => {
+  items = [];
+  render(<NativePhaseSessions scanId="scan" phaseId="dynamic" running={false} hideEmpty />);
+  await waitFor(() => expect(screen.queryByRole("region", { name: "阶段会话" })).not.toBeInTheDocument());
+});
+
+it("keeps load failures visible when empty conversations are hidden", async () => {
+  get.mockRejectedValue(new Error("加载失败"));
+  render(<NativePhaseSessions scanId="scan" phaseId="dynamic" running={false} hideEmpty />);
+  expect(await screen.findByText("加载失败")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
 });

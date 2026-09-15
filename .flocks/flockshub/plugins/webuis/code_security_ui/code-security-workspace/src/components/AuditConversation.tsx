@@ -32,10 +32,12 @@ export function NativePhaseSessions({
   scanId,
   phaseId,
   running,
+  hideEmpty = false,
 }: {
   scanId: string;
   phaseId: string;
   running: boolean;
+  hideEmpty?: boolean;
 }) {
   const { t } = useCodeSecurityI18n();
   const api = useAuditApi();
@@ -122,6 +124,7 @@ export function NativePhaseSessions({
     -1;
   const visibleMessages =
     firstOutput < 0 ? [] : session!.messages.slice(firstOutput);
+  if (hideEmpty && data?.complete && data.items.length === 0 && !error) return null;
   return (
     <section className="cs-native-sessions" aria-label={t("阶段会话")}>
       <h3>

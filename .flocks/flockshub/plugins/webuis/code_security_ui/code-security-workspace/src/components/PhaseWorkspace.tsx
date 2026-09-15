@@ -10,6 +10,7 @@ import {
   formatFileSize,
   formatTime,
   phaseLabel,
+  phaseStatusLabels,
   roleLabels,
   shortId,
 } from "../labels";
@@ -404,6 +405,15 @@ export function PhaseWorkspace({
             phase={selected}
             workers={sorted.filter((phase) => phase.phase === selected.phase).length === 1 ? workers : []}
           />
+        ) : selected?.phase === "dynamic_validation" ? (
+          <>
+            <DynamicValidationOverview
+              phase={selected}
+              summary={sorted.filter(phase => phase.phase === "dynamic_validation").at(-1)?.phase_run_id === selected.phase_run_id ? detail?.dynamicValidation ?? (dynamicValidationStatus ? { status: dynamicValidationStatus } : undefined) : undefined}
+              onOpenResults={onOpenArtifacts && stageArtifacts.some(artifact => artifact.state !== "pending") ? () => onOpenArtifacts("dynamic_validation") : undefined}
+            />
+            {scanId && <NativePhaseSessions key={`session-${selected.phase_run_id}`} scanId={scanId} phaseId={selected.phase_run_id} running={selected.status === "running"} hideEmpty />}
+          </>
         ) : selected?.phase === "finalization" && detail ? (
           <GeneratedReport key={detail.scan.scan_id} detail={detail} />
         ) : scanId && selected ? (
@@ -713,9 +723,26 @@ function DecisionCandidateList({
     ? candidateIds.map((candidateId) => ({ candidateId, reason: "" }))
     : rejectedCandidates;
   const accepted = tone === "accepted";
+  const listRef = useRef<HTMLUListElement>(null);
   const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(
     null,
   );
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || items.length <= 4) return;
+    const visibleItems = Array.from(list.children).slice(0, 4);
+    const resize = () => {
+      const bottom = Math.max(...visibleItems.map(item => item.getBoundingClientRect().bottom));
+      const height = bottom - list.getBoundingClientRect().top + list.scrollTop;
+      if (height > 0) list.style.maxHeight = `${height + parseFloat(getComputedStyle(list).paddingBottom)}px`;
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(list);
+    visibleItems.forEach(item => observer.observe(item));
+    return () => { observer.disconnect(); list.style.maxHeight = ""; };
+  }, [items.length, expandedCandidateId]);
+
   const toggleEvidence = (candidateId: string) => {
     if (expandedCandidateId === candidateId) {
       setExpandedCandidateId(null);
@@ -755,7 +782,7 @@ function DecisionCandidateList({
         </strong>
       </header>
       {items.length ? (
-        <ul>
+        <ul ref={listRef} className={items.length > 4 ? "cs-adjudication-group__scroll" : undefined} tabIndex={items.length > 4 ? 0 : undefined} aria-label={t(title)}>
           {items.map((item, index) => {
             const expanded = expandedCandidateId === item.candidateId;
             const evidencePanelId = `${tone}-evidence-${index + 1}`;
@@ -1050,6 +1077,45 @@ function WorkerAttemptHistory({ attempts }: { attempts: WorkerAttempt[] }) {
       </ol>
     </details>
   );
+}
+
+function DynamicValidationOverview({ phase, summary, onOpenResults }: {
+  phase: PhaseRun;
+  summary?: ScanDetail["dynamicValidation"];
+  onOpenResults?: () => void;
+}) {
+  const { t } = useCodeSecurityI18n();
+  const recordedStatus = typeof phase.summary?.status === "string"
+    ? phase.summary.status.trim()
+    : undefined;
+  const status = ["skipped", "failed", "cancelled"].includes(phase.status)
+    ? phase.status
+    : recordedStatus || String(summary?.status || phase.status);
+  const statusLabels: Record<string, string> = {
+    ...phaseStatusLabels,
+    waiting_for_static_confirmation: "等待静态确认",
+    waiting_for_probe_plan: "等待探测方案",
+    inconclusive: "结论不明确",
+  };
+  const reason = phase.summary?.reason || phase.summary?.error || phase.summary?.error_type || summary?.failure_reason;
+  return <section className="cs-snapshot-overview" aria-label={t("动态验证概览")}>
+    <div className="cs-snapshot-intro">
+      <span className="cs-snapshot-symbol"><Icon name="shield" /></span>
+      <div><h3>{t("动态验证结果")}</h3><p>{t(statusLabels[status] || status)}</p></div>
+    </div>
+    <div className="cs-snapshot-stats cs-dynamic-stats">
+      {[["ready", "待执行"], ["completed", "已完成验证"], ["inconclusive", "结论不明确"], ["not_runnable", "无法动态执行"]].map(([key, label]) =>
+        <div key={key}><span>{t(label)}</span><strong>{typeof summary?.[key] === "number" ? summary[key] : "—"}<small>{t("个")}</small></strong></div>
+      )}
+    </div>
+    <div className="cs-snapshot-note"><Icon name="shield" /><p>{t(status === "skipped"
+      ? "该阶段已跳过，未执行动态验证。"
+      : !summary
+        ? "该轮次未提供独立验证统计，请查看阶段详情或验证记录。"
+        : "统计为本次审计累计执行记录；已完成不代表漏洞已成功复现，请以验证结论为准。")}</p></div>
+    {typeof reason === "string" && reason && <div className="cs-snapshot-target"><span>{t("执行说明")}</span><span>{reason === "disabled_by_request" ? t("本次未启用动态验证") : t(reason)}</span></div>}
+    {onOpenResults && <button type="button" className="cs-button cs-button--secondary" onClick={onOpenResults}>{t("查看验证记录")}</button>}
+  </section>;
 }
 
 function SnapshotOverview({ boundary, completed }: {
