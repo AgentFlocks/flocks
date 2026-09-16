@@ -382,7 +382,6 @@ class AnthropicProvider(BaseProvider):
             "model": model_id,
             "messages": anthropic_messages,
             "max_tokens": kwargs.get("max_tokens", 4096),
-            "cache_control": {"type": "ephemeral"},
         }
         
         # Add thinking mode support
@@ -480,7 +479,6 @@ class AnthropicProvider(BaseProvider):
             "model": model_id,
             "messages": anthropic_messages,
             "max_tokens": kwargs.get("max_tokens", 4096),
-            "cache_control": {"type": "ephemeral"},
         }
         
         # Add thinking mode support for streaming

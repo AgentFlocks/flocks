@@ -185,6 +185,7 @@ async def test_anthropic_chat_forwards_disabled_thinking_and_temperature_without
     kwargs = messages_api.create.await_args.kwargs
     assert kwargs["thinking"] == {"type": "disabled"}
     assert kwargs["temperature"] == 0.2
+    assert "cache_control" not in kwargs
     beta_messages_api.create.assert_not_awaited()
 
 
@@ -214,6 +215,7 @@ async def test_anthropic_stream_forwards_disabled_thinking_and_temperature_witho
     kwargs = messages_api.stream.call_args.kwargs
     assert kwargs["thinking"] == {"type": "disabled"}
     assert kwargs["temperature"] == 0.2
+    assert "cache_control" not in kwargs
     beta_messages_api.stream.assert_not_called()
     assert chunks[-1].finish_reason == "stop"
 

@@ -42,6 +42,7 @@ async def test_anthropic_chat_forwards_structured_system_blocks():
     assert response.content == "ok"
     request_kwargs = create_mock.await_args.kwargs
     assert request_kwargs["system"] == system_blocks
+    assert "cache_control" not in request_kwargs
 
 
 def test_anthropic_config_falls_back_to_environment_credentials(monkeypatch):
