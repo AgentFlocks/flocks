@@ -239,7 +239,7 @@ def register_public_tool() -> None:
             name=PUBLIC_TOOL_NAME,
             description=(
                 "Start and manage a trusted digest-bound code security audit. "
-                "Static analysis copies source into a read-only snapshot by default and never executes target code. "
+                "Audits copy source into a read-only snapshot by default and provide standard file, command, and research tools. "
                 "dynamic_enabled=true runs validated probes in restricted local Docker. "
                 "Start returns quickly; keep the scan_id for status, wait, result, or cancel."
             ),

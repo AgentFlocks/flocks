@@ -22,17 +22,15 @@ from flocks_code_security.orchestration import (
 )
 from flocks_code_security.runtime import build_runtime
 from flocks_code_security.service import AuditService
+from source_helpers import inventory_source, read_source, search_source
 from flocks_code_security.tools import (
     audit_adjudication_context,
     audit_cancel,
     audit_finalize,
-    audit_inventory,
     audit_knowledge_base,
     audit_probe_subject,
     audit_prepare,
-    audit_read,
     audit_repository_summary,
-    audit_search,
     audit_run_workers,
     audit_submit_candidate,
     audit_submit_coverage,
@@ -131,10 +129,10 @@ async def _complete_threat_model(
     )
     summary = await audit_repository_summary(modeler)
     assert summary.success
-    inventory = await audit_inventory(modeler)
+    inventory = await inventory_source(modeler)
     assert inventory.success
     source_file = next(item for item in inventory.output["files"] if not item["is_binary"])
-    source = await audit_read(
+    source = await read_source(
         modeler,
         source_file["path"],
         start_line=1,
@@ -349,8 +347,8 @@ async def test_guided_baseline_and_investigator_record_separate_bound_accesses(
         )
         worker = _agent_context(session_id, f"{session_id}-message", agent_name)
         assert (await audit_threat_model_context(worker)).success
-        assert (await audit_inventory(worker)).success
-        assert (await audit_read(worker, "app.py", start_line=1, end_line=1)).success
+        assert (await inventory_source(worker)).success
+        assert (await read_source(worker, "app.py", start_line=1, end_line=1)).success
         blocked = await audit_submit_coverage(
             worker,
             dispositions=[{"path": "app.py", "claim": "analyzed"}],
@@ -691,9 +689,9 @@ async def test_transient_worker_failure_resumes_same_session_and_attempt(
         AsyncMock(
             return_value={
                 "audit_repository_summary",
-                "audit_inventory",
-                "audit_read",
-                "audit_search",
+                "glob",
+                "read",
+                "grep",
                 "audit_submit_threat_model",
             }
         ),
@@ -806,15 +804,8 @@ async def test_analysis_progress_without_coverage_gets_one_coverage_only_resume(
         children.append(child)
         return child
 
-    callable_tools = {
-        "audit_knowledge_base",
-        "audit_threat_model_context",
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
-        "audit_submit_candidate",
-        "audit_submit_coverage",
-    }
+    from flocks_code_security.projection import AGENT_TOOLS
+    callable_tools = set(AGENT_TOOLS["code-security-baseline"])
     messages = AsyncMock()
     monkeypatch.setattr(Session, "get_by_id", AsyncMock(return_value=parent))
     monkeypatch.setattr(Session, "create", create_child)
@@ -836,7 +827,19 @@ async def test_analysis_progress_without_coverage_gets_one_coverage_only_resume(
         turn_callable_tool_names=sorted(callable_tools),
     )
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
+    from flocks.tool.registry import ToolRegistry
+    ToolRegistry.init()
+    snapshot = runtime.store.get_snapshot(snapshot_id)
+    arguments = {"filePath": str(Path(snapshot.root_path) / "app.py")}
+    result = await ToolRegistry.get("read").execute(baseline, **arguments)
+    assert result.success, result.error
+    monkeypatch.setattr(Session, "get_by_id_unfiltered", AsyncMock(return_value=parent))
+    monkeypatch.setattr(Message, "list_with_parts", AsyncMock(return_value=[SimpleNamespace(
+        info=SimpleNamespace(role="assistant", agent=baseline.agent),
+        parts=[SimpleNamespace(id="read-app", type="tool", sessionID=baseline.session_id, tool="read",
+            state=SimpleNamespace(status="completed", input=arguments, output=result.output))],
+    )]))
+    assert not runtime.store.work_attempt_has_analysis_progress(worker["attempt_id"])
     manager.tasks["task-1"].status = "completed"
 
     resumed = await audit_wait_workers(
@@ -1009,7 +1012,7 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
         "message-2",
         "code-security-threat-modeler",
     )
-    source = await audit_read(modeler, "app.py", start_line=1, end_line=2)
+    source = await read_source(modeler, "app.py", start_line=1, end_line=2)
     incomplete = await audit_submit_threat_model(
         modeler,
         {"summary": "Missing canonical fields."},
@@ -1132,7 +1135,7 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
         role="threat_modeler",
         work_unit_id=missing_capsule_unit,
     )
-    missing_capsule = await audit_read(
+    missing_capsule = await read_source(
         ToolContext(
             session_id="missing-capsule-modeler",
             message_id="message-4",
@@ -1223,7 +1226,7 @@ async def test_large_repository_threat_model_needs_summary_not_inventory_paginat
     summary = await audit_repository_summary(modeler)
     assert summary.success is True
     assert summary.output["file_count"] == 502
-    source = await audit_read(modeler, "app.py", start_line=1, end_line=2)
+    source = await read_source(modeler, "app.py", start_line=1, end_line=2)
     submitted = await audit_submit_threat_model(
         modeler,
         {
@@ -1327,23 +1330,23 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     )
     assert unbacked_coverage.success is False
     assert "not backed" in str(unbacked_coverage.error)
-    assert (await audit_inventory(baseline)).success
-    assert (await audit_search(baseline, "return", path_glob="app.py")).success
+    assert (await inventory_source(baseline)).success
+    assert (await search_source(baseline, "return", path_glob="app.py")).success
     search_only_coverage = await audit_submit_coverage(
         baseline,
         dispositions=[{"path": "app.py", "claim": "analyzed"}],
     )
     assert search_only_coverage.success is False
     assert search_only_coverage.metadata["error_code"] == "COVERAGE_OVERCLAIM"
-    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await read_source(baseline, "app.py", start_line=1, end_line=1)).success
     partial_read_coverage = await audit_submit_coverage(
         baseline,
         dispositions=[{"path": "app.py", "claim": "analyzed"}],
     )
     assert partial_read_coverage.success is False
     assert "complete snapshot source reads" in str(partial_read_coverage.error)
-    source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
-    auxiliary = await audit_read(
+    source = await read_source(baseline, "app.py", start_line=1, end_line=2)
+    auxiliary = await read_source(
         baseline,
         "aaa_helper.py",
         start_line=1,
@@ -1432,8 +1435,8 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     )
     assert unread_verdict.success is False
     assert "independently read" in str(unread_verdict.error)
-    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
-    assert (await audit_read(verifier, "aaa_helper.py", start_line=1, end_line=2)).success
+    assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
+    assert (await read_source(verifier, "aaa_helper.py", start_line=1, end_line=2)).success
     verdict = await audit_submit_verdict(
         verifier,
         candidate.output["candidate_id"],
@@ -1653,11 +1656,11 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
         "code-security-baseline",
     )
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
+    assert (await inventory_source(baseline)).success
+    source = await read_source(baseline, "app.py", start_line=1, end_line=2)
     assert source.success
-    assert (await audit_search(baseline, "not-present-in-fixture")).success
-    assert (await audit_read(baseline, "Dockerfile", start_line=1, end_line=2)).success
+    assert (await search_source(baseline, "not-present-in-fixture")).success
+    assert (await read_source(baseline, "Dockerfile", start_line=1, end_line=2)).success
     candidate = await audit_submit_candidate(
         baseline,
         _candidate_payload(
@@ -1702,7 +1705,7 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
         "code-security-verifier",
     )
     assert (await audit_verification_subject(verifier)).success
-    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
+    assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
     assert (
         await audit_submit_verdict(
             verifier,
@@ -1742,9 +1745,9 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
         "code-security-prober",
     )
     assert (await audit_probe_subject(prober)).success
-    assert (await audit_inventory(prober)).success
-    assert (await audit_read(prober, "app.py", start_line=1, end_line=2)).success
-    assert (await audit_search(prober, "eval")).success
+    assert (await inventory_source(prober)).success
+    assert (await read_source(prober, "app.py", start_line=1, end_line=2)).success
+    assert (await search_source(prober, "eval")).success
     submitted_probe = await audit_submit_probe(
         prober,
         {
@@ -1893,11 +1896,11 @@ async def test_empty_files_and_static_limitations_do_not_make_coverage_partial(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
-    assert (await audit_read(baseline, "assets/logo.svg", start_line=1, end_line=1)).success
-    assert (await audit_read(baseline, "docs/security.md", start_line=1, end_line=1)).success
-    assert (await audit_read(baseline, "tests/test_app.py", start_line=1, end_line=1)).success
+    assert (await inventory_source(baseline)).success
+    assert (await read_source(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await read_source(baseline, "assets/logo.svg", start_line=1, end_line=1)).success
+    assert (await read_source(baseline, "docs/security.md", start_line=1, end_line=1)).success
+    assert (await read_source(baseline, "tests/test_app.py", start_line=1, end_line=1)).success
 
     invalid = await audit_submit_coverage(
         baseline,
@@ -2011,8 +2014,8 @@ async def test_host_attestation_records_partial_coverage_from_current_attempt_re
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    assert (await audit_read(baseline, "app.py", start_line=1, end_line=2)).success
+    assert (await inventory_source(baseline)).success
+    assert (await read_source(baseline, "app.py", start_line=1, end_line=2)).success
 
     submitted = await audit_submit_coverage(
         baseline,
@@ -2135,9 +2138,9 @@ async def test_exhaustive_attestation_blocks_until_all_files_have_terminal_state
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
-    assert (await audit_read(baseline, "app.py", start_line=3, end_line=3)).success
+    assert (await inventory_source(baseline)).success
+    assert (await read_source(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await read_source(baseline, "app.py", start_line=3, end_line=3)).success
 
     gap_rejected = await audit_submit_coverage(
         baseline,
@@ -2147,7 +2150,7 @@ async def test_exhaustive_attestation_blocks_until_all_files_have_terminal_state
     assert gap_rejected.metadata["error_code"] == "COVERAGE_OVERCLAIM"
     assert gap_rejected.metadata["violations"][0]["actual_state"] == "read_partial"
 
-    assert (await audit_read(baseline, "app.py", start_line=2, end_line=2)).success
+    assert (await read_source(baseline, "app.py", start_line=2, end_line=2)).success
 
     blocked = await audit_submit_coverage(
         baseline,
@@ -2181,7 +2184,7 @@ async def test_exhaustive_attestation_blocks_until_all_files_have_terminal_state
         }
     ]
 
-    assert (await audit_read(baseline, "other.py", start_line=1, end_line=1)).success
+    assert (await read_source(baseline, "other.py", start_line=1, end_line=1)).success
     complete = await audit_submit_coverage(
         baseline,
         dispositions=[
@@ -2240,8 +2243,8 @@ async def test_fresh_attempt_cannot_attest_with_previous_attempt_reads(
     )
     first = _agent_context("baseline-1", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(first)).success
-    assert (await audit_inventory(first)).success
-    assert (await audit_read(first, "app.py", start_line=1, end_line=2)).success
+    assert (await inventory_source(first)).success
+    assert (await read_source(first, "app.py", start_line=1, end_line=2)).success
     first_binding = runtime.store.require_binding("baseline-1", {"baseline"})
     runtime.store.finish_work_attempt(
         first_binding.attempt_id,
@@ -2318,8 +2321,8 @@ async def test_failed_coverage_is_sealed_as_deferred_work(
         dispositions=[{"path": "does-not-exist.py", "claim": "analyzed"}],
     )
     assert invalid.success is False
-    assert (await audit_inventory(baseline)).success
-    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await inventory_source(baseline)).success
+    assert (await read_source(baseline, "app.py", start_line=1, end_line=1)).success
     failed = await audit_submit_coverage(
         baseline,
         dispositions=[
@@ -2411,8 +2414,8 @@ async def test_investigator_success_removes_active_baseline_gap_from_report(
             "code-security-baseline" if role == "baseline" else "code-security-investigator",
         )
         assert (await audit_threat_model_context(worker)).success
-        assert (await audit_inventory(worker)).success
-        assert (await audit_read(worker, "app.py", start_line=1, end_line=end_line)).success
+        assert (await inventory_source(worker)).success
+        assert (await read_source(worker, "app.py", start_line=1, end_line=end_line)).success
         dispositions = (
             [{"path": "app.py", "claim": "analyzed"}]
             if role == "investigator"
@@ -2482,7 +2485,7 @@ async def test_exhaustive_finalize_returns_coverage_blocked_and_preserves_facts(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
+    assert (await inventory_source(baseline)).success
     submitted = await audit_submit_coverage(
         baseline,
         open_questions=[
@@ -2546,7 +2549,7 @@ async def test_worker_tool_creates_at_most_one_exact_path_investigator(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
+    assert (await inventory_source(baseline)).success
     submitted = await audit_submit_coverage(
         baseline,
         open_questions=[
@@ -2665,7 +2668,7 @@ async def test_store_enforces_analysis_phase_ordering(
         "code-security-baseline",
     )
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
+    assert (await inventory_source(baseline)).success
     coverage = await audit_submit_coverage(
         baseline,
         open_questions=[
@@ -2773,8 +2776,8 @@ async def test_parent_can_direct_only_one_targeted_rescan(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await inventory_source(baseline)).success
+    assert (await read_source(baseline, "app.py", start_line=1, end_line=1)).success
     assert (
         await audit_submit_coverage(
             baseline,
@@ -2879,8 +2882,8 @@ async def test_parent_can_direct_only_one_targeted_rescan(
     rescan_context = await audit_threat_model_context(rescan)
     assert rescan_context.success
     assert rescan_context.output["targeted_rescan"]["paths"] == ["app.py"]
-    assert (await audit_inventory(rescan)).success
-    assert (await audit_read(rescan, "app.py", start_line=1, end_line=1)).success
+    assert (await inventory_source(rescan)).success
+    assert (await read_source(rescan, "app.py", start_line=1, end_line=1)).success
     assert (
         await audit_submit_coverage(
             rescan,
@@ -2962,8 +2965,8 @@ async def test_parent_rejection_removes_verifier_confirmed_candidate(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    source = await audit_read(baseline, "app.py", start_line=1, end_line=1)
+    assert (await inventory_source(baseline)).success
+    source = await read_source(baseline, "app.py", start_line=1, end_line=1)
     candidate = await audit_submit_candidate(
         baseline,
         _candidate_payload(
@@ -3001,7 +3004,7 @@ async def test_parent_rejection_removes_verifier_confirmed_candidate(
     )
     verifier = _agent_context("verifier", "message-3", "code-security-verifier")
     assert (await audit_verification_subject(verifier)).success
-    assert (await audit_read(verifier, "app.py", start_line=1, end_line=1)).success
+    assert (await read_source(verifier, "app.py", start_line=1, end_line=1)).success
     assert (
         await audit_submit_verdict(
             verifier,
@@ -3113,8 +3116,8 @@ async def test_unverified_candidate_blocks_completed_bundle(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    source = await audit_read(baseline, "app.py", start_line=1, end_line=1)
+    assert (await inventory_source(baseline)).success
+    source = await read_source(baseline, "app.py", start_line=1, end_line=1)
     candidate = await audit_submit_candidate(
         baseline,
         _candidate_payload(
@@ -3187,8 +3190,8 @@ async def test_report_write_failure_does_not_publish_partial_bundle(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
+    assert (await inventory_source(baseline)).success
+    assert (await read_source(baseline, "app.py", start_line=1, end_line=1)).success
     assert (
         await audit_submit_coverage(
             baseline,
@@ -3256,8 +3259,8 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
+    assert (await inventory_source(baseline)).success
+    source = await read_source(baseline, "app.py", start_line=1, end_line=2)
     candidate_payload = _candidate_payload(
         [
             {
@@ -3309,7 +3312,7 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
         )
         assert (await audit_verification_subject(verifier)).success
         assert (
-            await audit_read(verifier, "app.py", start_line=1, end_line=2)
+            await read_source(verifier, "app.py", start_line=1, end_line=2)
         ).success
         assert (
             await audit_submit_verdict(
@@ -3387,8 +3390,8 @@ async def test_three_independent_votes_produce_one_majority_verdict(
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
     assert (await audit_threat_model_context(baseline)).success
-    assert (await audit_inventory(baseline)).success
-    source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
+    assert (await inventory_source(baseline)).success
+    source = await read_source(baseline, "app.py", start_line=1, end_line=2)
     candidate = await audit_submit_candidate(
         baseline,
         _candidate_payload(
@@ -3452,7 +3455,7 @@ async def test_three_independent_votes_produce_one_majority_verdict(
         assert subject.output["vote_index"] == index
         assert subject.output["trust"] == "untrusted_candidate_claim"
         subjects.append(subject.output["claim"])
-        assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
+        assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
         vote = await audit_submit_verdict(
             verifier,
             candidate.output["candidate_id"],
@@ -3521,9 +3524,9 @@ async def test_background_worker_orchestration_retries_failed_verification(
         return_value={
             "audit_knowledge_base",
             "audit_repository_summary",
-            "audit_inventory",
-            "audit_read",
-            "audit_search",
+            "glob",
+            "read",
+            "grep",
             "audit_submit_threat_model",
         }
     )
@@ -3566,9 +3569,9 @@ async def test_background_worker_orchestration_retries_failed_verification(
         turn_callable_tool_names=sorted(get_callable_tools.return_value),
     )
     assert (await audit_repository_summary(modeler)).success
-    inventory = await audit_inventory(modeler)
+    inventory = await inventory_source(modeler)
     assert inventory.success
-    source = await audit_read(modeler, "app.py", start_line=1, end_line=2)
+    source = await read_source(modeler, "app.py", start_line=1, end_line=2)
     assert (
         await audit_submit_threat_model(
             modeler,
@@ -3635,8 +3638,8 @@ async def test_background_worker_orchestration_retries_failed_verification(
         turn_callable_tool_names=sorted(get_callable_tools.return_value),
     )
     assert (await audit_threat_model_context(baseline)).success
-    source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
-    assert (await audit_inventory(baseline)).success
+    source = await read_source(baseline, "app.py", start_line=1, end_line=2)
+    assert (await inventory_source(baseline)).success
     candidate = await audit_submit_candidate(
         baseline,
         _candidate_payload(
@@ -3696,7 +3699,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
         turn_callable_tool_names=sorted(get_callable_tools.return_value),
     )
     assert (await audit_verification_subject(verifier)).success
-    assert (await audit_read(verifier, "app.py", start_line=1, end_line=2)).success
+    assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
     assert (
         await audit_submit_verdict(
             verifier,

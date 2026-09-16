@@ -59,6 +59,7 @@ from flocks_code_security.orchestration import (
 )
 from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
+from flocks_code_security.source_receipts import sync_source_receipts, sync_worker_source_receipts
 from flocks_code_security.poc import decode_poc_bytes
 from flocks_code_security.store import WorkerCapacityUnavailable
 
@@ -115,7 +116,6 @@ PROBER_ROLE = {"prober"}
 POC_GENERATOR_ROLE = {"poc_generator"}
 CYBERGYM_SOLVER_ROLE = {"cybergym_solver"}
 KNOWLEDGE_BASE_ROLES = COORDINATOR_ROLE | THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | POC_GENERATOR_ROLE
-SOURCE_READ_ROLES = THREAT_MODELER_ROLE | SOURCE_SUBMIT_ROLES | VERIFIER_ROLE | PROBER_ROLE | POC_GENERATOR_ROLE
 EVIDENCE_ROLES = {
     "user_input",
     "entrypoint",
@@ -137,9 +137,6 @@ AUDIT_TOOL_NAMES = (
     "audit_prepare",
     "audit_knowledge_base",
     "audit_repository_summary",
-    "audit_inventory",
-    "audit_read",
-    "audit_search",
     "audit_threat_model_context",
     "audit_submit_threat_model",
     "audit_verification_subject",
@@ -646,24 +643,6 @@ async def audit_knowledge_base(ctx: ToolContext) -> ToolResult:
         return _error(exc, title="Audit knowledge base unavailable")
 
 
-async def audit_inventory(
-    ctx: ToolContext,
-    offset: int = 0,
-    limit: int = 500,
-) -> ToolResult:
-    try:
-        _require_agent_execution(ctx, SOURCE_READ_ROLES)
-        output = await asyncio.to_thread(
-            get_runtime().source.inventory,
-            ctx.session_id,
-            offset=offset,
-            limit=limit,
-        )
-        return ToolResult(success=True, output=output, title="Snapshot inventory")
-    except STORE_ERRORS as exc:
-        return _error(exc, title="Snapshot inventory failed")
-
-
 async def audit_repository_summary(ctx: ToolContext) -> ToolResult:
     try:
         _require_agent_execution(ctx, THREAT_MODELER_ROLE | POC_GENERATOR_ROLE)
@@ -678,48 +657,6 @@ async def audit_repository_summary(ctx: ToolContext) -> ToolResult:
         )
     except STORE_ERRORS as exc:
         return _error(exc, title="Repository summary failed")
-
-
-async def audit_read(
-    ctx: ToolContext,
-    relative_path: str,
-    start_line: int = 1,
-    end_line: int | None = None,
-) -> ToolResult:
-    try:
-        _require_agent_execution(ctx, SOURCE_READ_ROLES)
-        output = await asyncio.to_thread(
-            get_runtime().source.read,
-            ctx.session_id,
-            relative_path,
-            start_line=start_line,
-            end_line=end_line,
-        )
-        return ToolResult(success=True, output=output, title=f"Read {relative_path}")
-    except STORE_ERRORS as exc:
-        return _error(exc, title="Snapshot read failed")
-
-
-async def audit_search(
-    ctx: ToolContext,
-    query: str,
-    path_glob: str | None = None,
-    case_sensitive: bool = False,
-    max_results: int = 100,
-) -> ToolResult:
-    try:
-        _require_agent_execution(ctx, SOURCE_READ_ROLES)
-        output = await asyncio.to_thread(
-            get_runtime().source.search,
-            ctx.session_id,
-            query,
-            path_glob=path_glob,
-            case_sensitive=case_sensitive,
-            max_results=max_results,
-        )
-        return ToolResult(success=True, output=output, title=f"Search snapshot for {query}")
-    except STORE_ERRORS as exc:
-        return _error(exc, title="Snapshot search failed")
 
 
 async def audit_threat_model_context(ctx: ToolContext) -> ToolResult:
@@ -900,6 +837,7 @@ async def audit_submit_poc(
     try:
         _require_agent_execution(ctx, POC_GENERATOR_ROLE)
         binding = runtime.store.require_binding(ctx.session_id, POC_GENERATOR_ROLE)
+        await sync_source_receipts(ctx, runtime, binding)
         await asyncio.to_thread(runtime.store.require_knowledge_base_consumed, binding)
         output = await asyncio.to_thread(runtime.store.save_poc_bundle, binding, poc)
         return ToolResult(
@@ -1090,6 +1028,7 @@ async def audit_submit_verdict(
     try:
         _require_agent_execution(ctx, VERIFIER_ROLE)
         binding = runtime.store.require_binding(ctx.session_id, VERIFIER_ROLE)
+        await sync_source_receipts(ctx, runtime, binding)
         normalized_verdict = str(verdict or "").lower()
         if normalized_verdict not in {"confirmed", "rejected", "insufficient_evidence"}:
             raise ValueError("Unsupported verification verdict")
@@ -1181,6 +1120,7 @@ async def audit_submit_coverage(
     try:
         _require_agent_execution(ctx, SOURCE_SUBMIT_ROLES)
         binding = runtime.store.require_binding(ctx.session_id, SOURCE_SUBMIT_ROLES)
+        await sync_source_receipts(ctx, runtime, binding)
         await asyncio.to_thread(
             runtime.store.require_threat_model_consumed,
             binding,
@@ -1888,6 +1828,9 @@ async def _launch_worker(
         prompt = cybergym_solver_prompt(recovery_reason=recovery_reason)
     else:
         raise ValueError("Worker prompt data is incomplete")
+    from flocks_code_security.builtin_tools import source_workspace_prompt
+
+    prompt += await asyncio.to_thread(source_workspace_prompt, runtime, snapshot_id, unit["paths"])
     await asyncio.to_thread(
         runtime.store.reserve_worker_capacity,
         unit["work_unit_id"],
@@ -2401,6 +2344,25 @@ async def _refresh_worker_batch(
                 status="completed",
             )
             continue
+        if unit["role"] in {"baseline", "investigator"} and isinstance(unit.get("session_id"), str):
+            try:
+                await sync_worker_source_receipts(
+                    unit["session_id"], expected_attempt_id=unit.get("attempt_id"),
+                )
+            except ExecutionCapsuleError:
+                await _ensure_capsule_mismatch_terminal(
+                    batch_id, unit["work_unit_id"], source="source_receipt_sync",
+                )
+                continue
+            except STORE_ERRORS:
+                await asyncio.to_thread(
+                    runtime.store.finish_work_attempt,
+                    unit["attempt_id"],
+                    status="failed",
+                    failure_class="source_receipt_invalid",
+                    work_unit_status="failed",
+                )
+                continue
         analysis_progress = (
             unit["role"] in {"baseline", "investigator"}
             and isinstance(unit.get("attempt_id"), str)
@@ -3246,36 +3208,6 @@ def register_tools() -> None:
         "Return the canonical host-computed repository summary and record that this threat-modeling worker consumed it.",
         audit_repository_summary,
         [],
-    )
-    _register(
-        "audit_inventory",
-        "List a bounded page of files, digests, languages, sizes, and omissions in the session-bound snapshot.",
-        audit_inventory,
-        [
-            _parameter("offset", ParameterType.INTEGER, "Zero-based inventory offset.", required=False, default=0),
-            _parameter("limit", ParameterType.INTEGER, "Page size, capped at 500.", required=False, default=500),
-        ],
-    )
-    _register(
-        "audit_read",
-        "Read at most 400 lines from a relative path in the session-bound snapshot.",
-        audit_read,
-        [
-            _parameter("relative_path", ParameterType.STRING, "Snapshot-relative source path."),
-            _parameter("start_line", ParameterType.INTEGER, "One-based first line.", required=False, default=1),
-            _parameter("end_line", ParameterType.INTEGER, "Optional one-based last line.", required=False),
-        ],
-    )
-    _register(
-        "audit_search",
-        "Search literal text in the session-bound snapshot without running target code.",
-        audit_search,
-        [
-            _parameter("query", ParameterType.STRING, "Literal text to search for."),
-            _parameter("path_glob", ParameterType.STRING, "Optional relative file glob.", required=False),
-            _parameter("case_sensitive", ParameterType.BOOLEAN, "Whether matching is case-sensitive.", required=False, default=False),
-            _parameter("max_results", ParameterType.INTEGER, "Maximum matches, capped at 200.", required=False, default=100),
-        ],
     )
     _register(
         "audit_threat_model_context",

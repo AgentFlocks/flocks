@@ -12,6 +12,7 @@ from flocks.session.callable_schema import resolve_callable_tool_infos
 from flocks.tool.registry import Tool, ToolContext, ToolRegistry, ToolResult
 
 from flocks_code_security import public_tool
+from flocks_code_security.builtin_tools import COMMON_TOOL_NAMES
 from flocks_code_security.agents import AGENTS_ROOT, register_agents
 from flocks_code_security.orchestration import (
     baseline_prompt,
@@ -43,12 +44,12 @@ async def _replacement_handler(_ctx, **_kwargs) -> ToolResult:
 def test_projection_only_reduces_code_security_agents() -> None:
     register_tools()
     audit_prepare = ToolRegistry.get("audit_prepare").info
-    audit_inventory = ToolRegistry.get("audit_inventory").info
+    glob = ToolRegistry.get("glob").info
     audit_submit_threat_model = ToolRegistry.get("audit_submit_threat_model").info
     question = ToolRegistry.get("question").info
     tools = [
         audit_prepare,
-        audit_inventory,
+        glob,
         audit_submit_threat_model,
         question,
         SimpleNamespace(name="bash"),
@@ -62,9 +63,9 @@ def test_projection_only_reduces_code_security_agents() -> None:
     )
     ordinary = code_security_tool_projection(tools, {"agent": "rex"})
 
-    assert [tool.name for tool in coordinator] == ["audit_prepare", "question"]
+    assert [tool.name for tool in coordinator] == ["audit_prepare", "glob", "question"]
     assert [tool.name for tool in threat_modeler] == [
-        "audit_inventory",
+        "glob",
         "audit_submit_threat_model",
     ]
     assert ordinary == tools
@@ -73,6 +74,7 @@ def test_projection_only_reduces_code_security_agents() -> None:
 def test_projection_narrows_session_scoped_parent_adjudication_tools() -> None:
     register_tools()
     names = [
+        *COMMON_TOOL_NAMES,
         "audit_knowledge_base",
         "audit_adjudication_context",
         "audit_submit_adjudication",
@@ -90,6 +92,7 @@ def test_projection_narrows_session_scoped_parent_adjudication_tools() -> None:
     )
 
     assert [tool.name for tool in projected] == [
+        *COMMON_TOOL_NAMES,
         "audit_knowledge_base",
         "audit_adjudication_context",
         "audit_submit_adjudication",
@@ -158,6 +161,7 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
         assert agent.memory_enabled is False
         assert agent.require_dedicated_session is True
         raw = yaml.safe_load((AGENTS_ROOT / name / "agent.yaml").read_text(encoding="utf-8"))
+        assert set(COMMON_TOOL_NAMES).issubset(agent.tools)
         assert raw["tools"] == AGENT_TOOLS[name]
         assert set(agent.tools).issubset(AGENT_TOOLS[name])
 
@@ -202,6 +206,7 @@ def test_all_audit_tools_register() -> None:
 
     expected = {name for names in AGENT_TOOLS.values() for name in names if name.startswith("audit_")}
     assert expected
+    assert all(ToolRegistry.get(name) is None for name in ("audit_inventory", "audit_read", "audit_search"))
     assert all(ToolRegistry.get(name) is not None for name in expected)
     for name in expected:
         info = ToolRegistry.get(name).info
@@ -349,9 +354,9 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     assert hostile not in rescan
     assert "single top-level candidate argument" in baseline
     assert "exact per-file dispositions" in baseline
-    assert "audit_search only produces located coverage" in baseline
+    assert "grep only produces located coverage" in baseline
     assert "First call audit_repository_summary" in threat_modeler
-    assert "full inventory pagination is not required" in threat_modeler
+    assert "exhaustive enumeration is not required" in threat_modeler
     assert "relative_path, blob_digest, start_line, and end_line" in verifier
     assert "blocked exhaustive attestation" not in rescan
     assert "valid complete, partial, or blocked attestation ends" in rescan

@@ -58,3 +58,8 @@ budget, stop with no final artifact instead of submitting reachability-only or
 `unverified` evidence. Never submit a null artifact or implicit empty input. Do
 not request fixed-side information, use a shell, choose an image/binary/argv/
 mount, alter source, or claim that unverified evidence is a reproduced crash.
+
+
+## Standard tools
+
+Use `read`, `write`, `edit`, `apply_patch`, `glob`, `delete`, `move`, `copy`, `mkdir`, `bash`, `grep`, `webfetch`, `websearch`, and `todo` for supporting audit work. Keep the canonical source snapshot unchanged and use separate scratch copies for modifications or experiments. Write final outputs under `~/.flocks/workspace/outputs/<current-date>/`, resolving the date at execution time; put temporary drafts under `/tmp/`. Read source evidence with `read` (`offset` is zero-based, `limit` is a line count); obtain `blob_digest` from existing candidate context or compute the unchanged file's SHA-256 with `bash`. Audit submission tools verify completed reads from the session transcript; `read` itself only returns file contents. Search and shell output do not establish complete read coverage.

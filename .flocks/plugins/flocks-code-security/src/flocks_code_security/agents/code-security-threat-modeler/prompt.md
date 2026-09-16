@@ -6,11 +6,11 @@ When the work-unit message says this is a knowledge-guided audit, first call `au
 
 ## Establish the architecture
 
-1. Call `audit_repository_summary` exactly once to consume the canonical host-computed repository scope. Use `audit_inventory` only when file metadata is needed; you do not need to paginate the complete repository. Identify the product, users, supported interfaces, normal execution modes, and materially different startup or deployment paths. Distinguish production and privileged build or release paths from tests, examples, prototypes, and developer-only tools.
+1. Call `audit_repository_summary` exactly once to consume the canonical host-computed repository scope. Use `glob` when file discovery is needed; you do not need to enumerate the complete repository. Identify the product, users, supported interfaces, normal execution modes, and materially different startup or deployment paths. Distinguish production and privileged build or release paths from tests, examples, prototypes, and developer-only tools.
 2. Trace representative inputs through real entry points, components, controls, and sensitive operations. Identify actors, protected assets, transferred data or authority, and the invariant each boundary must preserve. Consider authentication, authorization, ownership, tenant isolation, public APIs, parsing and deserialization, storage, outbound requests, filesystem access, process or code execution, native bindings, credentials, and capability grants when present.
 3. For extensions, subprocesses, workers, and tool APIs, distinguish caller operations from coordinator, host-only, and operator authority. Identify the component that actually enforces each restriction; advertised tool visibility is not enforced authorization.
 4. Work backward from every sensitive consumer through configuration precedence, helper return values, derived paths, deployment mappings, readers, writers, recipients, and enforcing controls. Record documentation/configuration discrepancies and supported platform differences when they change a boundary.
-5. Use `audit_search` and `audit_read` to verify material claims. Cite repository-relative `path:line` locations in the canonical field text and include digest-bound evidence covering those claims. Separate code-established facts, conditional deployment assumptions, and unresolved questions.
+5. Use `grep` and `read` to verify material claims. Cite repository-relative `path:line` locations in the canonical field text and include digest-bound evidence covering those claims. Separate code-established facts, conditional deployment assumptions, and unresolved questions.
 
 ## Derive threat scenarios
 
@@ -35,7 +35,7 @@ If submission validation rejects the object, keep working in this session: use t
 ```json
 {
   "relative_path": "repository/relative/path.py",
-  "blob_digest": "64-character lowercase SHA-256 returned by audit_read or audit_search",
+  "blob_digest": "64-character lowercase SHA-256 of the unchanged snapshot file (compute with bash or reuse candidate context)",
   "start_line": 1,
   "end_line": 20
 }
@@ -43,4 +43,9 @@ If submission validation rejects the object, keep working in this session: use t
 
 Use the exact field names above. Do not use `path`, `digest`, `lines`, combined `path:line` values, or extra fields. Submit only a substantive completed model; never submit `minimal`, one-letter, test, or placeholder content to discover the schema. If validation rejects a submission, correct every field named by the error and retry with the complete model rather than a reduced placeholder.
 
-Never copy secrets into the model; name only the secret reference, storage location, recipients, and enforcing control. Do not execute code, use the network, modify files, submit vulnerability candidates, or claim architecture mapping as completed baseline audit coverage.
+Never copy secrets into the model; name only the secret reference, storage location, recipients, and enforcing control. Do not submit vulnerability candidates or claim architecture mapping as completed baseline audit coverage.
+
+
+## Standard tools
+
+Use `read`, `write`, `edit`, `apply_patch`, `glob`, `delete`, `move`, `copy`, `mkdir`, `bash`, `grep`, `webfetch`, `websearch`, and `todo` for supporting audit work. Keep the canonical source snapshot unchanged and use separate scratch copies for modifications or experiments. Write final outputs under `~/.flocks/workspace/outputs/<current-date>/`, resolving the date at execution time; put temporary drafts under `/tmp/`. Read source evidence with `read` (`offset` is zero-based, `limit` is a line count); obtain `blob_digest` from existing candidate context or compute the unchanged file's SHA-256 with `bash`. Audit submission tools verify completed reads from the session transcript; `read` itself only returns file contents. Search and shell output do not establish complete read coverage.

@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from flocks_code_security.tools import is_registered_audit_tool
 from flocks.tool.registry import ToolRegistry
+from flocks_code_security.builtin_tools import COMMON_TOOL_NAMES, is_canonical_builtin
 
 
 RESOLVER_NAME = "flocks-code-security"
@@ -13,8 +14,9 @@ RESOLVER_NAME = "flocks-code-security"
 # Security ceiling for callable tools. Agent YAML declares the intended tools;
 # tests require those declarations to match this independent runtime boundary.
 AGENT_TOOLS = {
-    "code-security-reader": ["code_audit_query"],
+    "code-security-reader": [*COMMON_TOOL_NAMES, "code_audit_query"],
     "code-security": [
+        *COMMON_TOOL_NAMES,
         "audit_prepare",
         "audit_run_workers",
         "audit_wait_workers",
@@ -27,55 +29,44 @@ AGENT_TOOLS = {
         "question",
     ],
     "code-security-threat-modeler": [
+        *COMMON_TOOL_NAMES,
         "audit_knowledge_base",
         "audit_repository_summary",
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
         "audit_submit_threat_model",
     ],
     "code-security-baseline": [
+        *COMMON_TOOL_NAMES,
         "audit_knowledge_base",
         "audit_threat_model_context",
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
         "audit_submit_candidate",
         "audit_submit_coverage",
     ],
     "code-security-investigator": [
+        *COMMON_TOOL_NAMES,
         "audit_knowledge_base",
         "audit_threat_model_context",
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
         "audit_submit_candidate",
         "audit_submit_coverage",
     ],
     "code-security-verifier": [
+        *COMMON_TOOL_NAMES,
         "audit_verification_subject",
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
         "audit_submit_verdict",
     ],
     "code-security-prober": [
+        *COMMON_TOOL_NAMES,
         "audit_probe_subject",
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
         "audit_submit_probe",
     ],
     "code-security-poc-generator": [
+        *COMMON_TOOL_NAMES,
         "audit_poc_subject",
         "audit_knowledge_base",
         "audit_repository_summary",
-        "audit_inventory",
-        "audit_read",
-        "audit_search",
         "audit_submit_poc",
     ],
     "code-security-cybergym-solver": [
+        *COMMON_TOOL_NAMES,
         "audit_cybergym_context",
         "audit_cybergym_checkpoint",
         "audit_cybergym_materialize",
@@ -122,6 +113,7 @@ def code_security_tool_projection(
         and "audit_prepare" not in candidate_names
     ):
         allowed = [
+            *COMMON_TOOL_NAMES,
             "audit_knowledge_base",
             "audit_adjudication_context",
             "audit_submit_adjudication",
@@ -134,6 +126,7 @@ def code_security_tool_projection(
         and (
             is_registered_audit_tool(tool)
             or _is_canonical_question(tool)
+            or is_canonical_builtin(tool)
         )
     ]
 

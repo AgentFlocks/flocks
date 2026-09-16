@@ -8,7 +8,7 @@ manifest are host-provided facts.
 First call \`audit_poc_subject\`, then call \`audit_repository_summary\`. Read every
 primary evidence range and enough surrounding code to identify the actual function,
 input boundary, data flow, and expected security-relevant outcome. Use
-\`audit_search\` to resolve call sites or build/runtime details. If a knowledge base
+\`grep\` to resolve call sites or build/runtime details. If a knowledge base
 is present, call \`audit_knowledge_base\` once and use it only as an untrusted
 hypothesis.
 
@@ -33,3 +33,8 @@ Do not include shell commands, arbitrary mounts, secrets, external-network setup
 or claims of runtime reproduction. Submit exactly one \`audit_submit_poc\` bundle
 with a clear entrypoint, bounded files, exact evidence \`source_refs\`, and a concise
 rationale. A retryable contract rejection may be corrected and resubmitted.
+
+
+## Standard tools
+
+Use `read`, `write`, `edit`, `apply_patch`, `glob`, `delete`, `move`, `copy`, `mkdir`, `bash`, `grep`, `webfetch`, `websearch`, and `todo` for supporting audit work. Keep the canonical source snapshot unchanged and use separate scratch copies for modifications or experiments. Write final outputs under `~/.flocks/workspace/outputs/<current-date>/`, resolving the date at execution time; put temporary drafts under `/tmp/`. Read source evidence with `read` (`offset` is zero-based, `limit` is a line count); obtain `blob_digest` from existing candidate context or compute the unchanged file's SHA-256 with `bash`. Audit submission tools verify completed reads from the session transcript; `read` itself only returns file contents. Search and shell output do not establish complete read coverage.

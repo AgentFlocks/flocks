@@ -102,7 +102,7 @@ def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
 
 # Bump this whenever initialize() adds or changes schema migrations.
 # Version 9 was also used by databases with executable_mode but no conversation tables.
-STORE_SCHEMA_VERSION = 14
+STORE_SCHEMA_VERSION = 15
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -705,6 +705,11 @@ class ScanStore:
                     start_line INTEGER,
                     end_line INTEGER,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS source_receipt_parts (
+                    attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
+                    part_id TEXT NOT NULL,
+                    PRIMARY KEY (attempt_id, part_id)
                 );
                 CREATE TABLE IF NOT EXISTS submission_rejections (
                     rejection_id TEXT PRIMARY KEY,
@@ -6161,8 +6166,10 @@ class ScanStore:
         self,
         binding: SessionBinding,
         accesses: list[dict[str, Any]],
+        *,
+        processed_part_ids: list[str] | None = None,
     ) -> None:
-        if not accesses:
+        if not accesses and not processed_part_ids:
             return
         if binding.attempt_id is None:
             raise ValueError("Source access requires a bound work attempt")
@@ -6170,8 +6177,17 @@ class ScanStore:
         if not operations <= {"repository_summary", "inventory", "read", "search"}:
             raise ValueError("Unsupported source access operation")
         with self._lock, self._connect() as connection:
+            if processed_part_ids:
+                connection.execute("BEGIN IMMEDIATE")
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
+            # Receipts and their transcript checkpoints commit together. Repeated
+            # submissions or concurrent lifecycle callbacks cannot replay a part.
+            processed = {row[0] for row in connection.execute(
+                "SELECT part_id FROM source_receipt_parts WHERE attempt_id = ?",
+                (binding.attempt_id,),
+            )} if processed_part_ids else set()
+            accesses = [item for item in accesses if item.get("source_part_id") not in processed]
             now = _now()
             connection.executemany(
                 "INSERT INTO source_access ("
@@ -6196,6 +6212,17 @@ class ScanStore:
                     for item in accesses
                 ],
             )
+
+            connection.executemany(
+                "INSERT OR IGNORE INTO source_receipt_parts (attempt_id, part_id) VALUES (?, ?)",
+                [(binding.attempt_id, part_id) for part_id in (processed_part_ids or [])],
+            )
+
+    def processed_source_parts(self, attempt_id: str) -> set[str]:
+        with self._connect() as connection:
+            return {row[0] for row in connection.execute(
+                "SELECT part_id FROM source_receipt_parts WHERE attempt_id = ?", (attempt_id,),
+            )}
 
     def list_source_accesses(self, attempt_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:

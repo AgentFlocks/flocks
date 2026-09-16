@@ -295,3 +295,50 @@ async def test_prune_keeps_full_history_for_never_prune_tools(make_session):
                 assert not state.time.get("compacted"), (
                     f"skill_load at {mid} must never be compacted"
                 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_output_preserver_runs_once_before_destructive_cleanup(monkeypatch, oversized):
+    from types import SimpleNamespace
+    from flocks.session.message import Message
+    from flocks.session.lifecycle.compaction import pruning
+    import flocks.tool.truncation as truncation
+
+    outputs = ["a" * (6000 if oversized else 20), "b" * (6000 if oversized else 20)]
+    parts = [SimpleNamespace(type="tool", state=SimpleNamespace(status="completed", output=out)) for out in outputs]
+    monkeypatch.setattr(Message, "list", AsyncMock(return_value=[SimpleNamespace(id="m", role="assistant")]))
+    monkeypatch.setattr(Message, "parts", AsyncMock(return_value=parts))
+    monkeypatch.setattr(Message, "_persist_parts", AsyncMock())
+    monkeypatch.setattr(truncation, "calculate_max_tool_result_chars", lambda _: 5000)
+    monkeypatch.setattr(pruning, "_tool_output_preservers", {})
+
+    async def preserve(session_id):
+        assert session_id == "session"
+        assert [p.state.output for p in parts] == outputs
+
+    callback = AsyncMock(side_effect=preserve)
+    pruning.register_tool_output_preserver("test", callback)
+    await pruning.truncate_oversized_tool_outputs("session", 1000)
+    assert callback.await_count == int(oversized)
+
+
+@pytest.mark.asyncio
+async def test_failed_preservation_leaves_original_output_intact(monkeypatch):
+    from types import SimpleNamespace
+    from flocks.session.message import Message
+    from flocks.session.lifecycle.compaction import pruning
+    import flocks.tool.truncation as truncation
+
+    original = "source" * 1000
+    part = SimpleNamespace(type="tool", state=SimpleNamespace(status="completed", output=original))
+    monkeypatch.setattr(Message, "list", AsyncMock(return_value=[SimpleNamespace(id="m", role="assistant")]))
+    monkeypatch.setattr(Message, "parts", AsyncMock(return_value=[part]))
+    persist = AsyncMock()
+    monkeypatch.setattr(Message, "_persist_parts", persist)
+    monkeypatch.setattr(truncation, "calculate_max_tool_result_chars", lambda _: 100)
+    monkeypatch.setattr(pruning, "_tool_output_preservers", {"test": AsyncMock(side_effect=ValueError("invalid evidence"))})
+    with pytest.raises(ValueError, match="invalid evidence"):
+        await pruning.truncate_oversized_tool_outputs("session", 1000)
+    assert part.state.output == original
+    persist.assert_not_awaited()

@@ -22,6 +22,7 @@ from flocks.utils.langfuse import (
 )
 
 from flocks_code_security.paths import outputs_root
+from flocks_code_security.builtin_tools import COMMON_TOOL_NAMES, source_workspace_prompt
 from flocks_code_security.dynamic_validation import DockerDynamicRunner
 from flocks_code_security.orchestration import (
     FollowUpPlanningError,
@@ -76,7 +77,7 @@ def _require_enabled_audit_tools(
         excluded.update(CYBERGYM_AGENT_TOOL_NAMES)
     if not poc_enabled:
         excluded.update(POC_AGENT_TOOL_NAMES)
-    required = tuple(name for name in AUDIT_TOOL_NAMES if name not in excluded)
+    required = (*COMMON_TOOL_NAMES, *(name for name in AUDIT_TOOL_NAMES if name not in excluded))
     unavailable = [name for name in required if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled]
     if unavailable:
         raise RuntimeError(
@@ -583,6 +584,7 @@ class AuditOrchestrator:
         store = get_runtime().store
         knowledge_base_present = await asyncio.to_thread(store.get_knowledge_base_metadata, scan_id) is not None
         callable_tools = {
+            *COMMON_TOOL_NAMES,
             "audit_adjudication_context",
             "audit_submit_adjudication",
         }
@@ -599,6 +601,8 @@ class AuditOrchestrator:
             if knowledge_base_present
             else ""
         )
+        scan = await asyncio.to_thread(store.get_scan, scan_id)
+        source_prompt = await asyncio.to_thread(source_workspace_prompt, get_runtime(), scan["snapshot_id"], ["."])
         await Message.create(
             session_id=self.ctx.session_id,
             role=MessageRole.USER,
@@ -615,7 +619,7 @@ class AuditOrchestrator:
                 "may instead request one targeted_rescan with a concrete reason, "
                 "snapshot-relative paths, and answerable questions; it must not classify "
                 "candidates. Round 2 must finalize. Do not schedule workers or finalize "
-                "the report yourself."
+                "the report yourself." + source_prompt
             ),
             agent="code-security",
         )

@@ -18,6 +18,7 @@ from flocks.storage.storage import Storage
 from flocks.tool.registry import ToolRegistry
 from flocks_code_security import chat_runtime, conversation as chat
 from flocks_code_security.agents import register_agents
+from flocks_code_security.builtin_tools import COMMON_TOOL_NAMES
 from flocks_code_security.projection import code_security_tool_projection
 from flocks_code_security.service import AuditCaller, AuditServiceError
 from flocks_code_security.tools import register_tools
@@ -71,11 +72,14 @@ async def test_native_loop_streams_tools_and_reuses_session(audit, native_storag
 
         async def chat_stream(self, **kwargs):
             requests.append(kwargs)
-            assert [t["function"]["name"] for t in kwargs["tools"]] == ["code_audit_query"]
+            assert {t["function"]["name"] for t in kwargs["tools"]} == {"code_audit_query", *COMMON_TOOL_NAMES}
             if len(requests) == 1:
                 yield StreamChunk(tool_calls=[{
                     "id": "query-1", "type": "function",
                     "function": {"name": "code_audit_query", "arguments": json.dumps({"query": {"view": "artifact", "artifact_kind": "findings"}})},
+                }, {
+                    "id": "todo-1", "type": "function",
+                    "function": {"name": "todo", "arguments": json.dumps({"action": "write", "todos": [{"id": "review", "content": "Review audit evidence", "status": "in_progress", "activeForm": "Reviewing audit evidence"}]})},
                 }], finish_reason="tool_calls", usage={"prompt_tokens": 60000 if overflow else 100, "completion_tokens": 20})
             else:
                 yield StreamChunk(delta="Conclusion [artifact:findings]", finish_reason="stop", usage={"prompt_tokens": 200, "completion_tokens": 20})
@@ -119,6 +123,7 @@ async def test_native_loop_streams_tools_and_reuses_session(audit, native_storag
     assert _session_to_response(session).codeSecurityScanID == sid
     assert restored["session_id"] == session.id
     assert session.memory_enabled is False
+    assert session.permission is None
     assert session.metadata["hideFromSessionManager"] is False
     messages = await Message.list(session.id, include_archived=True)
     texts = [await Message.get_text_content(m) for m in messages if m.role == "user"]

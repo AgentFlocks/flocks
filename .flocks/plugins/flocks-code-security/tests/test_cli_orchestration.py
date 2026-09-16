@@ -11,6 +11,7 @@ from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 
 import flocks_code_security.cli as audit_cli
 from flocks_code_security.tools import register_tools
+from flocks_code_security.builtin_tools import COMMON_TOOL_NAMES
 
 
 def _result(output: dict) -> ToolResult:
@@ -39,15 +40,15 @@ async def test_cli_preserves_large_repository_scope_in_service_request(tmp_path,
 
 def test_cli_preflight_rejects_disabled_required_tool() -> None:
     register_tools()
-    audit_read = ToolRegistry.get("audit_read")
-    original_enabled = audit_read.info.enabled
-    audit_read.info.enabled = False
+    read = ToolRegistry.get("read")
+    original_enabled = read.info.enabled
+    read.info.enabled = False
 
     try:
-        with pytest.raises(RuntimeError, match="audit_read"):
+        with pytest.raises(RuntimeError, match="read"):
             audit_cli._require_enabled_audit_tools()
     finally:
-        audit_read.info.enabled = original_enabled
+        read.info.enabled = original_enabled
 
 
 def test_static_cli_preflight_does_not_require_dynamic_only_tools() -> None:
@@ -941,6 +942,7 @@ async def test_orchestrator_runs_one_parent_directed_rescan(
         (
             None,
             {
+                *COMMON_TOOL_NAMES,
                 "audit_adjudication_context",
                 "audit_submit_adjudication",
             },
@@ -949,6 +951,7 @@ async def test_orchestrator_runs_one_parent_directed_rescan(
             {"sha256": "a" * 64},
             {
                 "audit_knowledge_base",
+                *COMMON_TOOL_NAMES,
                 "audit_adjudication_context",
                 "audit_submit_adjudication",
             },
@@ -980,6 +983,14 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         @staticmethod
         def get_knowledge_base_metadata(_scan_id: str):
             return knowledge_base
+
+        @staticmethod
+        def get_scan(_scan_id: str):
+            return {"snapshot_id": "snap_parent"}
+
+        @staticmethod
+        def get_snapshot(_snapshot_id: str):
+            return SimpleNamespace(root_path="/snapshot")
 
     create_message = AsyncMock()
     run_loop = AsyncMock(return_value=SimpleNamespace(action="stop", error=None))

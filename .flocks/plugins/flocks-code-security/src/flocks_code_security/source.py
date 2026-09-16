@@ -53,16 +53,16 @@ class AuditSourceRepository:
         manifest = RepositoryManifestService(self.store).get_or_build(
             binding.snapshot_id
         )
-        assigned = self._assigned_paths(binding)
+        assigned = self.assigned_paths(binding)
         files = [
             item
             for item in self.store.list_snapshot_files(binding.snapshot_id)
-            if self._in_assigned_scope(item.relative_path, assigned)
+            if self.in_assigned_scope(item.relative_path, assigned)
         ]
         omissions = [
             item
             for item in self.store.list_snapshot_omissions(binding.snapshot_id)
-            if self._in_assigned_scope(item.relative_path, assigned)
+            if self.in_assigned_scope(item.relative_path, assigned)
         ]
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 500))
@@ -140,7 +140,7 @@ class AuditSourceRepository:
         validated: list[str] = []
         for raw_path in paths:
             path = normalize_relative_path(raw_path, allow_root=True)
-            if not self._in_assigned_scope(path, assigned):
+            if not self.in_assigned_scope(path, assigned):
                 raise ValueError(f"Coverage path is outside the work-unit scope: {path}")
             if not exists_in_snapshot(path):
                 raise ValueError(f"Coverage path is not present in the snapshot: {path}")
@@ -158,7 +158,7 @@ class AuditSourceRepository:
     ) -> dict[str, Any]:
         binding = self.binding(session_id)
         normalized = normalize_relative_path(relative_path)
-        if not self._in_assigned_scope(normalized, self._assigned_paths(binding)):
+        if not self.in_assigned_scope(normalized, self.assigned_paths(binding)):
             raise ValueError("Path is outside the bound work-unit scope")
         record = self._record(binding.snapshot_id, normalized)
         if record.is_binary:
@@ -168,7 +168,7 @@ class AuditSourceRepository:
         final_line = end_line if end_line is not None else start_line + 199
         if final_line < start_line or final_line - start_line + 1 > 400:
             raise ValueError("A single read may include at most 400 lines")
-        data = self._verified_bytes(binding.snapshot_id, record)
+        data = self.verified_bytes(binding.snapshot_id, record)
         lines = data.decode("utf-8", errors="replace").splitlines()
         selected = lines[start_line - 1 : final_line]
         text = "\n".join(selected)
@@ -209,15 +209,15 @@ class AuditSourceRepository:
         matches: list[dict[str, Any]] = []
         accesses: list[dict[str, Any]] = []
         truncated = False
-        assigned = self._assigned_paths(binding)
+        assigned = self.assigned_paths(binding)
         for record in self.store.list_snapshot_files(binding.snapshot_id):
-            if not self._in_assigned_scope(record.relative_path, assigned):
+            if not self.in_assigned_scope(record.relative_path, assigned):
                 continue
             if record.is_binary:
                 continue
             if path_glob and not fnmatch.fnmatch(record.relative_path, path_glob):
                 continue
-            data = self._verified_bytes(binding.snapshot_id, record)
+            data = self.verified_bytes(binding.snapshot_id, record)
             matched_record = False
             for line_number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), start=1):
                 comparable_line = line if case_sensitive else line.casefold()
@@ -299,9 +299,9 @@ class AuditSourceRepository:
             end_line = item["end_line"]
             if start_line < 1 or end_line < start_line or end_line > record.line_count:
                 raise ValueError(f"Invalid evidence line range: {relative_path}")
-            if not self._in_assigned_scope(
+            if not self.in_assigned_scope(
                 relative_path,
-                self._assigned_paths(binding),
+                self.assigned_paths(binding),
             ):
                 raise ValueError("Path is outside the bound work-unit scope")
             excerpt = self.evidence_excerpt(
@@ -353,7 +353,7 @@ class AuditSourceRepository:
         ):
             raise ValueError(f"Invalid evidence line range: {relative_path}")
         lines = (
-            self._verified_bytes(snapshot_id, record)
+            self.verified_bytes(snapshot_id, record)
             .decode(
                 "utf-8",
                 errors="replace",
@@ -388,7 +388,7 @@ class AuditSourceRepository:
         verified = self.evidence_excerpt(snapshot_id, evidence, max_characters=20_000)
         record = self._record(snapshot_id, verified["relative_path"])
         lines = (
-            self._verified_bytes(snapshot_id, record)
+            self.verified_bytes(snapshot_id, record)
             .decode(
                 "utf-8",
                 errors="replace",
@@ -412,7 +412,7 @@ class AuditSourceRepository:
             "text_truncated": truncated,
         }
 
-    def _assigned_paths(self, binding: SessionBinding) -> list[str]:
+    def assigned_paths(self, binding: SessionBinding) -> list[str]:
         if binding.work_unit_id is None:
             raise ValueError("Source access requires a bound work unit")
         work_unit = self.store.get_work_unit(binding.work_unit_id)
@@ -421,7 +421,7 @@ class AuditSourceRepository:
         return [normalize_relative_path(item, allow_root=True) for item in work_unit["paths"]]
 
     @staticmethod
-    def _in_assigned_scope(path: str, assigned: list[str]) -> bool:
+    def in_assigned_scope(path: str, assigned: list[str]) -> bool:
         return any(scope == "." or path == scope or path.startswith(f"{scope}/") for scope in assigned)
 
     def _record(self, snapshot_id: str, relative_path: str) -> SnapshotFile:
@@ -430,7 +430,7 @@ class AuditSourceRepository:
             raise ValueError("Path is not present in the bound snapshot")
         return record
 
-    def _verified_bytes(self, snapshot_id: str, record: SnapshotFile) -> bytes:
+    def verified_bytes(self, snapshot_id: str, record: SnapshotFile) -> bytes:
         snapshot = self.store.get_snapshot(snapshot_id)
         if snapshot is None:
             raise ValueError("Bound snapshot no longer exists")

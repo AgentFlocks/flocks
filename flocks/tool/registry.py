@@ -426,7 +426,7 @@ _SCOPED_SCHEMA_ALIASES: Dict[str, Dict[str, str]] = {
 }
 
 
-def _remap_schema_kwargs(
+def remap_schema_kwargs(
     kwargs: Dict[str, Any],
     declared_param_names: List[str],
     *,
@@ -518,7 +518,7 @@ class Tool:
             remap_aliases: Dict[str, str] = {}
             effective_kwargs = dict(kwargs)
             if declared_param_names:
-                effective_kwargs, remap_aliases = _remap_schema_kwargs(
+                effective_kwargs, remap_aliases = remap_schema_kwargs(
                     effective_kwargs,
                     declared_param_names,
                     tool_name=self.info.name,
@@ -659,7 +659,7 @@ class Tool:
                         **coerced_kwargs,
                         **dict(decision.validated_input_patch),
                     }
-                    patched_kwargs, _ = _remap_schema_kwargs(
+                    patched_kwargs, _ = remap_schema_kwargs(
                         patched_kwargs,
                         declared_param_names,
                         tool_name=self.info.name,

@@ -4,10 +4,10 @@ Project-level Flocks plugin for static source-code security audits with optional
 
 Current implementation provides:
 
-- six isolated code-security agents (primary adjudicator, threat modeler, repository-wide baseline, focused investigator, verifier, prober);
+- nine isolated code-security agents (primary adjudicator, threat modeler, repository-wide baseline, focused investigator, verifier, prober, PoC generator, CyberGym solver, result assistant);
 - a subset-only callable-tool projection;
 - digest-bound source views backed by reproducible read-only copies by default;
-- snapshot inventory, bounded reads, and literal search;
+- standard file operations, shell commands, regex search, web research, and task tracking;
 - isolated repository-wide baseline, optional focused-investigation, and independent-verification workers;
 - a mandatory source-backed threat-modeling phase with canonical assets, trust boundaries, attacker capabilities, security objectives, and assumptions;
 - SQLite scan, work-unit, session-binding, threat-model, candidate, verdict, dynamic-run, coverage, and batch storage;
@@ -16,7 +16,32 @@ Current implementation provides:
 - deterministic Markdown and SARIF projections of independently verified findings.
 - final parent-Agent adjudication with at most one scope-bound targeted rescan.
 
-Target code is copied into the plugin snapshot store by default. Static scans never run target code, build scripts, tests, or Git hooks. Every audit assigns one repository-wide baseline work unit over `.` with a 200-step ceiling; it is never split by file count or byte size. If the baseline returns valid blocking questions with exact related paths, the host may launch at most one focused investigator over their deduplicated union before verification.
+Target code is copied into the plugin snapshot store by default. Agents receive file, shell, and network tools for supporting work. Prompts instruct them to keep the canonical snapshot unchanged and use scratch copies for modifications or experiments; tool visibility is no longer a read-only execution boundary. Every audit assigns one repository-wide baseline work unit over `.` with a 200-step ceiling; it is never split by file count or byte size. If the baseline returns valid blocking questions with exact related paths, the host may launch at most one focused investigator over their deduplicated union before verification.
+
+
+All nine agents receive these standard tools, including during parent adjudication:
+`read`, `write`, `edit`, `apply_patch`, `glob`, `delete`, `move`, `copy`, `mkdir`,
+`bash`, `grep`, `webfetch`, `websearch`, and `todo`.
+The duplicate `audit_inventory`, `audit_read`, and `audit_search` tools have been
+removed; use `glob`, `read`, and `grep` instead. Audit-specific context, candidate,
+coverage, verdict, PoC, runner, query, and lifecycle tools remain stage-specific.
+
+Workers receive the absolute snapshot root and assigned paths in their work message.
+Standard tools retain their original behavior: `read` returns file contents and does
+not write audit records or add audit metadata. Before destructive context compression,
+at worker recovery, and at coverage, verifier-verdict, and PoC submission, the audit
+lifecycle derives deduplicated source receipts from completed
+`read`, `glob`, and `grep` ToolParts already stored by the session loop (including
+archived messages). Processed ToolPart IDs are committed atomically with receipts,
+so repeated submissions skip previously validated outputs. Ordinary sessions bypass
+the audit database during compaction. The audit layer shares native argument/path
+normalization and maps native read line numbers to snapshot evidence ranges.
+It verifies snapshot digests and counts only fully
+returned, unchanged source lines. Failed calls, user text, truncated lines, shell
+output, and web output cannot establish complete source coverage. Evidence digests
+come from existing candidate context or SHA-256 computed against the snapshot.
+Normal host permissions govern standard tools; audit-specific evidence validation
+and independent-verifier read requirements remain enforced.
 
 Run a complete audit with one command:
 
@@ -116,11 +141,11 @@ Model messages and audit-tool inputs/outputs can contain proprietary source code
 
 Standard static audits use the flow threat modeling → repository-wide baseline → optional focused investigation → verification → parent adjudication → deterministic reduction. Dynamic audits insert probing and Docker execution after verification. The parent may instead direct one targeted rescan, followed by verification, dynamic processing of only new confirmed candidates, and a mandatory second/final adjudication. Baseline and investigator workers must consume the persisted threat model before they can submit candidates or coverage. Every candidate must receive one independent verifier verdict and be classified by the parent before finalization. Parent-rejected candidates are omitted, insufficient-evidence candidates remain deferred coverage, and only independently confirmed candidates accepted by the parent are projected into SARIF.
 
-The public `code-security` Agent remains the interactive audit entry point. In an interactive audit it may drive the audit tools directly. In the one-command CLI path it is invoked only at the adjudication boundary, where the session callable-tool set exposes `audit_knowledge_base`, `audit_adjudication_context`, and `audit_submit_adjudication`; the host resumes control after the decision.
+The public `code-security` Agent remains the interactive audit entry point. In an interactive audit it may drive the audit tools directly. In the one-command CLI path it is invoked only at the adjudication boundary, where the session callable-tool set exposes the common standard tools plus `audit_knowledge_base`, `audit_adjudication_context`, and `audit_submit_adjudication`; the host resumes control after the decision.
 
-The six Agent definitions are declarative and live in `src/flocks_code_security/agents/<agent-name>/agent.yaml`, with each prompt in the adjacent `prompt.md`. Tools, skills, model settings, and isolation policy can therefore be reviewed and changed independently for each Agent while remaining owned and packaged by this plugin.
+The nine Agent definitions are declarative and live in `src/flocks_code_security/agents/<agent-name>/agent.yaml`, with each prompt in the adjacent `prompt.md`. Tools, skills, model settings, and isolation policy can therefore be reviewed and changed independently for each Agent while remaining owned and packaged by this plugin.
 
-All six code-security Agents combine a dedicated session with the `isolated` prompt profile. Their model input contains the Agent prompt, execution-mode rules, core configuration guard and tool protocol, minimal runtime environment, and only host-selected Agent skills; it excludes the Rex/Flocks provider identity, workspace instruction files, memory, optional `UserPromptBefore` context, and unrelated runtime metadata. Trusted `LLM_BEFORE`/`LLM_AFTER` hooks remain part of the host policy and redaction boundary. Their callable application tools never exceed the names declared in `AGENT_TOOLS`; phase projection may reduce that set, globally auto-loaded tools are not added, and host runtime controls such as `plan_exit` remain available when their mode requires them.
+All nine code-security Agents combine a dedicated session with the `isolated` prompt profile. Their model input contains the Agent prompt, execution-mode rules, core configuration guard and tool protocol, minimal runtime environment, and only host-selected Agent skills; it excludes the Rex/Flocks provider identity, workspace instruction files, memory, optional `UserPromptBefore` context, and unrelated runtime metadata. Trusted `LLM_BEFORE`/`LLM_AFTER` hooks remain part of the host policy and redaction boundary. Their callable application tools never exceed the names declared in `AGENT_TOOLS`; phase projection may reduce that set, globally auto-loaded tools are not added, and host runtime controls such as `plan_exit` remain available when their mode requires them.
 
 Threat-model evidence uses the exact `relative_path`, `blob_digest`, `start_line`, and `end_line` contract exposed in the tool schema. A threat-modeler may atomically refine its own structurally valid draft while its work unit remains active; once the work unit completes, the model is immutable. Worker completion, baseline launch, finalization, and status inspection re-check the structural contract. Semantic completeness remains the threat-model agent's responsibility and is not guessed from language-dependent placeholder blacklists. Historical scans with structurally invalid threat models are reported with `integrity_status: invalid` and must not be used.
 

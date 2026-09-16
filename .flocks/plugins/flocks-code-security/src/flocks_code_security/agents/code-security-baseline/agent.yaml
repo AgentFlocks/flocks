@@ -15,10 +15,21 @@ session_directory: ~/.flocks/workspace/code-security/runtime
 memory_enabled: false
 require_dedicated_session: true
 tools:
+  - read
+  - write
+  - edit
+  - apply_patch
+  - glob
+  - delete
+  - move
+  - copy
+  - mkdir
+  - bash
+  - grep
+  - webfetch
+  - websearch
+  - todo
   - audit_knowledge_base
   - audit_threat_model_context
-  - audit_inventory
-  - audit_read
-  - audit_search
   - audit_submit_candidate
   - audit_submit_coverage

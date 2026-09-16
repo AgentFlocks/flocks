@@ -10,6 +10,7 @@ from flocks_code_security.projection import register_projection
 from flocks_code_security.public_tool import register_public_tool
 from flocks_code_security.runtime import get_runtime
 from flocks_code_security.service import get_audit_service
+from flocks_code_security.source_receipts import register_source_receipt_preserver
 from flocks_code_security.tools import register_tools
 
 
@@ -22,6 +23,7 @@ def register(_loader: Any = None) -> None:
     register_tools()
     register_public_tool()
     register_projection()
+    register_source_receipt_preserver()
     register_agents()
     if not _service_initialized:
         # Parallel batch workers share one database; a worker must not recover

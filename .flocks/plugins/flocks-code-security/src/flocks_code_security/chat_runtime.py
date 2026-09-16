@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from typing import Awaitable, Callable
 
 from flocks.session.message import Message, MessageRole
-from flocks.session.session import PermissionRule, Session
+from flocks.session.session import Session
 from flocks.session.session_loop import SessionLoop, LoopCallbacks
 from flocks.tool.registry import ToolContext, ToolResult
 
@@ -47,7 +47,6 @@ async def conversation_session(service, scan_id: str, caller, turns: list[dict],
         agent=AGENT_NAME,
         owner_user_id=caller.subject,
         category="task",
-        permission=[PermissionRule(permission="*", action="deny"), PermissionRule(permission="code_audit_query", action="allow")],
         metadata={"session_scope": "code-security", "hideFromSessionManager": False, "code_security_chat_scan_id": scan_id},
     )
     try:
