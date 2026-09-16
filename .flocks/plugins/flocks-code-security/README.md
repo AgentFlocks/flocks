@@ -40,6 +40,12 @@ It verifies snapshot digests and counts only fully
 returned, unchanged source lines. Failed calls, user text, truncated lines, shell
 output, and web output cannot establish complete source coverage. Evidence digests
 come from existing candidate context or SHA-256 computed against the snapshot.
+The fourteen standard tools remain visible at every stage. Existing audit tools
+retain their original stage, role, subject, and assigned-path restrictions.
+For long lines, use read columnOffset/columnLimit with a zero-based line offset,
+following next_column until has_more is false. Verified slices survive compaction
+and count as a read only after covering the complete line. Verifier reads may span
+multiple calls without weakening independent-read requirements.
 Normal host permissions govern standard tools; audit-specific evidence validation
 and independent-verifier read requirements remain enforced.
 

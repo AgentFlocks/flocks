@@ -9,6 +9,7 @@ Reads files from the local filesystem, supporting:
 """
 
 import os
+import json
 import base64
 import mimetypes
 from pathlib import Path
@@ -59,7 +60,8 @@ Usage:
 - filePath may be absolute, use `~`, or be relative to the current project directory
 - By default, it reads up to 2000 lines starting from the beginning of the file
 - For files longer than 2000 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=2000, then offset=2000 limit=2000, etc.)
-- Any lines longer than 2000 characters will be truncated
+- Any lines longer than 2000 characters will be truncated in ordinary line mode
+- To read a long line completely, set offset to its zero-based line number and columnOffset to 0; use columnLimit for the character chunk size. Continue using next_column until has_more is false. Column mode returns JSON for one line and never writes files.
 - Text results are returned with a 5-digit, zero-padded 1-based line number prefix in the form `00001| `
 - You may call multiple independent tools in the same response. Prefer separate parallel Read calls when multiple files are likely to be useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
@@ -174,13 +176,25 @@ def find_similar_files(directory: str, filename: str, max_suggestions: int = 3) 
             required=False,
             default=DEFAULT_READ_LIMIT
         ),
+        ToolParameter(
+            name="columnOffset", type=ParameterType.INTEGER,
+            description="Optional zero-based character offset within the line selected by offset; enables single-line column mode.",
+            required=False,
+        ),
+        ToolParameter(
+            name="columnLimit", type=ParameterType.INTEGER,
+            description="Optional character count in column mode; defaults to the configured line length limit.",
+            required=False,
+        ),
     ]
 )
 async def read_tool(
     ctx: ToolContext,
     filePath: str,
     offset: Optional[int] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    columnOffset: Optional[int] = None,
+    columnLimit: Optional[int] = None,
 ) -> ToolResult:
     """
     Read a file from the local filesystem
@@ -330,6 +344,30 @@ async def read_tool(
 
     read_limit = limit if limit is not None else effective_max_lines
     read_offset = offset if offset is not None else 0
+
+    if columnOffset is not None or columnLimit is not None:
+        column_start = columnOffset if columnOffset is not None else 0
+        column_count = columnLimit if columnLimit is not None else effective_max_line_length
+        if read_offset < 0 or column_start < 0 or column_count < 1 or limit not in (None, 1, DEFAULT_READ_LIMIT):
+            return ToolResult(success=False, error="Column mode requires nonnegative offset/columnOffset, positive columnLimit and a single line.", title=title)
+        if read_offset >= len(all_lines):
+            return ToolResult(success=False, error="Line offset is beyond the end of the file.", title=title)
+        line = all_lines[read_offset]
+        if column_start > len(line):
+            return ToolResult(success=False, error="Column offset is beyond the end of the line.", title=title)
+        # Bound each response by the existing byte budget; the next column makes
+        # every remaining character reachable, even on multi-megabyte lines.
+        selected = line[column_start:column_start + min(column_count, effective_max_bytes)].encode("utf-8")[:effective_max_bytes].decode("utf-8", errors="ignore")
+        if not selected and column_start < len(line):
+            return ToolResult(success=False, error="The byte budget cannot hold the next character.", title=title)
+        column_end = column_start + len(selected)
+        payload = {
+            "format": "line_slice", "line": read_offset + 1,
+            "column_start": column_start, "column_end": column_end,
+            "total_columns": len(line), "text": selected,
+            "has_more": column_end < len(line), "next_column": column_end,
+        }
+        return ToolResult(success=True, output=json.dumps(payload, ensure_ascii=False), title=title)
 
     # Read lines with byte limit
     raw_lines: List[str] = []

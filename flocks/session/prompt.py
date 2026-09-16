@@ -1063,11 +1063,26 @@ Do not repeat an identical tool call in the same response."""
         """Build the small runtime environment block used by system subagents."""
         working_dir = session_directory or os.getcwd()
         today = datetime.now().strftime("%A %b %d, %Y")
+        # Resolve from Flocks itself, not the audit target or session directory.
+        source_root = Path(__file__).resolve().parents[2]
+        venv = source_root / ".venv"
+        python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        available = (source_root / "pyproject.toml").is_file() and python.is_file()
         return "\n".join([
             "## Environment",
             f"Current working directory: {working_dir}",
             f"Platform: {platform.system().lower()}",
             f"Today's date: {today}",
+            f"Default host Python virtual environment: {venv}",
+            f"Default host Python interpreter: {python}",
+            f"Flocks source .venv available: {'yes' if available else 'no'}",
+            "For host-side Python work, default to this Flocks source .venv, independently of the current working directory. "
+            "Invoke its interpreter by a quoted absolute path; use that interpreter with -m pip, -m pytest, or other modules. "
+            "In PowerShell, use the & call operator before the quoted interpreter path. "
+            "No activate command is needed; bare python/pip commands are not guaranteed to select this environment. "
+            "If this environment is unavailable, report the missing environment before Python-dependent work. "
+            "This is the host helper environment, not the audited project's environment. "
+            "Container commands use the container's Python; do not assume this host path exists inside a container.",
         ])
 
     @classmethod

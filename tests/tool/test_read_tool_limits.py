@@ -67,3 +67,32 @@ async def test_byte_limit_truncation_prompts_offset_continue(tool_context, tmp_p
     assert result.truncated is True
     assert f"Output truncated at {read_tool_module.MAX_BYTES} bytes" in result.output
     assert "To continue reading, call read with offset=" in result.output
+
+
+@pytest.mark.asyncio
+async def test_column_reads_reconstruct_a_long_unicode_line(tool_context, tmp_path, monkeypatch):
+    import json
+    text = "甲乙丙" * 30
+    path = tmp_path / "long.txt"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(read_tool_module, "get_read_max_bytes", lambda: 11)
+    offset, chunks = 0, []
+    while offset < len(text):
+        result = await read_tool_module.read_tool(tool_context, str(path), columnOffset=offset, columnLimit=20)
+        assert result.success, result.error
+        payload = json.loads(result.output)
+        assert payload["next_column"] > offset
+        chunks.append(payload["text"])
+        offset = payload["next_column"]
+    assert "".join(chunks) == text
+    assert not payload["has_more"]
+    assert path.read_text() == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parameters", [{"columnOffset": -1}, {"columnLimit": 0}, {"columnOffset": 100}, {"offset": 100, "columnOffset": 0}])
+async def test_column_reads_reject_invalid_ranges(tool_context, tmp_path, parameters):
+    path = tmp_path / "short.txt"
+    path.write_text("hello", encoding="utf-8")
+    result = await read_tool_module.read_tool(tool_context, str(path), **parameters)
+    assert not result.success

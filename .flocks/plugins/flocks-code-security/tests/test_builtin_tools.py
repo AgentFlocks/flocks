@@ -19,7 +19,10 @@ async def audit_workspace(tmp_path, monkeypatch, request):
     ToolRegistry.init()
     target = tmp_path / "target"
     target.mkdir()
-    (target / "app.py").write_text(getattr(request, "param", "user = input()\nprint(user)\n"), encoding="utf-8")
+    content = getattr(request, "param", "user = input()\nprint(user)\n")
+    files = content["files"] if isinstance(content, dict) else {"app.py": content}
+    for name, text in files.items():
+        (target / name).write_text(text, encoding="utf-8")
     runtime = build_runtime(tmp_path / "audit")
     snapshot = runtime.snapshots.create(str(target))
     scan_id = runtime.store.create_scan(
@@ -30,7 +33,7 @@ async def audit_workspace(tmp_path, monkeypatch, request):
     from test_tool_pipeline import _complete_threat_model
 
     await _complete_threat_model(runtime, scan_id=scan_id, snapshot_id=snapshot.snapshot_id)
-    unit = runtime.store.create_work_unit(scan_id=scan_id, phase="baseline", role="baseline", paths=["."])
+    unit = runtime.store.create_work_unit(scan_id=scan_id, phase="baseline", role="baseline", paths=content.get("paths", ["."]) if isinstance(content, dict) else ["."])
     runtime.store.create_work_attempt(
         work_unit_id=unit, session_id="worker", agent_name="code-security-baseline",
         toolset_digest_value=toolset_digest(AGENT_TOOLS["code-security-baseline"]),
@@ -364,3 +367,94 @@ async def test_concurrent_store_instances_commit_each_part_once(audit_workspace)
         for store in (runtime.store, other)
     ])
     assert len(other.list_source_accesses(binding.attempt_id)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_workspace", ["甲" * 6000 + "\n"], indirect=True)
+async def test_long_line_slices_survive_compaction_and_require_gap_free_coverage(audit_workspace):
+    import json
+    runtime, ctx, root = audit_workspace
+    binding = runtime.store.resolve_binding(ctx.session_id)
+    ordinary = await _execute(ctx, "read", filePath=str(root / "app.py"))
+    assert ordinary.success
+    for start in (0, 4000):
+        result = await _execute(ctx, "read", filePath=str(root / "app.py"), offset=0, columnOffset=start, columnLimit=2000)
+        assert result.success, result.error
+        payload = json.loads(result.output)
+        assert payload["column_start"] == start
+        assert payload["next_column"] == start + 2000
+        submitted = await audit_submit_coverage(ctx, dispositions=[{"path": "app.py", "claim": "analyzed"}])
+        assert not submitted.success
+        ctx._test_transcript[-1].parts[0].state.output = "[compacted]"
+    assert runtime.store.list_source_accesses(binding.attempt_id) == []
+    middle = await _execute(ctx, "read", filePath=str(root / "app.py"), offset=0, columnOffset=2000, columnLimit=2000)
+    assert middle.success
+    completed = await audit_submit_coverage(ctx, dispositions=[{"path": "app.py", "claim": "analyzed"}])
+    assert completed.success, completed.error
+    rows = runtime.store.list_source_accesses(binding.attempt_id)
+    assert [(row["start_line"], row["end_line"]) for row in rows] == [(1, 1)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_workspace", [{"files": {"app.py": "call()\n", "related.py": "def call(): pass\n"}, "paths": ["app.py"]}], indirect=True)
+async def test_related_snapshot_evidence_preserves_assigned_scope(audit_workspace):
+    from flocks_code_security.source_receipts import sync_source_receipts
+    runtime, ctx, root = audit_workspace
+    binding = runtime.store.resolve_binding(ctx.session_id)
+    record = runtime.store.get_snapshot_file(binding.snapshot_id, "related.py")
+    assert (await _execute(ctx, "read", filePath=str(root / "related.py"))).success
+    await sync_source_receipts(ctx, runtime, binding)
+    evidence = {"relative_path": "related.py", "blob_digest": record.blob_digest, "start_line": 1, "end_line": 1}
+    with pytest.raises(ValueError, match="work-unit scope"):
+        runtime.source.validate_evidence(binding, [evidence])
+    assert runtime.store.list_source_accesses(binding.attempt_id) == []
+    overbroad = await audit_submit_coverage(ctx, dispositions=[{"path": "related.py", "claim": "analyzed"}])
+    assert not overbroad.success
+    with pytest.raises(ValueError):
+        runtime.source.validate_evidence(binding, [{**evidence, "relative_path": "../outside.py"}])
+
+
+@pytest.mark.parametrize("spans,accepted", [([(1, 2), (3, 4)], True), ([(1, 3), (2, 4)], True), ([(1, 2), (4, 4)], False)])
+def test_verifier_merges_independent_read_intervals(spans, accepted):
+    import sqlite3
+    from flocks_code_security.store import ScanStore
+    with sqlite3.connect(":memory:") as db:
+        db.row_factory = sqlite3.Row
+        db.executescript("""
+            CREATE TABLE evidence (candidate_id TEXT, relative_path TEXT, blob_digest TEXT, start_line INT, end_line INT);
+            CREATE TABLE source_access (attempt_id TEXT, operation TEXT, relative_path TEXT, blob_digest TEXT, start_line INT, end_line INT);
+            INSERT INTO evidence VALUES ('candidate','app.py','digest',1,4);
+        """)
+        db.executemany("INSERT INTO source_access VALUES ('attempt','read','app.py','digest',?,?)", spans)
+        if accepted:
+            ScanStore.require_verifier_source_access(None, db, SimpleNamespace(attempt_id="attempt"), "candidate")
+        else:
+            with pytest.raises(ValueError, match="independently read"):
+                ScanStore.require_verifier_source_access(None, db, SimpleNamespace(attempt_id="attempt"), "candidate")
+
+
+@pytest.mark.asyncio
+async def test_column_receipt_table_migrates_version_15(audit_workspace):
+    runtime, _, _ = audit_workspace
+    with runtime.store._connect() as connection:
+        connection.execute("DROP TABLE source_read_segments")
+        connection.execute("PRAGMA user_version = 15")
+    runtime.store.initialize()
+    with runtime.store._connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM source_read_segments").fetchone()[0] == 0
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 16
+
+
+@pytest.mark.asyncio
+async def test_modified_column_output_cannot_establish_read_coverage(audit_workspace):
+    import json
+    runtime, ctx, root = audit_workspace
+    result = await _execute(ctx, "read", filePath=str(root / "app.py"), columnOffset=0)
+    assert result.success
+    output = json.loads(result.output)
+    output["text"] = "fabricated evidence"
+    ctx._test_transcript[-1].parts[0].state.output = json.dumps(output)
+    submitted = await audit_submit_coverage(ctx, dispositions=[{"path": "app.py", "claim": "analyzed"}])
+    assert not submitted.success
+    binding = runtime.store.resolve_binding(ctx.session_id)
+    assert runtime.store.list_source_accesses(binding.attempt_id) == []

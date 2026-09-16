@@ -46,7 +46,7 @@ def source_workspace_prompt(runtime: Any, snapshot_id: str, paths: list[str]) ->
         + json.dumps({"source_root": snapshot.root_path, "assigned_paths": paths}, ensure_ascii=False)
         + "\nUse absolute paths under source_root with glob, grep and read. "
         "The session working directory is not the source root. Use read for evidence: "
-        "offset is zero-based; limit is a line count. Obtain evidence blob_digest values "
+        "offset is zero-based; limit is a line count. For long lines use columnOffset/columnLimit and follow next_column until has_more is false. Obtain evidence blob_digest values "
         "from existing candidate context or compute SHA-256 of the unchanged file with bash. "
         "Audit submission tools validate source reads against the existing session transcript; "
         "read itself does not write audit records or annotate its output. "

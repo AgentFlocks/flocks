@@ -1,11 +1,12 @@
 """Preserve audit evidence at submission, recovery, and compaction boundaries.
 
-Standard tools remain unchanged; the audit lifecycle owns receipt persistence.
+Standard tools only return data; the audit lifecycle owns receipt persistence.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -100,12 +101,13 @@ def _record_transcript_receipts(runtime: PluginRuntime, binding: SessionBinding,
     root = Path(snapshot.root_path).resolve()
     assigned = source.assigned_paths(binding)
     accesses = []
+    segments = []
     verified_lines: dict[str, list[tuple[str, int, int]]] = {}
     for part in parts:
         name, state = part.tool, part.state
         if name == "read":
             arguments, _ = remap_schema_kwargs(
-                state.input, ["filePath", "offset", "limit"], tool_name="read",
+                state.input, ["filePath", "offset", "limit", "columnOffset", "columnLimit"], tool_name="read",
             )
             paths = [arguments.get("filePath", "")]
         elif name == "glob":
@@ -131,6 +133,22 @@ def _record_transcript_receipts(runtime: PluginRuntime, binding: SessionBinding,
             if relative not in verified_lines:
                 verified_lines[relative] = native_source_lines(source.verified_bytes(binding.snapshot_id, record))
             lines = verified_lines[relative]
+            if arguments.get("columnOffset") is not None or arguments.get("columnLimit") is not None:
+                try:
+                    payload = json.loads(state.output)
+                except (ValueError, TypeError):
+                    continue  # Transport-truncated JSON cannot prove a slice.
+                if not isinstance(payload, dict) or payload.get("format") != "line_slice":
+                    continue
+                number, left, right = (payload.get(key) for key in ("line", "column_start", "column_end"))
+                if not all(type(value) is int for value in (number, left, right)) or not 1 <= number <= len(lines):
+                    continue
+                text, start, end = lines[number - 1]
+                if end < start or not 0 <= left <= right <= len(text) or payload.get("text") != text[left:right]:
+                    continue
+                segments.append({**base, "start_line": start, "end_line": end,
+                                 "column_start": left, "column_end": right, "total_columns": len(text)})
+                continue
             ranges: list[list[int]] = []
             for line in state.output.split("\n"):
                 match = re.fullmatch(r"(\d+)\| (.*)", line)
@@ -155,7 +173,7 @@ def _record_transcript_receipts(runtime: PluginRuntime, binding: SessionBinding,
     existing = {key(item) for item in runtime.store.list_source_accesses(binding.attempt_id)}
     pending = {key(item): item for item in accesses if key(item) not in existing}
     runtime.store.record_source_accesses(
-        binding, list(pending.values()), processed_part_ids=[part.id for part in parts],
+        binding, list(pending.values()), processed_part_ids=[part.id for part in parts], read_segments=segments,
     )
 
 

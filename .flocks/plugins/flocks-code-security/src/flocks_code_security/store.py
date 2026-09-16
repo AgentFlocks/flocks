@@ -102,7 +102,7 @@ def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
 
 # Bump this whenever initialize() adds or changes schema migrations.
 # Version 9 was also used by databases with executable_mode but no conversation tables.
-STORE_SCHEMA_VERSION = 15
+STORE_SCHEMA_VERSION = 16
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -705,6 +705,18 @@ class ScanStore:
                     start_line INTEGER,
                     end_line INTEGER,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS source_read_segments (
+                    attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
+                    part_id TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    blob_digest TEXT NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    column_start INTEGER NOT NULL,
+                    column_end INTEGER NOT NULL,
+                    total_columns INTEGER NOT NULL,
+                    PRIMARY KEY (attempt_id, part_id)
                 );
                 CREATE TABLE IF NOT EXISTS source_receipt_parts (
                     attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
@@ -5828,8 +5840,7 @@ class ScanStore:
 
     def require_repository_summary_consumed(self, binding: SessionBinding) -> None:
         if (
-            binding.role not in {"threat_modeler", "poc_generator"}
-            or binding.work_unit_id is None
+            binding.work_unit_id is None
             or binding.attempt_id is None
         ):
             raise ValueError("Repository summary consumption requires a threat-modeler or PoC-generator work unit")
@@ -6168,8 +6179,9 @@ class ScanStore:
         accesses: list[dict[str, Any]],
         *,
         processed_part_ids: list[str] | None = None,
+        read_segments: list[dict[str, Any]] | None = None,
     ) -> None:
-        if not accesses and not processed_part_ids:
+        if not accesses and not processed_part_ids and not read_segments:
             return
         if binding.attempt_id is None:
             raise ValueError("Source access requires a bound work attempt")
@@ -6177,7 +6189,7 @@ class ScanStore:
         if not operations <= {"repository_summary", "inventory", "read", "search"}:
             raise ValueError("Unsupported source access operation")
         with self._lock, self._connect() as connection:
-            if processed_part_ids:
+            if processed_part_ids or read_segments:
                 connection.execute("BEGIN IMMEDIATE")
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
@@ -6188,6 +6200,37 @@ class ScanStore:
                 (binding.attempt_id,),
             )} if processed_part_ids else set()
             accesses = [item for item in accesses if item.get("source_part_id") not in processed]
+            for segment in read_segments or []:
+                connection.execute(
+                    "INSERT OR IGNORE INTO source_read_segments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (binding.attempt_id, segment["source_part_id"], segment["relative_path"], segment["blob_digest"],
+                     segment["start_line"], segment["end_line"], segment["column_start"], segment["column_end"], segment["total_columns"]),
+                )
+                spans = connection.execute(
+                    "SELECT column_start, column_end FROM source_read_segments "
+                    "WHERE attempt_id = ? AND relative_path = ? AND blob_digest = ? "
+                    "AND start_line = ? AND end_line = ? ORDER BY column_start",
+                    (binding.attempt_id, segment["relative_path"], segment["blob_digest"], segment["start_line"], segment["end_line"]),
+                ).fetchall()
+                covered = 0
+                for left, right in spans:
+                    if left > covered:
+                        break
+                    covered = max(covered, right)
+                if covered >= segment["total_columns"]:
+                    exists = connection.execute(
+                        "SELECT 1 FROM source_access WHERE attempt_id = ? AND operation = 'read' "
+                        "AND relative_path = ? AND blob_digest = ? AND start_line <= ? AND end_line >= ?",
+                        (binding.attempt_id, segment["relative_path"], segment["blob_digest"], segment["start_line"], segment["end_line"]),
+                    ).fetchone()
+                    if not exists and not any(
+                        item["relative_path"] == segment["relative_path"]
+                        and item.get("operation") == "read"
+                        and item.get("start_line") == segment["start_line"]
+                        and item.get("end_line") == segment["end_line"]
+                        for item in accesses
+                    ):
+                        accesses.append({**segment, "operation": "read"})
             now = _now()
             connection.executemany(
                 "INSERT INTO source_access ("
@@ -6308,16 +6351,13 @@ class ScanStore:
             (binding.attempt_id,),
         ).fetchall()
         for item in evidence:
-            independently_read = any(
-                read["relative_path"] == item["relative_path"]
+            matching = sorted(
+                (read["start_line"], read["end_line"]) for read in reads
+                if read["relative_path"] == item["relative_path"]
                 and read["blob_digest"] == item["blob_digest"]
-                and read["start_line"] is not None
-                and read["end_line"] is not None
-                and read["start_line"] <= item["start_line"]
-                and read["end_line"] >= item["end_line"]
-                for read in reads
+                and read["start_line"] is not None and read["end_line"] is not None
             )
-            if not independently_read:
+            if not _ranges_cover(matching, item["start_line"], item["end_line"]):
                 raise ValueError(
                     "Verifier must independently read every candidate evidence range: "
                     f"{item['relative_path']}:{item['start_line']}-{item['end_line']}"
