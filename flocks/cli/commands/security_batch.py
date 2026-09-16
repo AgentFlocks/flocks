@@ -62,6 +62,10 @@ def start(
 ) -> None:
     """Discover numeric task folders containing repo-vul.tar.gz and description.txt.
 
+    Each audit exposes standard file, bash, grep, webfetch, websearch and todo
+    tools at every stage by default; the model chooses when to use them.
+    No tool opt-in flags are needed.
+
     With --dynamic, each folder must also contain a trusted cybergym.json with
     a prebuilt vulnerable_runner image, target_binary, fuzzer_target,
     input_contract, gdb_supported=true, fuzzer_supported=true and limits.

@@ -403,7 +403,12 @@ def security_audit(
         help="Trusted Level 1 JSON execution manifest; enables cybergym_level1 mode",
     ),
 ) -> None:
-    """Run the host-orchestrated audit with parent-Agent adjudication."""
+    """Run the host-orchestrated audit with parent-Agent adjudication.
+
+    All audit stages expose standard file, bash, grep, webfetch, websearch and
+    todo tools by default; the model chooses when to use them. No tool opt-in
+    flags are needed. --poc and --dynamic enable separate audit phases.
+    """
     try:
         run_standard_audit, _scan_status = _load_plugin_cli()
         progress = _json_line if json_output else _progress_line

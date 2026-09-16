@@ -19,7 +19,7 @@ Current implementation provides:
 Target code is copied into the plugin snapshot store by default. Agents receive file, shell, and network tools for supporting work. Prompts instruct them to keep the canonical snapshot unchanged and use scratch copies for modifications or experiments; tool visibility is no longer a read-only execution boundary. Every audit assigns one repository-wide baseline work unit over `.` with a 200-step ceiling; it is never split by file count or byte size. If the baseline returns valid blocking questions with exact related paths, the host may launch at most one focused investigator over their deduplicated union before verification.
 
 
-All nine agents receive these standard tools, including during parent adjudication:
+All nine agents receive these standard tools by default, including during parent adjudication:
 `read`, `write`, `edit`, `apply_patch`, `glob`, `delete`, `move`, `copy`, `mkdir`,
 `bash`, `grep`, `webfetch`, `websearch`, and `todo`.
 The duplicate `audit_inventory`, `audit_read`, and `audit_search` tools have been
@@ -54,6 +54,14 @@ Run a complete audit with one command:
 ```bash
 flocks security audit /absolute/path/to/source
 ```
+
+Standard tools are available at every stage in both single audits and batch runs;
+the model chooses which tools to call. No per-scan tool switches are required.
+When migrating commands from the experimental CLI branch, remove `--bash` and
+`--web-search` from `flocks security audit` and `flocks security batch run`.
+These flags are no longer accepted. Keep `--poc` / `--generate-poc` (single audit)
+or `--poc` (batch) when PoC generation is needed, and `--dynamic` when dynamic
+validation is needed; those options enable audit phases, not standard tools.
 
 To skip the source copy and audit the source directory directly:
 
