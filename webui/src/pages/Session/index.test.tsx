@@ -2,7 +2,7 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useNavigate } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
 import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
@@ -487,6 +487,127 @@ describe('SessionPage session actions menu', () => {
     expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
     expect(agentIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
     expect(agentIconContainer?.className).not.toContain('shadow-');
+  });
+
+  it('shows full execution-mode titles in a portaled menu and preserves dismissal', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    const trigger = await screen.findByRole('button', { name: 'executionMode.title' });
+    await user.click(trigger);
+    const menu = screen.getByRole('menu', { name: 'executionMode.title' });
+    const plan = within(menu).getByRole('menuitemradio', { name: /executionMode.options.plan.label/ });
+
+    expect(menu.parentElement).toBe(document.body);
+    expect(menu).toHaveAttribute('data-execution-mode-selector');
+    expect(menu).toHaveStyle({ width: '520px' });
+    await user.hover(plan);
+    expect(plan).toHaveAttribute('title', 'executionMode.options.plan.label\nexecutionMode.options.plan.description');
+    expect(plan).toHaveAttribute('aria-checked', 'false');
+    await user.click(plan);
+    expect(screen.queryByRole('menu', { name: 'executionMode.title' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
+
+    await user.click(trigger);
+    expect(screen.getByRole('menuitemradio', { name: /executionMode.options.plan.label/ })).toHaveAttribute('aria-checked', 'true');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: 'executionMode.title' })).not.toBeInTheDocument();
+    await user.click(trigger);
+    await user.click(document.body);
+    expect(screen.queryByRole('menu', { name: 'executionMode.title' })).not.toBeInTheDocument();
+  });
+
+  it('uses the same width for execution, model and security menus with full hover text', async () => {
+    const user = userEvent.setup();
+    useProviders.mockReturnValue({
+      providers: modelProviders,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
+    client.get.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/flockspro/license/status'
+        ? { pro_enabled: true }
+        : [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true, pathStatus: 'available', sessionCount: 1 }],
+    }));
+    renderSessionPage();
+
+    await user.click(await screen.findByRole('button', { name: 'executionMode.title' }));
+    const executionMenu = screen.getByRole('menu', { name: 'executionMode.title' });
+    const menuWidth = executionMenu.style.width;
+    expect(menuWidth).toBe('520px');
+    await user.click(document.body);
+
+    await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
+    const modelMenu = screen.getByText('modelPicker.title').closest('[data-model-selector]') as HTMLElement;
+    expect(modelMenu.parentElement).toBe(document.body);
+    expect(modelMenu.style.width).toBe(menuWidth);
+    expect(within(modelMenu).getByText('OpenAI')).toHaveAttribute('title', 'OpenAI');
+    expect(within(modelMenu).getByText('modelPicker.hint')).toHaveAttribute('title', 'modelPicker.hint');
+    const modelOption = within(modelMenu).getByRole('button', { name: /MiniMax M3/i });
+    await user.hover(modelOption);
+    expect(modelOption.getAttribute('title')).toContain('MiniMax M3\nMiniMax / minimax-m3');
+    const info = modelOption.querySelector('.lucide-info')?.parentElement;
+    expect(info).not.toBeNull();
+    await user.hover(info as HTMLElement);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('MiniMax M3');
+    expect(within(modelMenu).getByRole('button', { name: 'modelPicker.addModel' })).toBeInTheDocument();
+    await user.click(document.body);
+    expect(screen.queryByText('modelPicker.title')).not.toBeInTheDocument();
+
+    await user.click(await screen.findByRole('button', { name: 'permissionMode.requireConfirm' }));
+    const securityMenu = screen.getByText('permissionMode.runtimeTitle').closest('[data-permission-mode-selector]') as HTMLElement;
+    expect(securityMenu.parentElement).toBe(document.body);
+    expect(securityMenu.style.width).toBe(menuWidth);
+    for (const [label, description] of [
+      ['permissionMode.runtimeExe', 'permissionMode.runtimeExeDesc'],
+      ['permissionMode.networkAutoDenyAll', 'permissionMode.networkAutoDenyAllDesc'],
+      ['permissionMode.autoAllowAll', 'permissionMode.autoAllowAllDesc'],
+    ]) {
+      const option = within(securityMenu).getByRole('button', { name: new RegExp(label) });
+      await user.hover(option);
+      expect(option).toHaveAttribute('title', `${label}\n${description}`);
+    }
+    await user.click(document.body);
+    expect(screen.queryByText('permissionMode.runtimeTitle')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['permissionMode.requireConfirm', 'permissionMode.viewDetails', '/settings/security-config'],
+    ['GPT-4o', 'modelPicker.addModel', '/models'],
+  ])('keeps navigation from the %s popup working', async (triggerName, actionName, destination) => {
+    const user = userEvent.setup();
+    useProviders.mockReturnValue({
+      providers: modelProviders,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
+    client.get.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/flockspro/license/status'
+        ? { pro_enabled: true }
+        : [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true, pathStatus: 'available', sessionCount: 1 }],
+    }));
+    function LocationProbe() {
+      return <output data-testid="location">{useLocation().pathname}</output>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/sessions']}>
+        <SessionPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: triggerName }));
+    await user.click(await screen.findByRole('button', { name: actionName }));
+    expect(screen.getByTestId('location')).toHaveTextContent(destination);
+    expect(screen.queryByRole('button', { name: actionName })).not.toBeInTheDocument();
   });
 
   it('persists Plan per session', async () => {
@@ -3127,7 +3248,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByText('chat.addMenu.selectSkill')).toBeInTheDocument();
   });
 
-  it('updates permission and runtime independently with the current revision', async () => {
+  it('updates permission, runtime and network independently from portaled menus with the current revision', async () => {
     const user = userEvent.setup();
     client.get.mockImplementation((url: string) => {
       if (url === '/api/flockspro/license/status') {
@@ -3179,6 +3300,17 @@ describe('SessionPage session actions menu', () => {
           entry: 'webui',
           revision: 9,
         },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          permissionMode: 'readonly',
+          runtimeMode: 'exe-mode',
+          networkMode: 'auto-deny-all',
+          networkModeDefault: 'require-confirm',
+          networkModeOverridden: true,
+          entry: 'webui',
+          revision: 10,
+        },
       });
 
     renderSessionPage('/sessions?session=session-1');
@@ -3189,7 +3321,7 @@ describe('SessionPage session actions menu', () => {
       return element as HTMLElement;
     });
     await user.click(within(selector).getByRole('button', { name: /permissionMode\.requireConfirm/ }));
-    await user.click(within(selector).getByRole('button', { name: /permissionMode\.readonly/ }));
+    await user.click(screen.getByRole('button', { name: /permissionMode\.readonlyDesc/ }));
 
     await waitFor(() => {
       expect(client.patch).toHaveBeenNthCalledWith(
@@ -3200,7 +3332,7 @@ describe('SessionPage session actions menu', () => {
     });
 
     await user.click(within(selector).getByRole('button', { name: /permissionMode\.readonly/ }));
-    await user.click(within(selector).getByRole('button', { name: /permissionMode\.runtimeExe/ }));
+    await user.click(screen.getByRole('button', { name: /permissionMode\.runtimeExeDesc/ }));
 
     await waitFor(() => {
       expect(client.patch).toHaveBeenNthCalledWith(
@@ -3209,5 +3341,17 @@ describe('SessionPage session actions menu', () => {
         { runtimeMode: 'exe-mode', revision: 8 },
       );
     });
+
+    await user.click(within(selector).getByRole('button', { name: /permissionMode\.readonly/ }));
+    await user.click(screen.getByRole('button', { name: /permissionMode\.networkAutoDenyAllDesc/ }));
+
+    await waitFor(() => {
+      expect(client.patch).toHaveBeenNthCalledWith(
+        3,
+        '/api/flockspro/policy/sessions/session-1/execution-settings',
+        { networkMode: 'auto-deny-all', revision: 9 },
+      );
+    });
+    expect(screen.queryByText('permissionMode.runtimeTitle')).not.toBeInTheDocument();
   });
 });
