@@ -483,6 +483,8 @@ async def test_generate_uses_original_session_id_and_backend_latest(
         generation_id="gen-001",
     )
     assert titled_validation["status"] == "needs_revision"
+    assert titled_validation == titled_write["validation"]
+    assert titled_validation["attempt"] == 1  # Explicit compatibility check does not spend a retry.
     assert titled_validation["issues"] == [
         {
             "code": "report_title_forbidden",
@@ -1514,6 +1516,7 @@ async def test_generate_accepts_empty_material_download(
         "total": 0,
         "hasMore": False,
         "nextOffset": 0,
+        "nextContentOffset": 0,
         "deterministicCounts": {"totalMaterials": 0, "bySourceType": {}},
         "fieldSemantics": {
             "authoritativeEventFacts": [

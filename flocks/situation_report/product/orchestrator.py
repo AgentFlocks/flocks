@@ -59,14 +59,14 @@ def _build_agent_recovery_event(
     if not candidate_path.is_file():
         instruction = (
             "The candidate report has not been written. Continue the required Skill steps now: "
-            "write the complete candidate with situation_product_report_write, then validate it."
+            "write the complete candidate with situation_product_report_write and inspect its automatic validation."
         )
     elif not evidence_path.is_file():
         current_sha = file_sha256(candidate_path)
         instruction = (
             "The candidate report exists but its internal evidence map is missing. Rewrite the "
             "same complete candidate with situation_product_report_write, supplying a complete "
-            f"evidence_map and expected_sha256={current_sha}, then validate it."
+            f"evidence_map and expected_sha256={current_sha}; inspect the write's automatic validation."
         )
     elif not validation_path.is_file():
         instruction = (
@@ -104,7 +104,7 @@ def _build_agent_recovery_event(
             instruction = (
                 "Validation returned needs_revision. In this same response, immediately repair only "
                 "the listed issues with situation_product_report_write, passing expected_sha256="
-                f"{current_sha}, then call situation_product_report_validate again. "
+                f"{current_sha}; inspect the write's automatic validation (do not validate twice). "
                 f"Do not answer with a plan or promise. Issues: {issues}"
             )
 

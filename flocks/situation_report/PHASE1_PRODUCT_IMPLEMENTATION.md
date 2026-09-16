@@ -84,12 +84,46 @@
 | `debug_datasets.py` | 开发环境冻结真实数据集的路径、哈希、数量和素材身份校验 |
 | `policy.py` | 报告意图白名单和 `open_report_config(sessionID)` |
 | `workspace.py` | Agent 受限读取、分页素材、候选写入与校验 |
+| `material_paging.py` | 按实际序列化大小无损分页；单条超大素材的受限续读 |
+| `markdown_counts.py` | Markdown 结构计数；明确矛盾与无法可靠识别分开返回 |
 | `output.py` | 不可变输出版本、current 指针和状态文件 |
 | `events.py` | `situation.report.status` 序号与发布 |
 | `orchestrator.py` | A1 前置同步、Agent 调用、有界恢复、不可变发布、终态结果消息和状态事件 |
 | `dispatch.py` | 原始 prompt 路由与产品运行时之间的窄适配 |
 
 已删除：`bindings.py`、`copy.py`、业务用户/Project/Session 绑定和 Flocks 内共享复制。保留的是 Flocks 原生 Session -> Project 内部映射。
+
+## Agent 内部读取与校验契约
+
+以下是 Agent 工具内部行为，不改变业务后端的 HTTP 接口、action 或 Event 协议，也不要求业务后端分页下载素材。
+
+- `situation_product_material_read(generation_id, offset=0, limit=20, content_offset=0)`：
+  `limit` 是最多记录数（1–50），还受完整 JSON 响应的字符、UTF-8 字节和行数限制。
+  普通记录仍放在 `materials`；无法一次容纳的单条记录放在 `materialFragment`，含内部
+  `material_id`、`text`、字符位置 `offset/nextOffset`、`totalCharacters/hasMore`。
+  `text` 是单条紧凑 JSON 的片段，不保证每片可独立解析。每次将**顶层**
+  `nextOffset/nextContentOffset` 传为下一次 `offset/content_offset`，直到顶层
+  `hasMore=false`；不可跳过片段。原始不可变快照不删字段、不摘要化，既有筛选元数据剔除规则不变。
+  内部分页预算为最多 60,000 序列化字符、80,000 UTF-8 字节、少于 800 换行；单条片段起始
+  上限为 24,000 字符，必要时按真实序列化大小缩小。这是传输保护，不是报告素材规模的质量保证。
+- `situation_product_source_read`：只用于具体事实冲突/模糊，不用于绕过素材分页。
+  大详情沿用已有 `offset/limit/query` 与冻结详情缓存；只读到足够消歧的上下文，不默认展开全部详情。
+- `situation_product_report_write`：在同一个写锁内保存候选与内部证据并自动校验，原有
+  `sha256/evidenceSHA256` 等字段保留，新增 `validation`（结构与独立校验工具一致）。
+  `validation.status=passed` 后无需再次调用校验工具；`needs_revision` 才按 `issues` 修订。
+  工具调用成功只表示写入/检查完成，不等于报告通过或已经发布。
+- `situation_product_report_validate` 保留，用于兼容和恢复缺失的校验结果。相同候选 SHA、证据 SHA、
+  模板/素材快照 SHA 和校验器版本复用结果，不增加 `attempt`；三次校验预算按发生变化的版本计。
+  第四个不同候选会在覆盖现有文件前被拒绝。发布仍要求当前报告/证据 SHA 与通过的结果一致。
+- `validation.issues` 是确定性阻断问题；`warnings` 是程序不能可靠识别的项目，不参与
+  `passed/needs_revision` 判定。计数支持粗体列表、有序列表、事件子标题、事件表格及子分组，
+  无法可靠计数时返回 `declared_group_count_unrecognized`、`actual=null`，不能把它当成 0 或已核实。
+  该检查不是全文语义审稿；事实覆盖、归因、数量单位等仍需按模板与素材核对。
+
+工具流程因此为：加载 Skill → 读上下文与全部素材 → 必要时查详情 → 写入并自动校验 →
+必要时有界修订 → 运行时发布。前端可能不再看到单独的 `report_validate` Tool Part；
+自动校验结果位于 `report_write` 工具返回的 `validation`，最终成功仍以报告终态 Event/Message 为准。
+这些规则不固定模板章节、IOC 类型或 Top-N；完整的本轮后端模板仍是写作依据。
 
 ## 核心代码接入
 

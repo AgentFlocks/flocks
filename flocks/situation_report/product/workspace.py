@@ -20,6 +20,8 @@ from .backend_sync import (
 )
 from .contracts import SAFE_IDENTIFIER
 from .files import async_file_lock, atomic_write_bytes, atomic_write_json, read_json, session_root, utc_now
+from .markdown_counts import declared_group_counts
+from .material_paging import bounded_material_page
 from .session_state import ReportSessionStateError, load_session_state
 
 
@@ -157,6 +159,8 @@ async def read_generation_context(*, session_id: str, generation_id: str) -> dic
             "materialIDInReportAllowed": False,
             "evidenceMode": "internal_sidecar",
             "maxValidationAttempts": 3,
+            "automaticValidationOnWrite": True,
+            "unchangedValidationIsIdempotent": True,
         },
     }
     base_report = context.get("baseReport")
@@ -172,9 +176,12 @@ async def read_material_page(
     generation_id: str,
     offset: int = 0,
     limit: int = 20,
+    content_offset: int = 0,
 ) -> dict[str, Any]:
-    if offset < 0 or limit < 1 or limit > 50:
-        raise ProductWorkspaceError("offset must be >= 0 and limit must be between 1 and 50")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (offset, limit, content_offset)):
+        raise ProductWorkspaceError("Material cursors and limit must be integers")
+    if offset < 0 or limit < 1 or limit > 50 or content_offset < 0:
+        raise ProductWorkspaceError("offset and content_offset must be >= 0; limit must be between 1 and 50")
     workspace_dir, _, _ = await _resolve_run(session_id, generation_id)
     context = _load_generation_context(workspace_dir, generation_id)
     materials_info = context.get("materials")
@@ -206,17 +213,11 @@ async def read_material_page(
                     ),
                 }
                 rows.append(value)
-    selected = rows[offset : offset + limit]
     source_type_counts: dict[str, int] = {}
     for row in rows:
         source_type = str(row["source_type"])
         source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
-    return {
-        "offset": offset,
-        "limit": limit,
-        "total": len(rows),
-        "hasMore": offset + len(selected) < len(rows),
-        "nextOffset": offset + len(selected),
+    metadata = {
         "deterministicCounts": {
             "totalMaterials": len(rows),
             "bySourceType": source_type_counts,
@@ -237,8 +238,13 @@ async def read_material_page(
                 "evidence that a matched entity is the victim, actor, or subject of the event."
             ),
         },
-        "materials": selected,
     }
+    try:
+        return bounded_material_page(
+            rows, offset=offset, limit=limit, content_offset=content_offset, metadata=metadata,
+        )
+    except ValueError as exc:
+        raise ProductWorkspaceError(str(exc)) from exc
 
 
 def _material_detail_view(
@@ -503,27 +509,34 @@ async def write_candidate_report(
         normalized_evidence[material_id] = normalized_sections
     path = workspace_dir / "work" / generation_id / "report.md"
     evidence_path = workspace_dir / "work" / generation_id / "evidence.json"
+    evidence = {
+        "schemaVersion": 1, "generationID": generation_id, "materials": normalized_evidence,
+    }
+    encoded_evidence = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     async with async_file_lock(workspace_dir / ".locks" / "write.lock"):
         if path.exists():
             current_hash = file_sha256(path)
             if not expected_sha256 or current_hash != expected_sha256:
                 raise ProductWorkspaceError("Candidate report changed; expected_sha256 is required")
+        validation_path = workspace_dir / "runs" / generation_id / "validation.json"
+        if validation_path.exists() and int(read_json(validation_path).get("attempt") or 0) >= 3:
+            # Reject a fourth distinct draft BEFORE replacing the last validated pair.
+            if (
+                not path.is_file() or path.read_bytes() != encoded + b"\n"
+                or not evidence_path.is_file() or evidence_path.read_bytes() != encoded_evidence
+            ):
+                raise ProductWorkspaceError("Validation attempt budget is exhausted")
         atomic_write_bytes(path, encoded + b"\n")
-        atomic_write_json(
-            evidence_path,
-            {
-                "schemaVersion": 1,
-                "generationID": generation_id,
-                "materials": normalized_evidence,
-            },
-        )
-    return {
-        "generationID": generation_id,
-        "path": f"work/{generation_id}/report.md",
-        "sizeBytes": path.stat().st_size,
-        "sha256": file_sha256(path),
-        "evidenceSHA256": file_sha256(evidence_path),
-    }
+        atomic_write_bytes(evidence_path, encoded_evidence)
+        validation = _validate_candidate_report(workspace_dir, generation_id)
+        return {
+            "generationID": generation_id,
+            "path": f"work/{generation_id}/report.md",
+            "sizeBytes": path.stat().st_size,
+            "sha256": validation["candidateSHA256"],
+            "evidenceSHA256": validation["evidenceSHA256"],
+            "validation": validation,
+        }
 
 
 def _template_h2(template: str) -> list[str]:
@@ -593,89 +606,17 @@ def _heading_sequence_issue(expected: list[str], actual: list[str]) -> dict[str,
 
 
 def _declared_group_count_issues(report: str) -> list[dict[str, Any]]:
-    """Check list counts explicitly declared by report subheadings."""
-
-    lines = report.splitlines()
-    issues: list[dict[str, Any]] = []
-    heading_pattern = re.compile(
-        r"^###\s+(.+?)[（(]\s*(\d+)\s*(?:起|条|项|个|events?|items?|records?)\s*[）)]\s*$",
-        flags=re.IGNORECASE,
-    )
-    item_patterns = (
-        re.compile(r"^\s*[-*]\s+\*\*标题\*\*[：:]"),
-        re.compile(r"^\s*\d+[.、]\s+\*\*标题(?:\*\*)?[：:]"),
-        re.compile(r"^\s*\d+[.、]\s+\*\*.+\*\*"),
-        re.compile(r"^\s*\*\*\d+[.、]\s+.+\*\*"),
-    )
-
-    def event_table_counts(block: list[str]) -> list[int]:
-        """Return record counts for Markdown tables with a semantic title column."""
-
-        counts: list[int] = []
-        row_index = 0
-        title_headers = {"标题", "事件标题", "title", "event", "event title"}
-        while row_index + 1 < len(block):
-            header = block[row_index].strip()
-            separator = block[row_index + 1].strip()
-            if "|" not in header or "|" not in separator:
-                row_index += 1
-                continue
-            header_cells = [
-                re.sub(r"[*_`]", "", cell).strip().casefold()
-                for cell in header.strip("|").split("|")
-            ]
-            separator_cells = [cell.strip() for cell in separator.strip("|").split("|")]
-            is_separator = bool(separator_cells) and all(
-                re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells
-            )
-            if not is_separator or not any(cell in title_headers for cell in header_cells):
-                row_index += 1
-                continue
-            data_count = 0
-            row_index += 2
-            while row_index < len(block):
-                candidate = block[row_index].strip()
-                if not candidate or "|" not in candidate:
-                    break
-                data_count += 1
-                row_index += 1
-            counts.append(data_count)
-        return counts
-
-    for index, line in enumerate(lines):
-        match = heading_pattern.match(line)
-        if match is None:
-            continue
-        expected = int(match.group(2))
-        end = index + 1
-        while end < len(lines) and not re.match(r"^#{2,3}\s+", lines[end]):
-            end += 1
-        block = lines[index + 1 : end]
-        list_count = sum(
-            1
-            for candidate in block
-            if any(pattern.match(candidate) for pattern in item_patterns)
-        )
-        table_counts = event_table_counts(block)
-        actual = max([list_count, *table_counts], default=0)
-        if actual != expected:
-            issues.append(
-                {
-                    "code": "declared_group_count",
-                    "heading": line[4:].strip(),
-                    "expected": expected,
-                    "actual": actual,
-                    "detail": (
-                        "The count declared by this report subheading does not match its "
-                        "listed records"
-                    ),
-                }
-            )
-    return issues
+    return declared_group_counts(report)[0]
 
 
 async def validate_candidate_report(*, session_id: str, generation_id: str) -> dict[str, Any]:
     workspace_dir, _, _ = await _resolve_run(session_id, generation_id)
+    async with async_file_lock(workspace_dir / ".locks" / "write.lock"):
+        return _validate_candidate_report(workspace_dir, generation_id)
+
+
+def _validate_candidate_report(workspace_dir: Path, generation_id: str) -> dict[str, Any]:
+    """Called with write.lock held; validate and persist the exact same candidate pair."""
     candidate_path = workspace_dir / "work" / generation_id / "report.md"
     evidence_path = workspace_dir / "work" / generation_id / "evidence.json"
     if not candidate_path.is_file():
@@ -696,6 +637,24 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         materials_info,
         "Material snapshot",
     )
+    validation_path = workspace_dir / "runs" / generation_id / "validation.json"
+    identity = {
+        "validatorVersion": 2,
+        "candidateSHA256": file_sha256(candidate_path),
+        "evidenceSHA256": file_sha256(evidence_path),
+        "templateSHA256": template_info["sha256"],
+        "materialsSHA256": materials_info["sha256"],
+    }
+    previous = read_json(validation_path) if validation_path.exists() else {}
+    if (
+        previous.get("generationID") == generation_id
+        and previous.get("status") in {"passed", "needs_revision"}
+        and all(previous.get(key) == value for key, value in identity.items())
+    ):
+        return previous
+    attempt = int(previous.get("attempt") or 0) + 1
+    if attempt > 3:
+        raise ProductWorkspaceError("Validation attempt budget is exhausted")
     template = template_path.read_text(encoding="utf-8")
     prohibited_literals = _template_prohibited_literals(template)
     material_rows = [
@@ -762,7 +721,8 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
         )
     if heading_issue:
         issues.append(heading_issue)
-    issues.extend(_declared_group_count_issues(report))
+    count_issues, warnings = declared_group_counts(report)
+    issues.extend(count_issues)
     if missing_evidence or unknown_evidence or invalid_evidence_sections:
         evidence_issue: dict[str, Any] = {"code": "evidence_map"}
         if missing_evidence:
@@ -817,21 +777,14 @@ async def validate_candidate_report(*, session_id: str, generation_id: str) -> d
             }
         )
 
-    validation_path = workspace_dir / "runs" / generation_id / "validation.json"
-    previous_attempts = 0
-    if validation_path.exists():
-        previous_attempts = int(read_json(validation_path).get("attempt") or 0)
-    attempt = previous_attempts + 1
-    if attempt > 3:
-        raise ProductWorkspaceError("Validation attempt budget is exhausted")
     result = {
         "schemaVersion": 1,
         "generationID": generation_id,
         "status": "passed" if not issues else "needs_revision",
         "attempt": attempt,
-        "candidateSHA256": file_sha256(candidate_path),
-        "evidenceSHA256": file_sha256(evidence_path),
+        **identity,
         "issues": issues,
+        "warnings": warnings,
         "validatedAt": utc_now(),
     }
     atomic_write_json(validation_path, result)

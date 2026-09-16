@@ -59,7 +59,10 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
     content = Path(skill.location).read_text(encoding="utf-8")
     assert "phase-one" in skill.description
     assert "Do not change templates, materials, language" in content
-    assert "Stop after three validation attempts" in content
+    assert "Stop after three distinct candidate/evidence validations" in content
+    assert "automatic `validation`" in content
+    material_tool = ToolRegistry.get("situation_product_material_read")
+    assert "content_offset" in material_tool.info.get_schema().properties
     assert "never expand every material by default" in content
     assert "selected-material detail" in content
     assert "authoritative writing specification" in content

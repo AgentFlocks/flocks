@@ -66,7 +66,10 @@ async def situation_product_context_read(ctx: ToolContext, generation_id: str) -
     name="situation_product_material_read",
     description=(
         "Read one verified page of the immutable material snapshot for this report generation. "
-        "Continue until hasMore=false before drafting. Numeric backend timestamps also include "
+        "Pages are bounded by serialized size as well as record count. Continue with the top-level "
+        "nextOffset/nextContentOffset as offset/content_offset until hasMore=false before drafting. "
+        "Oversized records return materialFragment.text JSON slices; read every slice. "
+        "Numeric backend timestamps also include "
         "normalized *_iso_utc fields; use those normalized values in the report."
     ),
     category=ToolCategory.SYSTEM,
@@ -87,9 +90,13 @@ async def situation_product_context_read(ctx: ToolContext, generation_id: str) -
         ToolParameter(
             name="limit",
             type=ParameterType.INTEGER,
-            description="Page size from 1 through 50.",
+            description="Maximum records from 1 through 50; size limits can return fewer.",
             required=False,
             default=20,
+        ),
+        ToolParameter(
+            name="content_offset", type=ParameterType.INTEGER, required=False, default=0,
+            description="Character cursor inside a large material; copy top-level nextContentOffset with nextOffset.",
         ),
     ],
 )
@@ -98,6 +105,7 @@ async def situation_product_material_read(
     generation_id: str,
     offset: int = 0,
     limit: int = 20,
+    content_offset: int = 0,
 ) -> ToolResult:
     return await _run(
         read_material_page,
@@ -105,6 +113,7 @@ async def situation_product_material_read(
         generation_id=generation_id,
         offset=offset,
         limit=limit,
+        content_offset=content_offset,
     )
 
 
@@ -177,7 +186,9 @@ async def situation_product_source_read(
     description=(
         "Write the complete candidate Markdown for this generation into the restricted work area. "
         "Store report-to-material traceability in evidence_map, never in the report body. It cannot "
-        "update current output. A repair must supply the SHA-256 returned by the prior write."
+        "update current output. The write automatically validates and returns validation.status, "
+        "issues, warnings and attempt; no separate validate call is needed after a successful write. "
+        "A repair must supply the SHA-256 returned by the prior write."
     ),
     category=ToolCategory.SYSTEM,
     parameters=[
@@ -242,7 +253,8 @@ async def situation_product_report_write(
     description=(
         "Validate the current candidate against the immutable template heading contract, internal "
         "evidence map, Markdown structure, and internal identifier/path leakage policy. At most "
-        "three validation attempts."
+        "three distinct candidate/evidence validation attempts. Writes already return validation; "
+        "use this compatibility tool only if that result is missing. Unchanged checks reuse the result."
     ),
     category=ToolCategory.SYSTEM,
     parameters=[
