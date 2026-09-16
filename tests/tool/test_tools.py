@@ -329,8 +329,7 @@ class TestEditTool:
             "edit",
             ctx=tool_context,
             filePath=filepath,
-            oldString="Hello",
-            newString="Hi"
+            edits=[{"oldString": "Hello", "newString": "Hi"}],
         )
         
         assert result.success
@@ -351,8 +350,12 @@ class TestEditTool:
             "edit",
             ctx=tool_context,
             filePath=filepath,
-            oldString="def foo():\n    return 1",
-            newString="def foo():\n    return 42"
+            edits=[
+                {
+                    "oldString": "def foo():\n    return 1",
+                    "newString": "def foo():\n    return 42",
+                }
+            ],
         )
         
         assert result.success
@@ -362,9 +365,9 @@ class TestEditTool:
             assert "return 42" in content
     
     @pytest.mark.asyncio
-    async def test_edit_replace_all(self, tool_context, temp_dir):
-        """Test replace all occurrences"""
-        filepath = os.path.join(temp_dir, "edit_replace_all.txt")
+    async def test_edit_rejects_non_unique_target(self, tool_context, temp_dir):
+        """Test that each targeted replacement must be unique."""
+        filepath = os.path.join(temp_dir, "edit_duplicate.txt")
         with open(filepath, 'w') as f:
             f.write("foo bar foo baz foo\n")
         
@@ -372,32 +375,50 @@ class TestEditTool:
             "edit",
             ctx=tool_context,
             filePath=filepath,
-            oldString="foo",
-            newString="qux",
-            replaceAll=True
+            edits=[{"oldString": "foo", "newString": "qux"}],
         )
-        
-        assert result.success
-        
+
+        assert not result.success
+        assert "must be unique" in (result.error or "")
+
         with open(filepath, 'r') as f:
-            content = f.read()
-            assert "foo" not in content
-            assert content.count("qux") == 3
+            assert f.read() == "foo bar foo baz foo\n"
 
     def test_edit_schema_supports_batch_edits(self):
-        """Test edit schema exposes pi-style edits[] plus legacy compatibility."""
+        """Test edit schema exposes only the required edits[] interface."""
         tool = ToolRegistry.get("edit")
         assert tool is not None
 
         schema = tool.info.get_schema()
         edits_prop = schema.properties["edits"]
 
+        assert set(schema.properties) == {"filePath", "edits"}
         assert edits_prop["type"] == "array"
+        assert edits_prop["minItems"] == 1
         assert edits_prop["items"]["type"] == "object"
         assert edits_prop["items"]["required"] == ["oldString", "newString"]
         assert "oldString" in edits_prop["items"]["properties"]
         assert "newString" in edits_prop["items"]["properties"]
-        assert schema.required == ["filePath"]
+        assert schema.required == ["filePath", "edits"]
+
+    @pytest.mark.asyncio
+    async def test_edit_rejects_top_level_replacement_fields(self, tool_context, temp_dir):
+        """Test that replacements must be supplied through edits[]."""
+        filepath = os.path.join(temp_dir, "edit_invalid_shape.txt")
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("Hello\n")
+
+        result = await ToolRegistry.execute(
+            "edit",
+            ctx=tool_context,
+            filePath=filepath,
+            oldString="Hello",
+            newString="Hi",
+        )
+
+        assert not result.success
+        assert "unknown parameters" in (result.error or "")
+        assert "edits" in (result.error or "")
 
 
 class TestBashTool:
@@ -1447,8 +1468,7 @@ class TestEditToolAdvanced:
             "edit",
             ctx=tool_context,
             filePath=filepath,
-            oldString="nonexistent",
-            newString="replacement"
+            edits=[{"oldString": "nonexistent", "newString": "replacement"}],
         )
         
         assert not result.success
@@ -1457,24 +1477,20 @@ class TestEditToolAdvanced:
         assert "slightly larger unique snippet" in result.error.lower()
     
     @pytest.mark.asyncio
-    async def test_edit_create_new_file(self, tool_context, temp_dir):
-        """Test edit creates new file with empty oldString"""
+    async def test_edit_requires_existing_file(self, tool_context, temp_dir):
+        """Test that edit does not create a missing file."""
         filepath = os.path.join(temp_dir, "new_edit_file.txt")
-        content = "New file content\n"
         
         result = await ToolRegistry.execute(
             "edit",
             ctx=tool_context,
             filePath=filepath,
-            oldString="",
-            newString=content
+            edits=[{"oldString": "missing", "newString": "replacement"}],
         )
         
-        assert result.success
-        assert os.path.exists(filepath)
-        
-        with open(filepath, 'r') as f:
-            assert f.read() == content
+        assert not result.success
+        assert "not found" in (result.error or "").lower()
+        assert not os.path.exists(filepath)
 
     @pytest.mark.asyncio
     async def test_edit_multi_snapshot_semantics(self, tool_context, temp_dir):
@@ -1573,8 +1589,7 @@ class TestEditToolAdvanced:
             "edit",
             ctx=tool_context,
             filePath=filepath,
-            oldString="Don't stop",
-            newString="Do not stop",
+            edits=[{"oldString": "Don't stop", "newString": "Do not stop"}],
         )
 
         assert result.success

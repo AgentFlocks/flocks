@@ -157,8 +157,7 @@ async def test_edit_rejects_daily_memory_before_permission(
         result = await edit_tool(
             ctx,
             filePath=str(memory_path),
-            oldString="existing",
-            newString="replacement",
+            edits=[{"oldString": "existing", "newString": "replacement"}],
         )
 
     assert result.success is False
