@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
+import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
@@ -678,6 +678,7 @@ export default function SessionPage() {
     () => readSessionExecutionMode(null),
   );
   const [showExecutionModeOptions, setShowExecutionModeOptions] = useState(false);
+  const executionModeSelectorRef = useRef<HTMLDivElement>(null);
   const executionModeHandoffRef = useRef<{
     sessionId: string;
     mode: SessionExecutionMode;
@@ -686,8 +687,8 @@ export default function SessionPage() {
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
-  const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
   const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
+  const permissionModeSelectorRef = useRef<HTMLDivElement>(null);
   const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
   const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
@@ -756,14 +757,6 @@ export default function SessionPage() {
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
-  const updateModelMenuLeftOffset = useCallback(() => {
-    const selector = modelSelectorRef.current;
-    if (!selector) return;
-    setModelMenuLeftOffset(getAnchoredMenuLeftOffset(
-      selector.getBoundingClientRect().left,
-      window.innerWidth,
-    ));
-  }, []);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
@@ -1409,13 +1402,6 @@ export default function SessionPage() {
     document.addEventListener('mousedown', handle);
     return () => document.removeEventListener('mousedown', handle);
   }, [showProjectOptions]);
-
-  useEffect(() => {
-    if (!showModelOptions) return;
-    updateModelMenuLeftOffset();
-    window.addEventListener('resize', updateModelMenuLeftOffset);
-    return () => window.removeEventListener('resize', updateModelMenuLeftOffset);
-  }, [showModelOptions, updateModelMenuLeftOffset]);
 
   useEffect(() => {
     if (!showModelOptions) return;
@@ -3356,7 +3342,7 @@ export default function SessionPage() {
           )}
           toolbarSlot={
             <div className="flex min-w-0 items-center gap-0.5">
-              <div className="relative" data-execution-mode-selector>
+              <div ref={executionModeSelectorRef} className="relative" data-execution-mode-selector>
                 <button
                   type="button"
                   onClick={() => {
@@ -3378,58 +3364,32 @@ export default function SessionPage() {
                   <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showExecutionModeOptions && (
-                  <div
+                  <SessionComposerMenu
+                    anchorRef={executionModeSelectorRef}
+                    data-execution-mode-selector
                     role="menu"
                     aria-label={t('executionMode.title')}
-                    className="absolute bottom-full left-0 z-50 mb-2 w-64 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+                    header={(
+                      <SessionComposerMenuHeader
+                        title={t('executionMode.title')}
+                        hint={t('executionMode.hint')}
+                      />
+                    )}
+                    contentClassName="space-y-0.5 p-1.5"
                   >
-                    <div className="border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
-                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">
-                        {t('executionMode.title')}
-                      </div>
-                      <div className="mt-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">
-                        {t('executionMode.hint')}
-                      </div>
-                    </div>
-                    <div className="space-y-0.5 p-1.5">
-                      {SESSION_EXECUTION_MODES.map((mode) => {
-                        const selected = selectedExecutionMode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            onClick={() => handleSelectExecutionMode(mode)}
-                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                              selected
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                            }`}
-                          >
-                            <div className="flex w-20 shrink-0 items-center gap-1.5 text-sm font-medium">
-                              <ExecutionModeIcon
-                                mode={mode}
-                                className={`h-3.5 w-3.5 shrink-0 ${
-                                  selected
-                                    ? 'text-zinc-700 dark:text-zinc-100'
-                                    : 'text-zinc-400 dark:text-zinc-500'
-                                }`}
-                              />
-                              <span>{t(`executionMode.options.${mode}.label`)}</span>
-                            </div>
-                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                              selected ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-500 dark:text-zinc-400'
-                            }`}
-                            >
-                              {t(`executionMode.options.${mode}.description`)}
-                            </div>
-                            {selected && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                    {SESSION_EXECUTION_MODES.map((mode) => (
+                      <SessionModeOption
+                        key={mode}
+                        role="menuitemradio"
+                        aria-checked={selectedExecutionMode === mode}
+                        selected={selectedExecutionMode === mode}
+                        label={t(`executionMode.options.${mode}.label`)}
+                        description={t(`executionMode.options.${mode}.description`)}
+                        icon={<ExecutionModeIcon mode={mode} className="h-3.5 w-3.5 shrink-0" />}
+                        onClick={() => handleSelectExecutionMode(mode)}
+                      />
+                    ))}
+                  </SessionComposerMenu>
                 )}
               </div>
               {!activeChatSessionId && (
@@ -3521,7 +3481,6 @@ export default function SessionPage() {
               <button
                 type="button"
                 onClick={() => {
-                  if (!showModelOptions) updateModelMenuLeftOffset();
                   setShowModelOptions(!showModelOptions);
                   setShowExecutionModeOptions(false);
                   setShowProjectOptions(false);
@@ -3546,15 +3505,34 @@ export default function SessionPage() {
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
-                <div
-                  className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
-                  style={{ transform: `translateX(${modelMenuLeftOffset}px)` }}
+                <SessionComposerMenu
+                  anchorRef={modelSelectorRef}
+                  data-model-selector
+                  aria-label={t('modelPicker.title')}
+                  header={(
+                    <SessionComposerMenuHeader
+                      title={t('modelPicker.title')}
+                      hint={t('modelPicker.hint')}
+                    />
+                  )}
+                  contentClassName="p-1.5"
+                  footer={(
+                    <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowModelOptions(false);
+                          setSelectorTooltip(null);
+                          navigate('/models');
+                        }}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                      >
+                        <Plus className="h-3 w-3" />
+                        {t('modelPicker.addModel')}
+                      </button>
+                    </div>
+                  )}
                 >
-                  <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
-                    <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
-                    <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>
-                  </div>
-                  <div className="h-[15.5rem] overflow-y-auto p-1.5">
                     {loadingProviders || loadingEnabledModels ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
                     ) : (
@@ -3563,6 +3541,7 @@ export default function SessionPage() {
                           <button
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
+                            title={`${t('modelPicker.auto')}\n${autoStatusLabel}`}
                             disabled={!canSelectAuto}
                             className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                               selectedModelAuto
@@ -3587,14 +3566,14 @@ export default function SessionPage() {
                               >
                                 <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                               </span>
-                              {selectedModelAuto && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              <Check aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelAuto ? '' : 'invisible'}`} />
                             </div>
                           </button>
                         </div>
                         {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
                           <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
-                            <span className="truncate">{group.providerName}</span>
+                            <span className="min-w-0 truncate" title={group.providerName}>{group.providerName}</span>
                             <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                               {t('modelPicker.count', { count: group.models.length })}
                             </span>
@@ -3605,7 +3584,8 @@ export default function SessionPage() {
                                 key={option.key}
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
-                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
+                                title={`${option.label}\n${option.providerName} / ${option.modelID}\n${option.pricingLabel}\n${option.contextLabel}`}
+                                className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
                                     ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
                                     : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
@@ -3633,7 +3613,7 @@ export default function SessionPage() {
                                       <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                     </span>
                                   </div>
-                                  {selectedModelOption?.key === option.key && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                                  <Check aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelOption?.key === option.key ? '' : 'invisible'}`} />
                                 </div>
                               </button>
                             ))}
@@ -3644,26 +3624,11 @@ export default function SessionPage() {
                         )}
                       </>
                     )}
-                  </div>
-                  <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowModelOptions(false);
-                        setSelectorTooltip(null);
-                        navigate('/models');
-                      }}
-                      className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-                    >
-                      <Plus className="h-3 w-3" />
-                      {t('modelPicker.addModel')}
-                    </button>
-                  </div>
-                </div>
+                </SessionComposerMenu>
               )}
               </div>
               {proPolicyEnabled && (
-                <div className="relative" data-permission-mode-selector>
+                <div ref={permissionModeSelectorRef} className="relative" data-permission-mode-selector>
                   <button
                     type="button"
                     onClick={() => setShowPermissionModeOptions((open) => !open)}
@@ -3677,11 +3642,18 @@ export default function SessionPage() {
                     <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
-                    <div className="absolute bottom-full left-0 z-50 mb-2 w-[520px] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                      <div className="space-y-3 p-2">
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                        <div className="flex items-center justify-between px-1">
-                          <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                    <SessionComposerMenu
+                      anchorRef={permissionModeSelectorRef}
+                      data-permission-mode-selector
+                      aria-label={t('permissionMode.executionControlTitle')}
+                      contentClassName="space-y-3 p-1.5"
+                    >
+                      <section>
+                        <div className="flex min-w-0 items-center justify-between gap-3 px-2.5 py-1.5">
+                          <div
+                            className="min-w-0 truncate text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                            title={t('permissionMode.runtimeTitle', '平台开发模式')}
+                          >
                             {t('permissionMode.runtimeTitle', '平台开发模式')}
                           </div>
                           <button
@@ -3690,108 +3662,71 @@ export default function SessionPage() {
                               setShowPermissionModeOptions(false);
                               navigate('/settings/security-config');
                             }}
-                            className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                            className="shrink-0 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
                           >
                             {t('permissionMode.viewDetails')}
                           </button>
                         </div>
-                        <div className="mt-1 space-y-1">
-                        {runtimeModeOptions.map(({ value: mode, label, description }) => (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => {
-                              void handleRuntimeModeChange(mode);
-                              setShowPermissionModeOptions(false);
-                            }}
-                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                              currentRuntimeMode === mode
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                            }`}
-                          >
-                            <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                              currentRuntimeMode === mode
-                                ? 'text-zinc-700 dark:text-zinc-200'
-                                : 'text-zinc-500 dark:text-zinc-400'
-                            }`}
-                            >
-                              {description}
-                            </div>
-                            {currentRuntimeMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                          </button>
-                        ))}
+                        <div className="space-y-0.5">
+                          {runtimeModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentRuntimeMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handleRuntimeModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
                         </div>
-                        </section>
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.networkTitle', '网络访问模式')}
-                          </div>
-                          <div className="mt-1 space-y-1">
-                            {networkModeOptions.map(({ value: mode, label, description }) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => {
-                                  void handleNetworkModeChange(mode);
-                                  setShowPermissionModeOptions(false);
-                                }}
-                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                                  currentNetworkMode === mode
-                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                                }`}
-                              >
-                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                                  currentNetworkMode === mode
-                                    ? 'text-zinc-700 dark:text-zinc-200'
-                                    : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                                >
-                                  {description}
-                                </div>
-                                {currentNetworkMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                              </button>
-                            ))}
-                          </div>
-                        </section>
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.title')}
-                          </div>
-                          <div className="mt-1 space-y-1">
-                            {permissionModeOptions.map(({ value: mode, label, description }) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => {
-                                  void handlePermissionModeChange(mode);
-                                  setShowPermissionModeOptions(false);
-                                }}
-                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                                  currentPermissionMode === mode
-                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                                }`}
-                              >
-                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                                  currentPermissionMode === mode
-                                    ? 'text-zinc-700 dark:text-zinc-200'
-                                    : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                                >
-                                  {description}
-                                </div>
-                                {currentPermissionMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                              </button>
-                            ))}
-                          </div>
-                        </section>
-                      </div>
-                    </div>
+                      </section>
+                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                        <div
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          title={t('permissionMode.networkTitle', '网络访问模式')}
+                        >
+                          {t('permissionMode.networkTitle', '网络访问模式')}
+                        </div>
+                        <div className="space-y-0.5">
+                          {networkModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentNetworkMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handleNetworkModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                        <div
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          title={t('permissionMode.title')}
+                        >
+                          {t('permissionMode.title')}
+                        </div>
+                        <div className="space-y-0.5">
+                          {permissionModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentPermissionMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handlePermissionModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    </SessionComposerMenu>
                   )}
                 </div>
               )}
@@ -3993,6 +3928,7 @@ export default function SessionPage() {
 
       {selectorTooltip && (
         <div
+          role="tooltip"
           className="pointer-events-none fixed z-[80] w-56 -translate-x-full -translate-y-1/2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-700 shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-xl dark:shadow-black/30"
           style={{ left: selectorTooltip.x, top: selectorTooltip.y }}
         >

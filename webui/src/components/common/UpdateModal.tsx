@@ -11,6 +11,7 @@ import {
   Container,
   BellOff,
 } from 'lucide-react';
+import NoticeCard, { NoticePrimaryAction } from './NoticeCard';
 import { useTranslation } from 'react-i18next';
 import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
@@ -58,6 +59,7 @@ interface UpdateModalProps {
   canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
+  onPresented?: () => void;
 }
 
 export default function UpdateModal({
@@ -67,7 +69,9 @@ export default function UpdateModal({
   canUpgrade = true,
   onClose,
   onDismiss,
+  onPresented,
 }: UpdateModalProps) {
+  useEffect(() => { onPresented?.(); }, [onPresented]);
   const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
@@ -331,33 +335,13 @@ export default function UpdateModal({
         </div>
       </>
     ) : (
-      <div className="fixed inset-x-4 bottom-4 z-[100] pointer-events-none sm:inset-x-auto sm:left-4 sm:w-full sm:max-w-sm lg:left-6 lg:bottom-6">
-        <div
-          className="pointer-events-auto rounded-2xl border border-amber-200 bg-white shadow-2xl overflow-hidden"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center justify-between border-b border-amber-100 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
-                <ArrowUpCircle className="h-4 w-4" />
-              </span>
-              <div>
-                <div className="text-sm font-semibold text-amber-950">
-                  {info?.has_update ? t('newVersionTitle') : modalTitle}
-                </div>
-                {latestDisplayVersion && (
-                  <div className="text-xs text-amber-700">{formatUpdateVersion(latestDisplayVersion)}</div>
-                )}
-              </div>
-            </div>
-            <button
-              onClick={safeClose}
-              className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
+      <NoticeCard
+        title={info?.has_update ? t('newVersionTitle') : modalTitle}
+        subtitle={latestDisplayVersion ? formatUpdateVersion(latestDisplayVersion) : undefined}
+        icon={ArrowUpCircle}
+        closeLabel={t('laterAction')}
+        onClose={safeClose}
+      >
           <div className="px-4 py-4">
             {info?.has_update ? (
               <>
@@ -448,17 +432,13 @@ export default function UpdateModal({
             )}
 
             {canUpgrade && info?.has_update && info.update_allowed !== false && (
-              <button
-                onClick={handleUpgrade}
-                className="ml-auto flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-amber-500 hover:bg-amber-600 rounded-lg shadow-sm transition-colors"
-              >
+              <NoticePrimaryAction onClick={handleUpgrade} className="ml-auto">
                 <ArrowUpCircle className="w-3.5 h-3.5" />
                 {t('confirmAction')}
-              </button>
+              </NoticePrimaryAction>
             )}
           </div>
-        </div>
-      </div>
+      </NoticeCard>
     ),
     document.body,
   );

@@ -84,41 +84,7 @@ class NotificationAckStatus(BaseModel):
     acknowledged: bool
 
 
-DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
-    NotificationConfig(
-        id="token-free-period-extended-2026-04",
-        kind="benefit",
-        priority=10,
-        starts_at="2026-03-30T00:00:00+08:00",
-        locales={
-            "zh-CN": NotificationContent(
-                title="Token 免费期已延长",
-                summary="福利已自动生效，无需额外操作。",
-                body=(
-                    "为了让你有更充足的时间体验 Flocks，我们已延长 token 免费使用期。"
-                ),
-                highlights=[
-                    "3月30日-4月29日注册的老用户，授权自动延期至60天",
-                    "4月29日之后注册的新用户，依旧默认30天注册授权",
-                ],
-                primaryAction=NotificationAction(label="知道了"),
-            ),
-            "en-US": NotificationContent(
-                title="Token free period extended",
-                summary="The benefit is active automatically. No action is required.",
-                body=(
-                    "We have extended the free token period so you have more time "
-                    "to experience Flocks."
-                ),
-                highlights=[
-                    "Existing users who registered between March 30 and April 29 will have their authorization automatically extended to 60 days",
-                    "New users who register after April 29 will still receive the default 30-day trial authorization",
-                ],
-                primaryAction=NotificationAction(label="Got it"),
-            ),
-        },
-    ),
-)
+DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = ()
 
 
 class NotificationService:

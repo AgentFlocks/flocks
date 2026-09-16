@@ -41,6 +41,7 @@ import type {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { onboardingAPI } from '@/api/onboarding';
+import { useTokenPolicyNotice } from '@/hooks/useTokenPolicyNotice';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
 // the home page never needs.
@@ -185,6 +186,7 @@ function saveSocDashboardTitle(title: string): void {
 const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
+const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
 import { checkUpdate, type VersionInfo } from '@/api/update';
 import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
@@ -334,7 +336,17 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [showUpdate, setShowUpdate] = useState(false);
+  const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
+  const tokenPolicy = useTokenPolicyNotice(user?.id, showOnboarding || updateState === 'visible');
+  const handleUpdatePresented = useCallback(() => {
+    if (document.visibilityState === 'visible') setUpdateState('visible');
+  }, []);
+  const requestUpdate = useCallback(() => {
+    setUpdateState((state) => state === 'visible' ? state : 'pending');
+  }, []);
+  const closeUpdate = useCallback(() => {
+    setUpdateState('idle');
+  }, []);
   const { t, i18n } = useTranslation('nav');
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
@@ -529,7 +541,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           && !isUpdateDismissed(info, localStorage.getItem(UPDATE_DISMISSED_KEY))
         ) {
           lastPromptedVersionRef.current = updateDismissalKey;
-          setShowUpdate(true);
+          requestUpdate();
         }
         return;
       }
@@ -544,7 +556,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive]);
+  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive, requestUpdate]);
 
   useEffect(() => {
     if (!flocksproStatusReady || !canManageUpdates) return undefined;
@@ -711,7 +723,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
-  const visibleNotifications = backendNotificationsReady && updateNotificationReady && !showOnboarding && !showUpdate && allNotifications.length > 0
+  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
     ? allNotifications
     : [];
 
@@ -1174,8 +1186,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const openManualUpdateCheck = useCallback(() => {
     setAccountMenuOpen(false);
     setUpdateInfo(null);
-    setShowUpdate(true);
-  }, []);
+    requestUpdate();
+  }, [requestUpdate]);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -1188,14 +1200,18 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
               onClose={() => setShowOnboarding(false)}
             />
           )}
-          {showUpdate && (
+          {tokenPolicy.notice && !showOnboarding && updateState !== 'visible' && (
+            <TokenPolicyNotice onClose={tokenPolicy.close} onPresented={tokenPolicy.onPresented} />
+          )}
+          {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !showOnboarding)) && (
             <UpdateModal
               initialInfo={updateInfo}
               forceInitialCheck={updateInfo === null}
               edition={isFlocksproActive ? 'flockspro' : 'flocks'}
               canUpgrade={canManageUpdates}
-              onClose={() => setShowUpdate(false)}
-              onDismiss={() => setShowUpdate(false)}
+              onPresented={handleUpdatePresented}
+              onClose={closeUpdate}
+              onDismiss={closeUpdate}
             />
           )}
           {visibleNotifications.length > 0 && (
@@ -1297,7 +1313,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                 {hasVisibleProductUpdate && (
                   <button
                     type="button"
-                    onClick={() => setShowUpdate(true)}
+                    onClick={requestUpdate}
                     className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-zinc-100 transition-colors hover:bg-amber-500 dark:ring-zinc-950"
                     title={productUpdateTitle}
                     aria-label={productUpdateTitle}
@@ -1316,7 +1332,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                   {hasVisibleProductUpdate && (
                     <button
                       type="button"
-                      onClick={() => setShowUpdate(true)}
+                      onClick={requestUpdate}
                       title={productUpdateTitle}
                       aria-label={productUpdateTitle}
                       className="relative inline-flex h-4 shrink-0 items-center rounded-sm bg-amber-50 px-1 text-[10px] font-bold leading-none text-amber-600 transition-colors hover:bg-amber-100 dark:bg-amber-950/70 dark:text-amber-300 dark:hover:bg-amber-900"

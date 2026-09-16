@@ -748,6 +748,13 @@ def normalize_fallback_provider_entries(value: Any) -> List[Dict[str, str]]:
     return normalized
 
 
+class TokenPolicyNoticeConfig(BaseModel):
+    """Enable or disable the built-in, one-month token policy notice."""
+
+    model_config = {"extra": "forbid"}
+    enabled: bool = True
+
+
 class ConfigInfo(BaseModel):
     """
     Main configuration schema
@@ -757,6 +764,9 @@ class ConfigInfo(BaseModel):
     model_config = {"extra": "allow", "populate_by_name": True}  # Allow extra fields for flexibility
     
     schema_: Optional[str] = Field(None, alias="$schema")
+    token_policy_notice: TokenPolicyNoticeConfig | None = Field(
+        default=None, alias="tokenPolicyNotice"
+    )
     theme: Optional[str] = None
     keybinds: Optional[KeybindsConfig] = None
     log_level: Optional[str] = Field(None, alias="logLevel")

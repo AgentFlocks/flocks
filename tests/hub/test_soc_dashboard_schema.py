@@ -1,9 +1,287 @@
 import importlib.util
+import asyncio
+import gc
 import json
 import sqlite3
+import subprocess
 import sys
+import time
+import tracemalloc
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
+
+import pytest
+
+
+def _activity_workflow_db(tmp_path):
+    path = tmp_path / "workflow.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE workflow_executions (
+            id TEXT PRIMARY KEY, workflow_id TEXT, status TEXT,
+            started_at INTEGER, updated_at INTEGER,
+            input_params TEXT, output_results TEXT, payload TEXT)""")
+        conn.execute("CREATE INDEX idx_started ON workflow_executions(workflow_id, started_at DESC)")
+        conn.execute("CREATE INDEX idx_status ON workflow_executions(workflow_id, status)")
+    return path
+
+
+def _activity_execution(path, key, *, status="running", started=1000, inputs=None, output=None, payload=None):
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+            key, "stream_alert_denoise", status, started, started + 100,
+            json.dumps(inputs or {}), json.dumps(output or {}), json.dumps(payload or {}),
+        ))
+
+
+@pytest.mark.parametrize("wrapper", ["direct", "preview", "syslog", "nested"])
+def test_activity_preview_handles_bounded_execution_shapes(wrapper):
+    handlers = _load_dashboard_handlers()
+    record = {"id": "a", "threat_name": "scan", "_source_type": "ndr",
+              "net_real_src_ip": "192.0.2.1", "net_dest_ip": "198.51.100.2"}
+    output, inputs = {}, {}
+    if wrapper == "direct":
+        inputs = {"alerts": [record]}
+    elif wrapper == "preview":
+        output = {"unique_alerts": {"_type": "list", "preview": [record]}}
+    elif wrapper == "syslog":
+        inputs = {"syslog_message": {"message": "Sep 11 device vendor: " + json.dumps(record)}}
+    else:
+        inputs = {"syslog_message": {"message": json.dumps({"data": {"message": json.dumps(record)}})}}
+    alert, count = handlers._dashboard_execution_detail(json.dumps(output), json.dumps(inputs))
+    assert alert == {"id": "a", "threatName": "scan", "sourceType": "ndr",
+                     "srcIp": "192.0.2.1", "dstIp": "198.51.100.2"}
+    assert count == (1 if wrapper == "direct" else None)
+
+
+def test_activity_does_not_combine_unrelated_alerts_or_guess_source():
+    handlers = _load_dashboard_handlers()
+    output = {"unique_alerts": [
+        {"id": "a", "threat_name": "first", "sip": "192.0.2.1"},
+        {"id": "b", "dip": "198.51.100.2", "_source_type": "ndr"},
+    ]}
+    alert, _ = handlers._dashboard_execution_detail(json.dumps(output), "{}")
+    assert alert["id"] == "a"
+    assert alert["dstIp"] == alert["sourceType"] == ""
+
+
+def test_activity_distinguishes_empty_unknown_and_real_batches(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "empty", output={"stats": {"raw_count": 0}})
+    _activity_execution(handlers.WORKFLOW_DB, "unknown", inputs={"source_log_type": "ndr"})
+    _activity_execution(handlers.WORKFLOW_DB, "nonempty", inputs={"_soc_alert_count": 5})
+    _activity_execution(handlers.WORKFLOW_DB, "queued", status="queued", inputs={"_soc_alert_count": 2})
+    events = {e["eventId"]: e for e in handlers._get_workflow_recent_events("stream_alert_denoise")}
+    assert "workflow-execution:empty" not in events
+    assert events["workflow-execution:unknown"]["result"]["rawCount"] is None
+    assert events["workflow-execution:unknown"]["alert"]["threatName"] == "降噪批次 · 数量未提供"
+    assert events["workflow-execution:nonempty"]["result"]["rawCount"] == 5
+    assert events["workflow-execution:queued"]["status"] == "queued"
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        assert conn.execute("SELECT count(*) FROM workflow_executions").fetchone()[0] == 4
+
+
+def test_activity_keeps_long_running_execution_and_bounds_history(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "long-running", started=1000)
+    for index in range(30):
+        _activity_execution(handlers.WORKFLOW_DB, f"done-{index}", status="success", started=2000 + index)
+    snapshot = {"complete": True}
+    events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
+    assert len(events) == 11
+    assert events[0]["eventId"] == "workflow-execution:long-running"
+    assert events[0]["updatedAt"] != events[0]["occurredAt"]
+    assert snapshot["complete"] is True
+    assert all(e["eventId"] != "workflow-execution:long-running" for e in
+               handlers._get_workflow_recent_events("stream_alert_denoise", 2, 3))
+
+
+def test_activity_large_payload_and_database_lock_degrade_without_writes(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "large", payload={"large": "x" * 1_000_000},
+                        inputs={"large": "x" * 1_000_000})
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert len(json.dumps(events)) < 4096
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("BEGIN EXCLUSIVE")
+        snapshot = {"complete": True}
+        started = time.monotonic()
+        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert time.monotonic() - started < 1.0
+        assert snapshot["complete"] is False
+
+
+def test_activity_truncated_active_snapshot_is_not_authoritative(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    for index in range(12):
+        _activity_execution(handlers.WORKFLOW_DB, str(index))
+    snapshot = {"complete": True}
+    assert len(handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)) <= 20
+    assert snapshot["complete"] is False
+
+
+def test_activity_does_not_substitute_execution_id_for_missing_alert_id(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "batch", inputs={
+        "alerts": [{"threat_name": "scan", "sip": "192.0.2.1"}],
+    })
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["eventId"] == "workflow-execution:batch"
+    assert event["alert"]["id"] == ""
+
+
+def test_activity_old_sqlite_omits_payloads_instead_of_using_unsafe_length(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "old-sqlite", inputs={
+        "alerts": [{"threat_name": "must not read this"}],
+    })
+    original_connect = sqlite3.connect
+    queries = []
+
+    class OldSQLiteConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            queries.append(sql)
+            if sql == "SELECT octet_length('')":
+                raise sqlite3.OperationalError("no such function: octet_length")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(handlers.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=OldSQLiteConnection))
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert events[0]["status"] == "running"
+    assert "must not read this" not in json.dumps(events)
+    assert not any("CASE WHEN" in query or "length(payload)" in query for query in queries)
+
+
+def test_activity_reader_does_not_wait_or_open_another_db_when_busy(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "active")
+    with handlers._workflow_activity_read_lock:
+        with monkeypatch.context() as patch:
+            def unexpected_connect(*args, **kwargs):
+                raise AssertionError("contending reader must not open SQLite")
+            patch.setattr(handlers.sqlite3, "connect", unexpected_connect)
+            snapshot = {"complete": True, "available": True}
+            assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+            assert snapshot == {"complete": False, "available": False}
+    assert handlers._get_workflow_recent_events("stream_alert_denoise")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_keeps_activity_read_slot_until_worker_exits(monkeypatch):
+    handlers = _load_dashboard_handlers()
+    entered, release = Event(), Event()
+
+    def blocked_read(*args):
+        entered.set()
+        assert release.wait(3), "test must release its worker"
+        return []
+
+    monkeypatch.setattr(handlers, "_read_workflow_recent_events", blocked_read)
+    request = asyncio.create_task(asyncio.to_thread(handlers._get_workflow_recent_events, "stream_alert_denoise"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert handlers._workflow_activity_read_lock.locked()
+        snapshot = {"complete": True, "available": True}
+        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert snapshot == {"complete": False, "available": False}
+    finally:
+        release.set()
+        assert await asyncio.to_thread(handlers._workflow_activity_read_lock.acquire, True, 3)
+        handlers._workflow_activity_read_lock.release()
+
+
+def test_activity_preview_limit_counts_utf8_bytes_not_characters(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "unicode")
+    inputs = json.dumps({"padding": "中" * 100_000, "alerts": [{"threat_name": "oversized-preview"}]}, ensure_ascii=False)
+    assert len(inputs) < 262144 < len(inputs.encode("utf-8"))
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET input_params = ?", (inputs,))
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert events[0]["status"] == "running"
+    assert "oversized-preview" not in json.dumps(events)
+
+
+def test_activity_deadline_is_checked_even_without_sqlite_progress_callback(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "active")
+    ticks = iter([100.0, 101.0])
+    monkeypatch.setattr(handlers, "time", SimpleNamespace(monotonic=lambda: next(ticks, 101.0)))
+    snapshot = {"complete": True, "available": True}
+    assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+    assert snapshot == {"complete": False, "available": False}
+    # Errors must release the worker-owned lock as well.
+    assert handlers._workflow_activity_read_lock.acquire(blocking=False)
+    handlers._workflow_activity_read_lock.release()
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="native RSS via resource is Unix-only")
+def test_activity_large_text_is_not_materialized_in_native_sqlite_memory(tmp_path):
+    handlers = _load_dashboard_handlers()
+    db = _activity_workflow_db(tmp_path)
+    _activity_execution(db, "old-large-running", payload={"padding": "x" * (32 * 1024 * 1024)})
+    for index in range(12):
+        _activity_execution(db, f"new-done-{index}", status="success", started=2000 + index)
+    # A fresh process excludes fixture allocations; tracemalloc alone cannot
+    # see SQLite's native buffers. Do not start the application or touch user DBs.
+    script = '''
+import importlib.util, json, resource, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("soc_native_rss_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+module.WORKFLOW_DB = Path(sys.argv[2])
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+events = module._get_workflow_recent_events("stream_alert_denoise")
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+scale = 1024**2 if sys.platform == "darwin" else 1024
+print(json.dumps({"growth_mib": (after - before) / scale, "events": len(events)}))
+'''
+    result = subprocess.run([sys.executable, "-B", "-c", script, handlers.__file__, str(db)],
+                            check=True, text=True, capture_output=True, timeout=20)
+    measurement = json.loads(result.stdout)
+    assert measurement["events"] == 11
+    assert measurement["growth_mib"] < 16, measurement
+
+
+def test_activity_repeated_projection_does_not_retain_payloads(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    for index in range(12):
+        _activity_execution(handlers.WORKFLOW_DB, str(index), inputs={
+            "_soc_alert_preview": {"threat_name": "scan", "sip": "192.0.2.1"},
+            "padding": "x" * 20000,
+        })
+    tracemalloc.start(1)
+    try:
+        for _ in range(10):
+            handlers._get_workflow_recent_events("stream_alert_denoise")
+        gc.collect()
+        before, _ = tracemalloc.get_traced_memory()
+        for _ in range(200):
+            events = handlers._get_workflow_recent_events("stream_alert_denoise")
+            assert len(events) <= 20
+            assert len(json.dumps(events)) < 20000
+        gc.collect()
+        after, peak = tracemalloc.get_traced_memory()
+        assert after - before < 1_000_000
+        assert peak < 8_000_000
+    finally:
+        tracemalloc.stop()
 
 
 def _load_dashboard_handlers():
@@ -1888,7 +2166,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     }
     assert [event["alert"]["threatName"] for event in activity["workflowEvents"]] == [
         "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
+        "降噪批次 · 数量未提供",
     ]
 
     events = handlers._get_workflow_recent_events(
@@ -1898,7 +2176,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     )
     assert [event["alert"]["threatName"] for event in events] == [
         "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
+        "降噪批次 · 数量未提供",
     ]
     assert events[0]["result"]["rawCount"] == 1
     assert events[0]["result"]["uniqueCount"] == 0

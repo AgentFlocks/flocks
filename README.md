@@ -270,6 +270,18 @@ Non-browser clients (TUI, SDKs, scripts):
   curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
   ```
 
+  Query the live runtime status of a specific session:
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+    https://flocks.example.com/api/session/<sessionID>/status
+  ```
+
+  `status.type` is one of `idle`, `queued`, `busy`, `retry`, `compacting`, or
+  `dreaming`. Automation clients can use `isProcessing` to determine whether
+  accepted work is still running or waiting. `idle` only means that the session
+  is currently inactive; it does not indicate whether the previous run succeeded.
+
 Reverse-proxy deployments:
 
 - Always set `X-Forwarded-For` on the proxy. Without it, any direct

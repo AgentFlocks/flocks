@@ -392,6 +392,66 @@ class TestUpload:
         assert r.status_code == 200
         assert (_ws(workspace_client) / "new_folder" / "x.txt").exists()
 
+    @pytest.mark.parametrize("purpose", [None, "chat"])
+    def test_upload_to_dest_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+        purpose: str | None,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        url = "/api/workspace/upload?dest=uploads"
+        if purpose:
+            url += f"&purpose={purpose}"
+
+        response = _client(workspace_client).post(
+            url,
+            files=[("files", ("report.pdf", b"report", "application/pdf"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["path"] == "uploads/report.pdf"
+        assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
+        assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
+
+    def test_upload_to_root_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        response = _client(workspace_client).post(
+            "/api/workspace/upload",
+            files=[("files", ("root.txt", b"root", "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["path"] == "root.txt"
+        assert result["abs_path"] == str(link / "root.txt")
+        assert (ws / "root.txt").read_bytes() == b"root"
+
     def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client):
         client = _client(workspace_client)
         first = client.post(

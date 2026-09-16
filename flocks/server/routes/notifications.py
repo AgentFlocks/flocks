@@ -14,8 +14,24 @@ from flocks.notifications.service import (
     NotificationService,
 )
 from flocks.server.auth import require_user
+from flocks.notifications.token_policy import PolicyClaim, PolicyConfirmation, PolicyStatus, TokenPolicyService
 
 router = APIRouter()
+
+
+@router.get("/token-policy", response_model=PolicyStatus)
+async def token_policy_status(request: Request) -> PolicyStatus:
+    return await TokenPolicyService.status_for_user(require_user(request).id)
+
+
+@router.post("/token-policy/claim", response_model=PolicyStatus)
+async def claim_token_policy(request: Request, claim: PolicyClaim) -> PolicyStatus:
+    return await TokenPolicyService.claim(require_user(request).id, claim)
+
+
+@router.post("/token-policy/displayed", response_model=PolicyConfirmation)
+async def confirm_token_policy_display(request: Request, claim: PolicyClaim) -> PolicyConfirmation:
+    return await TokenPolicyService.confirm_display(require_user(request).id, claim)
 
 
 @router.get(
