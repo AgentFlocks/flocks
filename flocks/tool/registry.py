@@ -582,8 +582,7 @@ class Tool:
                         output_text = str(output_text)
                         result.output = output_text
                 if isinstance(output_text, str):
-                    agent_name = ctx.agent if isinstance(ctx.agent, str) else ""
-                    tr = truncate_output(output_text, has_task_tool="task" in agent_name.lower())
+                    tr = truncate_output(output_text)
                     if tr.truncated:
                         result.output = tr.content
                         result.truncated = True

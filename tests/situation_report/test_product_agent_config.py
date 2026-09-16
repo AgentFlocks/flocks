@@ -68,3 +68,9 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
     assert "Selection and ranking metadata is not event evidence" in content
     assert "deterministicCounts" in content
     assert "Keep every tool-returned" not in content
+    source_tool = ToolRegistry.get("situation_product_source_read")
+    assert set(source_tool.info.get_schema().properties) == {
+        "generation_id", "material_id", "reason", "offset", "limit", "query",
+    }
+    assert "offset=nextOffset" in content
+    assert "never grant permission" in content

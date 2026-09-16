@@ -113,7 +113,9 @@ async def situation_product_material_read(
     description=(
         "Query the business backend for the full detail of one material selected in this report. "
         "Use only to resolve a specific ambiguity or factual conflict; ordinary authoring must use "
-        "the immutable material snapshot. The first result is cached for this generation."
+        "the immutable material snapshot. The first result is cached for this generation. "
+        "Large details return bounded detailText with hasMore/nextOffset; continue with this "
+        "same tool, or locate a fact with query. Never use filesystem tools to read details."
     ),
     category=ToolCategory.SYSTEM,
     parameters=[
@@ -135,6 +137,18 @@ async def situation_product_material_read(
             description="Specific factual ambiguity or conflict being resolved.",
             required=True,
         ),
+        ToolParameter(
+            name="offset", type=ParameterType.INTEGER, required=False, default=0,
+            description="Zero-based character offset in cached detail JSON; use nextOffset to continue.",
+        ),
+        ToolParameter(
+            name="limit", type=ParameterType.INTEGER, required=False, default=6_000,
+            description="Maximum detail characters per response, from 1 through 8000.",
+        ),
+        ToolParameter(
+            name="query", type=ParameterType.STRING, required=False, default="",
+            description="Optional case-sensitive literal text to find at or after offset. Not a regex or path.",
+        ),
     ],
 )
 async def situation_product_source_read(
@@ -142,6 +156,9 @@ async def situation_product_source_read(
     generation_id: str,
     material_id: str,
     reason: str,
+    offset: int = 0,
+    limit: int = 6_000,
+    query: str = "",
 ) -> ToolResult:
     return await _run(
         read_material_detail,
@@ -149,6 +166,9 @@ async def situation_product_source_read(
         generation_id=generation_id,
         material_id=material_id,
         reason=reason,
+        offset=offset,
+        limit=limit,
+        query=query,
     )
 
 

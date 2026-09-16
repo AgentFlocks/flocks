@@ -432,6 +432,23 @@ async def test_generate_uses_original_session_id_and_backend_latest(
     )
     assert cached_detail["cacheHit"] is True
     assert len(detail_requests) == 1
+    pieces = []
+    offset = 0
+    while True:
+        detail_page = await read_material_detail(
+            session_id=product_session.id, generation_id="gen-001",
+            material_id="REPORT:contract-report-v1", reason="分段确认同一个冲突",
+            offset=offset, limit=20, synchronizer=detail_sync,
+        )
+        assert detail_page["cacheHit"] is True
+        assert detail_page["detailSHA256"] == detail["detailSHA256"]
+        pieces.append(detail_page["detailText"])
+        assert detail_page["nextOffset"] > offset
+        offset = detail_page["nextOffset"]
+        if not detail_page["hasMore"]:
+            break
+    assert json.loads("".join(pieces)) == detail["detail"]
+    assert len(detail_requests) == 1  # All continuation reads use the frozen cache.
     with pytest.raises(
         ProductWorkspaceError,
         match="material_id does not identify exactly one declared material",
@@ -451,7 +468,8 @@ async def test_generate_uses_original_session_id_and_backend_latest(
             / "runs/gen-001/audit/source_reads.jsonl"
         ).read_text(encoding="utf-8").splitlines()
     ]
-    assert [row["cacheHit"] for row in audit_rows] == [False, True]
+    assert [row["cacheHit"] for row in audit_rows] == [False] + [True] * (1 + len(pieces))
+    assert [row["offset"] for row in audit_rows[2:]] == list(range(0, offset, 20))
 
     report = _valid_report(template, materials)
     titled_write = await write_candidate_report(

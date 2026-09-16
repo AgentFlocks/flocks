@@ -90,7 +90,6 @@ def truncate_output(
     max_lines: int = MAX_LINES,
     max_bytes: int = MAX_BYTES,
     direction: str = "head",
-    has_task_tool: bool = False,
 ) -> TruncateResult:
     """
     Truncate tool output that exceeds size limits.
@@ -100,7 +99,6 @@ def truncate_output(
         max_lines: Maximum number of lines to keep.
         max_bytes: Maximum byte size to keep.
         direction: "head" keeps the first N lines, "tail" keeps the last N.
-        has_task_tool: Whether the current agent can delegate via task tool.
 
     Returns:
         TruncateResult with (possibly truncated) content.
@@ -159,21 +157,17 @@ def truncate_output(
     else:
         filepath_str = str(filepath)
 
-    if has_task_tool and filepath_str:
-        hint = (
-            f"The tool call succeeded but the output was truncated. "
-            f"Full output saved to: {filepath_str}\n"
-            f"Use the Task tool to have explore agent process this file with Grep and Read "
-            f"(with offset/limit). Do NOT read the full file yourself - delegate to save context."
-        )
-    elif filepath_str:
-        hint = (
-            f"The tool call succeeded but the output was truncated. "
-            f"Full output saved to: {filepath_str}\n"
-            f"Use Grep to search the full content or Read with offset/limit to view specific sections."
-        )
-    else:
-        hint = "The tool call succeeded but the output was truncated."
+    # This layer does not know the caller's effective tool permissions. Never
+    # recommend a named tool or imply that a saved path grants file access.
+    hint = "The tool call succeeded but the output was truncated."
+    if filepath_str:
+        hint += f" Full output saved to: {filepath_str}"
+    hint += (
+        "\nContinue only with tools allowed for this task and their documented "
+        "pagination or filtering parameters. A saved path does not grant file access. "
+        "If no permitted continuation is available, report the limitation; "
+        "do not assume the omitted content was read."
+    )
 
     if direction == "head":
         message = f"{preview}\n\n...{removed} {unit} truncated...\n\n{hint}"

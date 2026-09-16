@@ -241,14 +241,67 @@ async def read_material_page(
     }
 
 
+def _material_detail_view(
+    detail: dict[str, Any], *, offset: int, limit: int, query: str
+) -> dict[str, Any]:
+    """Bound model-visible detail without exposing an arbitrary file reader."""
+    text = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    total = len(text)
+    start = min(offset, total)
+    if query:
+        match = text.find(query, start)
+        if match < 0:
+            return {
+                "detailText": "", "offset": total, "nextOffset": total,
+                "totalCharacters": total, "hasMore": False, "matchFound": False,
+                "continuation": (
+                    "No literal match at or after the requested offset. This does not prove "
+                    "the fact is absent. Use a different query or omit query to read a bounded page."
+                ),
+            }
+        # Include limited preceding context, without returning an earlier page.
+        start = max(start, match - min(200, limit // 4))
+    end = min(start + limit, total)
+    page: dict[str, Any] = {
+        "offset": start, "nextOffset": end, "totalCharacters": total,
+        "hasMore": end < total,
+    }
+    if query:
+        page["matchFound"] = True
+    if not query and start == 0 and end == total:
+        pretty = json.dumps(detail, ensure_ascii=False, indent=2)
+        if len(pretty) <= limit and pretty.count("\n") < 500:
+            page["detail"] = detail
+            return page
+    page["detailText"] = text[start:end]
+    page["continuation"] = (
+        "This is a character slice of the cached detail JSON, not necessarily a complete JSON object. "
+        "Use situation_product_source_read with the same generation_id, material_id and reason; "
+        "set offset=nextOffset and omit query for contiguous continuation, or set query to a "
+        "case-sensitive literal fact to locate it. An unsuccessful search does not prove the fact "
+        "is absent. Read only enough to resolve the stated conflict. Do not use filesystem tools "
+        "or treat omitted content as read."
+    )
+    return page
+
+
 async def read_material_detail(
     *,
     session_id: str,
     generation_id: str,
     material_id: str,
     reason: str,
+    offset: int = 0,
+    limit: int = 6_000,
+    query: str = "",
     synchronizer: BackendReportSynchronizer | None = None,
 ) -> dict[str, Any]:
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ProductWorkspaceError("Detail offset must be a non-negative character index")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 8_000:
+        raise ProductWorkspaceError("Detail limit must be from 1 through 8000 characters")
+    if not isinstance(query, str) or len(query) > 200:
+        raise ProductWorkspaceError("Detail query must be a literal string of at most 200 characters")
     normalized_reason = reason.strip()
     if not normalized_reason:
         raise ProductWorkspaceError("A specific conflict reason is required")
@@ -373,6 +426,9 @@ async def read_material_detail(
                         "reason": normalized_reason,
                         "detailSHA256": detail_hash,
                         "cacheHit": cache_hit,
+                        "offset": offset,
+                        "limit": limit,
+                        "query": query,
                         "time": utc_now(),
                     },
                     ensure_ascii=False,
@@ -391,8 +447,10 @@ async def read_material_detail(
         "sourceType": source_type,
         "sourceId": source_id,
         "detailType": detail_field,
-        "detail": detail_payload[detail_field],
         "cacheHit": cache_hit,
+        **_material_detail_view(
+            detail_payload[detail_field], offset=offset, limit=limit, query=query,
+        ),
     }
 
 
