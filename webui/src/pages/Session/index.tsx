@@ -9,8 +9,10 @@ import {
   Hammer, ClipboardList, Target, UserRound, UsersRound,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams, useParams } from 'react-router-dom';
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
+import { sessionPath } from '@/utils/sessionUrl';
+import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
@@ -663,8 +665,26 @@ export default function SessionPage() {
   const projectsSectionCollapsedStorageKey = `flocks:sessions:projects-section-collapsed:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const { sessionId: routeSessionId } = useParams();
+  const selectedSessionId = routeSessionId || searchParams.get('session') || null;
+  const navigationRef = useRef({ key: location.key, sessionId: selectedSessionId });
+  navigationRef.current = { key: location.key, sessionId: selectedSessionId };
+  const restoreAttemptRef = useRef<string | null>(null);
+  const legacyNavigationRef = useRef<string | null>(null);
+  const previousActionSessionRef = useRef(selectedSessionId);
+  const [sessionLoadError, setSessionLoadError] = useState<{ sessionId: string; kind: 'unavailable' | 'forbidden' | 'failed' } | null>(null);
+  const [sessionLoadAttempt, setSessionLoadAttempt] = useState(0);
+  const [pendingInitialSessionId, setPendingInitialSessionId] = useState<string | null>(null);
+  const selectSession = useCallback((id: string | null, replace = false) => {
+    if (!id) writeLastSelectedSessionId(null);
+    if (id && navigationRef.current.sessionId === id) return;
+    navigate(id ? sessionPath(id) : '/sessions', {
+      replace,
+      state: id ? null : { skipLastSelectedSessionRestore: true },
+    });
+  }, [navigate]);
+  const legacyNavigationPending = Boolean(selectedSessionId) && (searchParams.has('session') || searchParams.has('message') || searchParams.has('display'));
   const [pendingFocusMessageId, setPendingFocusMessageId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
@@ -924,8 +944,9 @@ export default function SessionPage() {
   );
   const selectedSession = listedSelectedSession
     ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
-  const activeChatSessionId = selectedSession ? selectedSessionId : null;
-  const resolvingSelectedSession = Boolean(selectedSessionId && !selectedSession);
+  const activeSessionError = sessionLoadError?.sessionId === selectedSessionId ? sessionLoadError : null;
+  const activeChatSessionId = selectedSession && !activeSessionError ? selectedSessionId : null;
+  const resolvingSelectedSession = legacyNavigationPending || Boolean(selectedSessionId && !selectedSession && !activeSessionError);
   const pinnedModelKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
     ? makeModelKey(selectedSession.provider, selectedSession.model)
     : null;
@@ -1271,48 +1292,54 @@ export default function SessionPage() {
     return () => window.removeEventListener('click', closeMenu);
   }, [openProjectMenuId]);
 
-  // Keep the selected session in sync with URL query params (e.g. onboarding
-  // or other in-app navigation to `/sessions?session=...`). Clear the params
-  // after consuming them so refreshes don't re-send the initial message.
+  // A pending action belongs only to its original session. Clear it before
+  // consuming a new legacy navigation; canonicalization keeps the same ID.
   useEffect(() => {
-    const sessionParam = searchParams.get('session');
-    const messageParam = searchParams.get('message');
-    const focusMessageParam = searchParams.get('focusMessage');
-    const displayParam = searchParams.get('display');
-    if (!sessionParam) return;
-
-    if (sessionParam !== selectedSessionId) {
-      setSelectedSessionId(sessionParam);
-    }
-    if (sessionParam) {
-      if (messageParam) {
-        setPendingInitialMessage(messageParam);
-        setPendingInitialDisplayText(displayParam ? buildInstructionDisplayText(displayParam) : null);
-      } else {
-        setPendingInitialMessage(null);
-        setPendingInitialDisplayText(null);
-      }
-      setPendingFocusMessageId(focusMessageParam || null);
-      setSearchParams({}, { replace: true });
-    }
-  }, [searchParams, selectedSessionId, setSearchParams]);
+    if (previousActionSessionRef.current === selectedSessionId) return;
+    previousActionSessionRef.current = selectedSessionId;
+    setPendingInitialMessage(null);
+    setPendingInitialDisplayText(null);
+    setPendingInitialSessionId(null);
+  }, [selectedSessionId]);
 
   useEffect(() => {
-    if (loadingSessions) return;
+    if (!selectedSessionId || !legacyNavigationPending || legacyNavigationRef.current === location.key) return;
+    legacyNavigationRef.current = location.key;
+    const legacyId = searchParams.get('session');
+    const conflictingTarget = Boolean(routeSessionId && legacyId && routeSessionId !== legacyId);
+    const message = searchParams.get('message');
+    if (message && !conflictingTarget) {
+      setPendingInitialSessionId(selectedSessionId);
+      setPendingInitialMessage(message);
+      const display = searchParams.get('display');
+      setPendingInitialDisplayText(display ? buildInstructionDisplayText(display) : null);
+    }
+    if (!message || conflictingTarget) {
+      setPendingInitialSessionId(null);
+      setPendingInitialMessage(null);
+      setPendingInitialDisplayText(null);
+    }
+    if (conflictingTarget) toast.error(t('linkTargetMismatch'));
+    const next = new URLSearchParams(searchParams);
+    next.delete('session');
+    next.delete('message');
+    next.delete('display');
+    navigate({ pathname: sessionPath(selectedSessionId), search: next.toString(), hash: location.hash }, { replace: true });
+  }, [legacyNavigationPending, location.key, location.hash, navigate, routeSessionId, searchParams, selectedSessionId, t, toast]);
 
+  useEffect(() => {
+    setPendingFocusMessageId(searchParams.get('focusMessage'));
+  }, [selectedSessionId, searchParams]);
+
+  useEffect(() => {
+    if (loadingSessions || restoreAttemptRef.current === location.key) return;
+    restoreAttemptRef.current = location.key;
     const alreadyVisited = hasVisitedSessionPage();
     markSessionPageVisited();
-
-    if (selectedSessionId) return;
-    if (searchParams.get('session')) return;
-    if (!alreadyVisited) return;
-    if (shouldSkipLastSelectedSessionRestore(location.state)) return;
-
+    if (selectedSessionId || !alreadyVisited || shouldSkipLastSelectedSessionRestore(location.state)) return;
     const lastSelectedSessionId = readLastSelectedSessionId();
-    if (lastSelectedSessionId) {
-      setSelectedSessionId(lastSelectedSessionId);
-    }
-  }, [loadingSessions, location.state, searchParams, selectedSessionId]);
+    if (lastSelectedSessionId) selectSession(lastSelectedSessionId, true);
+  }, [loadingSessions, location.key, location.state, selectedSessionId, selectSession]);
 
   useEffect(() => {
     if (!selectedSessionId || selectedSession?.id !== selectedSessionId) return;
@@ -1330,38 +1357,40 @@ export default function SessionPage() {
   }, [selectedSessionId]);
 
   useEffect(() => {
-    if (!selectedSessionId) {
-      setSelectedSessionFallback(null);
-      return;
-    }
+    // Do not reuse a list-external detail after leaving its route (it may
+    // have been archived or its sharing permissions may have changed).
+    setSelectedSessionFallback(current => current?.id === selectedSessionId ? current : null);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    setSessionLoadError(null);
+    // Keep a newly created session cached while React commits navigation.
+    // Clearing it on the old route can discard the creation handoff.
+    if (!selectedSessionId) return;
     if (listedSelectedSession) {
-      setSelectedSessionFallback(null);
+      if (selectedSessionFallback?.id === selectedSessionId) setSelectedSessionFallback(null);
       return;
     }
     if (selectedSessionFallback?.id === selectedSessionId) return;
-    if (loadingSessions) return;
-
+    // Direct links must not wait for a failed/slow sidebar request.
     let cancelled = false;
     sessionApi.get(selectedSessionId)
       .then((session) => {
         if (cancelled) return;
+        if (session.id !== selectedSessionId) throw new Error('Unexpected session response');
         setSelectedSessionFallback(session as unknown as Session);
       })
       .catch((err: any) => {
         if (cancelled) return;
-        const statusCode = err?.response?.status ?? err?.status;
-        if (statusCode === 403 || statusCode === 404) {
-          setSelectedSessionId((current) => (current === selectedSessionId ? null : current));
-          setSelectedSessionFallback(null);
-          setPendingInitialMessage(null);
-          setPendingInitialDisplayText(null);
-          writeLastSelectedSessionId(null);
-        }
+        const status = err?.response?.status ?? err?.status;
+        setSelectedSessionFallback(null);
+        setSessionLoadError({ sessionId: selectedSessionId, kind: status === 403 ? 'forbidden' : status === 404 ? 'unavailable' : 'failed' });
+        setPendingInitialMessage(null);
+        setPendingInitialDisplayText(null);
+        if (status === 403 || status === 404) writeLastSelectedSessionId(null);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [listedSelectedSession, loadingSessions, selectedSessionFallback?.id, selectedSessionId]);
+    return () => { cancelled = true; };
+  }, [listedSelectedSession, selectedSessionId, selectedSessionFallback?.id, sessionLoadAttempt]);
 
   // Close agent dropdown on outside click
   useEffect(() => {
@@ -1439,8 +1468,10 @@ export default function SessionPage() {
       setSessionExecutionRevision(null);
       return;
     }
+    let cancelled = false;
     void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
       .then((result) => {
+        if (cancelled) return;
         setSessionPermissionMode(result.permissionMode);
         setSessionRuntimeMode(result.runtimeMode);
         setSessionNetworkMode(result.networkMode);
@@ -1450,6 +1481,7 @@ export default function SessionPage() {
         setSessionExecutionRevision(result.revision);
       })
       .catch(() => {
+        if (cancelled) return;
         setSessionPermissionMode(null);
         setSessionRuntimeMode(null);
         setSessionNetworkMode(null);
@@ -1458,6 +1490,7 @@ export default function SessionPage() {
         setSessionEntry('unknown');
         setSessionExecutionRevision(null);
       });
+    return () => { cancelled = true; };
   }, [proPolicyEnabled, selectedSessionId]);
 
   const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
@@ -1724,7 +1757,7 @@ export default function SessionPage() {
 
   const handleStartNewSession = useCallback(() => {
     writeLastSelectedSessionId(null);
-    setSelectedSessionId(null);
+    selectSession(null);
     setSelectedSessionFallback(null);
     setPendingInitialMessage(null);
     setPendingInitialDisplayText(null);
@@ -1734,13 +1767,14 @@ export default function SessionPage() {
     setShowAgentOptions(false);
     setShowModelOptions(false);
     setShowProjectOptions(false);
-  }, []);
+  }, [selectSession]);
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
     const targetGroupId = projectIdOverride ?? selectedProjectId ?? TASK_SESSION_GROUP_ID;
     const projectID = targetGroupId === TASK_SESSION_GROUP_ID ? null : targetGroupId;
     const carryAutoSelection = !selectedSessionId && selectedModelAuto;
+    const navigationKey = navigationRef.current.key;
     setCreating(true);
     try {
       const response = await client.post('/api/session', {
@@ -1750,6 +1784,7 @@ export default function SessionPage() {
       });
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
+      if (navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       setSelectedProjectId(targetGroupId);
       setCollapsedProjectIds(prev => {
@@ -1770,13 +1805,13 @@ export default function SessionPage() {
       setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
       setShowExecutionModeOptions(false);
       setSelectedModelKey(carryAutoSelection ? AUTO_MODEL_KEY : null);
-      setSelectedSessionId(response.data.id);
+      selectSession(response.data.id);
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     } finally {
       setCreating(false);
     }
-  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
+  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t, selectSession]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -1829,6 +1864,7 @@ export default function SessionPage() {
     options?: PromptDisplayOptions,
     executionModeOverride?: SessionExecutionMode,
   ) => {
+    const navigationKey = navigationRef.current.key;
     try {
       const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
@@ -1874,13 +1910,15 @@ export default function SessionPage() {
             runtimeMode: draftRuntimeMode,
             networkMode: draftNetworkMode,
           });
-          setSessionPermissionMode(updated.permissionMode);
-          setSessionRuntimeMode(updated.runtimeMode);
-          setSessionNetworkMode(updated.networkMode);
-          setSessionNetworkModeDefault(updated.networkModeDefault);
-          setSessionNetworkModeOverridden(updated.networkModeOverridden);
-          setSessionEntry(updated.entry);
-          setSessionExecutionRevision(updated.revision);
+          if (navigationRef.current.key === navigationKey) {
+            setSessionPermissionMode(updated.permissionMode);
+            setSessionRuntimeMode(updated.runtimeMode);
+            setSessionNetworkMode(updated.networkMode);
+            setSessionNetworkModeDefault(updated.networkModeDefault);
+            setSessionNetworkModeOverridden(updated.networkModeOverridden);
+            setSessionEntry(updated.entry);
+            setSessionExecutionRevision(updated.revision);
+          }
         } catch (error: unknown) {
           if (isSessionExecutionSettingsUnsupported(error)) {
             // Backward compatibility: older backends may not expose execution-settings yet.
@@ -1896,6 +1934,7 @@ export default function SessionPage() {
 
       addSession(response.data);
       void fetchProjects(undefined, searchQuery).catch(() => {});
+      if (navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1924,7 +1963,7 @@ export default function SessionPage() {
         timestamp: Date.now(),
         agent: effectiveAgent,
       });
-      setSelectedSessionId(newSessionId);
+      selectSession(newSessionId);
       if (effectiveExecutionMode === 'goal') {
         setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
         writeSessionExecutionMode(
@@ -1937,6 +1976,7 @@ export default function SessionPage() {
       throw err;
     }
   }, [
+    selectSession,
     addSession,
     fetchProjects,
     searchQuery,
@@ -2028,7 +2068,8 @@ export default function SessionPage() {
     }
     // The mutation is complete. A secondary project-count refresh must not
     // turn a successful archive into an error or re-enable the removed row.
-    if (selectedSessionId === sessionId) setSelectedSessionId(null);
+    if (navigationRef.current.sessionId === sessionId) selectSession(null, true);
+    setSelectedSessionFallback(current => current?.id === sessionId ? null : current);
     removeSession(sessionId);
     toast.success(t('archiveSuccess'));
     try {
@@ -2036,7 +2077,7 @@ export default function SessionPage() {
     } catch {
       // SSE/reconnect refreshes will reconcile project counts later.
     }
-  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t]);
+  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t, selectSession]);
 
   const handleStartRename = useCallback((sessionId: string, currentTitle: string) => {
     setOpenMenuSessionId(null);
@@ -2384,9 +2425,9 @@ export default function SessionPage() {
     if (selectMode) {
       handleToggleCheck(sessionId);
     } else {
-      setSelectedSessionId(sessionId);
+      selectSession(sessionId);
     }
-  }, [handleToggleCheck, selectMode]);
+  }, [handleToggleCheck, selectMode, selectSession]);
   const handleCloseSessionSearch = useCallback(() => {
     setSessionSearchOpen(false);
     setSearchQuery('');
@@ -2433,9 +2474,10 @@ export default function SessionPage() {
         }
       }));
       if (succeeded.length > 0) {
+        setSelectedSessionFallback(current => current && succeeded.includes(current.id) ? null : current);
         removeSessions(succeeded);
-        if (selectedSessionId && succeeded.includes(selectedSessionId)) {
-          setSelectedSessionId(null);
+        if (navigationRef.current.sessionId && succeeded.includes(navigationRef.current.sessionId)) {
+          selectSession(null, true);
         }
         try {
           await fetchProjects(undefined, searchQuery);
@@ -2453,12 +2495,12 @@ export default function SessionPage() {
     } finally {
       setBatchArchiving(false);
     }
-  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
+  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t, selectSession]);
 
   const renderSessionListItem = (session: Session) => (
     <div
       key={session.id}
-      onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
+      onClick={() => selectMode ? handleToggleCheck(session.id) : selectSession(session.id)}
       className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
         !selectMode && selectedSessionId === session.id
           ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
@@ -3091,13 +3133,25 @@ export default function SessionPage() {
             </h2>
           </div>
 
+          {selectedSessionId && selectedSession && !activeSessionError && (
+            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} />
+          )}
+
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
           )}
         </header>
 
         {/* Chat — powered by unified SessionChat */}
-        {resolvingSelectedSession ? (
+        {activeSessionError ? (
+          <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
+            <p>{t(`sessionAccess.${activeSessionError.kind}`)}</p>
+            <div className="flex gap-4">
+              <button onClick={() => { setSessionLoadError(null); setSessionLoadAttempt(value => value + 1); }}>{t('sessionAccess.retry')}</button>
+              <button onClick={() => selectSession(null)}>{t('sessionAccess.back')}</button>
+            </div>
+          </div>
+        ) : resolvingSelectedSession ? (
           <SessionChatSkeleton />
         ) : (
           <SessionChat
@@ -3120,8 +3174,8 @@ export default function SessionPage() {
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
           composerTextareaMinHeight={56}
-          initialMessage={pendingInitialMessage}
-          initialDisplayText={pendingInitialDisplayText}
+          initialMessage={pendingInitialSessionId === activeChatSessionId && selectedSession?.canWrite !== false ? pendingInitialMessage : null}
+          initialDisplayText={pendingInitialSessionId === activeChatSessionId ? pendingInitialDisplayText : null}
           initialOptimisticMessage={pendingOptimisticMessage}
           focusMessageId={pendingFocusMessageId}
           onFocusMessageConsumed={() => setPendingFocusMessageId(null)}

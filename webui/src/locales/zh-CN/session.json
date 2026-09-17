@@ -519,5 +519,14 @@
   "filterConversations": "搜索任务",
   "noResults": "没有匹配的任务",
   "showMore": "显示更多 {{count}} 条",
-  "showLess": "收起"
+  "showLess": "收起",
+  "copyLink": "复制会话链接",
+  "linkTargetMismatch": "链接中的会话不一致，已取消自动发送。",
+  "sessionAccess": {
+    "unavailable": "会话不存在、已归档或当前不可访问。",
+    "forbidden": "你没有权限访问此会话。",
+    "failed": "会话加载失败，请重试。",
+    "retry": "重试",
+    "back": "返回工作台"
+  }
 }

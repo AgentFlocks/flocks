@@ -735,7 +735,7 @@ export default function Layout() {
     matchPath('/workflows/create', location.pathname) ||
     matchPath('/workflows/:id/edit', location.pathname) ||
     matchPath('/workflows/:id', location.pathname) ||
-    matchPath('/sessions', location.pathname) ||
+    matchPath('/sessions/:sessionId?', location.pathname) ||
     matchPath('/devices', location.pathname) ||
     matchPath('/contracts/webui/*', location.pathname);
   const displayVersion = isFlocksproActive
