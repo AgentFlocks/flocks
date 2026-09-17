@@ -55,6 +55,7 @@ _api_service_summary_metadata_cache: Dict[str, tuple[tuple[Any, ...], Optional[D
 _provider_initialization_lock = asyncio.Lock()
 _provider_initialization_task: asyncio.Task[None] | None = None
 _dynamic_provider_load_tasks: set[asyncio.Task[None]] = set()
+_THREATBOOK_LLM_PROVIDER_IDS = frozenset({"threatbook-cn-llm", "threatbook-io-llm"})
 
 
 async def _run_provider_initialization() -> None:
@@ -1888,10 +1889,9 @@ async def set_provider_credentials(
         # 2. Ensure provider entry exists in flocks.json and update base_url / name
         raw_provider = ConfigWriter.get_provider_raw(provider_id)
         if raw_provider:
-            # First-run entries may lack models; upgrades may have only older
-            # models. Match validation's catalog backfill while keeping every
-            # existing model and user override intact.
-            if not preserve_existing_secret:
+            # ThreatBook onboarding may precede catalog sync on first run or
+            # upgrade. Other providers keep their model list when rotating keys.
+            if not preserve_existing_secret and provider_id in _THREATBOOK_LLM_PROVIDER_IDS:
                 from flocks.provider.model_catalog import get_provider_model_definitions
 
                 existing_models = raw_provider.get("models") or {}
@@ -2488,6 +2488,8 @@ async def _prepare_isolated_provider(provider: BaseProvider) -> BaseProvider:
     # default before the background catalog sync has reached this provider.
     # Saved definitions and runtime-only custom models keep their precedence.
     existing_ids = {model.id for model in provider.get_models()}
+    if existing_ids and provider.id not in _THREATBOOK_LLM_PROVIDER_IDS:
+        return provider
     missing_models = {
         model.id: {"name": model.name}
         for model in get_provider_model_definitions(provider.id)
@@ -2604,7 +2606,15 @@ async def _test_provider_credentials_impl(
 
             if isolated_provider:
                 try:
-                    provider = await _prepare_isolated_provider(provider)
+                    probe_models = Provider.list_models(provider_id)
+                    if provider_id in _THREATBOOK_LLM_PROVIDER_IDS or not probe_models:
+                        provider = await _prepare_isolated_provider(provider)
+                        probe_models = provider.get_models()
+                    else:
+                        # Preserve loaded third-party settings and model
+                        # membership without adding a config reload dependency.
+                        provider = copy.copy(provider)
+                        provider._config = copy.deepcopy(provider._config)
                 except Exception as exc:
                     log.warning("provider.validation.prepare_failed", {
                         "provider_id": provider_id,
@@ -2639,7 +2649,7 @@ async def _test_provider_credentials_impl(
                 provider._client = None
 
             models = (
-                provider.get_models()
+                probe_models
                 if isolated_provider else Provider.list_models(provider_id)
             )
 
