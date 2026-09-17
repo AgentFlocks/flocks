@@ -325,6 +325,7 @@ async def audit_prepare(
     coverage_policy: str = "evidence_backed_partial",
     verification_votes: int = 1,
     cybergym_manifest: dict[str, Any] | None = None,
+    max_files: int = 50_000,
 ) -> ToolResult:
     if mode not in {"standard", "cybergym_level1"}:
         return _error("Unsupported audit mode", title="Audit preparation")
@@ -350,6 +351,7 @@ async def audit_prepare(
             exclude_patterns=exclude_patterns,
             max_file_bytes=max_file_bytes,
             max_total_bytes=max_total_bytes,
+            max_files=max_files,
             copy_source=copy_source,
         )
         scan_id = await asyncio.to_thread(
@@ -3026,6 +3028,7 @@ def register_tools() -> None:
             _parameter("exclude_patterns", ParameterType.ARRAY, "Optional relative glob patterns to exclude.", required=False, json_schema=string_array),
             _parameter("max_file_bytes", ParameterType.INTEGER, "Optional per-file byte cap. Omit to include all regular files within the total snapshot limit.", required=False),
             _parameter("max_total_bytes", ParameterType.INTEGER, "Optional total snapshot byte cap; defaults to 4 GiB.", required=False),
+            _parameter("max_files", ParameterType.INTEGER, "Maximum number of files included in the snapshot; must be a positive integer.", required=False, default=50_000),
             _parameter(
                 "copy_source",
                 ParameterType.BOOLEAN,
