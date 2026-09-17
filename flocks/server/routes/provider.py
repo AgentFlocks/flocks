@@ -1888,16 +1888,17 @@ async def set_provider_credentials(
         # 2. Ensure provider entry exists in flocks.json and update base_url / name
         raw_provider = ConfigWriter.get_provider_raw(provider_id)
         if raw_provider:
-            # An incomplete first-run entry may exist without any models.
-            # Persist the same catalog defaults used by isolated validation.
-            if not preserve_existing_secret and not raw_provider.get("models"):
+            # First-run entries may lack models; upgrades may have only older
+            # models. Match validation's catalog backfill while keeping every
+            # existing model and user override intact.
+            if not preserve_existing_secret:
                 from flocks.provider.model_catalog import get_provider_model_definitions
 
-                models = {
-                    model.id: {"name": model.name}
-                    for model in get_provider_model_definitions(provider_id)
-                }
-                if models:
+                existing_models = raw_provider.get("models") or {}
+                models = dict(existing_models)
+                for model in get_provider_model_definitions(provider_id):
+                    models.setdefault(model.id, {"name": model.name})
+                if models != existing_models:
                     ConfigWriter.update_provider_field(provider_id, "models", models)
             # Provider already exists — update base_url and name if provided
             if request.base_url is not None:
@@ -2483,14 +2484,19 @@ async def _prepare_isolated_provider(provider: BaseProvider) -> BaseProvider:
         provider._config_models = []
         Provider.apply_provider_config(provider, settings)
 
-    if not provider.get_models():
-        # Match the catalog snapshot used when credentials are first saved.
-        # Built-in registration alone does not populate _config_models.
-        models = {
-            model.id: {"name": model.name}
-            for model in get_provider_model_definitions(provider.id)
-        }
-        Provider.apply_provider_config(provider, ProviderSettings(models=models))
+    # Backfill even a nonempty list: an upgrade can introduce the onboarding
+    # default before the background catalog sync has reached this provider.
+    # Saved definitions and runtime-only custom models keep their precedence.
+    existing_ids = {model.id for model in provider.get_models()}
+    missing_models = {
+        model.id: {"name": model.name}
+        for model in get_provider_model_definitions(provider.id)
+        if model.id not in existing_ids
+    }
+    if missing_models:
+        existing_models = provider._config_models
+        Provider.apply_provider_config(provider, ProviderSettings(models=missing_models))
+        provider._config_models = [*existing_models, *provider._config_models]
     return provider
 
 
