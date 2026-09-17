@@ -144,3 +144,38 @@ async def test_changed_template_cannot_reuse_passed_result(run):
     result = await ws.validate_candidate_report(**params)
     assert result["attempt"] == 2 and result["status"] == "needs_revision"
     assert result["issues"][0]["code"] == "template_headings"
+
+
+@pytest.mark.asyncio
+async def test_heading_and_evidence_equivalent_markdown_pass_without_repair(run):
+    root, params, context = run
+    template = root / 'template.md'
+    atomic_write_bytes(template, b'## ATT\\&CK MAP\n')
+    context['template'].update(sha256=ws.file_sha256(template), sizeBytes=template.stat().st_size)
+    result = await ws.write_candidate_report(**params, content='## **ATT&CK MAP**\nFacts',
+        evidence_map={'REPORT:synthetic-id':[r'ATT\&CK MAP']})
+    assert result['validation']['status'] == 'passed'
+    assert result['validation']['attempt'] == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_template_warns_but_does_not_invent_report_chapters(run):
+    root, params, context = run
+    template = root / 'template.md'
+    atomic_write_bytes(template, '## 使用目标\n说明\n## 输入与证据边界\n说明'.encode())
+    context['template'].update(sha256=ws.file_sha256(template), sizeBytes=template.stat().st_size)
+    result = await ws.write_candidate_report(**params, content='## Custom chapter\nFacts',
+        evidence_map={'REPORT:synthetic-id':['Custom chapter']})
+    assert result['validation']['status'] == 'passed'
+    assert result['validation']['warnings'][0]['code'] == 'template_structure_unresolved'
+
+
+@pytest.mark.asyncio
+async def test_validator_upgrade_rechecks_same_candidate_without_spending_revision(run):
+    root, params, _ = run
+    result = await ws.write_candidate_report(**params, content='## Custom chapter\nFacts',
+        evidence_map={'REPORT:synthetic-id':['Custom chapter']})
+    old = result['validation'] | {'validatorVersion':2, 'attempt':3, 'status':'needs_revision'}
+    ws.atomic_write_json(_validation_path(root), old)
+    checked = await ws.validate_candidate_report(**params)
+    assert checked['validatorVersion'] == 3 and checked['attempt'] == 3 and checked['status'] == 'passed'

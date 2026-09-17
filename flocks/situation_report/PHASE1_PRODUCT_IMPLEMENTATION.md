@@ -54,6 +54,15 @@ Session 已保存的语言。Flocks 在首轮模型调用前注入语言约束�
 终态失败 Text 使用本地化提示，原始诊断保持在 `metadata.situationReport.error`
 及 `situation.report.status.error` 中，工程方仍通过该字段取得完整错误。
 
+### 模板目录与续接意图
+
+- `templateContract.requiredH2` 优先提取模板显式声明的正文 H2 代码块，再提取报告结构区的章节清单，最后兼容纯 H2 正文模板；不会默认把模板说明章节当成报告章节。
+- 标题与证据映射章节按 Markdown 可见文本比较，兼容反斜杠转义、强调和 HTML 实体；真实的缺章、增章、重复和乱序仍校验失败。
+- 不能可靠提取目录时返回 `headingCheck=not_enforced`、`headingSource=unresolved` 和 `template_structure_unresolved` warning。这不表示模板结构已经检查通过；其余发布检查照常执行，完整模板仍是模型依据。校验器版本为 3。
+- 对话 `modify` 中的独立“继续／继续生成／重试／接着写／continue”等返回状态化引导，不再归为无关任务。Text Part 的 `metadata.policy.category=continuation`、`rejected=false`；`reason=previous_task_running/cancelled/failed/succeeded/unknown`，并提供可确定的 `previousGenerationID/previousStatus`。该回复不是一次新报告执行，没有对应的报告 succeeded/failed Event。
+- 本次没有实现断点续跑或取消后自动重启。取消/失败后引导用户通过现有生成入口重试；完成后询问修改内容。对话操作仍为 `modify`，不静默转换成 `generate/regenerate`。已有报告的“简短一点／更详细一点／换个说法”等明确修改请求可正常进入原 `modify` 流程，后端版本检查保持不变。
+- Session 真正忙碌时仍按原接口返回 429，前端应继续展示当前执行，不把它当作当前报告 failed。
+
 ## 目录
 
 ```text

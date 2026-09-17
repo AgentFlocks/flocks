@@ -37,6 +37,26 @@ def output_language_instruction(language: str) -> str:
 
 
 _MESSAGES = {
+    "continuation_unknown": (
+        "我理解你希望继续报告任务，但当前没有可确认的上一任务。请从页面的报告生成入口开始，或说明希望修改已有报告的哪部分。",
+        "I understand you want to continue the report task, but no previous task can be confirmed. Use the report generation entry, or specify which part of an existing report to revise.",
+    ),
+    "continuation_running": (
+        "上一报告任务尚未记录最终状态，请先查看其执行状态，不要重复提交生成任务。",
+        "The previous report task has not recorded a final status. Check its progress before submitting another generation task.",
+    ),
+    "continuation_cancelled": (
+        "上一报告任务已取消，不会自动恢复已取消的执行。请通过页面的生成或重新生成入口重试；若要修改已有报告，请说明修改内容。",
+        "The previous report task was cancelled and will not resume automatically. Retry using the generation or regeneration entry; to revise an existing report, specify the changes.",
+    ),
+    "continuation_failed": (
+        "上一报告任务未完成。请先查看失败原因，处理后通过页面的生成或重新生成入口重试；若要修改已有报告，请说明修改内容。",
+        "The previous report task failed. Review the failure details and address the cause before retrying through the generation or regeneration entry; for an existing report, specify the changes.",
+    ),
+    "continuation_succeeded": (
+        "上一报告任务已经完成。请说明接下来需要修改或补充的章节和内容。",
+        "The previous report task is complete. Please specify the sections or content you want revised or expanded.",
+    ),
     "new_report": (
         "新报告需要通过页面的 AI 生成报告入口创建。",
         "Create a new report using the AI report generation entry on the page.",

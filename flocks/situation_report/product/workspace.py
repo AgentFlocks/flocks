@@ -23,6 +23,7 @@ from .files import async_file_lock, atomic_write_bytes, atomic_write_json, read_
 from .markdown_counts import declared_group_counts
 from .material_paging import bounded_material_page
 from .session_state import ReportSessionStateError, load_session_state
+from .template_contract import extract_template_contract, normalize_heading, report_headings
 
 
 class ProductWorkspaceError(RuntimeError):
@@ -131,7 +132,7 @@ async def read_generation_context(*, session_id: str, generation_id: str) -> dic
     template_info = context.get("template")
     template_path = _verified_context_file(workspace_dir, template_info, "Template snapshot")
     template = template_path.read_text(encoding="utf-8")
-    required_headings = _template_h2(template)
+    heading_contract = extract_template_contract(template)
     result = {
         "generationID": generation_id,
         "operation": request.get("operation"),
@@ -140,7 +141,7 @@ async def read_generation_context(*, session_id: str, generation_id: str) -> dic
         "template": template,
         "templateContract": {
             "authority": "session_template_snapshot",
-            "requiredH2": required_headings,
+            **heading_contract,
             "headingOrder": "template_order",
             "prohibitedLiterals": _template_prohibited_literals(template),
             "instruction": (
@@ -540,18 +541,7 @@ async def write_candidate_report(
 
 
 def _template_h2(template: str) -> list[str]:
-    structured = re.findall(r"^\d+\.\s+\*\*([^*]+)\*\*", template, flags=re.MULTILINE)
-    if structured:
-        return [
-            re.sub(
-                r"\s*[（(](?:必有|可空|可选|required|optional)[）)]\s*$",
-                "",
-                heading,
-                flags=re.IGNORECASE,
-            ).strip()
-            for heading in structured
-        ]
-    return [line[3:].strip() for line in template.splitlines() if line.startswith("## ")]
+    return extract_template_contract(template)["requiredH2"]
 
 
 def _template_prohibited_literals(template: str) -> list[str]:
@@ -581,9 +571,14 @@ def _template_prohibited_literals(template: str) -> list[str]:
     return literals
 
 
-def _heading_sequence_issue(expected: list[str], actual: list[str]) -> dict[str, Any] | None:
+def _heading_sequence_issue(
+    expected: list[str], actual: list[str], *, normalized: bool = False,
+) -> dict[str, Any] | None:
     """Describe report H2 drift without assuming any particular report template."""
 
+    if not normalized:
+        expected = [normalize_heading(value) for value in expected]
+        actual = [normalize_heading(value) for value in actual]
     missing = [heading for heading in expected if heading not in actual]
     unexpected = [heading for heading in actual if heading not in expected]
     expected_present = [heading for heading in expected if heading in actual]
@@ -639,7 +634,7 @@ def _validate_candidate_report(workspace_dir: Path, generation_id: str) -> dict[
     )
     validation_path = workspace_dir / "runs" / generation_id / "validation.json"
     identity = {
-        "validatorVersion": 2,
+        "validatorVersion": 3,
         "candidateSHA256": file_sha256(candidate_path),
         "evidenceSHA256": file_sha256(evidence_path),
         "templateSHA256": template_info["sha256"],
@@ -652,7 +647,9 @@ def _validate_candidate_report(workspace_dir: Path, generation_id: str) -> dict[
         and all(previous.get(key) == value for key, value in identity.items())
     ):
         return previous
-    attempt = int(previous.get("attempt") or 0) + 1
+    # Rechecking the same candidate with a fixed validator is not a new model revision.
+    same_inputs = all(previous.get(key) == value for key, value in identity.items() if key != "validatorVersion")
+    attempt = max(1, int(previous.get("attempt") or 0)) if same_inputs else int(previous.get("attempt") or 0) + 1
     if attempt > 3:
         raise ProductWorkspaceError("Validation attempt budget is exhausted")
     template = template_path.read_text(encoding="utf-8")
@@ -663,9 +660,13 @@ def _validate_candidate_report(workspace_dir: Path, generation_id: str) -> dict[
         if line.strip()
     ]
     material_ids = [_material_id(value) for value in material_rows]
-    h1_lines = [line for line in report.splitlines() if line.startswith("# ")]
-    report_h2 = [line[3:].strip() for line in report.splitlines() if line.startswith("## ")]
-    heading_issue = _heading_sequence_issue(_template_h2(template), report_h2)
+    headings = report_headings(report)
+    h1_lines, report_h2 = headings["h1"], headings["h2"]
+    heading_contract = extract_template_contract(template)
+    heading_issue = (
+        _heading_sequence_issue(heading_contract["requiredH2"], report_h2, normalized=True)
+        if heading_contract["headingCheck"] == "enforced" else None
+    )
     evidence = read_json(evidence_path)
     evidence_materials = evidence.get("materials")
     if not isinstance(evidence_materials, dict):
@@ -684,7 +685,7 @@ def _validate_candidate_report(workspace_dir: Path, generation_id: str) -> dict[
         invalid = [
             section
             for section in sections
-            if not isinstance(section, str) or section not in report_h2
+            if not isinstance(section, str) or normalize_heading(section) not in report_h2
         ]
         if invalid:
             invalid_evidence_sections[material_id] = invalid
@@ -722,6 +723,7 @@ def _validate_candidate_report(workspace_dir: Path, generation_id: str) -> dict[
     if heading_issue:
         issues.append(heading_issue)
     count_issues, warnings = declared_group_counts(report)
+    warnings.extend(heading_contract["warnings"])
     issues.extend(count_issues)
     if missing_evidence or unknown_evidence or invalid_evidence_sections:
         evidence_issue: dict[str, Any] = {"code": "evidence_map"}

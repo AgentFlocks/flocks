@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 from .contracts import ParsedReportPrompt, parse_report_prompt_parts
 from .language import report_message, resolve_report_language
+from .files import read_json, session_root
+from .session_state import load_session_state, state_path
 
 
 class ReportPolicyDecision(BaseModel):
@@ -55,6 +57,43 @@ _MODIFY_SIGNAL = re.compile(
     r"regenerate|rewrite\s+from\s+scratch",
     re.I,
 )
+
+# Standalone follow-ups refer to the preceding task; they are not unrelated Q&A.
+# Do not turn an arbitrary sentence beginning with "continue" into a report task.
+_CONTINUATION = re.compile(
+    r"^(?:(?:请|麻烦|帮我)?\s*(?:继续(?:生成|撰写|写|执行|完成|修改)?(?:报告|任务)?|"
+    r"接着(?:写|生成|完成)(?:报告)?|重试(?:一下|上次任务|报告)?)|"
+    r"(?:please\s+)?(?:continue|resume|retry)(?:\s+(?:the\s+)?(?:report|task|generation))?)\s*[。.!！?？]*$",
+    re.I,
+)
+_SHORT_REVISION = re.compile(
+    r"^(?:(?:请|再|更)?(?:简短|简洁|详细|具体|正式|精简)(?:一点|一些)?|换个说法|"
+    r"(?:make\s+it\s+)?(?:shorter|longer|more concise|more detailed))\s*[。.!！?？]*$", re.I,
+)
+
+
+def _continuation_guidance(session_id: str, language: str) -> ReportPolicyDecision:
+    latest = None
+    for path in (session_root(session_id) / "runs").glob("*/event_state.json"):
+        if path.is_symlink() or path.parent.is_symlink():
+            continue
+        try:
+            value = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("updatedAt"), str):
+            continue
+        if latest is None or value["updatedAt"] > latest[0]:
+            latest = (value["updatedAt"], path.parent.name, value.get("lastStatus"))
+    previous_status = latest[2] if latest else None
+    reason = previous_status if previous_status in {"running", "cancelled", "failed", "succeeded"} else "unknown"
+    return ReportPolicyDecision(
+        kind="direct", text=report_message(f"continuation_{reason}", language),
+        metadata={"policy": {"category": "continuation", "rejected": False,
+                             "reason": f"previous_task_{reason}",
+                             "previousGenerationID": latest[1] if latest else None,
+                             "previousStatus": previous_status}},
+    )
 
 
 def _text(parts: list[dict[str, Any]]) -> str:
@@ -103,6 +142,14 @@ def decide_report_prompt(parts: list[dict[str, Any]], *, session_id: str) -> Rep
             return _ui_action(reason, session_id, language)
     if _GENERAL_CONFIG.search(text):
         return _ui_action("configuration_change", session_id, language)
+
+    if prompt.action.operation == "modify" and _CONTINUATION.fullmatch(text.strip()):
+        return _continuation_guidance(session_id, language)
+    if prompt.action.operation == "modify" and _SHORT_REVISION.fullmatch(text.strip()):
+        report = load_session_state(session_id).report_state if state_path(session_id).is_file() else None
+        if report and (report.get("currentFlocksReportVersion") or report.get("syncedBackendReportVersion")):
+            return ReportPolicyDecision(kind="execute", prompt=prompt)
+        return _continuation_guidance(session_id, language)
 
     # The trusted business backend selects the operation from the product
     # entry point: first-generation button -> generate, dedicated regenerate

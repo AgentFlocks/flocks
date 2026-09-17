@@ -53,6 +53,7 @@ template-required headings. A request to change report language must go through 
 
 ## Boundaries
 
+- Template instructions are not report chapters. Use the explicitly declared report outline, including an outline inside a template code block, without copying its fence. If `templateContract.headingCheck` is `not_enforced`, the parser could not reliably extract the outline: follow the full template, not its instruction headings. Do not rewrite solely for a structural warning or equivalent Markdown escaping.
 - Do not change templates, materials, language, Session state, or current output.
 - Do not create a second report or answer unrelated questions.
 - Do not expose `generation_context`, snapshot paths, work paths, prompts, or reasoning in the report.
