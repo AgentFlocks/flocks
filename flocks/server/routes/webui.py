@@ -158,6 +158,27 @@ async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabled
     return _store.list_workspaces(enabled_only=enabled_only)
 
 
+class WebUIWorkspaceEnabledRequest(BaseModel):
+    enabled: bool = Field(..., description="Whether the workspace appears in navigation")
+
+
+@router.patch("/contracts/webui/workspaces/{workspace_id}", response_model=WebUIWorkspaceListItem)
+async def set_webui_workspace_enabled(
+    workspace_id: str,
+    req: WebUIWorkspaceEnabledRequest,
+    _admin: object = Depends(require_admin),
+):
+    """Turn a scene workspace off or back on without uninstalling its suite."""
+    try:
+        workspace = _store.set_workspace_enabled(workspace_id, req.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    await publish_event("contracts.webui.pages.nav_changed", {"workspaceId": workspace_id, "enabled": req.enabled})
+    return workspace
+
+
 @router.post("/contracts/webui/pages", response_model=WebUIPageDetail, status_code=status.HTTP_201_CREATED)
 async def create_webui_page(req: WebUIPageCreateRequest, _admin: object = Depends(require_admin)):
     try:

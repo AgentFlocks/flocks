@@ -22,11 +22,7 @@
     "loadFailed": "加载工作区失败",
     "notFound": "工作区不存在",
     "empty": "工作区暂无页面",
-    "selectPage": "请从工作区菜单选择页面",
     "pageNotFound": "页面不存在",
-    "sectionNavigation": "工作区页面分类",
-    "collapseSidebar": "折叠侧边栏",
-    "expandSidebar": "展开侧边栏",
     "customPage": "自定义页面",
     "customTitle": "自定义标题",
     "customTitleDialogTitle": "自定义态势页标题",
@@ -37,6 +33,11 @@
     "customPageSessionTitle": "{{workspace}} 自定义页面",
     "customPageCreateError": "无法创建自定义页面会话，请稍后重试",
     "socCustomPageDisplayLabel": "创建 SOC 自定义页面",
-    "socCustomPageInitialMessage": "我想在 {{workspaceTitle}} 中创建一个新的自定义页面。请严格限制只对 SOC 工作区新增页面：工作区 ID 是 `{{workspaceId}}`，工作区路由是 `{{workspaceRoute}}`，页面目录应创建在 `~/.flocks/plugins/contracts/webui/{{workspaceId}}/<page_dir>/`，并把新页面加入 `~/.flocks/plugins/contracts/webui/{{workspaceId}}/workspace.json` 的合适 section。不要创建全局首页页面，不要写入 `~/.flocks/plugins/contracts/webui/` 根目录，也不要写入 `~/.flocks/plugins/user_defined_pages/`。请先引导我确认页面 ID、标题、所属栏目（态势、告警运营或新的同级栏目）、数据契约和展示内容，然后再创建页面骨架、实现 React 页面、构建并说明如何在 SOC 工作区侧栏预览。"
+    "socCustomPageInitialMessage": "我想在 {{workspaceTitle}} 中创建一个新的自定义页面。请严格限制只对 SOC 工作区新增页面：工作区 ID 是 `{{workspaceId}}`，工作区路由是 `{{workspaceRoute}}`，页面目录应创建在 `~/.flocks/plugins/contracts/webui/{{workspaceId}}/<page_dir>/`，并把新页面加入 `~/.flocks/plugins/contracts/webui/{{workspaceId}}/workspace.json` 的合适 section。不要创建全局首页页面，不要写入 `~/.flocks/plugins/contracts/webui/` 根目录，也不要写入 `~/.flocks/plugins/user_defined_pages/`。请先引导我确认页面 ID、标题、所属栏目（态势、告警运营或新的同级栏目）、数据契约和展示内容，然后再创建页面骨架、实现 React 页面、构建并说明如何在 SOC 工作区侧栏预览。",
+    "proOnlyTitle": "该场景需要 Flocks Pro",
+    "proOnlyBody": "当前是开源版，代码审计、AI 红队这类扩展场景要升级到 Flocks Pro 并安装对应套件后才能进入。",
+    "proOnlyAction": "去场景套件",
+    "disabledTitle": "该场景已停用",
+    "disabledBody": "这个场景工作区被停用了，页面暂时打不开。到场景套件里重新启用即可恢复。"
   }
 }

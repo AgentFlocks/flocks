@@ -137,7 +137,25 @@ export interface HubCatalogPageResponse {
   facets: HubCatalogFacets;
 }
 
+export interface HubSceneSuite {
+  id: string;
+  name: string;
+  nameCn?: string | null;
+  description: string;
+  descriptionCn?: string | null;
+  version: string;
+  installedVersion?: string | null;
+  edition: 'oss' | 'pro';
+  state: HubPluginState;
+  workspaceId?: string | null;
+  workspaceTitle?: string | null;
+  workspaceRoute?: string | null;
+  workspaceEnabled?: boolean | null;
+}
+
 export const hubAPI = {
+  sceneSuites: () => client.get<HubSceneSuite[]>('/api/hub/scene-suites'),
+
   catalog: (params?: HubCatalogParams) =>
     client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from flocks.hub import local
-from flocks.hub.catalog import clear_catalog_caches, load_manifest
+from flocks.hub.catalog import _version_tuple, clear_catalog_caches, load_manifest
 from flocks.hub.files import plugin_root
 from flocks.hub.models import (
     HubComponentRef,
@@ -464,6 +464,22 @@ def _can_adopt_existing_ref(
     return record.source == _bundled_source_for_ref(ref)
 
 
+def _component_ref_is_outdated(
+    ref: HubComponentRef,
+    install_path: Path,
+    record: Optional[InstalledPluginRecord],
+) -> bool:
+    """True when the installed child is older than the version this suite ships."""
+    try:
+        available = load_manifest(ref.type, ref.id).version
+    except Exception:
+        return False
+    installed = record.version if record is not None else local.installed_payload_version(ref.type, install_path)
+    if not installed:
+        return False
+    return _version_tuple(installed) < _version_tuple(available)
+
+
 async def _install_component_refs(
     manifest: HubPluginManifest,
     *,
@@ -492,6 +508,28 @@ async def _install_component_refs(
             existing_path = local.infer_local_install(ref.type, ref.id)
             if existing_path is not None:
                 existing_record = local.get_record(ref.type, ref.id)
+                # Installing or updating the suite has to bring an outdated
+                # child along, otherwise the suite reads as current while its
+                # pages stay on the old version.
+                if _component_ref_is_outdated(ref, existing_path, existing_record):
+                    item.status = "installing"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    try:
+                        await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
+                    except Exception as exc:
+                        if ref.optional:
+                            item.status = "skipped"
+                            item.message = f"Optional dependency failed to update: {exc}"
+                            await _emit_component_progress(progress, manifest, "item", item=item)
+                            continue
+                        item.status = "failed"
+                        item.message = str(exc) or "Update failed"
+                        await _emit_component_progress(progress, manifest, "item", item=item)
+                        raise
+                    item.status = "installed"
+                    item.message = "Updated by component"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
                 if existing_record is not None and _can_adopt_existing_ref(ref, existing_record, component_key, existing_path):
                     adopted_records.append(existing_record)
                     local.save_installed_record(existing_record.model_copy(update={"installedBy": component_key}))

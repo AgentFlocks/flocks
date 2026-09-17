@@ -1,0 +1,11 @@
+{
+  "id": "code_audit_ui",
+  "version": "1.0.0",
+  "title": "代码审计",
+  "titleEn": "Code Audit",
+  "icon": "FileSearch",
+  "order": 20,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "code-audit-overview"
+}

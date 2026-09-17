@@ -1,0 +1,12 @@
+{
+  "id": "code-audit-findings",
+  "title": "缺陷清单",
+  "titleEn": "Findings",
+  "route": "/contracts/webui/code-audit-findings",
+  "icon": "ListChecks",
+  "order": 20,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 1788900000000
+}

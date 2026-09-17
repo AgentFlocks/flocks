@@ -19,6 +19,7 @@ from flocks.hub.catalog import (
     load_taxonomy,
 )
 from flocks.hub.files import file_tree, read_file_content
+from flocks.license import license_status
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.hub.models import (
     HubCatalogEntry,
@@ -29,7 +30,7 @@ from flocks.hub.models import (
     InstalledPluginRecord,
     PluginType,
 )
-from flocks.server.auth import require_admin
+from flocks.server.auth import require_admin, require_user
 from flocks.utils.log import Log
 
 
@@ -220,6 +221,95 @@ async def hub_plugin_file_content(plugin_type: PluginType, plugin_id: str, path:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class SceneSuiteEntry(BaseModel):
+    """A scene suite as the scene workspace shows it: catalog state + workspace state."""
+
+    id: str
+    name: str
+    nameCn: Optional[str] = None
+    description: str = ""
+    descriptionCn: Optional[str] = None
+    version: str = "0.0.0"
+    installedVersion: Optional[str] = None
+    edition: str = "oss"
+    state: str = "available"
+    workspaceId: Optional[str] = None
+    workspaceTitle: Optional[str] = None
+    workspaceRoute: Optional[str] = None
+    workspaceEnabled: Optional[bool] = None
+
+
+def _suite_workspace_id(plugin_id: str) -> Optional[str]:
+    try:
+        manifest = load_manifest("component", plugin_id)
+    except Exception:
+        return None
+    for component in getattr(manifest, "components", []) or []:
+        if getattr(component, "type", None) == "webui":
+            return getattr(component, "id", None)
+    return None
+
+
+@router.get("/hub/scene-suites", response_model=list[SceneSuiteEntry])
+async def hub_scene_suites(_user: object = Depends(require_user)):
+    """Scene suites for the scene-workspace suite manager (Hub no longer lists them)."""
+    from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_workspace_route
+
+    catalog = list_catalog()
+    entries = [entry for entry in catalog if entry.type == "component"]
+    webui_entries = {entry.id: entry for entry in catalog if entry.type == "webui"}
+    workspaces = {item.id: item for item in WebUIPagesStore().list_workspaces()}
+    suites: list[SceneSuiteEntry] = []
+    for entry in entries:
+        workspace_id = _suite_workspace_id(entry.id)
+        workspace = workspaces.get(workspace_id) if workspace_id else None
+        # A suite is only current when its pages are current too: the component
+        # shell and its WebUI package carry separate versions.
+        state = entry.state
+        child = webui_entries.get(workspace_id) if workspace_id else None
+        if state == "installed" and child is not None and child.state == "updateAvailable":
+            state = "updateAvailable"
+        suites.append(
+            SceneSuiteEntry(
+                id=entry.id,
+                name=entry.name,
+                nameCn=entry.nameCn,
+                description=entry.description,
+                descriptionCn=entry.descriptionCn,
+                version=entry.version,
+                installedVersion=entry.installedVersion,
+                edition=entry.edition,
+                state=state,
+                workspaceId=workspace_id,
+                workspaceTitle=workspace.title if workspace else None,
+                workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,
+                workspaceEnabled=workspace.enabled if workspace else None,
+            )
+        )
+    suites.sort(key=lambda item: (item.edition != "oss", item.id))
+    return suites
+
+
+async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> None:
+    """Pro-only suites stay listed in the catalog but only install under Pro."""
+    try:
+        manifest = load_manifest(plugin_type, plugin_id)
+    except Exception:
+        return
+    if getattr(manifest, "edition", "oss") != "pro":
+        return
+    try:
+        status_payload = await license_status()
+    except Exception:
+        status_payload = {}
+    edition = str(status_payload.get("status") or "").lower()
+    if edition == "oss" or not status_payload.get("active"):
+        raise HTTPException(
+            status_code=403,
+            detail="该套件需要 Flocks Pro 授权后才能安装，请先在系统设置中升级。",
+        )
+
+
 @router.post("/hub/plugins/{plugin_type}/{plugin_id}/install", response_model=InstalledPluginRecord)
 async def hub_install_plugin(
     plugin_type: PluginType,
@@ -228,6 +318,7 @@ async def hub_install_plugin(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    await _assert_edition_allowed(plugin_type, plugin_id)
     try:
         return await install_plugin(plugin_type, plugin_id, scope=req.scope)
     except Exception as exc:
@@ -243,6 +334,7 @@ async def hub_install_plugin_stream(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    await _assert_edition_allowed(plugin_type, plugin_id)
     if plugin_type != "component":
         raise HTTPException(status_code=400, detail="Streaming install progress is only supported for components.")
     try:

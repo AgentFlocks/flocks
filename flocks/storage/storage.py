@@ -116,30 +116,80 @@ class Storage:
     )
 
     @classmethod
-    def _prefix_matches_runtime_cache(cls, prefix: Optional[str], roots: tuple[str, ...]) -> bool:
-        if prefix is None:
-            return True
-        normalized = str(prefix)
-        return any(normalized == root.rstrip(":/") or normalized.startswith(root) for root in roots)
+    def _runtime_cache_scope(
+        cls,
+        target: str,
+        *,
+        exact: bool,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Map a deleted key (``exact``) or prefix onto ``(cache, session_id)``.
+
+        ``cache`` is ``"session"`` or ``"message"`` (``None`` when the target
+        backs no runtime cache).  ``session_id`` is set only when the target
+        unambiguously belongs to one session; ``None`` means every session.
+        Key shapes: ``session:{project_id}:{session_id}``, ``message:{sid}``,
+        ``message_parts:{sid}``, ``message_parts:{sid}:{message_id}``.
+        """
+        segments = str(target).split(":")
+        root = segments[0]
+        if root == "session":
+            # Only a complete key names one session; ``session:`` and
+            # ``session:{project_id}:`` prefixes span many.
+            if exact and len(segments) >= 3 and segments[-1]:
+                return "session", segments[-1]
+            return "session", None
+        if root in ("message", "message_parts"):
+            # ``message_parts:{sid}:`` is the per-session prefix; without the
+            # trailing colon a prefix could match other session ids.
+            if len(segments) >= 2 and segments[1] and (exact or len(segments) >= 3):
+                return "message", segments[1]
+            return "message", None
+        return None, None
 
     @classmethod
-    def _invalidate_runtime_caches(cls, prefix: Optional[str] = None) -> None:
-        """Clear higher-level caches that depend on the active storage DB."""
-        if cls._prefix_matches_runtime_cache(prefix, ("session:",)):
-            try:
-                from flocks.session.session import Session
+    def _invalidate_runtime_caches(
+        cls,
+        target: Optional[str] = None,
+        *,
+        exact: bool = False,
+    ) -> None:
+        """Drop higher-level caches that depend on the affected storage rows.
 
-                Session.invalidate_cache()
-            except Exception:
-                pass
+        ``target`` is the deleted key (``exact=True``) or prefix.  A target
+        that names a single session evicts only that session; ``None``
+        (database swap / full clear) and root-level prefixes reset everything.
+        """
+        if not target:
+            cls._invalidate_session_cache(None)
+            cls._invalidate_message_cache(None)
+            return
+        cache, session_id = cls._runtime_cache_scope(target, exact=exact)
+        if cache == "session":
+            cls._invalidate_session_cache(session_id)
+        elif cache == "message":
+            cls._invalidate_message_cache(session_id)
 
-        if cls._prefix_matches_runtime_cache(prefix, ("message:", "message_parts:")):
-            try:
-                from flocks.session.message import Message
+    @classmethod
+    def _invalidate_session_cache(cls, session_id: Optional[str]) -> None:
+        try:
+            from flocks.session.session import Session
 
+            Session.invalidate_cache(session_id)
+        except Exception:
+            pass
+
+    @classmethod
+    def _invalidate_message_cache(cls, session_id: Optional[str]) -> None:
+        try:
+            from flocks.session.message import Message
+
+            if session_id is None:
                 Message.invalidate_cache()
-            except Exception:
-                pass
+            else:
+                # Keep the per-session lock: the caller may be holding it.
+                Message.invalidate_cache(session_id, discard_lock=False)
+        except Exception:
+            pass
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -1577,11 +1627,16 @@ class Storage:
         delete_keys: Sequence[str] = (),
         delete_prefixes: Sequence[str] = (),
         transaction_hook: Optional[TransactionHook] = None,
+        invalidate_caches: bool = True,
     ) -> int:
         """Apply related set/delete operations in one SQLite transaction.
 
         ``transaction_hook`` is reserved for derived relational indexes that
         must commit atomically with their canonical KV records.
+        ``invalidate_caches=False`` skips the runtime cache eviction for the
+        deleted session/message rows; only the owners of those caches
+        (``Session`` / ``Message``) should pass it, after reconciling their
+        in-memory state themselves.
         """
         entries = list(set_entries)
         keys_to_delete = list(delete_keys)
@@ -1665,10 +1720,11 @@ class Storage:
             action="mutate_many",
         )
 
-        for key in keys_to_delete:
-            cls._invalidate_runtime_caches(key)
-        for prefix in prefixes_to_delete:
-            cls._invalidate_runtime_caches(prefix)
+        if invalidate_caches:
+            for key in keys_to_delete:
+                cls._invalidate_runtime_caches(key, exact=True)
+            for prefix in prefixes_to_delete:
+                cls._invalidate_runtime_caches(prefix)
         cls._log.debug("storage.mutate_many", {
             "set_count": len(entries),
             "delete_key_count": len(keys_to_delete),
