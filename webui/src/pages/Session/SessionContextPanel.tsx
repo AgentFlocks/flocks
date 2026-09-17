@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, ChevronDown, Download, FileText, Folder, FolderPlus,
   Maximize2, RefreshCw, Search, SlidersHorizontal, Sparkles, X,
@@ -10,6 +10,7 @@ import {
   type SessionContextFile,
   type SessionContextRoot,
   type SessionContextRootNode,
+  type SessionContextSkill,
   type SessionContextSnapshot,
 } from '@/api/session';
 import { formatBytes, type WorkspaceNode } from '@/api/workspace';
@@ -590,13 +591,7 @@ export default function SessionContextPanel({
             {(snapshot?.skills.length || 0) > 0 && (
               <Section title={t('context.skills')} count={snapshot?.skills.length || 0} icon={<Sparkles className="h-4 w-4" />} defaultOpen={false}>
                 <div className="space-y-1">
-                  {snapshot!.skills.map((skill) => (
-                    <div key={skill.name} className="flex items-center gap-2 rounded-lg px-2 py-2 text-xs text-zinc-700 dark:text-zinc-200">
-                      <Sparkles className="h-3.5 w-3.5 text-violet-500" />
-                      <span className="min-w-0 flex-1 truncate">{skill.name}</span>
-                      <span className="text-[10px] text-zinc-400">{t('context.loaded')}</span>
-                    </div>
-                  ))}
+                  {snapshot!.skills.map((skill) => <SkillRow key={skill.name} skill={skill} />)}
                 </div>
               </Section>
             )}
@@ -604,6 +599,45 @@ export default function SessionContextPanel({
         )}
       </div>
       {previewPending}
+    </div>
+  );
+}
+
+function SkillRow({ skill }: { skill: SessionContextSkill }) {
+  const { t } = useTranslation('session');
+  const failed = skill.status === 'error';
+  const error = failed ? skill.error : undefined;
+  const label = skill.status === 'loaded' ? t('context.loaded')
+    : skill.status === 'loading' ? t('context.loading')
+      : failed ? t('context.failed') : t('context.unknown');
+  const rowClassName = 'flex items-center gap-2 rounded-lg px-2 py-2 text-xs text-zinc-700 dark:text-zinc-200';
+  const row = (
+    <>
+      <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+      <span className="min-w-0 flex-1 truncate">{skill.name}</span>
+      <span className={`shrink-0 text-[10px] ${failed ? 'text-red-600 dark:text-red-400' : 'text-zinc-400'}`}>{label}</span>
+    </>
+  );
+  if (!error) return <div className={rowClassName}>{row}</div>;
+  return <SkillError key={error} error={error} rowClassName={rowClassName}>{row}</SkillError>;
+}
+
+function SkillError({ error, rowClassName, children }: { error: string; rowClassName: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const errorId = useId();
+  return (
+    <div className="rounded-lg">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={errorId}
+        onClick={() => setOpen((value) => !value)}
+        className={`${rowClassName} w-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-500`}
+      >
+        {children}
+        <ChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 text-zinc-400 ${open ? 'rotate-180' : ''}`} />
+      </button>
+      <p id={errorId} hidden={!open} className="whitespace-pre-wrap px-2 pb-2 text-xs text-red-600 [overflow-wrap:anywhere] dark:text-red-400">{error}</p>
     </div>
   );
 }

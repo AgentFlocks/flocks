@@ -8,7 +8,9 @@ import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
 import type { SessionContextFile, SessionContextSnapshot } from '@/api/session';
 import type { SessionContextPanelProps } from './SessionContextPanel';
+import type { SSEChatEvent } from '@/features/session-chat/sseRouting';
 
+const sessionChatSSERef = vi.hoisted(() => ({ current: undefined as ((event: SSEChatEvent) => void) | undefined }));
 const contextPanelPropsRef = vi.hoisted(() => ({ current: null as SessionContextPanelProps | null }));
 vi.mock('./SessionContextPanel', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./SessionContextPanel')>();
@@ -248,6 +250,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     onOpenContextFile?: (resourceID: string) => void;
     onSseStatusChange?: (status: 'connected' | 'disconnected') => void;
   }) {
+    sessionChatSSERef.current = onSSEEvent;
     const [input, setInput] = React.useState('');
     return (
       <div
@@ -450,11 +453,37 @@ function contextPage(overrides: Partial<SessionContextSnapshot> = {}): SessionCo
   };
 }
 
+function skillEvent(
+  tool: 'skill_load' | 'load_skill',
+  status: string,
+  {
+    sessionID = session.id, id = 'skill-part', messageID = 'skill-message',
+    input = { name: 'docx' }, error, output = '',
+  }: {
+    sessionID?: string; id?: string; messageID?: string;
+    input?: Record<string, string>; error?: string; output?: string;
+  } = {},
+): SSEChatEvent {
+  return {
+    type: 'message.part.updated',
+    properties: { part: { id, sessionID, messageID, type: 'tool', tool, state: { status, input, error, output } } },
+  };
+}
+
+function emitChatEvent(event: SSEChatEvent) {
+  act(() => sessionChatSSERef.current!(event));
+}
+
+async function advanceContextDebounce(ms = 250) {
+  await act(async () => { vi.advanceTimersByTime(ms); });
+}
+
 describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     __resetChatModelResourcesForTesting();
     sessionStatusSSEOptionsRef.current = null;
+    sessionChatSSERef.current = undefined;
     contextPanelPropsRef.current = null;
     localStorage.clear();
     sessionStorage.clear();
@@ -650,6 +679,223 @@ describe('SessionPage session actions menu', () => {
       expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
       await act(async () => { vi.advanceTimersByTime(1); });
       expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['skill_load', 'load_skill'] as const)('refreshes skill-only %s lifecycle events and clears retry errors', async (tool) => {
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      let requests = 1;
+      for (const status of ['pending', 'running', 'error', 'running', 'completed'] as const) {
+        const error = status === 'error' ? 'Skill dependency missing' : undefined;
+        const skill = {
+          name: 'docx', description: null,
+          status: status === 'completed' ? 'loaded' as const : status === 'error' ? 'error' as const : 'loading' as const,
+          ...(error ? { error } : {}),
+        };
+        sessionApi.getContext.mockResolvedValueOnce(contextPage({ skills: [skill] }));
+        emitChatEvent(skillEvent(tool, status, { input: tool === 'skill_load' ? { name: 'docx' } : { skill: 'docx' }, error }));
+        await advanceContextDebounce(249);
+        expect(sessionApi.getContext).toHaveBeenCalledTimes(requests);
+        await advanceContextDebounce(1);
+        requests += 1;
+        expect(sessionApi.getContext).toHaveBeenCalledTimes(requests);
+        expect(sessionApi.getContext).toHaveBeenLastCalledWith('session-1', {}, expect.any(AbortSignal));
+        expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([skill]);
+      }
+      // No write/todo/context-updated or streaming-done event is needed above.
+      for (let i = 0; i < 5; i += 1) emitChatEvent(skillEvent(tool, 'completed', { output: `chunk ${i}` }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(requests);
+      expect(contextPanelPropsRef.current?.snapshot?.skills[0]).not.toHaveProperty('error');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('deduplicates skill descriptors by part, including newly available names and changed errors', async () => {
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('skill_load', 'unknown'));
+      const unrelated = skillEvent('skill_load', 'running');
+      unrelated.properties!.part.tool = 'read';
+      emitChatEvent(unrelated);
+      emitChatEvent({ ...skillEvent('skill_load', 'running'), type: 'message.updated' });
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+
+      emitChatEvent(skillEvent('skill_load', 'running', { input: {} }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      emitChatEvent(skillEvent('skill_load', 'running', { input: {}, output: 'partial' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      emitChatEvent(skillEvent('skill_load', 'running', { input: { skill: 'docx' } }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      emitChatEvent(skillEvent('skill_load', 'running', { input: { name: 'docx' }, output: 'more' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'First reason' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'First reason', output: 'ignored output' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'Full reason' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(5);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'Full reason', id: 'another-part' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(6);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'Full reason', messageID: 'another-message' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(7);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces skill bursts into one debounced request and one dirty trailing read', async () => {
+    const refresh = deferred<SessionContextSnapshot>();
+    const trailing = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockResolvedValueOnce(contextPage()).mockReturnValueOnce(refresh.promise).mockReturnValueOnce(trailing.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('skill_load', 'pending'));
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      emitChatEvent(skillEvent('load_skill', 'pending', { id: 'second-part' }));
+      await advanceContextDebounce(249);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+      await advanceContextDebounce(1);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      for (const status of ['error', 'running', 'completed']) {
+        emitChatEvent(skillEvent('skill_load', status));
+      }
+      emitChatEvent(skillEvent('load_skill', 'completed', { id: 'second-part' }));
+      await advanceContextDebounce(500);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      await act(async () => refresh.resolve(contextPage({ skills: [{ name: 'docx', status: 'loading' }] })));
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      expect(contextPanelPropsRef.current?.loading).toBe(true);
+      // Repeated output-only updates during the trailing flight must not dirty it again.
+      for (let i = 0; i < 5; i += 1) emitChatEvent(skillEvent('skill_load', 'completed', { output: `chunk ${i}` }));
+      await act(async () => trailing.resolve(contextPage({ skills: [{ name: 'docx', status: 'loaded' }] })));
+      await advanceContextDebounce(500);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      expect(contextPanelPropsRef.current?.loading).toBe(false);
+      expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([{ name: 'docx', status: 'loaded' }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets skill deduplication on close/reopen and A -> B -> A without caching foreign or stale events', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    sessionApi.getContext.mockImplementation((sessionId: string) => Promise.resolve(contextPage({ sessionID: sessionId })));
+    renderSessionPage('/sessions?session=session-1');
+    await screen.findByRole('button', { name: 'context.title' });
+    const closedHandler = sessionChatSSERef.current!;
+    emitChatEvent(skillEvent('skill_load', 'running'));
+    expect(sessionApi.getContext).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    const firstAHandler = sessionChatSSERef.current!;
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('skill_load', 'running', { sessionID: 'session-2' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      fireEvent.click(screen.getByRole('button', { name: 'context.title' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      act(() => { closedHandler(skillEvent('skill_load', 'running')); firstAHandler(skillEvent('skill_load', 'running')); });
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+
+      // A scheduled descriptor change is discarded on switch, not carried into B.
+      emitChatEvent(skillEvent('skill_load', 'completed'));
+      fireEvent.click(screen.getByText('Second Session'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(5);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(5);
+      emitChatEvent(skillEvent('skill_load', 'running', { sessionID: 'session-2' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(6);
+      fireEvent.click(screen.getByText('Original Session'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(7);
+      act(() => firstAHandler(skillEvent('skill_load', 'running')));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(7);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(8);
+      emitChatEvent(skillEvent('skill_load', 'completed'));
+      fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext.mock.calls.map((call) => call[0])).toEqual([
+        'session-1', 'session-1', 'session-1', 'session-1', 'session-2', 'session-2', 'session-1', 'session-1',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps newer failed skill attempts above older loaded pages and refreshes retries from skill SSE alone', async () => {
+    const older = deferred<SessionContextSnapshot>();
+    const refresh = deferred<SessionContextSnapshot>();
+    const failed = { name: 'docx', status: 'error' as const, error: 'Latest attempt failed' };
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({ hasMore: true, nextBefore: 'old-cursor', messageIDs: ['head'], skills: [failed] }))
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(refresh.promise)
+      .mockResolvedValueOnce(contextPage({ skills: [{ name: 'docx', status: 'loaded' }] }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    emitChatEvent(skillEvent('load_skill', 'running'));
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    await act(async () => older.resolve(contextPage({ skills: [
+      { name: 'docx', status: 'loaded' }, { name: 'older-skill', status: 'loaded' },
+    ] })));
+    expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([failed, { name: 'older-skill', status: 'loaded' }]);
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+    expect(sessionApi.getContext.mock.calls[2][1]).toEqual({});
+    await act(async () => refresh.resolve(contextPage({ skills: [{ name: 'docx', status: 'loading' }] })));
+    expect(contextPanelPropsRef.current?.snapshot?.skills[0]).toEqual({ name: 'docx', status: 'loading' });
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('load_skill', 'completed'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+      expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([
+        { name: 'docx', status: 'loaded' }, { name: 'older-skill', status: 'loaded' },
+      ]);
     } finally {
       vi.useRealTimers();
     }

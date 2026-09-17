@@ -90,6 +90,7 @@ async def test_missing_session_directory_uses_cwd_and_publishes_notice(
 @pytest.mark.asyncio
 async def test_shell_route_maps_extension_stop_to_forbidden(
     monkeypatch: pytest.MonkeyPatch,
+    session_id: str,
 ) -> None:
     """A Pro policy stop must not surface as an unhandled server error."""
 
@@ -111,7 +112,7 @@ async def test_shell_route_maps_extension_stop_to_forbidden(
 
     with pytest.raises(HTTPException) as error:
         await session_routes.run_shell_command(
-            "ses_1",
+            session_id,
             session_routes.ShellRequest(agent="build", command="rm -rf /etc"),
             SimpleNamespace(),
         )
@@ -154,9 +155,11 @@ class TestSessionCRUD:
 
         profile = await get_session_execution_profile(data["id"])
         assert profile is not None
-        assert profile["entry"] == "interactive"
+        assert profile["entry"] == "webui"
         assert profile["source"] == "webui.session.create"
-        assert "permission_mode" not in profile
+        assert profile["permission_mode"] == "require-confirm"
+        assert profile["runtime_mode"] == "dev-mode"
+        assert profile["network_mode"] == "require-confirm"
 
     @pytest.mark.asyncio
     async def test_create_session_emits_canonical_created_event(
@@ -2904,6 +2907,127 @@ class TestSessionContext:
         assert download.status_code == status.HTTP_200_OK
         assert download.content == b"uploaded"
         assert 'filename="notes.txt"' in download.headers["content-disposition"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("username, role", [("admin", "admin"), ("member", "member")])
+    @pytest.mark.parametrize("scope", ["global", "user"])
+    @pytest.mark.parametrize("relative", ["report.md", "2026-09-17/report.md"])
+    @pytest.mark.parametrize("legacy", [False, True])
+    async def test_written_outputs_are_listed_previewable_and_downloadable(
+        self, client: AsyncClient, tmp_path, monkeypatch, username, role, scope, relative, legacy,
+    ):
+        from flocks.auth.context import reset_current_auth_user, set_current_auth_user
+        from flocks.tool.registry import ToolContext, ToolRegistry
+        from flocks.workspace.manager import WorkspaceManager
+
+        monkeypatch.setattr(WorkspaceManager, "_instance", None)
+        user = AuthUser(id=f"usr_{username}", username=username, role=role, status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: user)
+        session = await Session.create(
+            project_id="default", directory=str(tmp_path), title="Output registration",
+            owner_user_id=user.id, owner_username=username,
+        )
+        message = await Message.create(session.id, MessageRole.ASSISTANT, "")
+        manager = WorkspaceManager.get_instance()
+        output_username = username if scope == "user" else None
+        target = manager.get_default_outputs_dir(username=output_username, include_today=False) / relative
+        other_username = None if scope == "user" else username
+        decoy = manager.get_default_outputs_dir(username=other_username, include_today=False) / relative
+        decoy.parent.mkdir(parents=True, exist_ok=True)
+        decoy.write_text("Unrelated same-name file", encoding="utf-8")
+        content = f"# {username} {scope}\n已生成的说明文件\n"
+
+        ctx = ToolContext(
+            session_id=session.id, message_id=message.id, agent="test", call_id="call_output",
+            permission_callback=AsyncMock(),
+        )
+        token = set_current_auth_user(user)
+        try:
+            result = await ToolRegistry.execute("write", ctx, filePath=str(target), content=content)
+        finally:
+            reset_current_auth_user(token)
+        assert result.success, result.error
+        assert target.read_bytes() == content.encode("utf-8")
+        assert result.attachments and len(result.attachments) == 1
+        assert result.attachments[0]["source"] == {
+            "root": "workspace-output", "path": relative, "username": output_username,
+        }
+        assert result.attachments[0]["sessionID"] == session.id
+        assert result.attachments[0]["messageID"] == message.id
+        part = ToolPart(
+            id="prt_registered_write", sessionID=session.id, messageID=message.id,
+            callID="call_output", tool="write",
+            state=ToolStateCompleted(
+                input={"filePath": str(target)}, output=result.output, title=result.title,
+                metadata=result.metadata, time={"start": 1, "end": 2},
+                attachments=None if legacy else result.attachments,
+            ),
+        )
+        await Message.store_part(session.id, message.id, part)
+        response = await client.get(f"/api/session/{session.id}/context")
+        assert response.status_code == 200
+        snapshot = response.json()
+        assert snapshot["counts"]["outputs"] == 1
+        descriptor = snapshot["outputs"][0]
+        prefix = f"users/{username}/outputs" if scope == "user" else "outputs"
+        assert descriptor["logicalPath"] == f"{prefix}/{relative}"
+        assert descriptor["status"] == "ready"
+        assert str(tmp_path) not in str(descriptor)
+        resource_url = f"/api/session/{session.id}/context/files/{descriptor['resourceID']}"
+        preview = await client.get(f"{resource_url}/content")
+        assert preview.status_code == 200
+        assert preview.json()["content"] == content
+        download = await client.get(f"{resource_url}/download")
+        assert download.status_code == 200
+        assert download.content == content.encode("utf-8")
+        assert 'filename="report.md"' in download.headers["content-disposition"]
+        assert decoy.read_text(encoding="utf-8") == "Unrelated same-name file"
+
+        other_session = await Session.create(
+            project_id="default", directory=str(tmp_path), owner_user_id=user.id, owner_username=username,
+        )
+        foreign = await client.get(
+            f"/api/session/{other_session.id}/context/files/{descriptor['resourceID']}/download",
+        )
+        assert foreign.status_code == 404
+        stranger = AuthUser(id="usr_stranger", username="stranger", role="member", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: stranger)
+        assert (await client.get(f"/api/session/{session.id}/context")).status_code == 403
+        for endpoint in ("metadata", "content", "preview", "download"):
+            assert (await client.get(f"{resource_url}/{endpoint}")).status_code == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool", ["skill_load", "load_skill"])
+    async def test_context_api_preserves_skill_failure_and_successful_retry(
+        self, client: AsyncClient, session_id: str, tool,
+    ):
+        from flocks.session.message import ToolStatePending
+
+        name = "missing-then-loaded"
+        message = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        states = [
+            ToolStatePending(input={"name": name}, raw="{}"),
+            ToolStateRunning(input={"name": name}, time={"start": 1}),
+            ToolStateError(input={"name": name}, error="Skill not found", time={"start": 1, "end": 2}),
+            ToolStateRunning(input={"name": name}, time={"start": 3}),
+            ToolStateCompleted(input={"name": name}, output="Loaded", title=name, metadata={}, time={"start": 3, "end": 4}),
+        ]
+        for index, (state, expected_status) in enumerate(zip(states, ["loading", "loading", "error", "loading", "loaded"])):
+            part = ToolPart(
+                id=f"prt_skill_{index}", sessionID=session_id, messageID=message.id,
+                callID=f"call_skill_{index}", tool=tool, state=state,
+            )
+            await Message.store_part(session_id, message.id, part)
+            response = await client.get(f"/api/session/{session_id}/context")
+            assert response.status_code == 200
+            skills = response.json()["skills"]
+            assert len(skills) == 1
+            assert skills[0]["name"] == name
+            assert skills[0]["status"] == expected_status
+            if expected_status == "error":
+                assert skills[0]["error"] == "Skill not found"
+            else:
+                assert "error" not in skills[0]
 
     @pytest.mark.asyncio
     async def test_chat_upload_binds_as_file_part_without_exposing_host_path(

@@ -494,6 +494,9 @@
     "project": "Project",
     "folder": "Folder",
     "loaded": "Loaded",
+    "loading": "Loading",
+    "failed": "Failed",
+    "unknown": "Unknown",
     "locateMessage": "Locate source message"
   },
   "groupToday": "Today",

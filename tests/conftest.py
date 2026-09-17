@@ -107,6 +107,14 @@ async def _cleanup_runtime_singletons_after_test():
     except Exception:
         pass
 
+    # Session listing can also open the independent channel-binding database.
+    try:
+        from flocks.channel.inbound.session_binding import close_binding_db
+
+        await close_binding_db()
+    except Exception:
+        pass
+
     # Then run storage shutdown (idempotent when not initialized).
     try:
         from flocks.storage.storage import Storage

@@ -1,5 +1,6 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { SessionContextFile, SessionContextRootPage, SessionContextSnapshot } from '@/api/session';
@@ -31,6 +32,10 @@ vi.mock('react-i18next', () => ({
       'context.outputs': 'Outputs',
       'context.contextFiles': 'Context files',
       'context.skills': 'Skills',
+      'context.loaded': 'Loaded',
+      'context.loading': 'Loading',
+      'context.failed': 'Failed',
+      'context.unknown': 'Unknown',
       'context.download': 'Download',
       'chat.tool.todoStatus.inProgress': 'in progress',
     }[key] || key),
@@ -140,6 +145,70 @@ describe('SessionContextPanel', () => {
     expect(screen.getByText('Research')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Skills'));
     expect(screen.getByText('docx')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['loaded', 'Loaded'], ['loading', 'Loading'], ['error', 'Failed'], ['unknown', 'Unknown'],
+  ] as const)('renders the %s skill status without implying success', (status, label) => {
+    renderPanel({ snapshot: { ...snapshot, skills: [{ name: 'docx', description: null, status }] } });
+    fireEvent.click(screen.getByRole('button', { name: /Skills/ }));
+    const row = screen.getByText('docx').parentElement!;
+    expect(within(row).getByText(label)).toBeInTheDocument();
+    if (status !== 'loaded') expect(within(row).queryByText('Loaded')).not.toBeInTheDocument();
+    // A failed load without a reason remains a compact badge, not an empty disclosure.
+    expect(row.querySelector('[aria-expanded]')).toBeNull();
+  });
+
+  it('falls back to unknown for an unrecognized runtime skill status', () => {
+    renderPanel({ snapshot: {
+      ...snapshot,
+      skills: [{ name: 'docx', status: 'unexpected' as SessionContextSnapshot['skills'][number]['status'] }],
+    } });
+    fireEvent.click(screen.getByRole('button', { name: /Skills/ }));
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Loaded')).not.toBeInTheDocument();
+  });
+
+  it('discloses the full escaped skill error with both keyboard and mouse', async () => {
+    const user = userEvent.setup();
+    const reason = `Unable to load <script>alert("unsafe")</script>\n${'long-unbroken-reason'.repeat(50)}\nFinal diagnostic line`;
+    renderPanel({ snapshot: { ...snapshot, skills: [{ name: 'docx', status: 'error', error: reason }] } });
+    await user.click(screen.getByRole('button', { name: /Skills/ }));
+    const disclosure = screen.getByRole('button', { name: 'docx Failed' });
+    const error = document.getElementById(disclosure.getAttribute('aria-controls')!)!;
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    expect(error).not.toBeVisible();
+    await user.tab();
+    expect(disclosure).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(error).toBeVisible();
+    expect(error.textContent).toBe(reason);
+    expect(error).toHaveClass('whitespace-pre-wrap', '[overflow-wrap:anywhere]');
+    expect(error.querySelector('script')).toBeNull();
+    await user.keyboard(' ');
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    await user.click(disclosure);
+    expect(error).toBeVisible();
+  });
+
+  it('clears failed skill details through a retry from loading to loaded', () => {
+    const props = {
+      sessionId: 'sess-1', loading: false, onClose: vi.fn(), onRefresh: vi.fn(), onFocusMessage: vi.fn(),
+    };
+    const view = renderPanel({ ...props, snapshot: {
+      ...snapshot, skills: [{ name: 'docx', status: 'error', error: 'Missing dependency' }],
+    } });
+    fireEvent.click(screen.getByRole('button', { name: /Skills/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'docx Failed' }));
+    expect(screen.getByText('Missing dependency')).toBeVisible();
+    for (const status of ['loading', 'loaded'] as const) {
+      view.rerender(<SessionContextPanel {...props} snapshot={{ ...snapshot, skills: [{ name: 'docx', status }] }} />);
+      expect(screen.getByText(status === 'loading' ? 'Loading' : 'Loaded')).toBeInTheDocument();
+      expect(screen.queryByText('Failed')).not.toBeInTheDocument();
+      expect(screen.queryByText('Missing dependency')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /docx/ })).not.toBeInTheDocument();
+    }
   });
 
   it('opens a text resource in the shared preview and keeps download separate', async () => {

@@ -339,6 +339,66 @@ async def test_unbound_context_keeps_explicitly_attached_folders(project_session
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["skill_load", "load_skill"])
+@pytest.mark.parametrize("input_key", ["name", "skill"])
+@pytest.mark.parametrize("state, expected_status, error", [
+    ("pending", "loading", None),
+    ("running", "loading", None),
+    ("completed", "loaded", None),
+    ("error", "error", 'Skill "missing-skill" not found.'),
+    ("error", "error", None),
+    ("unexpected", "unknown", None),
+    (None, "unknown", None),
+])
+async def test_context_preserves_skill_states(tmp_path, tool, input_key, state, expected_status, error):
+    session = _session(tmp_path)
+    part = SimpleNamespace(
+        type="tool", tool=tool,
+        state=SimpleNamespace(status=state, input={input_key: "missing-skill"}, error=error),
+    )
+    message = _message("msg_skill", "assistant", [part])
+    with (
+        patch("flocks.session.files._messages_with_parts", new=AsyncMock(return_value=([message], False, None))),
+        patch("flocks.session.features.todo.Todo.get_snapshot", new=AsyncMock(return_value=[])),
+    ):
+        context = await build_session_context(session, include_roots=False)
+    expected = {"name": "missing-skill", "description": None, "status": expected_status}
+    if error:
+        expected["error"] = error
+    assert context["skills"] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_context_skill_retry_replaces_error_with_latest_state(tmp_path):
+    from flocks.session.message import ToolStateError, ToolStateRunning
+
+    session = _session(tmp_path)
+    states = [
+        ToolStateError(input={"name": "retry-skill"}, error="Skill not found", time={"start": 1, "end": 2}),
+        ToolStateRunning(input={"name": "retry-skill"}, time={"start": 3}),
+        ToolStateCompleted(input={"name": "retry-skill"}, output="Loaded", title="retry-skill", metadata={}, time={"start": 3, "end": 4}),
+    ]
+    messages = []
+    for index, (state, expected_status) in enumerate(zip(states, ["error", "loading", "loaded"])):
+        part = ToolPart(
+            id=f"prt_skill_{index}", sessionID=session.id, messageID=f"msg_skill_{index}",
+            callID=f"call_skill_{index}", tool="skill_load", state=state,
+        )
+        messages.append(_message(part.messageID, "assistant", [part], created=index))
+        with (
+            patch("flocks.session.files._messages_with_parts", new=AsyncMock(return_value=(messages, False, None))),
+            patch("flocks.session.features.todo.Todo.get_snapshot", new=AsyncMock(return_value=[])),
+        ):
+            context = await build_session_context(session, include_roots=False)
+        assert len(context["skills"]) == 1
+        assert context["skills"][0]["status"] == expected_status
+        if expected_status == "error":
+            assert context["skills"][0]["error"] == "Skill not found"
+        else:
+            assert "error" not in context["skills"][0]
+
+
+@pytest.mark.asyncio
 async def test_context_derives_uploads_and_deduplicated_outputs(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
     WorkspaceManager._instance = None
@@ -554,14 +614,17 @@ def _write_part(session, attachment, *, filepath=None, message_id="msg_agent"):
     ("legacy-attachment", "admin", "admin", "users/admin/outputs"),
     ("legacy-attachment", None, None, "outputs"),
     ("legacy-metadata", "admin", "admin", "users/admin/outputs"),
+    ("legacy-metadata", "member", "member", "users/member/outputs"),
     ("legacy-metadata", None, None, "outputs"),
+    ("legacy-metadata", None, "admin", "outputs"),
+    ("legacy-metadata", None, "member", "outputs"),
 ])
-async def test_output_logical_path_shows_actual_workspace_scope(tmp_path, monkeypatch, source_kind, writer, owner, prefix):
+@pytest.mark.parametrize("relative", ["report.md", "2026-09-15/report.md"])
+async def test_output_logical_path_shows_actual_workspace_scope(tmp_path, monkeypatch, source_kind, writer, owner, prefix, relative):
     monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setattr(WorkspaceManager, "_instance", None)
     session = _session(tmp_path)
     session.owner_username = owner
-    relative = "2026-09-15/report.md"
     manager = WorkspaceManager.get_instance()
     target = manager.get_default_outputs_dir(username=writer, include_today=False) / relative
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -585,6 +648,114 @@ async def test_output_logical_path_shows_actual_workspace_scope(tmp_path, monkey
         assert resource.path == target.resolve()
         assert resource.path.read_text(encoding="utf-8") == "Report"
         assert str(tmp_path) not in descriptor["logicalPath"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_outputs_with_identical_names_keep_distinct_scopes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setattr(WorkspaceManager, "_instance", None)
+    session = _session(tmp_path)
+    session.owner_username = "member"
+    manager = WorkspaceManager.get_instance()
+    messages = []
+    expected = {}
+    for index, username in enumerate(["member", None]):
+        target = manager.get_default_outputs_dir(username=username, include_today=False) / "report.md"
+        text = "member report" if username else "global report"
+        target.write_text(text, encoding="utf-8")
+        message_id = f"msg_output_{index}"
+        part = _write_part(session, None, filepath=str(target), message_id=message_id)
+        messages.append(_message(message_id, "assistant", [part], created=index))
+        prefix = "users/member/outputs" if username else "outputs"
+        expected[f"{prefix}/report.md"] = text
+    by_id = {message.info.id: message for message in messages}
+    with (
+        patch("flocks.session.files._messages_with_parts", new=AsyncMock(return_value=(messages, False, None))),
+        patch("flocks.session.message.Message.get_with_parts_lazy", new=AsyncMock(side_effect=lambda _session, message_id: by_id[message_id])),
+        patch("flocks.session.features.todo.Todo.get_snapshot", new=AsyncMock(return_value=[])),
+    ):
+        context = await build_session_context(session, include_roots=False)
+        assert context["counts"]["outputs"] == 2
+        assert {item["logicalPath"] for item in context["outputs"]} == set(expected)
+        assert len({item["resourceID"] for item in context["outputs"]}) == 2
+        for descriptor in context["outputs"]:
+            resource = await resolve_session_resource(session, descriptor["resourceID"])
+            assert resource.path.read_text(encoding="utf-8") == expected[descriptor["logicalPath"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner, prefix", [
+    ("admin", "users/admin/outputs"),
+    ("admin", "outputs"),
+    (None, "outputs"),
+])
+async def test_missing_legacy_output_is_listed_without_creating_directories(tmp_path, monkeypatch, owner, prefix):
+    workspace = tmp_path / "uncreated-workspace"
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setattr(WorkspaceManager, "_instance", None)
+    session = _session(tmp_path)
+    session.owner_username = owner
+    target = workspace / prefix / "missing.md"
+    message = _message("msg_agent", "assistant", [_write_part(session, None, filepath=str(target))])
+    with (
+        patch("flocks.session.files._messages_with_parts", new=AsyncMock(return_value=([message], False, None))),
+        patch("flocks.session.message.Message.get_with_parts_lazy", new=AsyncMock(return_value=message)),
+        patch("flocks.session.features.todo.Todo.get_snapshot", new=AsyncMock(return_value=[])),
+    ):
+        context = await build_session_context(session, include_roots=False)
+        assert context["counts"]["outputs"] == 1
+        descriptor = context["outputs"][0]
+        assert descriptor["status"] == "missing"
+        assert descriptor["logicalPath"] == f"{prefix}/missing.md"
+        assert (await resolve_session_resource(session, descriptor["resourceID"])).path == target.resolve()
+    assert not workspace.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["other-user", "outside", "relative", "traversal", "symlink", "root-symlink", "failed-write"])
+async def test_legacy_output_rejects_untrusted_scope_or_failed_write(tmp_path, monkeypatch, case):
+    from flocks.session.message import ToolStateError
+
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setattr(WorkspaceManager, "_instance", None)
+    session = _session(tmp_path)
+    session.owner_username = "member"
+    manager = WorkspaceManager.get_instance()
+    global_root = manager.get_default_outputs_dir(include_today=False)
+    other_root = manager.get_default_outputs_dir(username="other", include_today=False)
+    outside = other_root / "private.md" if case in {"other-user", "symlink", "root-symlink"} else tmp_path / "outside.md"
+    outside.write_text("not a session output", encoding="utf-8")
+    if case == "relative":
+        filepath = "report.md"
+    elif case == "traversal":
+        filepath = str(global_root / ".." / "users" / "other" / "private.md")
+    elif case == "symlink":
+        link = global_root / "alias.md"
+        link.symlink_to(outside)
+        filepath = str(link)
+    elif case == "root-symlink":
+        user = manager.get_user_workspace_dir("member")
+        user.mkdir(parents=True)
+        (user / "outputs").symlink_to(other_root, target_is_directory=True)
+        filepath = str(user / "outputs" / "private.md")
+    elif case == "failed-write":
+        filepath = str(global_root / "report.md")
+        (global_root / "report.md").write_text("pre-existing output", encoding="utf-8")
+    else:
+        filepath = str(outside)
+    part = _write_part(session, None, filepath=filepath)
+    if case == "failed-write":
+        part.state = ToolStateError(input={}, error="write failed", metadata={"filepath": filepath}, time={"start": 1, "end": 2})
+    message = _message("msg_agent", "assistant", [part])
+    with (
+        patch("flocks.session.files._messages_with_parts", new=AsyncMock(return_value=([message], False, None))),
+        patch("flocks.session.message.Message.get_with_parts_lazy", new=AsyncMock(return_value=message)),
+        patch("flocks.session.features.todo.Todo.get_snapshot", new=AsyncMock(return_value=[])),
+    ):
+        assert (await build_session_context(session, include_roots=False))["outputs"] == []
+        with pytest.raises(FileNotFoundError):
+            await resolve_session_resource(session, public_resource_id("msg_agent", part.id))
 
 
 def test_output_projection_drops_unbounded_payload_and_limits_fields():
@@ -630,12 +801,14 @@ def test_output_projection_rejects_invalid_descriptors(updates):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_binding", ["conflict", "invalid_scope", "wrong_message", "wrong_session"])
-async def test_rejected_output_binding_never_falls_back_to_metadata(tmp_path, monkeypatch, invalid_binding):
+@pytest.mark.parametrize("owner", [None, "admin"])
+async def test_rejected_output_binding_never_falls_back_to_metadata(tmp_path, monkeypatch, invalid_binding, owner):
     monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setattr(WorkspaceManager, "_instance", None)
     session = _session(tmp_path)
-    output = session_outputs_root(session) / "report.md"
-    output.write_text("owner output")
+    session.owner_username = owner
+    output = WorkspaceManager.get_instance().get_default_outputs_dir(include_today=False) / "report.md"
+    output.write_text("global output")
     attachment = _output_attachment(
         sessionID=session.id, messageID="msg_agent",
         source={"root": "workspace-output", "path": "report.md", "username": None},
@@ -662,7 +835,7 @@ async def test_rejected_output_binding_never_falls_back_to_metadata(tmp_path, mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_attachment", [False, True])
-async def test_legacy_output_is_compatible_only_with_owner_root(tmp_path, monkeypatch, with_attachment):
+async def test_legacy_output_keeps_owner_paths_and_rejects_host_paths(tmp_path, monkeypatch, with_attachment):
     monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setattr(WorkspaceManager, "_instance", None)
     session = _session(tmp_path)

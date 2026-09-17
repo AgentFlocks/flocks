@@ -144,7 +144,8 @@ export interface SessionContextRoot {
 export interface SessionContextSkill {
   name: string;
   description?: string | null;
-  status: 'loaded' | 'loading' | string;
+  status: 'loading' | 'loaded' | 'error' | 'unknown';
+  error?: string;
 }
 
 export interface SessionContextCounts {

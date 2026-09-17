@@ -775,7 +775,12 @@ export default function SessionPage() {
   const [contextLoading, setContextLoading] = useState(false);
   const [contextLoadingMore, setContextLoadingMore] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
-  const contextScope = useMemo(() => ({ sessionId: selectedSessionId, open: contextPanelOpen, active: false }), [selectedSessionId, contextPanelOpen]);
+  const contextScope = useMemo(() => ({
+    sessionId: selectedSessionId,
+    open: contextPanelOpen,
+    active: false,
+    skillSignatures: new Map<string, string>(),
+  }), [selectedSessionId, contextPanelOpen]);
   const contextScopeRef = useRef(contextScope);
   contextScopeRef.current = contextScope;
   const contextSnapshotRef = useRef<SessionContextSnapshot | null>(null);
@@ -1337,25 +1342,41 @@ export default function SessionPage() {
     const eventSessionId = event.properties?.sessionID
       || event.properties?.part?.sessionID
       || event.properties?.info?.sessionID;
-    const updatedPart = event.properties?.part;
-    const contextPartUpdated = event.type === 'message.part.updated' && (
-      updatedPart?.type === 'file'
-      || (
-        updatedPart?.type === 'tool'
-        && updatedPart?.tool === 'write'
-        && (updatedPart?.state?.status === 'completed' || updatedPart?.state?.status === 'error')
-      )
-    );
     if (
-      contextPanelOpen
-      && eventSessionId === selectedSessionId
-      && (
-        contextPartUpdated
-        || event.type === 'todo.updated'
-        || event.type === 'session.context.updated'
-      )
+      contextScopeRef.current === contextScope
+      && contextScope.active
+      && contextScope.open
+      && eventSessionId === contextScope.sessionId
     ) {
-      scheduleContextRefetch();
+      const updatedPart = event.properties?.part;
+      let contextPartUpdated = event.type === 'message.part.updated' && (
+        updatedPart?.type === 'file'
+        || (
+          updatedPart?.type === 'tool'
+          && updatedPart?.tool === 'write'
+          && (updatedPart?.state?.status === 'completed' || updatedPart?.state?.status === 'error')
+        )
+      );
+      if (
+        event.type === 'message.part.updated'
+        && updatedPart?.type === 'tool'
+        && (updatedPart.tool === 'skill_load' || updatedPart.tool === 'load_skill')
+        && ['pending', 'running', 'completed', 'error'].includes(updatedPart.state?.status)
+      ) {
+        const { input, status, error } = updatedPart.state;
+        const partID = updatedPart.id || event.properties?.partID;
+        const key = JSON.stringify([updatedPart.messageID || event.properties?.messageID, partID]);
+        const signature = JSON.stringify([input?.name || input?.skill || null, status, error ?? null]);
+        // Only descriptor changes matter, not streamed output. Keep this cache
+        // inside the open/session scope so closed, foreign, or stale events cannot seed it.
+        if (!partID || contextScope.skillSignatures.get(key) !== signature) {
+          if (partID) contextScope.skillSignatures.set(key, signature);
+          contextPartUpdated = true;
+        }
+      }
+      if (contextPartUpdated || event.type === 'todo.updated' || event.type === 'session.context.updated') {
+        scheduleContextRefetch();
+      }
     }
     if (
       event.type === 'session.execution_mode.changed'
@@ -1390,7 +1411,7 @@ export default function SessionPage() {
       scheduleSessionListRefetch();
     }
   }, [
-    contextPanelOpen,
+    contextScope,
     scheduleContextRefetch,
     scheduleSessionListRefetch,
     selectedSessionId,
@@ -1414,6 +1435,7 @@ export default function SessionPage() {
     if (contextScope.open && contextScope.sessionId) void fetchSessionContext();
     return () => {
       contextScope.active = false;
+      contextScope.skillSignatures.clear();
       if (contextRefetchTimerRef.current !== null) {
         window.clearTimeout(contextRefetchTimerRef.current);
         contextRefetchTimerRef.current = null;

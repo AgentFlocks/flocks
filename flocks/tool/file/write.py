@@ -164,14 +164,13 @@ async def _build_output_attachment(
         from flocks.workspace.manager import WorkspaceManager
 
         owner_username = await _resolve_owner_username(ctx)
-        outputs_root = WorkspaceManager.get_instance().get_default_outputs_dir(
-            username=owner_username,
-            include_today=False,
-        ).resolve(strict=False)
-        target = Path(filepath).resolve(strict=True)
-        if not target.is_file() or not target.is_relative_to(outputs_root):
+        scope = WorkspaceManager.get_instance().resolve_output_scope(
+            filepath, username=owner_username,
+        )
+        if scope is None or not scope.path.is_file():
             return None
 
+        target = scope.path
         stat = target.stat()
         attachment_id = Identifier.ascending("part")
         return {
@@ -186,11 +185,8 @@ async def _build_output_attachment(
             "origin": "agent_output",
             "source": {
                 "root": "workspace-output",
-                "path": target.relative_to(outputs_root).as_posix(),
-                "username": (
-                    WorkspaceManager.normalize_username_for_path(owner_username)
-                    if owner_username else None
-                ),
+                "path": scope.relative_path,
+                "username": scope.username,
             },
         }
     except (OSError, RuntimeError, ValueError) as exc:

@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 from flocks.config.config import Config
 from flocks.session.utils.file_extractor import file_url_to_path
-from flocks.workspace.manager import WorkspaceManager
+from flocks.workspace.manager import WorkspaceManager, WorkspaceOutputScope
 
 
 _CONTEXT_FOLDERS_METADATA_KEY = "contextFolders"
@@ -380,7 +380,7 @@ def _attachment_source_path(
         return None
 
 
-def _legacy_output_path(session: Any, part: Any) -> Path | None:
+def _legacy_output_scope(session: Any, part: Any) -> WorkspaceOutputScope | None:
     if str(getattr(part, "tool", "") or "") != "write":
         return None
     state = getattr(part, "state", None)
@@ -392,12 +392,8 @@ def _legacy_output_path(session: Any, part: Any) -> Path | None:
     filepath = str(metadata.get("filepath") or "").strip()
     if not filepath:
         return None
-    try:
-        target = Path(filepath).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError):
-        return None
-    root = session_outputs_root(session)
-    return target if _is_within(root, target) else None
+    username = str(getattr(session, "owner_username", "") or "").strip() or None
+    return WorkspaceManager.get_instance().resolve_output_scope(filepath, username=username)
 
 
 def _message_created_at(message: Any) -> int | None:
@@ -509,6 +505,12 @@ def _todo_fallback(parts: Iterable[Any]) -> list[dict[str, Any]] | None:
 
 def _skill_descriptors(parts: Iterable[Any]) -> list[dict[str, Any]]:
     skills: dict[str, dict[str, Any]] = {}
+    statuses = {
+        "pending": "loading",
+        "running": "loading",
+        "completed": "loaded",
+        "error": "error",
+    }
     for part in parts:
         tool_name = str(getattr(part, "tool", "") or "")
         if tool_name not in {"skill_load", "load_skill"}:
@@ -520,11 +522,12 @@ def _skill_descriptors(parts: Iterable[Any]) -> list[dict[str, Any]]:
         name = str(state_input.get("name") or state_input.get("skill") or "").strip()
         if not name:
             continue
-        skills[name] = {
-            "name": name,
-            "description": None,
-            "status": "loaded" if getattr(state, "status", None) == "completed" else "loading",
-        }
+        status = statuses.get(str(getattr(state, "status", "") or ""), "unknown")
+        descriptor = {"name": name, "description": None, "status": status}
+        error = getattr(state, "error", None)
+        if status == "error" and isinstance(error, str) and error.strip():
+            descriptor["error"] = error
+        skills[name] = descriptor
     return sorted(skills.values(), key=lambda item: item["name"].casefold())
 
 
@@ -751,14 +754,13 @@ def _message_resources(session: Any, message: Any) -> Iterable[ResolvedSessionFi
                 )
             # Legacy filepath is never a fallback for a rejected bound source.
             if not getattr(part.state, "attachments", None):
-                path = _legacy_output_path(session, part)
-                if path is not None:
-                    relative = path.relative_to(session_outputs_root(session)).as_posix()
+                scope = _legacy_output_scope(session, part)
+                if scope is not None:
                     yield ResolvedSessionFile(
-                        public_resource_id(message_id, str(part.id)), path, path.name,
-                        mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                        public_resource_id(message_id, str(part.id)), scope.path, scope.path.name,
+                        mimetypes.guess_type(scope.path.name)[0] or "application/octet-stream",
                         "agent_output", message_id,
-                        _output_logical_path(relative, getattr(session, "owner_username", None)), created_at,
+                        _output_logical_path(scope.relative_path, scope.username), created_at,
                     )
 
 
