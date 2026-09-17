@@ -8,6 +8,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 from .contracts import ParsedReportPrompt, parse_report_prompt_parts
+from .language import report_message, resolve_report_language
 
 
 class ReportPolicyDecision(BaseModel):
@@ -60,12 +61,8 @@ def _text(parts: list[dict[str, Any]]) -> str:
     return "\n".join(str(part.get("text") or "") for part in parts if part.get("type") == "text").strip()
 
 
-def _ui_action(reason: str, session_id: str) -> ReportPolicyDecision:
-    message = (
-        "新报告需要通过页面的 AI 生成报告入口创建。"
-        if reason == "new_report"
-        else "素材、模板或语言需要在报告配置页修改。"
-    )
+def _ui_action(reason: str, session_id: str, language: str) -> ReportPolicyDecision:
+    message = report_message("new_report" if reason == "new_report" else "configuration", language)
     return ReportPolicyDecision(
         kind="direct",
         text=message,
@@ -73,17 +70,17 @@ def _ui_action(reason: str, session_id: str) -> ReportPolicyDecision:
             "uiAction": {
                 "type": "open_report_config",
                 "reason": reason,
-                "buttonText": "前往配置",
+                "buttonText": report_message("config_button", language),
                 "sessionID": session_id,
             }
         },
     )
 
 
-def _reject() -> ReportPolicyDecision:
+def _reject(language: str) -> ReportPolicyDecision:
     return ReportPolicyDecision(
         kind="direct",
-        text="当前助手仅支持报告生成和报告内容修改。",
+        text=report_message("out_of_scope", language),
         metadata={"policy": {"category": "out_of_scope", "rejected": True}},
     )
 
@@ -91,19 +88,21 @@ def _reject() -> ReportPolicyDecision:
 def decide_report_prompt(parts: list[dict[str, Any]], *, session_id: str) -> ReportPolicyDecision:
     """Apply explicit redirects/rejection before parsing an executable action."""
 
+    language = resolve_report_language(session_id)
     try:
         prompt = parse_report_prompt_parts(parts)
     except (ValueError, TypeError):
-        return _reject()
+        return _reject(language)
 
+    language = resolve_report_language(session_id, prompt.action.language)
     text = prompt.text
     if _NEW_REPORT.search(text):
-        return _ui_action("new_report", session_id)
+        return _ui_action("new_report", session_id, language)
     for reason, pattern in _CONFIG_PATTERNS:
         if pattern.search(text):
-            return _ui_action(reason, session_id)
+            return _ui_action(reason, session_id, language)
     if _GENERAL_CONFIG.search(text):
-        return _ui_action("configuration_change", session_id)
+        return _ui_action("configuration_change", session_id, language)
 
     # The trusted business backend selects the operation from the product
     # entry point: first-generation button -> generate, dedicated regenerate
@@ -111,5 +110,5 @@ def decide_report_prompt(parts: list[dict[str, Any]], *, session_id: str) -> Rep
     # may describe a broad rewrite, but it must not override or invalidate the
     # explicit action selected by that entry point.
     if prompt.action.operation == "modify" and not _MODIFY_SIGNAL.search(text):
-        return _reject()
+        return _reject(language)
     return ReportPolicyDecision(kind="execute", prompt=prompt)

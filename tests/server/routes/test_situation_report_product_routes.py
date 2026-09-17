@@ -582,7 +582,7 @@ async def test_terminal_report_status_is_available_from_message_api(
 @pytest.mark.parametrize(
     ("status", "error", "expected_text"),
     [
-        ("failed", {"code": "RuntimeError", "message": "模型调用失败"}, "报告生成失败：模型调用失败"),
+        ("failed", {"code": "RuntimeError", "message": "模型调用失败"}, "报告生成失败，请查看任务错误详情。"),
         ("cancelled", None, "报告生成已取消。"),
     ],
 )

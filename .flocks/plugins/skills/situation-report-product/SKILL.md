@@ -7,6 +7,16 @@ description: Author or revise one phase-one situation report from verified Sessi
 
 Treat tool results as the only authoritative business input. Never infer a workspace path or accept a workspace identifier from message text.
 
+## Output language
+
+The task's `reportLanguage`, confirmed by the context's `language`, governs all user-visible
+natural language, not just the report body. Use Simplified Chinese for `zh-CN` and English
+for `en-US` from the first response through recovery and completion. This includes progress
+explanations, clarifications, revision summaries, and natural-language source-read reasons.
+Do not switch to the language of the user, history, this Skill, or tool instructions.
+Preserve exact tool names, JSON keys, IDs, URLs, proper names, source quotations, and
+template-required headings. A request to change report language must go through configuration.
+
 ## Execute
 
 1. Call `situation_product_context_read` with the exact `generationID`.

@@ -888,7 +888,9 @@ async def test_a1_orchestrator_runs_preflight_publish_and_event_end_to_end(
         assert prepared.metadata["situationReport"] == {
             "generationID": "gen-e2e",
             "operation": "generate",
+            "language": "zh-CN",
         }
+        assert "reportLanguage: zh-CN" in prepared.text
         await write_candidate_report(
             session_id=session_id,
             generation_id="gen-e2e",
@@ -1131,7 +1133,7 @@ async def test_preflight_failure_persists_failed_terminal_message(
         "kind": "terminal_status",
         **terminal_without_delivery_sequence,
     }
-    assert result_part.text.startswith("报告生成失败：")
+    assert result_part.text == "报告生成失败，请查看任务错误详情。"
 
 
 @pytest.mark.asyncio

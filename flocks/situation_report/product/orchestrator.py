@@ -19,6 +19,7 @@ from flocks.utils.log import Log
 from .backend_sync import BackendReportSynchronizer, initialize_report_action
 from .events import publish_report_status
 from .files import async_file_lock, atomic_write_json, read_json, session_root, utc_now
+from .language import output_language_instruction, report_message, resolve_report_language
 from .output import publish_validated_candidate
 from .policy import ReportPolicyDecision
 from .workspace import file_sha256
@@ -108,17 +109,20 @@ def _build_agent_recovery_event(
                 f"Do not answer with a plan or promise. Issues: {issues}"
             )
 
+    language = (event.metadata.get("situationReport") or {}).get("language", "zh-CN")
     recovery_text = (
         "[SITUATION_REPORT_PRODUCT_RECOVERY_V1]\n"
         f"generationID: {generation_id}\n"
         f"recoveryTurn: {recovery_turn}\n"
+        f"reportLanguage: {language}\n"
+        f"{output_language_instruction(language)}\n"
         f"{instruction}"
     )
     return event.model_copy(
         update={
             "text": recovery_text,
             "parts": [{"type": "text", "text": recovery_text}],
-            "display_text": "正在根据校验结果继续完善报告。",
+            "display_text": report_message("recovery", language),
             "synthetic": True,
             "message_id": None,
         }
@@ -334,6 +338,7 @@ async def persist_terminal_status_message(
     parent_message_id: str,
     payload: dict,
     expected_generation: int,
+    language: str | None = None,
 ) -> dict:
     """Persist one runtime-authored terminal result and link it from the status event."""
 
@@ -351,15 +356,10 @@ async def persist_terminal_status_message(
         "messageID": message_id,
         "messagePartID": part_id,
     }
-    if status == "succeeded":
-        version = str(payload.get("flocksReportVersion") or "")
-        text = f"报告已生成并发布（版本：{version}）。"
-    elif status == "cancelled":
-        text = "报告生成已取消。"
-    else:
-        error = payload.get("error")
-        detail = error.get("message") if isinstance(error, dict) else None
-        text = f"报告生成失败：{detail or '未知错误'}"
+    language = resolve_report_language(session.id, language)
+    # Raw provider/backend errors remain in metadata; they are not necessarily
+    # written in the configured report language.
+    text = report_message(status, language, version=str(payload.get("flocksReportVersion") or ""))
 
     part_metadata = {
         "situationReport": {
@@ -390,15 +390,19 @@ async def prepare_agent_event(
     if decision.kind != "execute" or decision.prompt is None:
         raise ValueError("An executable report policy decision is required")
     action = decision.prompt.action
-    await initialize_report_action(
+    context_path = await initialize_report_action(
         session_id=session.id,
         prompt=decision.prompt,
         synchronizer=backend_synchronizer,
     )
+    language = read_json(context_path)["language"]
+    language_instruction = output_language_instruction(language)
     task_text = (
         "[SITUATION_REPORT_PRODUCT_TASK_V1]\n"
         f"generationID: {action.generation_id}\n"
         f"operation: {action.operation}\n"
+        f"reportLanguage: {language}\n"
+        f"{language_instruction}\n"
         "Load the situation-report-product Skill and complete this one restricted A1 task.\n"
         f"User instruction: {decision.prompt.text}"
     )
@@ -417,6 +421,7 @@ async def prepare_agent_event(
                 "situationReport": {
                     "generationID": action.generation_id,
                     "operation": action.operation,
+                    "language": language,
                 },
             },
         }
@@ -451,6 +456,7 @@ async def run_managed_report_turn(
     action = decision.prompt.action
     parent_message_id = event.message_id or action.request_id
     correlated_event = event.model_copy(update={"message_id": parent_message_id})
+    report_language = resolve_report_language(session.id, action.language)
 
     async def publish_status(payload: dict) -> None:
         await publish_report_status(
@@ -467,6 +473,7 @@ async def run_managed_report_turn(
                 parent_message_id=parent_message_id,
                 payload=payload,
                 expected_generation=expected_generation,
+                language=report_language,
             )
         except Exception as exc:
             log.error(
@@ -504,6 +511,7 @@ async def run_managed_report_turn(
                 decision=decision,
                 backend_synchronizer=backend_synchronizer,
             )
+            report_language = prepared.metadata["situationReport"]["language"]
             current_stage = "modifying" if action.operation == "modify" else "generating"
             await publish_status(
                 {

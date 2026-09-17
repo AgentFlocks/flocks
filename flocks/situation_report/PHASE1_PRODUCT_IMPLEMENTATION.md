@@ -44,6 +44,16 @@
 12. 后端调用原始 `/api/file/download?path=...`。没有 `sessionID` 下载参数、报告分支、专用 ETag 或版本响应头。
 13. 模板/素材在配置页只保存时不触发 Flocks；下一次可执行对话自动同步。
 
+### 输出语言
+
+首次 `generate` 的 `action.language` 建立 Session 报告语言；`modify/regenerate` 沿用
+Session 已保存的语言。Flocks 在首轮模型调用前注入语言约束，恢复轮次继续保留。
+报告正文、Agent 进度说明/修改摘要/完成回复以及运行时终态消息、配置引导文案均使用
+报告语言（`zh-CN` 简体中文、`en-US` 英文），不跟随本次用户输入或历史消息的语言切换。
+工具名、状态码、JSON 字段、标识符、专有名称和模板指定章节名保留原值。
+终态失败 Text 使用本地化提示，原始诊断保持在 `metadata.situationReport.error`
+及 `situation.report.status.error` 中，工程方仍通过该字段取得完整错误。
+
 ## 目录
 
 ```text
