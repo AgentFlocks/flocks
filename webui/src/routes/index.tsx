@@ -45,6 +45,10 @@ const TaskPage = lazyPage(() => import('@/pages/Task'), ['task']);
 const ToolPage = lazyPage(() => import('@/pages/Tool'), ['tool']);
 const HubPage = lazyPage(() => import('@/pages/Hub'));
 const SkillPage = lazyPage(() => import('@/pages/Skill'), ['skill']);
+// Guard the import itself so mock fixtures never enter the production bundle.
+const PluginLibraryPrototypePage = import.meta.env.DEV
+  ? lazyPage(() => import('@/pages/PluginLibraryPrototype'), ['pluginLibrary'])
+  : null;
 const ModelPage = lazyPage(() => import('@/pages/Model'), ['model']);
 const ChannelPage = lazyPage(() => import('@/pages/Channel'), ['channel']);
 const PermissionPage = lazyPage(() => import('@/pages/Permission'), ['permission']);
@@ -65,6 +69,28 @@ function LazyRoute({ children }: { children: ReactNode }) {
       </Suspense>
     </LazyLoadErrorBoundary>
   );
+}
+
+function PluginGroupPreviewRoute({ pluginType, children }: {
+  pluginType: 'workflow' | 'agent' | 'skill' | 'tool' | 'device';
+  children: ReactNode;
+}) {
+  const { search } = useLocation();
+  let content = children;
+
+  if (
+    import.meta.env.DEV
+    && PluginLibraryPrototypePage
+    && new URLSearchParams(search).get('preview') === 'groups'
+  ) {
+    const preview = <PluginLibraryPrototypePage pluginType={pluginType} />;
+    // The real device route owns its scrolling; the mock list needs a container.
+    content = pluginType === 'device'
+      ? <div className="h-full overflow-y-auto p-6">{preview}</div>
+      : preview;
+  }
+
+  return <LazyRoute>{content}</LazyRoute>;
 }
 
 function AdminOnlyRoute({ children }: { children: React.ReactNode }) {
@@ -166,8 +192,8 @@ export function Routes() {
 
         {/* AI 工作台 */}
         <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />
-        <Route path="agents" element={<LazyRoute><AgentPage /></LazyRoute>} />
-        <Route path="workflows" element={<LazyRoute><WorkflowListPage /></LazyRoute>} />
+        <Route path="agents" element={<PluginGroupPreviewRoute pluginType="agent"><AgentPage /></PluginGroupPreviewRoute>} />
+        <Route path="workflows" element={<PluginGroupPreviewRoute pluginType="workflow"><WorkflowListPage /></PluginGroupPreviewRoute>} />
         <Route path="workflows/new" element={<LazyRoute><WorkflowCreate /></LazyRoute>} />
         <Route path="workflows/:id" element={<LazyRoute><WorkflowDetail /></LazyRoute>} />
         <Route path="workflows/:id/edit" element={<LazyRoute><WorkflowEditor /></LazyRoute>} />
@@ -175,13 +201,13 @@ export function Routes() {
         <Route path="workspace" element={<LazyRoute><WorkspacePage /></LazyRoute>} />
 
         {/* 设备接入 */}
-        <Route path="devices" element={<LazyRoute><DeviceIntegrationPage /></LazyRoute>} />
+        <Route path="devices" element={<PluginGroupPreviewRoute pluginType="device"><DeviceIntegrationPage /></PluginGroupPreviewRoute>} />
 
         {/* Agent Smith */}
-        <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />
+        <Route path="tools" element={<PluginGroupPreviewRoute pluginType="tool"><ToolPage /></PluginGroupPreviewRoute>} />
         <Route path="hub" element={<LazyRoute><HubPage /></LazyRoute>} />
         <Route path="models" element={<LazyRoute><ModelPage /></LazyRoute>} />
-        <Route path="skills" element={<LazyRoute><SkillPage /></LazyRoute>} />
+        <Route path="skills" element={<PluginGroupPreviewRoute pluginType="skill"><SkillPage /></PluginGroupPreviewRoute>} />
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
 
