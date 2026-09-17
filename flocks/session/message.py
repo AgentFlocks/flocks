@@ -1460,10 +1460,13 @@ class Message:
                 parts=parts,
             )
 
+        # The caches were reconciled above under the session lock; the
+        # storage-level eviction would only throw that work away.
         await Storage.mutate_many(
             set_entries=set_entries,
             delete_keys=delete_keys,
             transaction_hook=_sync_search_index,
+            invalidate_caches=False,
         )
 
         if include_parts:
@@ -2143,6 +2146,7 @@ class Message:
                 delete_keys=[cls._parts_blob_key(session_id)],
                 delete_prefixes=[cls._parts_item_prefix(session_id)],
                 transaction_hook=_delete_search_index,
+                invalidate_caches=False,
             )
 
             log.info("messages.cleared", {
@@ -2169,15 +2173,23 @@ class Message:
         )
     
     @classmethod
-    def invalidate_cache(cls, session_id: Optional[str] = None) -> None:
+    def invalidate_cache(
+        cls,
+        session_id: Optional[str] = None,
+        *,
+        discard_lock: bool = True,
+    ) -> None:
         """
         Invalidate cache for a session or all sessions
         
         Args:
             session_id: Optional session ID, if None invalidates all
+            discard_lock: Also forget the session's lock (per-session only).
+                Pass ``False`` when a caller may still be holding it, so a
+                concurrent writer cannot obtain a second lock for the session.
         """
         if session_id:
-            cls._drop_cached_session(session_id)
+            cls._drop_cached_session(session_id, discard_lock=discard_lock)
         else:
             for sid in list(cls._parts_flush_tasks):
                 cls._cancel_parts_flush_task(sid)
