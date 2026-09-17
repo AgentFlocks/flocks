@@ -10,7 +10,7 @@ tags:
   - code-security
   - static-analysis
 temperature: 0.1
-steps: 64
+steps: 200
 skills: []
 prompt_profile: isolated
 session_directory: ~/.flocks/workspace/code-security/runtime

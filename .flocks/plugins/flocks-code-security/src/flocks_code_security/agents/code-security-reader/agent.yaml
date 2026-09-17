@@ -3,6 +3,7 @@ description: Conversations and supporting analysis about one code-security audit
 mode: primary
 hidden: true
 delegatable: false
+steps: 200
 prompt_profile: isolated
 session_directory: ~/.flocks/workspace/code-security/runtime
 memory_enabled: false
