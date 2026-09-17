@@ -43,7 +43,7 @@ def task(status, *, language="zh-CN"):
 
 @pytest.mark.parametrize(
     "text",
-    ["继续", "继续生成", "继续生成报告", "请继续。", "重试", "接着写", "continue", "please resume the task", "retry"],
+    ["继续", "继续吧", "好的，继续", "继续生成", "继续生成报告", "请继续。", "重试", "接着写", "continue", "please resume the task", "retry"],
 )
 def test_short_continuations_are_not_unrelated_or_silently_restarted(text):
     task("cancelled")
@@ -85,7 +85,7 @@ def test_latest_run_is_selected_and_malformed_state_does_not_crash_policy():
     assert decide_report_prompt(parts("继续"), session_id=SID).metadata["policy"]["previousGenerationID"] == "gen_later"
 
 
-@pytest.mark.parametrize("text", ["简短一点", "更详细一点", "换个说法", "make it shorter"])
+@pytest.mark.parametrize("text", ["简短一点", "短一点", "更详细一点", "换个说法", "make it shorter"])
 def test_specific_short_revisions_keep_modify_and_preserve_original_instruction(text):
     state = ensure_session_state(SID)
     state.report_state = {"language": "zh-CN", "currentFlocksReportVersion": "frv_001"}

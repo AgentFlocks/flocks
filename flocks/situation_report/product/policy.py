@@ -61,13 +61,13 @@ _MODIFY_SIGNAL = re.compile(
 # Standalone follow-ups refer to the preceding task; they are not unrelated Q&A.
 # Do not turn an arbitrary sentence beginning with "continue" into a report task.
 _CONTINUATION = re.compile(
-    r"^(?:(?:请|麻烦|帮我)?\s*(?:继续(?:生成|撰写|写|执行|完成|修改)?(?:报告|任务)?|"
+    r"^(?:好的[，,\s]*)?(?:(?:请|麻烦|帮我)?\s*(?:继续(?:生成|撰写|写|执行|完成|修改)?(?:报告|任务)?|"
     r"接着(?:写|生成|完成)(?:报告)?|重试(?:一下|上次任务|报告)?)|"
-    r"(?:please\s+)?(?:continue|resume|retry)(?:\s+(?:the\s+)?(?:report|task|generation))?)\s*[。.!！?？]*$",
+    r"(?:please\s+)?(?:continue|resume|retry)(?:\s+(?:the\s+)?(?:report|task|generation))?)(?:吧|一下)?\s*[。.!！?？]*$",
     re.I,
 )
 _SHORT_REVISION = re.compile(
-    r"^(?:(?:请|再|更)?(?:简短|简洁|详细|具体|正式|精简)(?:一点|一些)?|换个说法|"
+    r"^(?:(?:请|再|更)?(?:简短|简洁|详细|具体|正式|精简|短|长)(?:一点|一些)?|换个说法|"
     r"(?:make\s+it\s+)?(?:shorter|longer|more concise|more detailed))\s*[。.!！?？]*$", re.I,
 )
 
