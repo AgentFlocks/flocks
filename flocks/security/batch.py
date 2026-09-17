@@ -234,6 +234,8 @@ def task_result(task_dir: Path) -> dict | None:
 
 
 def batch_status(root: Path) -> dict:
+    from flocks.security.batch_diagnostics import read_runtime
+
     config = read_json(root / "batch.json")
     state = read_json(root / "state.json")
     items = []
@@ -248,6 +250,9 @@ def batch_status(root: Path) -> dict:
         elif item["status"] == "running" and not task_running(task_dir):
             item["status"] = "interrupted"
         current = read_json(task_dir / "current.json") if (task_dir / "current.json").exists() else {}
+        runtime = item.get("runtime") or read_runtime(task_dir, current.get("attempt"))
+        if runtime:
+            item["runtime"] = runtime
         item.update(
             task_id=task_id,
             scan_id=item.get("scan_id") or current.get("scan_id"),
@@ -310,7 +315,7 @@ def delete_batch_task(task_dir: Path) -> None:
                 _remove_owned_tree(Path(scan["output_dir"]), root=outputs_root(), expected_name=scan["scan_id"])
         remove_owned_tree(task_dir, "data")
         atomic_json(marker, {"status": "deleted"})
-        for name in ("current.json", "result.json", "source-exclusions.json", "stdout.log", "stderr.log", "cleanup.log", "cancel.json"):
+        for name in ("current.json", "result.json", "runtime.json", "source-exclusions.json", "stdout.log", "stderr.log", "cleanup.log", "cancel.json"):
             (task_dir / name).unlink(missing_ok=True)
 
 
@@ -365,8 +370,13 @@ def _cleanup_child_work(task_dir: Path, result: dict) -> None:
     """Caller owns task.lock or the just-reaped worker; never clean a live task."""
     from flocks.security.batch_worker import cleanup_work
     from flocks.security.batch_cleanup import remove_owned_tree, reconcile
+    from flocks.security.batch_diagnostics import termination_snapshot, write_runtime
 
     current = read_json(task_dir / "current.json")
+    if result.get("status") != "completed" and "runtime" not in result:
+        result["runtime"] = termination_snapshot(task_dir, current["attempt"], result.get("status", "interrupted"))
+    if result.get("runtime"):
+        write_runtime(task_dir, result["runtime"])
     scan_id = current.get("scan_id") or current.get("previous", {}).get("scan_id")
     if scan_id:
         current["scan_id"] = scan_id
@@ -481,6 +491,9 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
             state["tasks"][task_id] = item
             atomic_json(root / "state.json", state)
             progress(f"{task_id}: {item['status']}")
+            if item.get("runtime") and item["status"] != "running":
+                progress(json.dumps({"event": "audit.termination_snapshot", "task_id": task_id,
+                                     "runtime": item["runtime"]}, ensure_ascii=False))
 
         async def run_one(task_id: str) -> None:
             task_dir = resolve_task(root, task_id, config=config)
@@ -560,6 +573,7 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
             environment = task_environment(task_dir)
             process = None
             termination_reason = None
+            runtime_at_termination = None
             try:
                 with (task_dir / "stdout.log").open("ab") as out, (task_dir / "stderr.log").open("ab") as err:
                     process = await asyncio.create_subprocess_exec(
@@ -577,7 +591,10 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                         }
                         expired = time.monotonic() - started >= config["task_timeout"]
                         if cancelled or expired:
+                            from flocks.security.batch_diagnostics import termination_snapshot
+
                             termination_reason = "cancelled" if cancelled else "timed_out"
+                            runtime_at_termination = termination_snapshot(task_dir, attempt, termination_reason)
                             request_cancel(task_dir)
                             try:
                                 await asyncio.wait_for(process.wait(), 20)
@@ -603,6 +620,8 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                     }
                 if termination_reason:
                     result["termination_reason"] = termination_reason
+                    result.setdefault("runtime", runtime_at_termination)
+                    result["runtime"]["termination_reason"] = termination_reason
                     if result["status"] != "completed" and result.get("audit_status") != "failed":
                         result["status"] = termination_reason
                 await cleanup_child_work(task_dir, result)

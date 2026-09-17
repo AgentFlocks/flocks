@@ -861,6 +861,100 @@ while not (folder / 'cancel.json').exists():
     assert batch.task_result(batch.resolve_task(root, '0'))['error'] == 'CancelledError'
 
 
+@pytest.mark.asyncio
+async def test_timeout_preserves_snapshot_before_worker_cleanup(tmp_path, monkeypatch):
+    root = make_batch(tmp_path, monkeypatch)
+    config = batch.read_json(root / 'batch.json')
+    config['task_timeout'] = 1
+    batch.atomic_json(root / 'batch.json', config)
+    script = '''
+import sys, time
+from pathlib import Path
+from flocks.security.batch import atomic_json
+folder, attempt = Path(sys.argv[1]), sys.argv[2]
+atomic_json(folder / 'runtime.json', {'attempt': attempt, 'phase': 'verification',
+    'observed_at': time.time(), 'workers': [{'execution': {'step': 71, 'state': 'executing_tool', 'active_tools': {'bash': 1}}}]})
+while not (folder / 'cancel.json').exists():
+    time.sleep(.02)
+# Emulate an uninstrumented cleanup overwriting transient runtime state.
+atomic_json(folder / 'runtime.json', {'attempt': attempt, 'phase': 'cleanup'})
+atomic_json(folder / 'result.json', {'attempt': attempt, 'status': 'cancelled'})
+'''
+    monkeypatch.setattr(batch, '_worker_command', lambda root, task, attempt: [sys.executable, '-c', script, str(batch.resolve_task(root, task)), attempt])
+    messages = []
+    result = await batch.run_batch(root, progress=messages.append)
+    runtime = result['tasks'][0]['runtime']
+    assert runtime['phase'] == 'verification'
+    assert runtime['termination_reason'] == 'timed_out'
+    assert runtime['workers'][0]['execution']['step'] == 71
+    task = batch.resolve_task(root, '0')
+    assert batch.read_json(task / 'runtime.json') == runtime
+    assert batch.task_result(task)['runtime'] == runtime
+    assert not (task / 'stdout.log').exists()
+    assert json.loads(messages[-1])['runtime'] == runtime
+
+
+@pytest.mark.asyncio
+async def test_worker_freezes_diagnostics_before_cancelling_audit(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import time
+    from flocks.cli.commands import security
+    from flocks.security import batch_worker
+
+    root = make_batch(tmp_path, monkeypatch)
+    config = batch.read_json(root / 'batch.json')
+    config['task_timeout'] = 0.3
+    batch.atomic_json(root / 'batch.json', config)
+    task_dir = batch.resolve_task(root, '0')
+    batch.atomic_json(task_dir / 'current.json', {'attempt': 'attempt', 'started_at': time.time()})
+    store = SimpleNamespace(get_scan=lambda _: {}, list_worker_batches=lambda _: [])
+    monkeypatch.setitem(sys.modules, 'flocks_code_security.runtime', SimpleNamespace(get_runtime=lambda: SimpleNamespace(store=store)))
+    monkeypatch.setattr(batch_worker, 'extract_source', lambda *a, **kw: [])
+    monkeypatch.setattr(batch_worker, 'scan_summary', lambda *a: {'status': 'failed', 'audit_status': 'cancelled'})
+
+    async def audit(source, *, progress, **kwargs):
+        progress('scan.prepared', {'scan_id': 'scan'})
+        progress('adjudication.started', {'current_phase': 'adjudication'})
+        try:
+            await asyncio.Future()
+        finally:
+            frozen = batch.read_json(task_dir / 'runtime.json')
+            assert frozen['termination_reason'] == 'timed_out'
+            assert frozen['phase'] == 'adjudication'
+            progress('scan.cancelled', {})
+
+    monkeypatch.setattr(security, '_load_plugin_cli', lambda: (audit, None))
+    result = await batch_worker.execute(root, '0', 'attempt')
+    assert result['status'] == 'timed_out'
+    assert result['runtime']['phase'] == 'adjudication'
+    assert batch.read_json(task_dir / 'runtime.json') == result['runtime']
+    batch_worker.cleanup_work(batch.read_json(task_dir / 'current.json')['work_dir'], task_dir)
+
+
+def test_runtime_write_failure_does_not_block_result_or_cleanup(tmp_path, monkeypatch):
+    root = make_batch(tmp_path, monkeypatch)
+    task_dir = batch.resolve_task(root, '0')
+    batch.atomic_json(task_dir / 'current.json', {'attempt': 'attempt'})
+    intermediate = task_dir / 'data/flocks'
+    intermediate.mkdir(parents=True)
+    (intermediate / 'temporary').write_text('remove me')
+    original_write = batch.atomic_json
+
+    def fail_runtime(path, value):
+        if path.name == 'runtime.json':
+            raise OSError('diagnostics unavailable')
+        original_write(path, value)
+
+    monkeypatch.setattr(batch, 'atomic_json', fail_runtime)
+    result = {'attempt': 'attempt', 'status': 'timed_out', 'runtime': {'attempt': 'attempt'}}
+    batch._cleanup_child_work(task_dir, result)
+    assert result['status'] == 'timed_out'
+    assert result['cleanup_status'] == 'completed'
+    assert result['runtime']['diagnostics_error'] == 'OSError'
+    assert batch.task_result(task_dir) == result
+    assert not intermediate.exists()
+
+
 @pytest.mark.parametrize('error', [OSError('busy'), KeyboardInterrupt()])
 def test_cleanup_can_resume_after_owner_marker_removal(tmp_path, monkeypatch, error):
     from flocks.security import batch_worker

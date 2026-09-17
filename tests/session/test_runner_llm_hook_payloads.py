@@ -24,6 +24,7 @@ class _ProviderStub:
 
 async def _run_call_llm_with_hooks(
     monkeypatch: pytest.MonkeyPatch,
+    provider_factory=None,
 ) -> tuple[dict, dict]:
     session = await Session.create(project_id="test_project_hook_payloads", directory="/test/hooks")
     user_msg = await Message.create(
@@ -67,7 +68,7 @@ async def _run_call_llm_with_hooks(
     monkeypatch.setattr(Config, "get", AsyncMock(return_value=ConfigInfo()))
 
     result = await runner._call_llm(
-        provider=_ProviderStub(),
+        provider=provider_factory(runner) if provider_factory else _ProviderStub(),
         messages=[
             ChatMessage(role="system", content="system prompt"),
             ChatMessage(role="user", content="user prompt"),
@@ -92,6 +93,44 @@ async def _run_call_llm_with_hooks(
     assert len(captured_before) == 1
     assert len(captured_after) == 1
     return captured_before[0], captured_after[0]
+
+
+@pytest.mark.asyncio
+async def test_execution_activity_tracks_stream_and_parallel_tools_without_content(monkeypatch):
+    import json
+    from flocks.session.streaming.stream_processor import StreamProcessor
+    from flocks.tool.registry import ToolResult
+
+    processors = []
+    original_init = StreamProcessor.__init__
+
+    def initialize(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        processors.append(self)
+
+    monkeypatch.setattr(StreamProcessor, "__init__", initialize)
+
+    class Provider:
+        def __init__(self, runner):
+            self.runner = runner
+
+        async def chat_stream(self, **kwargs):
+            activity = self.runner.execution_activity
+            assert activity["state"] == "waiting_model"
+            assert activity["request_started_at"] is not None
+            yield StreamChunk(delta="hook payload ok")
+            assert activity["state"] == "streaming_model"
+            processor = processors[-1]
+            await processor.tool_start_callback("bash", {"command": "secret"})
+            await processor.tool_start_callback("bash", {"command": "secret"})
+            assert activity["active_tools"] == {"bash": 2}
+            await processor.tool_end_callback("bash", ToolResult(success=True, output="secret"))
+            assert activity["active_tools"] == {"bash": 1}
+            await processor.tool_end_callback("bash", ToolResult(success=True, output="secret"))
+            assert activity["active_tools"] == {}
+            assert "secret" not in json.dumps(activity)
+
+    await _run_call_llm_with_hooks(monkeypatch, provider_factory=Provider)
 
 
 @pytest.mark.asyncio

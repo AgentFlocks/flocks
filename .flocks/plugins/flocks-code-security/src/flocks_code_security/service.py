@@ -86,6 +86,10 @@ PROJECTED_ARTIFACT_KINDS = {
     "coverage",
 }
 EVENT_TITLES = {
+    "cleanup.started": "审计执行数据正在清理",
+    "cleanup.completed": "审计执行数据清理完成",
+    "cleanup.failed": "审计执行数据清理失败",
+    "phase.dispatching": "审计阶段正在调度工作单元",
     "scan.prepared": "不可变源码快照已创建",
     "batch.started": "审计阶段已开始",
     "batch.status": "审计阶段状态已更新",
@@ -272,6 +276,12 @@ class _ProgressRecorder:
                 self._record_terminal_fallback(exc)
         if self.downstream is not None:
             try:
+                scan = self.store.get_scan(self.scan_id)
+                if scan is not None:
+                    payload = {**payload, "current_phase": _public_phase(scan.get("current_phase"))}
+            except Exception:
+                pass
+            try:
                 self.downstream(event, payload)
             except Exception:
                 # Progress rendering is best-effort and cannot abort an audit.
@@ -336,6 +346,12 @@ class _ProgressRecorder:
             phase_run_id = run["phase_run_id"]
             self.phase_runs["dynamic_validation"] = phase_run_id
             event_type = "phase.started"
+        elif event == "cleanup.started":
+            self.store.set_current_phase(self.scan_id, "cleanup")
+        elif event == "phase.dispatching":
+            phase = _public_phase(str(payload.get("phase") or ""))
+            if phase:
+                self.store.set_current_phase(self.scan_id, phase)
         elif event == "batch.started":
             phase = _public_phase(str(payload.get("phase") or ""))
             if phase:
@@ -887,9 +903,9 @@ class AuditService:
             try:
                 if request.cleanup_intermediates:
                     from flocks_code_security.cleanup import cleanup_scan
+                    recorder("cleanup.started", {})
                     summary = await cleanup_scan(self.runtime, scan_id, owned_parent_session=True)
-                    if summary.get("status") == "completed":
-                        recorder._publish_change(self.store.list_scan_events(scan_id, limit=1)["latest_seq"])
+                    recorder("cleanup.completed" if summary.get("status") == "completed" else "cleanup.failed", summary)
             except Exception:
                 logger.warning("Post-audit cleanup failed for %s", scan_id, exc_info=True)
             finally:

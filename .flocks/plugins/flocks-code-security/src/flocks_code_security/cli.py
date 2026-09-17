@@ -224,6 +224,7 @@ async def _run_phase(
     if phase_trace_context:
         ctx.extra["langfuse_trace_context"] = phase_trace_context
     try:
+        _emit(progress, "phase.dispatching", {"phase": phase}, observation_parent=phase_parent)
         batch = _require_success(await audit_run_workers(ctx, scan_id, phase))
         if attempt_ordinal is not None:
             batch["attempt_ordinal"] = attempt_ordinal

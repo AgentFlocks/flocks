@@ -106,7 +106,7 @@ def resume(
 
 @batch_app.command("status")
 def status(run_dir: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True)) -> None:
-    """Print durable task status and task-specific WebUI links."""
+    """Print task status, live or termination runtime snapshots, and WebUI links."""
     try:
         typer.echo(json.dumps(batch_status(run_dir), ensure_ascii=False, indent=2))
     except (OSError, ValueError, RuntimeError) as exc:

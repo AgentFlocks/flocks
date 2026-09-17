@@ -149,6 +149,25 @@ flocks security audit /absolute/path/to/source
 
 The `code-security.scan` trace records snapshot preparation, threat-modeling, baseline, optional investigation, verification, optional dynamic validation and targeted rescan, parent adjudication, batch status changes, scan counters, and the final finding summary. Worker model-step spans are attached beneath their phase in the same trace while retaining isolated Flocks sessions. Each step records its agent role, work-unit ID, assigned paths, and candidate ID. Under each model generation, audit-tool spans show the concrete inspection and decision actions. Repeated worker polling remains available to the CLI progress callback, but Langfuse records a progress span only when batch status or counts change.
 
+For local batch diagnostics, run `flocks security batch status <run-dir>` and
+inspect each task's `runtime`. Workers refresh `tasks/<task-id>/runtime.json`
+approximately every five seconds; orchestration events wake the same monitor
+and are coalesced into its next update. The snapshot includes the service's
+current phase (including cleanup), coordinator and active/pending work units, session
+and attempt IDs, logical `step`, cumulative `trace_step`, model state
+(`waiting_model` / `streaming_model`), active tool names and counts, retry or
+compaction status, and the last observed model/tool activity time. Tool arguments,
+model output, and provider error text are excluded.
+
+Before timeout cancellation, the worker freezes this snapshot into `result.json`.
+If the worker is unresponsive, the scheduler retains the last persisted snapshot
+and its age. Both JSON files survive normal cleanup. `observed_at` is the sampling
+time; `workers_observed_at` is the last successful work-unit lookup. Activity and
+polling do not prove useful audit progress. A missing snapshot is reported as an
+unknown phase; these diagnostics cannot reconstruct runs made before this change.
+Slow lookups keep a single outstanding query. Diagnostic write failures are
+reported separately and do not prevent audit result saving or resource cleanup.
+
 Dynamic scans add spans for Docker preflight, the bounded runner, each candidate, build, control, attack, image removal, and final cleanup. These spans use lifecycle IDs and counts plus status, exit code, duration, timeout, and truncation summaries; they never attach Docker argv, probe scripts, raw stdout/stderr, Docker endpoints, image names, or host paths.
 
 Model messages and audit-tool inputs/outputs can contain proprietary source code. Prefer a trusted self-hosted Langfuse deployment for full-fidelity traces. Set `FLOCKS_LANGFUSE_CAPTURE_MODE=truncated` and `FLOCKS_LANGFUSE_MAX_CHARS=<limit>` when bounded payload capture is required. Langfuse failures are best-effort only and never alter scan state or finalization.

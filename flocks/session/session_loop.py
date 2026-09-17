@@ -118,6 +118,7 @@ class LoopContext:
     turn_additional_context: Optional[str] = None
     stop_hook_active: bool = False
     session_start_pending: bool = False
+    execution_activity: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def trace_step(self) -> int:
@@ -1239,8 +1240,13 @@ class SessionLoop:
                 session_start_pending=ctx.session_start_pending,
             )
             runner._step = ctx.trace_step
+            ctx.execution_activity = runner.execution_activity
 
-            step_result = await runner._process_step(messages, last_user)
+            try:
+                step_result = await runner._process_step(messages, last_user)
+            finally:
+                ctx.execution_activity["state"] = "processing"
+                ctx.execution_activity["active_tools"] = {}
             ctx.max_steps_reached |= bool(getattr(runner, "max_steps_reached", False))
             if runner._session_start_fired:
                 ctx.session_start_pending = False

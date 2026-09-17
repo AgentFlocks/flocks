@@ -355,6 +355,12 @@ class SessionRunner:
         self._session_start_pending = session_start_pending
         self._session_start_fired = False
         self._attempt_state = LlmAttemptState()
+        # Content-free diagnostics; timestamps are Unix seconds, not proof of
+        # useful progress. Parallel calls of the same tool retain their count.
+        self.execution_activity = {
+            "state": "processing", "last_activity_at": time.time(),
+            "request_started_at": None, "active_tools": {},
+        }
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -1566,6 +1572,7 @@ class SessionRunner:
         
         # Check if we've reached max steps (matching Flocks logic)
         max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
+        self.execution_activity["max_steps"] = max_steps
         is_last_step = self._step >= max_steps
         self.max_steps_reached = is_last_step
         
@@ -3533,8 +3540,21 @@ class SessionRunner:
             # Mark before hooks/callbacks/execution (including parallel tools)
             # so a concurrent provider error can never replay side effects.
             self._attempt_state.tool_execution_started = True
+            active = self.execution_activity["active_tools"]
+            active[tool_name] = active.get(tool_name, 0) + 1
+            self.execution_activity["last_activity_at"] = time.time()
             if self.callbacks.on_tool_start:
                 await self.callbacks.on_tool_start(tool_name, tool_input)
+
+        async def _on_tool_execution_end(tool_name: str, result: ToolResult) -> None:
+            active = self.execution_activity["active_tools"]
+            if active.get(tool_name, 0) <= 1:
+                active.pop(tool_name, None)
+            else:
+                active[tool_name] -= 1
+            self.execution_activity["last_activity_at"] = time.time()
+            if self.callbacks.on_tool_end:
+                await self.callbacks.on_tool_end(tool_name, result)
 
         turn_plan_file = getattr(self, "_turn_plan_file", None)
         if turn_plan_file is None:
@@ -3549,7 +3569,7 @@ class SessionRunner:
             text_delta_callback=self.callbacks.on_text_delta,
             reasoning_delta_callback=self.callbacks.on_reasoning_delta,
             tool_start_callback=_on_tool_execution_start,
-            tool_end_callback=self.callbacks.on_tool_end,
+            tool_end_callback=_on_tool_execution_end,
             event_publish_callback=self.callbacks.event_publish_callback,
             session_key=self.session.id,
             main_session_key=main_session_key,
@@ -3813,6 +3833,9 @@ class SessionRunner:
                 trace_ctx = None
                 generation_ctx = None
         llm_call_started_at = time.perf_counter()
+        self.execution_activity.update(
+            state="waiting_model", request_started_at=time.time(), last_activity_at=time.time(),
+        )
         first_chunk_logged = False
         aborted_during_stream = False
         stream_timeouts = resolve_llm_stream_timeouts(provider, self.model_id)
@@ -3840,6 +3863,7 @@ class SessionRunner:
                 ongoing_chunk_timeout_s=stream_timeouts.ongoing_chunk_s,
             ):
                 chunk_counts["total"] += 1
+                self.execution_activity.update(state="streaming_model", last_activity_at=time.time())
                 self._attempt_state.received_chunk = True
                 if not first_chunk_logged:
                     first_chunk_logged = True
@@ -4024,6 +4048,7 @@ class SessionRunner:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
             raise
         
+        self.execution_activity.update(state="processing", last_activity_at=time.time())
         log.debug("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
             "reasoning_chunks": chunk_counts["reasoning"],

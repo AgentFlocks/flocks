@@ -508,6 +508,9 @@ def test_progress_recorder_creates_one_phase_run_per_worker_batch(
     )
     recorder = _ProgressRecorder(scan_id, dynamic_enabled=False)
 
+    recorder("phase.dispatching", {"phase": "threat_modeling"})
+    assert store.get_scan(scan_id)["current_phase"] == "threat_modeling"
+    assert store.list_phase_runs(scan_id) == []
     recorder(
         "batch.started",
         {"batch_id": "batch-1", "phase": "threat_modeling", "attempt_ordinal": 1},
@@ -654,6 +657,23 @@ def test_finalization_starts_after_poc_generation_and_dynamic_validation(tmp_pat
     ]
     assert phases[-1]["duration_ms"] == 4_000
     assert phases[-1]["status"] == "completed"
+
+
+def test_downstream_receives_authoritative_phase_for_dynamic_and_cleanup(tmp_path, monkeypatch):
+    from flocks.security.batch_diagnostics import RuntimeDiagnostics
+
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="parent", snapshot_id="snapshot_test", mode="standard", ruleset_digest="rules",
+    )
+    monkeypatch.setattr(service_module, "get_runtime", lambda: SimpleNamespace(store=store))
+    diagnostics = RuntimeDiagnostics(tmp_path / "task", "attempt", store)
+    recorder = _ProgressRecorder(scan_id, dynamic_enabled=True, downstream=diagnostics.progress)
+    recorder("dynamic.started", {})
+    recorder("phase.dispatching", {"phase": "probing"})
+    assert diagnostics.phase == store.get_scan(scan_id)["current_phase"] == "dynamic_validation"
+    recorder("cleanup.started", {})
+    assert diagnostics.freeze("timed_out")["phase"] == "cleanup"
 
 
 def test_recent_event_page_is_bounded_and_chronological(tmp_path: Path) -> None:

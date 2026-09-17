@@ -196,7 +196,11 @@ async def test_service_failure_runs_optional_cleanup(tmp_path, monkeypatch, enab
     orchestrator = SimpleNamespace(run=AsyncMock(side_effect=RuntimeError("audit failed")))
     monkeypatch.setattr(service_module, "AuditOrchestrator", lambda *a, **kw: orchestrator)
     service = AuditService()
-    recorder = SimpleNamespace(_publish_change=lambda *a: None)
+    events = []
+    recorder = service_module._ProgressRecorder(
+        scan_id, dynamic_enabled=False, downstream=lambda event, payload: events.append((event, payload)),
+    )
+    monkeypatch.setattr(recorder, "_publish_change", lambda *a: None)
     with pytest.raises(RuntimeError, match="audit failed"):
         await service._run_background(
             StartScanRequest(target_path=tmp_path, cleanup_intermediates=enabled), None, {"scan_id": scan_id}, recorder
@@ -206,6 +210,10 @@ async def test_service_failure_runs_optional_cleanup(tmp_path, monkeypatch, enab
     assert bool(runtime.store.list_phase_runs(scan_id)) is (not enabled)
     if enabled:
         cleanup_module._delete_session.assert_awaited_once_with("parent", {"parent"})
+        assert [event for event, _ in events] == ["cleanup.started", "cleanup.completed"]
+        assert all(payload["current_phase"] == "cleanup" for _, payload in events)
+    else:
+        assert events == []
 
 
 @pytest.mark.asyncio

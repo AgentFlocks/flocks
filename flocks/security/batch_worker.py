@@ -230,6 +230,7 @@ async def stop_audit_task(task: asyncio.Task, task_dir: Path, result: dict) -> N
 
 async def execute(root: Path, task_id: str, attempt: str) -> dict:
     from flocks.cli.commands.security import _load_plugin_cli, _read_knowledge_base
+    from flocks.security.batch_diagnostics import RuntimeDiagnostics
 
     config = read_json(root / "batch.json")
     task_dir = resolve_task(root, task_id)
@@ -244,6 +245,9 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
     runtime = get_runtime()
     result: dict = {"status": "failed", "attempt": attempt, "cleanup_status": "pending"}
     scan_id = None
+    diagnostics = RuntimeDiagnostics(task_dir, attempt, runtime.store)
+    diagnostics.persist()
+    monitor = None
     try:
         task = config["tasks"][task_id]
         archive = Path(task["archive"])
@@ -267,6 +271,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
         atomic_json(task_dir / "source-exclusions.json", {"exclusions": exclusions})
         description = work / "description.txt"
         description.write_text(task["description_content"], encoding="utf-8")
+        diagnostics.progress("snapshot.started", {"current_phase": "snapshot"})
 
         def progress(event: str, payload: dict) -> None:
             nonlocal scan_id
@@ -274,6 +279,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 scan_id = payload["scan_id"]
                 current["scan_id"] = scan_id
                 atomic_json(task_dir / "current.json", current)
+            diagnostics.progress(event, payload)
             print(json.dumps({"event": event, **payload}, ensure_ascii=False, default=str), flush=True)
 
         async def audit():
@@ -293,6 +299,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 max_files=config.get("max_snapshot_files", 50_000),
             )
 
+        monitor = asyncio.create_task(diagnostics.run())
         audit_task = asyncio.create_task(audit())
 
         watcher = asyncio.create_task(wait_for_cancel(
@@ -306,6 +313,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 atomic_json(task_dir / "result.json", result)
             else:
                 result["status"] = watcher.result()
+                result["runtime"] = diagnostics.freeze(result["status"])
                 atomic_json(task_dir / "result.json", result)
         finally:
             watcher.cancel()
@@ -313,6 +321,8 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
             if not audit_task.done():
                 if result["status"] == "failed" and not result.get("error"):
                     result.update(status="cancelled", error="Audit cancelled")
+                if "runtime" not in result:
+                    result["runtime"] = diagnostics.freeze(result["status"])
                 stopping = asyncio.create_task(stop_audit_task(audit_task, task_dir, result))
                 try:
                     await asyncio.shield(stopping)
@@ -324,6 +334,10 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
     except Exception as exc:
         result.update(error=f"{type(exc).__name__}: {exc}")
     finally:
+        diagnostics.closed = True
+        if monitor:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
         if scan_id:
             result["scan_id"] = scan_id
             try:
