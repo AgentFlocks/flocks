@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from flocks.audit import emit_audit_event
 from flocks.auth.context import AuthUser
 from flocks.utils.log import Log
-from flocks.provider.provider import Provider, ModelInfo as ProviderModelInfo
+from flocks.provider.provider import BaseProvider, Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
 from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin
 from flocks.server.config_mutation import serialized_config_mutation
@@ -55,6 +55,7 @@ _api_service_summary_metadata_cache: Dict[str, tuple[tuple[Any, ...], Optional[D
 _provider_initialization_lock = asyncio.Lock()
 _provider_initialization_task: asyncio.Task[None] | None = None
 _dynamic_provider_load_tasks: set[asyncio.Task[None]] = set()
+_THREATBOOK_LLM_PROVIDER_IDS = frozenset({"threatbook-cn-llm", "threatbook-io-llm"})
 
 
 async def _run_provider_initialization() -> None:
@@ -1888,18 +1889,28 @@ async def set_provider_credentials(
         # 2. Ensure provider entry exists in flocks.json and update base_url / name
         raw_provider = ConfigWriter.get_provider_raw(provider_id)
         if raw_provider:
+            # ThreatBook onboarding may precede catalog sync on first run or
+            # upgrade. Other providers keep their model list when rotating keys.
+            if not preserve_existing_secret and provider_id in _THREATBOOK_LLM_PROVIDER_IDS:
+                from flocks.provider.model_catalog import get_provider_model_definitions
+
+                existing_models = raw_provider.get("models") or {}
+                models = dict(existing_models)
+                for model in get_provider_model_definitions(provider_id):
+                    models.setdefault(model.id, {"name": model.name})
+                if models != existing_models:
+                    ConfigWriter.update_provider_field(provider_id, "models", models)
             # Provider already exists — update base_url and name if provided
             if request.base_url is not None:
                 ConfigWriter.update_provider_field(
                     provider_id, "options.baseURL", request.base_url
                 )
-                if not preserve_existing_secret:
-                    # A newly supplied key uses the canonical secret reference.
-                    # When preserving a stored or inline key, leave its existing
-                    # config reference untouched.
-                    ConfigWriter.update_provider_field(
-                        provider_id, "options.apiKey", f"{{secret:{secret_id}}}"
-                    )
+            if not preserve_existing_secret:
+                # Persist a newly supplied key's reference even when the URL
+                # is unchanged (including an incomplete first-run entry).
+                ConfigWriter.update_provider_field(
+                    provider_id, "options.apiKey", f"{{secret:{secret_id}}}"
+                )
             if request.provider_name:
                 ConfigWriter.update_provider_field(
                     provider_id, "name", request.provider_name
@@ -2456,6 +2467,62 @@ class TestCredentialRequest(BaseModel):
     model_id: Optional[str] = Field(None, description="Model to test with (uses first available if omitted)")
 
 
+async def _prepare_isolated_provider(provider: BaseProvider) -> BaseProvider:
+    """Load persisted settings and first-run models without publishing a key."""
+    from flocks.config.config import ProviderConfig as ProviderSettings
+    from flocks.provider.model_catalog import get_provider_model_definitions
+
+    provider = copy.copy(provider)
+    provider._config = copy.deepcopy(provider._config)
+    provider._config_models = copy.deepcopy(provider._config_models)
+    if hasattr(provider, "_client"):
+        provider._client = None
+
+    config = await Config.get()
+    settings = (getattr(config, "provider", None) or {}).get(provider.id)
+    if settings is not None:
+        provider._config_models = []
+        Provider.apply_provider_config(provider, settings)
+
+    # Backfill even a nonempty list: an upgrade can introduce the onboarding
+    # default before the background catalog sync has reached this provider.
+    # Saved definitions and runtime-only custom models keep their precedence.
+    existing_ids = {model.id for model in provider.get_models()}
+    if existing_ids and provider.id not in _THREATBOOK_LLM_PROVIDER_IDS:
+        return provider
+    missing_models = {
+        model.id: {"name": model.name}
+        for model in get_provider_model_definitions(provider.id)
+        if model.id not in existing_ids
+    }
+    if missing_models:
+        existing_models = provider._config_models
+        Provider.apply_provider_config(provider, ProviderSettings(models=missing_models))
+        provider._config_models = [*existing_models, *provider._config_models]
+    return provider
+
+
+def _credential_test_error_code(error: Exception) -> str:
+    """Classify upstream failures without treating every exception as a bad key."""
+    import httpx
+    from openai import APIConnectionError, APITimeoutError
+
+    if isinstance(error, (APITimeoutError, httpx.TimeoutException, TimeoutError)):
+        return "connection_timeout"
+    if isinstance(error, (APIConnectionError, httpx.TransportError)):
+        return "connection_error"
+    status_code = getattr(error, "status_code", None)
+    if status_code == 401:
+        return "authentication_failed"
+    if status_code == 403:
+        return "permission_denied"
+    if status_code == 429:
+        return "rate_limited"
+    if isinstance(status_code, int) and status_code >= 500:
+        return "upstream_error"
+    return "provider_test_failed"
+
+
 @router.post(
     "/{provider_id}/test-credentials",
     response_model=Dict[str, Any],
@@ -2538,7 +2605,27 @@ async def _test_provider_credentials_impl(
             from flocks.provider.provider import ProviderConfig, ChatMessage as ProviderChatMessage
 
             if isolated_provider:
-                provider = copy.copy(provider)
+                try:
+                    probe_models = Provider.list_models(provider_id)
+                    if provider_id in _THREATBOOK_LLM_PROVIDER_IDS or not probe_models:
+                        provider = await _prepare_isolated_provider(provider)
+                        probe_models = provider.get_models()
+                    else:
+                        # Preserve loaded third-party settings and model
+                        # membership without adding a config reload dependency.
+                        provider = copy.copy(provider)
+                        provider._config = copy.deepcopy(provider._config)
+                except Exception as exc:
+                    log.warning("provider.validation.prepare_failed", {
+                        "provider_id": provider_id,
+                        "error_type": type(exc).__name__,
+                    })
+                    return {
+                        "success": False,
+                        "message": "模型配置加载失败，请检查模型配置后重试。",
+                        "error": "Model configuration failed",
+                        "code": "model_configuration_error",
+                    }
 
             # Always reconfigure with the freshest key from secret manager
             # to avoid stale keys from cached config or prior apply_config.
@@ -2561,13 +2648,17 @@ async def _test_provider_credentials_impl(
             if hasattr(provider, '_client'):
                 provider._client = None
 
-            models = Provider.list_models(provider_id)
+            models = (
+                probe_models
+                if isolated_provider else Provider.list_models(provider_id)
+            )
 
             if not models:
                 response = {
                     "success": False,
                     "message": "该 Provider 没有可用的模型进行测试",
                     "error": "No models available",
+                    "code": "no_models_available",
                     "latency_ms": int((time.time() - start) * 1000),
                 }
                 await _save_api_service_status_if_configured(provider_id, response)
@@ -2590,6 +2681,7 @@ async def _test_provider_credentials_impl(
                     "success": False,
                     "message": f"模型 '{test_model_id}' 不属于该 Provider",
                     "error": "Invalid model",
+                    "code": "invalid_model",
                 }
                 await _save_api_service_status_if_configured(provider_id, response)
                 return response
@@ -2629,6 +2721,7 @@ async def _test_provider_credentials_impl(
                     "success": False,
                     "message": f"API 调用失败: {error_msg}",
                     "error": error_msg,
+                    "code": _credential_test_error_code(chat_err),
                     "latency_ms": latency,
                     "model_id": test_model_id,
                     "question": test_question,
@@ -3037,7 +3130,8 @@ async def _test_provider_credentials_impl(
         return {
             "success": False,
             "message": f"Credentials test failed: {str(e)}",
-            "error": str(e)
+            "error": str(e),
+            "code": _credential_test_error_code(e),
         }
 
 
