@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
+import { memo, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   Plus, Trash2, Archive,
   ChevronDown, ChevronLeft, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
@@ -670,6 +670,15 @@ export default function SessionPage() {
   const selectedSessionId = routeSessionId || searchParams.get('session') || null;
   const navigationRef = useRef({ key: location.key, sessionId: selectedSessionId });
   navigationRef.current = { key: location.key, sessionId: selectedSessionId };
+  const mountedRef = useRef(false);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // Once this page leaves the route, its pending mutations may finish,
+      // but must not navigate or overwrite the next page's selection.
+      mountedRef.current = false;
+    };
+  }, []);
   const restoreAttemptRef = useRef<string | null>(null);
   const legacyNavigationRef = useRef<string | null>(null);
   const previousActionSessionRef = useRef(selectedSessionId);
@@ -677,6 +686,7 @@ export default function SessionPage() {
   const [sessionLoadAttempt, setSessionLoadAttempt] = useState(0);
   const [pendingInitialSessionId, setPendingInitialSessionId] = useState<string | null>(null);
   const selectSession = useCallback((id: string | null, replace = false) => {
+    if (!mountedRef.current) return;
     if (!id) writeLastSelectedSessionId(null);
     if (id && navigationRef.current.sessionId === id) return;
     navigate(id ? sessionPath(id) : '/sessions', {
@@ -1784,7 +1794,7 @@ export default function SessionPage() {
       });
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
-      if (navigationRef.current.key !== navigationKey) return;
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       setSelectedProjectId(targetGroupId);
       setCollapsedProjectIds(prev => {
@@ -1910,7 +1920,7 @@ export default function SessionPage() {
             runtimeMode: draftRuntimeMode,
             networkMode: draftNetworkMode,
           });
-          if (navigationRef.current.key === navigationKey) {
+          if (mountedRef.current && navigationRef.current.key === navigationKey) {
             setSessionPermissionMode(updated.permissionMode);
             setSessionRuntimeMode(updated.runtimeMode);
             setSessionNetworkMode(updated.networkMode);
@@ -1934,7 +1944,7 @@ export default function SessionPage() {
 
       addSession(response.data);
       void fetchProjects(undefined, searchQuery).catch(() => {});
-      if (navigationRef.current.key !== navigationKey) return;
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,

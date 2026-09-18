@@ -403,6 +403,8 @@ function NavigationProbe() {
     <button onClick={() => navigate(-1)}>history-back</button>
     <button onClick={() => navigate(1)}>history-forward</button>
     <button onClick={() => navigate('/sessions/session-2')}>open-second</button>
+    <button onClick={() => navigate('/agents')}>leave-session-page</button>
+    <button onClick={() => navigate('/sessions/session-1')}>return-to-first</button>
   </>;
 }
 
@@ -551,6 +553,84 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything()));
     expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
     expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+  });
+
+  describe.each(['create', 'create-and-send'] as const)('%s completion under StrictMode', (action) => {
+    it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
+      const request = deferred<{ data: typeof secondSession }>();
+      client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
+      const user = userEvent.setup();
+      render(<React.StrictMode><MemoryRouter initialEntries={['/sessions']}>
+        <NavigationProbe /><SessionRoutes />
+      </MemoryRouter></React.StrictMode>);
+      await user.click(action === 'create'
+        ? screen.getByRole('button', { name: 'createTaskSession' })
+        : screen.getByText('mock-create-and-send'));
+      expect(client.post).toHaveBeenCalledWith('/api/session', expect.anything());
+
+      if (destination !== 'stay') {
+        await user.click(screen.getByText('leave-session-page'));
+        expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+        if (destination === 'return') {
+          await user.click(screen.getByText('return-to-first'));
+          expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+        }
+      }
+      const savedSelection = localStorage.getItem('flocks:last-selected-session');
+      await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+      await waitFor(() => expect(addSession).toHaveBeenCalledWith(secondSession));
+      if (action === 'create-and-send') {
+        expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
+      }
+      expect(screen.getByTestId('session-location').textContent).toBe(
+        destination === 'stay' ? '/sessions/session-2'
+          : destination === 'leave' ? '/agents' : '/sessions/session-1',
+      );
+      if (destination !== 'stay') {
+        expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
+      }
+    });
+  });
+
+  describe.each(['archive', 'batch-archive'] as const)('%s completion under StrictMode', (action) => {
+    it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
+      useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+      const request = deferred<{ id: string; status: string }>();
+      sessionApi.archive.mockReturnValue(request.promise);
+      const user = userEvent.setup();
+      render(<React.StrictMode><MemoryRouter initialEntries={['/sessions/session-1']}>
+        <NavigationProbe /><SessionRoutes />
+      </MemoryRouter></React.StrictMode>);
+      if (action === 'archive') {
+        await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
+        await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+      } else {
+        await user.click(screen.getByRole('button', { name: 'selectMode' }));
+        await user.click(screen.getAllByText('Original Session')[0]);
+        await user.click(screen.getByRole('button', { name: 'archiveSelected' }));
+      }
+      expect(sessionApi.archive).toHaveBeenCalledWith(session.id);
+      if (destination !== 'stay') {
+        await user.click(screen.getByText('leave-session-page'));
+        expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+        if (destination === 'return') {
+          await user.click(screen.getByText('open-second'));
+          expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+        }
+      }
+      const savedSelection = localStorage.getItem('flocks:last-selected-session');
+      await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
+      expect(action === 'archive' ? removeSession : removeSessions).toHaveBeenCalledWith(
+        action === 'archive' ? session.id : [session.id],
+      );
+      expect(screen.getByTestId('session-location').textContent).toBe(
+        destination === 'stay' ? '/sessions'
+          : destination === 'leave' ? '/agents' : '/sessions/session-2',
+      );
+      if (destination !== 'stay') {
+        expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
+      }
+    });
   });
 
   it('does not leave the current session when another session finishes archiving', async () => {
