@@ -65,3 +65,42 @@ describe('UpdateModal update checks', () => {
     });
   });
 });
+
+describe('UpdateModal deploy-mode notices', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('explains the offline package upgrade path instead of the docker hint', async () => {
+    const info = {
+      ...currentVersion,
+      latest_version: '2026.09.14',
+      has_update: true,
+      deploy_mode: 'offline' as const,
+      update_allowed: false,
+    };
+    checkUpdate.mockResolvedValue(info);
+    render(<UpdateModal initialInfo={info} onClose={vi.fn()} />);
+
+    expect(await screen.findByText('offlineModeTitle')).toBeInTheDocument();
+    expect(screen.getByText('offlineModeDesc')).toBeInTheDocument();
+    expect(screen.getByText('offlineUpgradeHint')).toBeInTheDocument();
+    expect(screen.queryByText('dockerModeTitle')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'confirmAction' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the docker hint for docker deployments', async () => {
+    const info = {
+      ...currentVersion,
+      latest_version: '2026.09.14',
+      has_update: true,
+      deploy_mode: 'docker' as const,
+      update_allowed: false,
+    };
+    checkUpdate.mockResolvedValue(info);
+    render(<UpdateModal initialInfo={info} onClose={vi.fn()} />);
+
+    expect(await screen.findByText('dockerModeTitle')).toBeInTheDocument();
+    expect(screen.queryByText('offlineModeTitle')).not.toBeInTheDocument();
+  });
+});

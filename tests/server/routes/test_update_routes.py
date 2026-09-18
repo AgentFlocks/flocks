@@ -342,3 +342,22 @@ async def test_manual_webui_apply_update_upgrades_to_confirmed_branch(
 
     assert response.status_code == 200, response.text
     assert '"stage":"error"' not in response.text
+
+
+async def test_apply_update_refuses_on_offline_install(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _req: None)
+    monkeypatch.setattr(update_routes, "detect_deploy_mode", lambda: "offline")
+
+    async def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("perform_update must not start on an offline install")
+
+    monkeypatch.setattr(update_routes, "perform_update", _must_not_run)
+
+    response = await update_routes.apply_update(_request())
+    body = "".join([chunk if isinstance(chunk, str) else chunk.decode() async for chunk in response.body_iterator])
+
+    assert response.media_type == "text/event-stream"
+    assert '"stage": "error"' in body
+    assert "flocks-offline.run" in body

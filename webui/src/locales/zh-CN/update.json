@@ -32,6 +32,9 @@
   "dockerModeTitle": "Docker 部署",
   "dockerModeDesc": "当前通过 Docker 运行 Flocks，暂不支持页面内原地升级。请拉取最新镜像并重启容器完成升级。",
   "dockerUpgradeHint": "docker pull ghcr.io/agentflocks/flocks:latest",
+  "offlineModeTitle": "离线安装包部署",
+  "offlineModeDesc": "当前实例由离线安装包（flocks-offline.run）部署，不支持联网就地升级。请向交付人员获取新版安装包，上传到服务器后重新执行安装命令，数据和授权会保留。",
+  "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
   "stageLabels": {
     "fetching": "下载最新源码包",
     "fetchingPro": "下载 Pro bundle",

@@ -2410,3 +2410,24 @@ def test_log_startup_config_appends_to_log_file(tmp_path: Path) -> None:
 
     content = log_path.read_text(encoding="utf-8")
     assert "backend starting: host=0.0.0.0 port=8000 pid=2468 pgid=2468" in content
+
+
+def test_process_inspection_survives_missing_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Minimal images without procps must not crash `flocks start`/`stop`."""
+    import subprocess as _subprocess
+
+    def _no_ps(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "ps")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", _no_ps)
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)  # no pgrep either
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+
+    completed = service_manager._run_ps(["ps", "-eo", "pid="])
+    assert isinstance(completed, _subprocess.CompletedProcess)
+    assert completed.returncode == 127 and completed.stdout == ""
+    assert service_manager._process_list_pids() == []
+    assert service_manager._unix_process_stat(12345) is None
+    assert service_manager._process_command_line(12345) == ""
+    assert service_manager._process_group_member_pids(12345) == []
+    assert service_manager.child_pids(12345) == []

@@ -435,16 +435,24 @@ def read_pid(pid_file: Path) -> int | None:
     return record.pid if record else None
 
 
+def _run_ps(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run ``ps`` for best-effort process inspection.
+
+    Minimal images (containers without procps) have no ``ps`` at all; report that
+    like a failed call instead of crashing the CLI, callers already tolerate empty
+    output.
+    """
+    try:
+        return subprocess.run(args, check=False, capture_output=True, text=True)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(args, 127, "", "")
+
+
 def _unix_process_stat(pid: int) -> str | None:
     """Return the Unix process status code for a pid, if available."""
     if sys.platform == "win32" or pid <= 0:
         return None
-    completed = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-o", "stat=", "-p", str(pid)])
     if completed.returncode != 0:
         return None
     lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
@@ -661,12 +669,7 @@ def _process_group_member_pids(pgid: int) -> list[int]:
         )
         return [int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()]
 
-    completed = subprocess.run(
-        ["ps", "-eo", "pid=,pgid="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-eo", "pid=,pgid="])
     result: list[int] = []
     for line in completed.stdout.splitlines():
         parts = line.split()
@@ -798,12 +801,7 @@ def _process_command_line(pid: int) -> str:
     if sys.platform == "win32":
         snapshot = _windows_process_snapshot(pid)
         return str(snapshot.get("command_line") or "") if snapshot else ""
-    completed = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "command="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-p", str(pid), "-o", "command="])
     return completed.stdout.strip()
 
 
@@ -896,12 +894,7 @@ def _process_list_pids() -> list[int]:
             errors="replace",
         )
     else:
-        completed = subprocess.run(
-            ["ps", "-eo", "pid="],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        completed = _run_ps(["ps", "-eo", "pid="])
     if completed.returncode != 0:
         return []
     pids = []
@@ -1958,12 +1951,7 @@ def child_pids(pid: int) -> list[int]:
         )
         return [int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()]
 
-    completed = subprocess.run(
-        ["ps", "-eo", "pid=,ppid="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-eo", "pid=,ppid="])
     result: list[int] = []
     for line in completed.stdout.splitlines():
         parts = line.split()

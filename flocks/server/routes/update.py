@@ -154,6 +154,10 @@ async def apply_update(
             ),
             media_type="text/event-stream",
         )
+    if detect_deploy_mode() == "offline":
+        from flocks.updater.updater import OFFLINE_UPGRADE_REFUSED_MESSAGE
+
+        return StreamingResponse(_error(OFFLINE_UPGRADE_REFUSED_MESSAGE), media_type="text/event-stream")
 
     zipball_url: str | None = None
     tarball_url: str | None = None

@@ -1794,3 +1794,56 @@ async def test_report_failed_installation_uses_target_bundle_when_marker_is_stal
     assert posted_payloads[0]["bundle_version"] == "v2026.6.5"
     assert posted_payloads[0]["build_id"] == "job_new"
     assert posted_payloads[0]["install_result"] == "failed"
+
+
+async def test_create_upgrade_request_reports_pinned_channel_only_when_set(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    seen_payloads: list[dict] = []
+
+    class _FakeResponse:
+        status_code = status.HTTP_200_OK
+
+        def json(self) -> dict:
+            return {"request_id": "req_channel_001", "status": "pending"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            seen_payloads.append(json)
+            return _FakeResponse()
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+    form = {
+        "product": "Flocks Pro",
+        "license_type": "poc",
+        "company": "acme",
+        "applicant_name": "alice",
+        "applicant_email": "alice@example.com",
+        "applicant_phone": "13800000000",
+    }
+
+    monkeypatch.delenv("FLOCKS_UPDATE_CHANNEL", raising=False)
+    resp = await client.post("/api/console/upgrade-requests", json=form)
+    assert resp.status_code == status.HTTP_200_OK
+    assert "channel" not in seen_payloads[-1]
+
+    monkeypatch.setenv("FLOCKS_UPDATE_CHANNEL", "flockspro-offline-2026.9.14")
+    resp = await client.post("/api/console/upgrade-requests", json=form)
+    assert resp.status_code == status.HTTP_200_OK
+    assert seen_payloads[-1]["channel"] == "flockspro-offline-2026.9.14"
+    assert seen_payloads[-1]["fingerprint"] == "fp_1"
