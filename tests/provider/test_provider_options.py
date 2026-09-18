@@ -1,3 +1,5 @@
+import pytest
+
 from flocks.provider import options as provider_options
 from flocks.provider.interleaved import (
     REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
@@ -11,6 +13,31 @@ MIMO_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
 
 
 class TestBuildProviderOptions:
+    @pytest.mark.parametrize("model", ["claude-fable-5", "claude-fable-5-1"])
+    @pytest.mark.parametrize("enabled", [True, False, None])
+    def test_fable_requires_adaptive_thinking(self, model, enabled):
+        options = provider_options.build_provider_options(
+            "anthropic", model, reasoning_enabled=enabled,
+            reasoning_effort="high", resolve_max_tokens=False,
+        )
+        assert options["thinking"] == {"type": "adaptive"}
+        assert options["output_config"] == {"effort": "high"}
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_opus5_adaptive_or_disabled(self, enabled):
+        options = provider_options.build_provider_options(
+            "anthropic", "claude-opus-5", reasoning_enabled=enabled,
+            reasoning_effort="medium", resolve_max_tokens=False,
+        )
+        assert options["thinking"] == {"type": "adaptive" if enabled else "disabled"}
+        assert options.get("output_config") == ({"effort": "medium"} if enabled else None)
+
+    def test_adaptive_claude_rejects_unknown_effort(self):
+        with pytest.raises(ValueError, match="Unsupported adaptive Claude effort"):
+            provider_options.build_provider_options(
+                "anthropic", "claude-fable-5-1", reasoning_effort="ultra", resolve_max_tokens=False,
+            )
+
     def test_claude_reasoning_can_be_disabled(self):
         options = provider_options.build_provider_options(
             "anthropic",

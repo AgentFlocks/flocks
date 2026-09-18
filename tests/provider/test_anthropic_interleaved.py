@@ -156,6 +156,36 @@ def test_anthropic_tool_conversion_strips_schema_defaults_without_mutating_input
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_adaptive_thinking_forwards_effort_without_legacy_beta_or_temperature(streaming):
+    provider = AnthropicProvider()
+    response = SimpleNamespace(
+        id="msg_adaptive", model="claude-fable-5-1",
+        content=[SimpleNamespace(type="text", text="OK")],
+        stop_reason="end_turn", usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+    )
+    api = SimpleNamespace(create=AsyncMock(return_value=response), stream=MagicMock(
+        return_value=_FakeAsyncStream([SimpleNamespace(type="message_stop")]),
+    ))
+    beta = SimpleNamespace(create=AsyncMock(), stream=MagicMock())
+    provider._client = SimpleNamespace(messages=api, beta=SimpleNamespace(messages=beta))
+    options = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"},
+               "temperature": 0.2, "max_tokens": 128000}
+    if streaming:
+        _ = [x async for x in provider.chat_stream("claude-fable-5-1", [ChatMessage(role="user", content="OK")], **options)]
+        sent = api.stream.call_args.kwargs
+    else:
+        await provider.chat("claude-fable-5-1", [ChatMessage(role="user", content="OK")], **options)
+        sent = api.create.call_args.kwargs
+    assert sent["thinking"] == {"type": "adaptive"}
+    assert sent["output_config"] == {"effort": "high"}
+    assert sent["max_tokens"] == 128000
+    assert "temperature" not in sent and "betas" not in sent
+    beta.create.assert_not_called()
+    beta.stream.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_anthropic_chat_forwards_disabled_thinking_and_temperature_without_beta():
     provider = AnthropicProvider()
     messages_api = SimpleNamespace(

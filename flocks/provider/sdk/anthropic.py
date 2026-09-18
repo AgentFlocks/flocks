@@ -308,9 +308,9 @@ class AnthropicProvider(BaseProvider):
         return formatted
 
     @classmethod
-    def _beta_flags_for_request(cls, *, thinking_enabled: bool, has_tools: bool) -> Optional[List[str]]:
+    def _beta_flags_for_request(cls, *, thinking_enabled: bool, has_tools: bool, adaptive: bool = False) -> Optional[List[str]]:
         """Return beta feature flags needed for interleaved thinking."""
-        if not thinking_enabled:
+        if not thinking_enabled or adaptive:
             return None
         betas = [cls._INTERLEAVED_THINKING_BETA]
         if has_tools:
@@ -395,6 +395,8 @@ class AnthropicProvider(BaseProvider):
                 request_params["max_tokens"] = kwargs["max_tokens"]
         if not thinking_enabled:
             request_params["temperature"] = kwargs.get("temperature", 0.7)
+        if isinstance(kwargs.get("output_config"), dict):
+            request_params["output_config"] = dict(kwargs["output_config"])
         
         if system_message:
             request_params["system"] = system_message
@@ -404,6 +406,7 @@ class AnthropicProvider(BaseProvider):
         betas = self._beta_flags_for_request(
             thinking_enabled=thinking_enabled,
             has_tools=bool(tools),
+            adaptive=isinstance(thinking, dict) and thinking.get("type") == "adaptive",
         )
         if betas and hasattr(client, "beta") and hasattr(client.beta, "messages"):
             response = await client.beta.messages.create(**request_params, betas=betas)
@@ -497,6 +500,8 @@ class AnthropicProvider(BaseProvider):
             # Disabled thinking is an explicit payload, but temperature remains
             # valid and must still be forwarded to compatible gateways.
             request_params["temperature"] = kwargs.get("temperature", 0.7)
+        if isinstance(kwargs.get("output_config"), dict):
+            request_params["output_config"] = dict(kwargs["output_config"])
         
         if system_message:
             request_params["system"] = system_message
@@ -506,6 +511,7 @@ class AnthropicProvider(BaseProvider):
         betas = self._beta_flags_for_request(
             thinking_enabled=thinking_enabled,
             has_tools=bool(tools),
+            adaptive=isinstance(thinking, dict) and thinking.get("type") == "adaptive",
         )
 
         # Track tool calls during streaming

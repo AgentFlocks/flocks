@@ -358,7 +358,17 @@ def build_provider_options(
         # the catalog entry (catalog takes priority over flocks.json overrides
         # per anthropic.py get_model_definitions), so api_limit reflects the
         # real Anthropic limit (e.g. 64 000 for claude-sonnet-4-20250514).
-        if reasoning_enabled is False:
+        # Fable 5/5.1 require adaptive thinking; Opus 5 supports adaptive or
+        # disabled, but not the legacy manual token budget. Keep older Claude
+        # models and non-Anthropic transports on their existing paths.
+        fable_adaptive = model_lower in {"claude-fable-5", "claude-fable-5-1"}
+        if fable_adaptive or (model_lower == "claude-opus-5" and reasoning_enabled is not False):
+            effort = reasoning_effort or "high"
+            if effort not in {"low", "medium", "high", "max"}:
+                raise ValueError(f"Unsupported adaptive Claude effort: {effort}")
+            options["thinking"] = {"type": "adaptive"}
+            options["output_config"] = {"effort": effort}
+        elif reasoning_enabled is False:
             # Anthropic-compatible gateways may not share Anthropic's default.
             # Preserve an explicit opt-out so callers such as Cloudwise can
             # guarantee that report generation does not consume thinking
