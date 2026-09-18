@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SceneSuitesPage from './index';
+import { __resetSceneSuiteUpdatesForTesting } from '@/hooks/useSceneSuiteUpdates';
+import { SCENE_SUITES_CHANGED_EVENT } from '@/utils/sceneSuites';
 
 const { hubAPI, webuiContractPagesAPI, flocksproUsersApi, toast } = vi.hoisted(() => ({
   hubAPI: {
@@ -55,10 +57,31 @@ const CODE_AUDIT = {
   workspaceEnabled: null,
 };
 
-function renderPage() {
+function renderPage(route = '/scenes/suites') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[route]}>
       <SceneSuitesPage />
+    </MemoryRouter>,
+  );
+}
+
+function NavigationProbe() {
+  const location = useLocation();
+  return <>
+    <output data-testid="location">{location.pathname}{location.search}</output>
+    <Link to="/agents">Leave manager</Link>
+    <Link to="/scenes/suites?workspace=code_audit_ui&reason=pages-unavailable">Change target</Link>
+  </>;
+}
+
+function renderNavigablePage(route: string) {
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <NavigationProbe />
+      <Routes>
+        <Route path="/scenes/suites" element={<SceneSuitesPage />} />
+        <Route path="/agents" element={<div>Agent page</div>} />
+      </Routes>
     </MemoryRouter>,
   );
 }
@@ -71,10 +94,12 @@ function card(suiteId: string): HTMLElement {
 
 describe('SceneSuitesPage', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+    __resetSceneSuiteUpdatesForTesting();
     hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, CODE_AUDIT] });
     flocksproUsersApi.hasCapability.mockResolvedValue(false);
     hubAPI.install.mockResolvedValue({});
+    hubAPI.installStream.mockResolvedValue(undefined);
     hubAPI.update.mockResolvedValue({});
     hubAPI.uninstall.mockResolvedValue({});
     webuiContractPagesAPI.setWorkspaceEnabled.mockResolvedValue({});
@@ -117,6 +142,7 @@ describe('SceneSuitesPage', () => {
       'component', 'code-audit-workspace', expect.any(Function),
     ));
     expect(hubAPI.install).not.toHaveBeenCalled();
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('code_audit_ui', true);
     // The list is reloaded so the card reflects the new state.
     await waitFor(() => expect(hubAPI.sceneSuites).toHaveBeenCalledTimes(2));
   });
@@ -206,5 +232,190 @@ describe('SceneSuitesPage', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('re-enables a reinstalled scene and refreshes navigation without waiting for SSE', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'available', workspaceEnabled: false, installedVersion: null }] });
+    const changed = vi.fn();
+    window.addEventListener(SCENE_SUITES_CHANGED_EVENT, changed);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '安装' }));
+
+    await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('soc_ui', true);
+    expect(toast.success).toHaveBeenCalledWith('安装完成，场景已启用');
+    window.removeEventListener(SCENE_SUITES_CHANGED_EVENT, changed);
+  });
+
+  it('resolves a missing workspace mapping from the post-install suite list', async () => {
+    hubAPI.sceneSuites
+      .mockResolvedValueOnce({ data: [{ ...SOC, state: 'available', workspaceId: null, installedVersion: null }] })
+      .mockResolvedValue({ data: [{ ...SOC, workspaceId: 'actual_new_workspace', workspaceEnabled: false }] });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '安装' }));
+
+    await waitFor(() => expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('actual_new_workspace', true));
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).not.toHaveBeenCalledWith('soc-workspace', true);
+  });
+
+  it('keeps a successful install and offers Enable when auto-enabling fails', async () => {
+    hubAPI.sceneSuites
+      .mockResolvedValueOnce({ data: [{ ...SOC, state: 'available', workspaceEnabled: false, installedVersion: null }] })
+      .mockResolvedValue({ data: [{ ...SOC, workspaceEnabled: false }] });
+    webuiContractPagesAPI.setWorkspaceEnabled.mockRejectedValue({ response: { data: { detail: '无权启用此工作区' } } });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '安装' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      '安装已完成，但启用失败。请点击“启用”重试。', '无权启用此工作区',
+    ));
+    expect(await screen.findByRole('button', { name: '启用' })).toBeEnabled();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('shows a backend error detail for an unsuccessful uninstall', async () => {
+    hubAPI.uninstall.mockRejectedValue({ response: { data: { detail: '场景正在运行，请稍后重试' } } });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '卸载' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      '操作失败: SOC 工作区场景套件', '场景正在运行，请稍后重试',
+    ));
+  });
+
+  it('refreshes the list and navigation after uninstalling a scene', async () => {
+    const changed = vi.fn();
+    window.addEventListener(SCENE_SUITES_CHANGED_EVENT, changed);
+    hubAPI.sceneSuites
+      .mockResolvedValueOnce({ data: [SOC] })
+      .mockResolvedValue({ data: [{ ...SOC, state: 'available', installedVersion: null }] });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '卸载' }));
+
+    expect(await screen.findByRole('button', { name: '安装' })).toBeEnabled();
+    expect(changed).toHaveBeenCalledTimes(1);
+    window.removeEventListener(SCENE_SUITES_CHANGED_EVENT, changed);
+  });
+
+  it('focuses the requested disabled scene and explains how to open it', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, workspaceEnabled: false }] });
+    renderPage('/scenes/suites?workspace=soc_ui');
+    expect(await screen.findByText('此场景尚未启用，点击“启用”即可打开场景。')).toBeInTheDocument();
+    await waitFor(() => expect(card('soc-workspace')).toHaveFocus());
+    expect(screen.getByRole('button', { name: '启用' })).toBeEnabled();
+  });
+
+  it('explains why an enabled scene with unavailable pages opened its manager', async () => {
+    renderPage('/scenes/suites?workspace=soc_ui&reason=pages-unavailable');
+    expect(await screen.findByText('此场景已启用，页面尚未就绪。请刷新状态；如安装异常，请更新或重新安装场景。')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '启用' })).not.toBeInTheDocument();
+  });
+
+  it('shows an existing workspace as incomplete and completes it without uninstalling', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'partial', installedVersion: null }] });
+    const user = userEvent.setup();
+    renderPage();
+    const soc = await waitFor(() => card('soc-workspace'));
+    expect(within(soc).getByText('待补全')).toBeInTheDocument();
+    expect(within(soc).queryByText('未安装')).not.toBeInTheDocument();
+    expect(within(soc).getByText('此场景已存在，部分套件组件缺失。点击“补全安装”恢复完整套件。')).toBeInTheDocument();
+    expect(within(soc).getByRole('button', { name: '停用' })).toBeEnabled();
+    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC] });
+    await user.click(within(soc).getByRole('button', { name: '补全安装' }));
+    await waitFor(() => expect(hubAPI.installStream).toHaveBeenCalledWith('component', 'soc-workspace', expect.any(Function)));
+    expect(hubAPI.uninstall).not.toHaveBeenCalled();
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('soc_ui', true);
+    expect(await within(card('soc-workspace')).findByText('已安装')).toBeInTheDocument();
+  });
+
+  it('offers completion instead of Enable when the partial suite has no workspace', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'partial', workspaceEnabled: null }] });
+    renderPage('/scenes/suites?workspace=soc_ui&reason=pages-unavailable');
+    const soc = await waitFor(() => card('soc-workspace'));
+    expect(within(soc).getByRole('button', { name: '补全安装' })).toBeEnabled();
+    expect(within(soc).queryByRole('button', { name: '启用' })).not.toBeInTheDocument();
+    expect(within(soc).queryByRole('button', { name: '停用' })).not.toBeInTheDocument();
+    expect(within(soc).getByText('套件安装不完整，点击“补全安装”恢复缺失的场景组件。')).toBeInTheDocument();
+    expect(within(soc).queryByText(/此场景已启用/)).not.toBeInTheDocument();
+  });
+
+  it('keeps an incomplete disabled workspace available for enabling', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'partial', workspaceEnabled: false }] });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '启用' }));
+    await waitFor(() => expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('soc_ui', true));
+    expect(screen.getByRole('button', { name: '补全安装' })).toBeEnabled();
+  });
+
+  it('keeps the incomplete state and error detail when completion fails', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'partial', installedVersion: null }] });
+    hubAPI.installStream.mockRejectedValue(new Error('required workflow unavailable'));
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: '补全安装' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      '操作失败: SOC 工作区场景套件', 'required workflow unavailable',
+    ));
+    expect(screen.getByText('待补全')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '补全安装' })).toBeEnabled();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each(['/scenes/suites', '/scenes/suites?workspace=soc_ui&reason=pages-unavailable'])(
+    'does not navigate back after leaving an installation started at %s', async (route) => {
+      let finishInstall: () => void = () => {};
+      hubAPI.installStream.mockReturnValue(new Promise<void>((resolve) => { finishInstall = resolve; }));
+      hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'available', installedVersion: null }] });
+      const user = userEvent.setup();
+      renderNavigablePage(route);
+      await user.click(await screen.findByRole('button', { name: '安装' }));
+      await user.click(screen.getByRole('link', { name: 'Leave manager' }));
+      expect(screen.getByTestId('location')).toHaveTextContent('/agents');
+
+      await act(async () => finishInstall());
+
+      expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('soc_ui', true);
+      expect(screen.getByTestId('location')).toHaveTextContent('/agents');
+      expect(screen.getByText('Agent page')).toBeInTheDocument();
+    },
+  );
+
+  it('does not navigate back when enabling finishes after leaving the manager', async () => {
+    let finishEnable: () => void = () => {};
+    webuiContractPagesAPI.setWorkspaceEnabled.mockReturnValue(new Promise<void>((resolve) => { finishEnable = resolve; }));
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, workspaceEnabled: false }] });
+    const user = userEvent.setup();
+    renderNavigablePage('/scenes/suites?workspace=soc_ui&reason=pages-unavailable');
+    await user.click(await screen.findByRole('button', { name: '启用' }));
+    await user.click(screen.getByRole('link', { name: 'Leave manager' }));
+    await act(async () => finishEnable());
+    expect(screen.getByTestId('location')).toHaveTextContent('/agents');
+  });
+
+  it('clears the resolved reason for the current scene while preserving other parameters', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, workspaceEnabled: false }] });
+    const user = userEvent.setup();
+    renderNavigablePage('/scenes/suites?workspace=soc_ui&reason=pages-unavailable&keep=yes');
+    await user.click(await screen.findByRole('button', { name: '启用' }));
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/scenes/suites?workspace=soc_ui&keep=yes'));
+  });
+
+  it('preserves a newer target selected while another scene is installing', async () => {
+    let finishInstall: () => void = () => {};
+    hubAPI.installStream.mockReturnValue(new Promise<void>((resolve) => { finishInstall = resolve; }));
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'available', installedVersion: null }] });
+    const user = userEvent.setup();
+    renderNavigablePage('/scenes/suites?workspace=soc_ui&reason=pages-unavailable');
+    await user.click(await screen.findByRole('button', { name: '安装' }));
+    await user.click(screen.getByRole('link', { name: 'Change target' }));
+    await act(async () => finishInstall());
+    expect(screen.getByTestId('location')).toHaveTextContent('/scenes/suites?workspace=code_audit_ui&reason=pages-unavailable');
   });
 });

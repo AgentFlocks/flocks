@@ -2,7 +2,7 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { Link, MemoryRouter, Route, Routes, useLocation, type RouteObject } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import Layout from './Layout';
 import Home from '@/pages/Home';
 import { UPDATE_DISMISSED_KEY } from '@/utils/updateDismissal';
@@ -32,6 +32,7 @@ const {
   useAuth,
   useStats,
   useWebUIContractPages,
+  useSceneSuiteUpdates,
 } = vi.hoisted(() => ({
   catalogAPI: {
     list: vi.fn(),
@@ -77,6 +78,7 @@ const {
     resetProductFavicon: vi.fn(),
   },
   updateModalMock: vi.fn(() => null),
+  useSceneSuiteUpdates: vi.fn(() => ({ hasUnseenSuites: false })),
   useAuth: vi.fn(),
   useStats: vi.fn(),
   useWebUIContractPages: vi.fn(() => ({
@@ -142,6 +144,8 @@ vi.mock('@/contexts/AuthContext', () => ({
 vi.mock('@/contexts/ProductNameContext', () => ({
   useProductName: () => productNameContextValue,
 }));
+
+vi.mock('@/hooks/useSceneSuiteUpdates', () => ({ useSceneSuiteUpdates }));
 
 vi.mock('@/hooks/useStats', () => ({
   useStats,
@@ -282,6 +286,7 @@ function activeProbe(): HTMLElement {
 
 function RouteProbe() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [count, setCount] = React.useState(0);
   return (
     <div>
@@ -291,18 +296,24 @@ function RouteProbe() {
       <Link to="/contracts/webui/workspaces/soc_ui/soc-alerts">go-soc-alerts</Link>
       <Link to="/sessions">go-sessions</Link>
       <Link to="/workflows/wf-1">go-workflow-detail</Link>
+      <button type="button" onClick={() => navigate(-1)}>go-back</button>
+      <button type="button" onClick={() => navigate(1)}>go-forward</button>
     </div>
   );
 }
 
-function renderLayoutAt(path: string) {
-  return render(
+function layoutTree(path: string) {
+  return (
     <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/*" element={<Layout contentRoutes={testContentRoutes} />} />
       </Routes>
     </MemoryRouter>,
   );
+}
+
+function renderLayoutAt(path: string) {
+  return render(layoutTree(path));
 }
 
 function makeSocPage(id: string, title: string, icon: string, order: number) {
@@ -332,7 +343,7 @@ function makeSceneWorkspace(id: string, title: string, pages: Array<{ id: string
     order: 20,
     enabled: true,
     placement: 'sceneWorkspace',
-    defaultPageId: pages[0].id,
+    defaultPageId: pages[0]?.id ?? '',
     sections: [],
     pages: pages.map((page, index) => ({
       id: page.id,
@@ -1296,6 +1307,7 @@ describe('Layout onboarding entry', () => {
 describe('Layout WebUI contract pages navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: false });
     localStorage.clear();
     checkUpdate.mockResolvedValue({
       has_update: false,
@@ -1340,7 +1352,7 @@ describe('Layout WebUI contract pages navigation', () => {
     });
   });
 
-  it('shows the three fixed partitions and swaps the sidebar menu when switching', async () => {
+  it('shows installed scene tabs and opens system settings from the top-right menu', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     mockSocWorkspaceNav();
@@ -1348,7 +1360,7 @@ describe('Layout WebUI contract pages navigation', () => {
     const { container } = renderHomeWithLayout();
 
     await screen.findByRole('button', { name: 'aiWorkbench' });
-    expect(partitionNames()).toEqual(['partitionAgent', 'partitionScene', 'partitionSettings']);
+    expect(partitionNames()).toEqual(['partitionAgent', 'SOC 工作区']);
     expect(activePartitionName()).toBe('partitionAgent');
     expect(sectionHeadings(container)).toEqual(['aiWorkbench', 'agentHub']);
     expect(screen.getByRole('link', { name: 'flocksHome' })).toHaveAttribute('href', '/');
@@ -1356,33 +1368,36 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'settingsPreferences' })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'SOC 工作区' }));
     // The scene suite is the first level, its pages the second.
     await waitFor(() => expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查']));
     expect(sectionHeadings(container)).toEqual(['SOC 工作区']);
     expect(screen.getByRole('button', { name: 'SOC 工作区' })).toHaveAttribute('aria-expanded', 'true');
-    expect(activePartitionName()).toBe('partitionScene');
+    expect(activePartitionName()).toBe('SOC 工作区');
     expect(screen.queryByRole('link', { name: 'sessions' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: '告警调查' })).toBeInTheDocument();
     // The suite manager is a top-bar entry, not a sidebar menu item.
-    expect(within(screen.getByRole('tablist', { name: 'partitions' }).parentElement as HTMLElement)
-      .getByRole('link', { name: 'sceneSuiteManager' })).toHaveAttribute('href', '/scenes/suites');
+    expect(screen.getByRole('link', { name: 'sceneSuiteManager' })).toHaveAttribute('href', '/scenes/suites');
     await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-dashboard'));
 
-    await user.click(screen.getByRole('tab', { name: 'partitionSettings' }));
+    await user.click(screen.getByRole('button', { name: 'partitionSettings' }));
+    const settingsMenu = screen.getByRole('menu', { name: 'partitionSettings' });
+    expect(within(settingsMenu).getByRole('menuitem', { name: 'flocksLlmUsageQuota' }))
+      .toHaveAttribute('href', 'https://portal.agentflocks.com');
+    expect(within(settingsMenu).getByRole('menuitem', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
+    await user.click(within(settingsMenu).getByRole('menuitem', { name: 'settingsPreferences' }));
     await waitFor(() => expect(sectionHeadings(container)).toEqual([
       'settingsGroupPreferences',
       'settingsGroupData',
       'settingsGroupSystem',
     ]));
-    // D02: the LLM usage portal moved into the system settings menu.
-    expect(screen.getByRole('link', { name: 'flocksLlmUsageQuota' }))
-      .toHaveAttribute('href', 'https://portal.agentflocks.com');
     expect(screen.getByRole('link', { name: 'settingsPreferences' })).toHaveAttribute('href', '/settings/preferences');
     expect(screen.getByRole('link', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
     expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
     await waitFor(() => expect(activeProbe()).toHaveTextContent('/settings/preferences'));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(activePartitionName()).toBe('');
   });
 
   it('returns each partition to the page it was left on', async () => {
@@ -1393,7 +1408,7 @@ describe('Layout WebUI contract pages navigation', () => {
     renderLayoutAt('/sessions');
     await screen.findByRole('button', { name: 'aiWorkbench' });
 
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'SOC 工作区' }));
     await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-dashboard'));
 
     await user.click(screen.getByRole('link', { name: '告警调查' }));
@@ -1403,11 +1418,11 @@ describe('Layout WebUI contract pages navigation', () => {
     await waitFor(() => expect(activeProbe()).toHaveTextContent('/sessions'));
     expect(activePartitionName()).toBe('partitionAgent');
 
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'SOC 工作区' }));
     await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-alerts'));
     expect(JSON.parse(localStorage.getItem('flocks_layout_partition_paths') ?? '{}')).toMatchObject({
       agent: '/sessions',
-      scene: '/contracts/webui/workspaces/soc_ui/soc-alerts',
+      'workspace:soc_ui': '/contracts/webui/workspaces/soc_ui/soc-alerts',
     });
   });
 
@@ -1421,12 +1436,40 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(activePartitionName()).toBe('partitionAgent');
 
     await user.click(screen.getByRole('link', { name: 'go-soc-alerts' }));
-    await waitFor(() => expect(activePartitionName()).toBe('partitionScene'));
+    await waitFor(() => expect(activePartitionName()).toBe('SOC 工作区'));
     expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-white');
 
     await user.click(screen.getByRole('link', { name: 'go-sessions' }));
     await waitFor(() => expect(activePartitionName()).toBe('partitionAgent'));
     expect(screen.getByRole('button', { name: 'aiWorkbench' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('follows browser back and forward when selecting the active scene and sidebar', async () => {
+    const user = userEvent.setup();
+    mockSocWorkspaceNav();
+    renderLayoutAt('/sessions');
+    await user.click(screen.getByRole('link', { name: 'go-soc-alerts' }));
+    expect(activePartitionName()).toBe('SOC 工作区');
+    await user.click(screen.getByRole('button', { name: 'go-back' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/sessions'));
+    expect(activePartitionName()).toBe('partitionAgent');
+    expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'go-forward' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui/soc-alerts'));
+    expect(activePartitionName()).toBe('SOC 工作区');
+    expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-white');
+  });
+
+  it('keeps privileged settings out of the member top-right menu', async () => {
+    const user = userEvent.setup();
+    useAuth.mockReturnValue({ user: { id: 'member-1', username: 'member', role: 'member', status: 'active' }, logout: vi.fn() });
+    renderLayoutAt('/sessions');
+    await user.click(screen.getByRole('button', { name: 'partitionSettings' }));
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: 'accountManagement' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: 'securityConfig' })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: 'auditLogs' })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: 'Flocks Pro' })).not.toBeInTheDocument();
   });
 
   it('keeps the suite manager reachable when no scene workspace is installed', async () => {
@@ -1443,9 +1486,12 @@ describe('Layout WebUI contract pages navigation', () => {
     renderHomeWithLayout();
     await screen.findByRole('button', { name: 'aiWorkbench' });
 
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    expect(partitionNames()).toEqual(['partitionAgent']);
     expect(await screen.findByRole('link', { name: 'sceneSuiteManager' }))
       .toHaveAttribute('href', '/scenes/suites');
+    await user.click(screen.getByRole('link', { name: 'sceneSuiteManager' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(activePartitionName()).toBe('');
     expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
     // Agent and settings stay usable while no scene workspace exists.
     await user.click(screen.getByRole('tab', { name: 'partitionAgent' }));
@@ -1460,11 +1506,101 @@ describe('Layout WebUI contract pages navigation', () => {
     await screen.findByRole('button', { name: 'aiWorkbench' });
     expect(screen.queryByRole('link', { name: '自定义仪表盘' })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'customPages' }));
     expect(await screen.findByRole('link', { name: '自定义仪表盘' })).toHaveAttribute(
       'href',
       '/contracts/webui/dash-1',
     );
+    expect(activePartitionName()).toBe('customPages');
+    await user.click(screen.getByRole('link', { name: 'sceneSuiteManager' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(activePartitionName()).toBe('');
+  });
+
+  it('updates scene tabs after install, uninstalls the active scene safely, and uses fresh pages after reinstall', async () => {
+    const user = userEvent.setup();
+    const emptyNav = { pages: [], workspaces: [], loading: false, error: null, refetch: vi.fn() };
+    useWebUIContractPages.mockReturnValue(emptyNav);
+    const view = renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(partitionNames()).toEqual(['partitionAgent']);
+
+    const installed = makeSceneWorkspace('code_audit_ui', '代码审计', [
+      { id: 'audit-overview', title: '审计总览' },
+      { id: 'old-findings', title: '旧缺陷清单' },
+    ]);
+    useWebUIContractPages.mockReturnValue({ ...emptyNav, pages: installed.pages, workspaces: [installed] });
+    view.rerender(layoutTree('/sessions'));
+    await user.click(screen.getByRole('tab', { name: '代码审计' }));
+    await user.click(screen.getByRole('link', { name: '旧缺陷清单' }));
+    expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/old-findings');
+    expect(activePartitionName()).toBe('代码审计');
+
+    useWebUIContractPages.mockReturnValue(emptyNav);
+    view.rerender(layoutTree('/sessions'));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(partitionNames()).toEqual(['partitionAgent']);
+    expect(screen.queryByRole('link', { name: '旧缺陷清单' })).not.toBeInTheDocument();
+    expect(Array.from(document.querySelectorAll('[data-keep-alive-pane]')).some((pane) => pane.textContent?.includes('/old-findings'))).toBe(false);
+
+    const reinstalled = makeSceneWorkspace('code_audit_ui', '代码审计', [
+      { id: 'new-overview', title: '新审计总览' },
+    ]);
+    useWebUIContractPages.mockReturnValue({ ...emptyNav, pages: reinstalled.pages, workspaces: [reinstalled] });
+    view.rerender(layoutTree('/sessions'));
+    await user.click(screen.getByRole('tab', { name: '代码审计' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/new-overview'));
+    expect(screen.getByRole('link', { name: '新审计总览' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '旧缺陷清单' })).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('flocks_layout_partition_paths') ?? '{}')['workspace:code_audit_ui'])
+      .toBe('/contracts/webui/workspaces/code_audit_ui/new-overview');
+  });
+
+  it.each(['disabled', 'empty'] as const)('keeps an installed %s workspace tab and routes it to its management state', async (state) => {
+    const user = userEvent.setup();
+    const workspace = makeSceneWorkspace('code_audit_ui', '代码审计', state === 'empty' ? [] : [
+      { id: 'audit-overview', title: '审计总览' },
+    ]);
+    workspace.enabled = state !== 'disabled';
+    useWebUIContractPages.mockReturnValue({ pages: workspace.pages, workspaces: [workspace], loading: false, error: null, refetch: vi.fn() });
+    const view = renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(partitionNames()).toEqual(['partitionAgent', '代码审计']);
+    await user.click(screen.getByRole('tab', { name: '代码审计' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(
+      `/scenes/suites?workspace=code_audit_ui${state === 'empty' ? '&reason=pages-unavailable' : ''}`,
+    ));
+    expect(activePartitionName()).toBe('代码审计');
+    expect(screen.queryByRole('link', { name: '审计总览' })).not.toBeInTheDocument();
+
+    const ready = makeSceneWorkspace('code_audit_ui', '代码审计', [{ id: 'audit-overview', title: '审计总览' }]);
+    useWebUIContractPages.mockReturnValue({ pages: ready.pages, workspaces: [ready], loading: false, error: null, refetch: vi.fn() });
+    view.rerender(layoutTree('/sessions'));
+    await user.click(screen.getByRole('tab', { name: '代码审计' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/audit-overview'));
+    expect(activePartitionName()).toBe('代码审计');
+  });
+
+  it('waits for navigation loading and redirects a removed workspace only after fresh data arrives', async () => {
+    useWebUIContractPages.mockReturnValue({ pages: [], workspaces: [], loading: true, error: null, refetch: vi.fn() });
+    const view = renderLayoutAt('/contracts/webui/workspaces/removed/page');
+    await flushEffects();
+    expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/removed/page');
+    useWebUIContractPages.mockReturnValue({ pages: [], workspaces: [], loading: false, error: null, refetch: vi.fn() });
+    view.rerender(layoutTree('/contracts/webui/workspaces/removed/page'));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(activePartitionName()).toBe('');
+  });
+
+  it('shows the new-scene badge from the update hook and marks the suite manager as viewed', async () => {
+    const user = userEvent.setup();
+    useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: true });
+    renderLayoutAt('/sessions');
+    const manager = screen.getByRole('link', { name: 'sceneSuiteManager' });
+    expect(within(manager).getByText('NEW')).toBeInTheDocument();
+    expect(useSceneSuiteUpdates).toHaveBeenLastCalledWith({ viewingScenes: false, userId: 'user-1' });
+    await user.click(manager);
+    await waitFor(() => expect(useSceneSuiteUpdates).toHaveBeenLastCalledWith({ viewingScenes: true, userId: 'user-1' }));
   });
 
   it('does not render WebUI contract page links until their build is ready', async () => {
@@ -1501,10 +1637,70 @@ describe('Layout WebUI contract pages navigation', () => {
 
     renderHomeWithLayout();
     await screen.findByRole('button', { name: 'aiWorkbench' });
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'customPages' }));
 
     expect(await screen.findByRole('link', { name: '可用页面' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '失败页面' })).not.toBeInTheDocument();
+  });
+
+  it.each(['sceneWorkspace', 'aiWorkbench'] as const)('only exposes enabled, ready pages inside a %s workspace', async (placement) => {
+    const user = userEvent.setup();
+    const base = makeSceneWorkspace('mixed_ui', '混合工作区', [
+      { id: 'disabled-page', title: '已禁用页面' },
+      { id: 'failed-page', title: '构建失败页面' },
+      { id: 'ready-page', title: '可用工作区页面' },
+    ]);
+    const workspace = {
+      ...base,
+      placement,
+      pages: base.pages.map((page) => ({
+        ...page,
+        enabled: page.id !== 'disabled-page',
+        buildStatus: page.id === 'failed-page' ? 'failed' as const : 'ready' as const,
+      })),
+    };
+    localStorage.setItem('flocks_layout_workspace_page_order:mixed_ui', JSON.stringify(['failed-page', 'disabled-page', 'ready-page']));
+    useWebUIContractPages.mockReturnValue({ pages: workspace.pages, workspaces: [workspace], loading: false, error: null, refetch: vi.fn() });
+    const { container } = renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    if (placement === 'sceneWorkspace') {
+      await user.click(screen.getByRole('tab', { name: '混合工作区' }));
+      await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/mixed_ui/ready-page'));
+    } else {
+      expect(partitionNames()).toEqual(['partitionAgent']);
+    }
+    expect(screen.getByRole('link', { name: '可用工作区页面' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '已禁用页面' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '构建失败页面' })).not.toBeInTheDocument();
+    expect(Array.from(container.querySelectorAll('aside nav a'))
+      .filter((link) => link.getAttribute('href')?.startsWith('/contracts/webui/workspaces/mixed_ui/'))
+      .map((link) => link.getAttribute('href')))
+      .toEqual(['/contracts/webui/workspaces/mixed_ui/ready-page']);
+  });
+
+  it('routes a workspace with only unavailable pages to the page-recovery state', async () => {
+    const user = userEvent.setup();
+    const base = makeSceneWorkspace('unavailable_ui', '页面不可用工作区', [
+      { id: 'idle-page', title: '待构建页面' },
+      { id: 'building-page', title: '构建中页面' },
+      { id: 'failed-page', title: '构建失败页面' },
+    ]);
+    const workspace = {
+      ...base,
+      pages: base.pages.map((page) => ({
+        ...page,
+        buildStatus: page.id === 'failed-page' ? 'failed' as const
+          : page.id === 'building-page' ? 'building' as const : 'idle' as const,
+      })),
+    };
+    useWebUIContractPages.mockReturnValue({ pages: workspace.pages, workspaces: [workspace], loading: false, error: null, refetch: vi.fn() });
+    renderLayoutAt('/sessions');
+    await user.click(screen.getByRole('tab', { name: '页面不可用工作区' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites?workspace=unavailable_ui&reason=pages-unavailable'));
+    expect(activePartitionName()).toBe('页面不可用工作区');
+    expect(screen.queryByRole('link', { name: '待构建页面' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '构建中页面' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '构建失败页面' })).not.toBeInTheDocument();
   });
 
   it('keeps the accordion of each partition independent', async () => {
@@ -1526,7 +1722,7 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(screen.queryByRole('link', { name: 'agents' })).not.toBeInTheDocument();
 
     // The scene partition has its own accordion: the SOC group opens on its own.
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'SOC 工作区' }));
     expect(await screen.findByRole('link', { name: '告警调查' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'SOC 工作区' })).toHaveAttribute('aria-expanded', 'true');
     expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查']);
@@ -1541,7 +1737,7 @@ describe('Layout WebUI contract pages navigation', () => {
     renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
 
     expect(await screen.findByRole('link', { name: '告警调查' })).toBeInTheDocument();
-    expect(activePartitionName()).toBe('partitionScene');
+    expect(activePartitionName()).toBe('SOC 工作区');
   });
 
   it('renders the SOC workspace in the scene partition and keeps device integration in the agent studio', async () => {
@@ -1564,7 +1760,7 @@ describe('Layout WebUI contract pages navigation', () => {
     ]);
     expect(screen.getByRole('link', { name: 'deviceIntegration' })).toHaveAttribute('href', '/devices');
 
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'SOC 工作区' }));
     await screen.findByRole('link', { name: 'SOC 总览' });
     // The workspace title is the first-level group; its sections (态势 /
     // 告警运营) do not become headings, the pages sit flat under the scene.
@@ -1744,7 +1940,7 @@ describe('Layout WebUI contract pages navigation', () => {
     // A stored entry keeps the path it was left on.
     expect(screen.getByRole('link', { name: 'workflows' })).toHaveAttribute('href', '/workflows/wf-9');
 
-    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await user.click(screen.getByRole('tab', { name: 'SOC 工作区' }));
     await screen.findByRole('link', { name: '态势' });
     // The entry of a workspace that no longer exists is simply not there.
     expect(screen.queryByRole('link', { name: /old_ws/ })).not.toBeInTheDocument();
@@ -1785,7 +1981,7 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(keysIn(second.container, 'aiWorkbench')).toEqual(['/', '/workflows', '/sessions', '/tasks', '/workspace']);
   });
 
-  it('gives every scene suite its own first-level group and opens one scene at a time', async () => {
+  it('gives every installed scene its own tab and shows only the active scene in the sidebar', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     const socPages = mockSocWorkspaceNav();
@@ -1805,23 +2001,23 @@ describe('Layout WebUI contract pages navigation', () => {
     const { container } = renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
     await screen.findByRole('link', { name: '告警调查' });
 
-    // One heading per scene; the scene owning the route is open, the other closed.
-    expect(sectionHeadings(container)).toEqual(['SOC 工作区', '代码审计']);
+    expect(partitionNames()).toEqual(['partitionAgent', 'SOC 工作区', '代码审计']);
+    expect(sectionHeadings(container)).toEqual(['SOC 工作区']);
     const socToggle = screen.getByRole('button', { name: 'SOC 工作区' });
-    const auditToggle = screen.getByRole('button', { name: '代码审计' });
     expect(socToggle).toHaveAttribute('aria-expanded', 'true');
-    expect(auditToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: '代码审计' })).not.toBeInTheDocument();
     expect(sceneMenuLinks()).toEqual(['态势', 'SOC 总览', '告警调查']);
     expect(screen.queryByRole('link', { name: '审计总览' })).not.toBeInTheDocument();
     // Workspace actions belong to the SOC group only.
     expect(within(sceneMenuSection()).getByRole('button', { name: 'workspace.customPage' })).toBeInTheDocument();
-    // No switcher in the top bar any more: the groups are the switcher.
     expect(screen.queryByRole('tablist', { name: 'scenes' })).not.toBeInTheDocument();
 
-    // Opening the other scene closes SOC (accordion) and shows only that scene's pages.
-    await user.click(auditToggle);
+    await user.click(screen.getByRole('tab', { name: '代码审计' }));
+    const auditToggle = screen.getByRole('button', { name: '代码审计' });
     expect(auditToggle).toHaveAttribute('aria-expanded', 'true');
-    expect(socToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(sectionHeadings(container)).toEqual(['代码审计']);
+    expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
+    expect(activePartitionName()).toBe('代码审计');
     expect(screen.getByRole('link', { name: '审计总览' })).toHaveAttribute('href', '/contracts/webui/workspaces/code_audit_ui/code-audit-overview');
     expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
     const auditSection = auditToggle.closest('div.mb-6') as HTMLElement;
@@ -1832,12 +2028,16 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(auditToggle).toHaveAttribute('aria-expanded', 'true');
     expect(localStorage.getItem('flocks_layout_expanded_primary_nav_section')).toBe('workspace:code_audit_ui');
 
-    // Coming back through the SOC group works the same way.
-    await user.click(socToggle);
-    expect(socToggle).toHaveAttribute('aria-expanded', 'true');
-    expect(auditToggle).toHaveAttribute('aria-expanded', 'false');
-    await user.click(screen.getByRole('link', { name: 'SOC 总览' }));
+    await user.click(screen.getByRole('tab', { name: 'SOC 工作区' }));
+    expect(screen.getByRole('button', { name: 'SOC 工作区' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.queryByRole('button', { name: '代码审计' })).not.toBeInTheDocument();
     await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-overview'));
+    await user.click(screen.getByRole('tab', { name: '代码审计' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/code-audit-findings'));
+    expect(JSON.parse(localStorage.getItem('flocks_layout_partition_paths') ?? '{}')).toMatchObject({
+      'workspace:soc_ui': '/contracts/webui/workspaces/soc_ui/soc-overview',
+      'workspace:code_audit_ui': '/contracts/webui/workspaces/code_audit_ui/code-audit-findings',
+    });
   });
 
   it('opens the scene group that owns a directly opened page', async () => {
@@ -1860,9 +2060,9 @@ describe('Layout WebUI contract pages navigation', () => {
     await screen.findByRole('link', { name: '攻击面' });
 
     expect(screen.getByRole('button', { name: 'AI 红队' })).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByRole('button', { name: 'SOC 工作区' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
-    expect(activePartitionName()).toBe('partitionScene');
+    expect(activePartitionName()).toBe('AI 红队');
   });
 
   it('keeps the single installed scene under its own first-level heading', async () => {

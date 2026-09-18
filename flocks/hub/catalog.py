@@ -827,7 +827,15 @@ def _resolve_install_path(
         path = Path(record.installPath)
         if local.has_install_payload(plugin_type, path):
             return path, record
-        local.remove_installed_record(plugin_type, plugin_id)
+        # Access contracts can outlive a missing WebUI payload. Keep their
+        # ownership/scope record for a later safe uninstall, while reporting no
+        # installed payload or installed version in the catalog response.
+        retained_access = (
+            plugin_type == "webui"
+            and (local.install_root("webui", record.scope).parent / "access" / plugin_id).exists()
+        )
+        if not retained_access:
+            local.remove_installed_record(plugin_type, plugin_id)
         record = None
     if inferred_installs is not None:
         return inferred_installs.get((plugin_type, plugin_id)), record

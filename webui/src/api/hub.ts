@@ -146,7 +146,7 @@ export interface HubSceneSuite {
   version: string;
   installedVersion?: string | null;
   edition: 'oss' | 'pro';
-  state: HubPluginState;
+  state: HubPluginState | 'partial';
   workspaceId?: string | null;
   workspaceTitle?: string | null;
   workspaceRoute?: string | null;
@@ -189,12 +189,14 @@ export const hubAPI = {
       fetch(`${getApiBase()}/api/hub/plugins/${type}/${id}/install/stream`, {
         method: 'POST',
         credentials: 'include',
+        signal: AbortSignal.timeout(15 * 60_000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scope }),
       })
-        .then((res) => {
+        .then(async (res) => {
           if (!res.ok || !res.body) {
-            reject(new Error(`HTTP ${res.status}`));
+            const payload = await res.json().catch(() => null) as { detail?: unknown } | null;
+            reject(new Error(typeof payload?.detail === 'string' ? payload.detail : `HTTP ${res.status}`));
             return;
           }
 

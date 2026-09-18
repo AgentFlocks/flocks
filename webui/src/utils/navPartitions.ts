@@ -1,10 +1,11 @@
-/**
- * The three fixed partitions of the top bar. Each partition owns a set of
- * routes and shows only its own menu in the sidebar.
- */
-export type NavPartitionId = 'agent' | 'scene' | 'settings';
+import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
-export const NAV_PARTITION_IDS: readonly NavPartitionId[] = ['agent', 'scene', 'settings'] as const;
+/** Scene tabs are identified by the installed workspace, never a fixed label. */
+export type NavPartitionId = 'agent' | 'scene' | 'settings' | `workspace:${string}`;
+
+export function workspacePartitionId(workspaceId: string): NavPartitionId {
+  return `workspace:${workspaceId}`;
+}
 
 export const AGENT_PARTITION_DEFAULT_PATH = '/';
 export const SETTINGS_PARTITION_DEFAULT_PATH = '/settings/preferences';
@@ -24,8 +25,15 @@ function isScenePath(pathname: string): boolean {
     || pathname.startsWith('/user-defined-pages/');
 }
 
-export function resolveNavPartition(pathname: string): NavPartitionId {
+export function resolveNavPartition(
+  pathname: string,
+  workspaces: readonly WebUIContractWorkspaceListItem[] = [],
+): NavPartitionId {
+  const workspace = workspaces.find((item) => pathname === item.route || pathname.startsWith(`${item.route}/`));
+  if (workspace) return workspace.placement === 'aiWorkbench' ? 'agent' : workspacePartitionId(workspace.id);
   if (isSettingsPath(pathname)) return 'settings';
+  const workspaceMatch = pathname.match(/^\/contracts\/webui\/workspaces\/([^/]+)(?:\/|$)/);
+  if (workspaceMatch) return workspacePartitionId(workspaceMatch[1]);
   if (isScenePath(pathname)) return 'scene';
   return 'agent';
 }
@@ -40,10 +48,16 @@ export function readPartitionPaths(): NavPartitionPaths {
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
     const result: NavPartitionPaths = {};
-    for (const id of NAV_PARTITION_IDS) {
-      const value = (parsed as Record<string, unknown>)[id];
-      // Only keep a stored path that still belongs to its own partition.
-      if (typeof value === 'string' && value.startsWith('/') && resolveNavPartition(value) === id) {
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!['agent', 'scene', 'settings'].includes(key) && !/^workspace:[^/]+$/.test(key)) continue;
+      const id = key as NavPartitionId;
+      if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) continue;
+      const inferredPartition = resolveNavPartition(value.split('?')[0]);
+      // Workspace placement is unknown until navigation loads. Keep Agent's
+      // workspace candidate too; Layout validates it against that partition's
+      // current available hrefs before navigating, including after uninstall.
+      const pendingAgentWorkspace = id === 'agent' && inferredPartition.startsWith('workspace:');
+      if (inferredPartition === id || id.startsWith('workspace:') || pendingAgentWorkspace) {
         result[id] = value;
       }
     }

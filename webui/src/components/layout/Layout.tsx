@@ -19,9 +19,7 @@ import {
   Archive,
   ServerCog,
   LogOut,
-  Settings,
   LayoutGrid,
-  Boxes,
   ArrowUpCircle,
   RefreshCw,
   Gauge,
@@ -201,6 +199,7 @@ import { useProductName } from '@/contexts/ProductNameContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
+import { useSceneSuiteUpdates } from '@/hooks/useSceneSuiteUpdates';
 import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import {
@@ -217,6 +216,7 @@ import {
   readPartitionPaths,
   resolveNavPartition,
   savePartitionPaths,
+  workspacePartitionId,
   type NavPartitionId,
   type NavPartitionPaths,
 } from '@/utils/navPartitions';
@@ -377,7 +377,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     pages: webuiContractPages,
     workspaces: webuiContractWorkspaces = [],
     loading: webuiContractNavLoading,
+    error: webuiContractNavError,
   } = useWebUIContractPages();
+  const viewingScenes = location.pathname === '/scenes' || location.pathname.startsWith('/scenes/');
+  const { hasUnseenSuites } = useSceneSuiteUpdates({ viewingScenes, userId: user?.id });
   const workspacePageOrders = useWorkspacePageOrders();
   const [openTabRecords, setOpenTabRecords] = useLayoutOpenTabs();
   // Tab whose close is in flight: React Router commits the navigation as a
@@ -765,7 +768,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       const enabledWorkspaces = webuiContractWorkspaces.filter((workspace) => workspace.enabled);
       const workspacePageItems = (workspace: WebUIContractWorkspaceListItem): LayoutNavItem[] => (
         workspacePageOrders
-          .apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language))
+          .apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language)
+            .filter((page) => page.enabled && page.buildStatus === 'ready'))
           .map((page) => ({
             pageId: page.id,
             name: page.title,
@@ -783,18 +787,17 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       // second level. The groups share the accordion, so one scene is open at
       // a time and entering a scene's route opens it: the menu on screen never
       // mixes two scenes' pages (xlsx TC-09).
-      const sceneWorkspaceSections: LayoutNavSection[] = enabledWorkspaces
+      const sceneWorkspaceSections: LayoutNavSection[] = webuiContractWorkspaces
         .filter((workspace) => workspace.placement === 'sceneWorkspace')
-        .map((workspace) => ({ workspace, items: workspacePageItems(workspace) }))
-        .filter(({ items }) => items.length > 0)
+        .map((workspace) => ({ workspace, items: workspace.enabled ? workspacePageItems(workspace) : [] }))
         .map(({ workspace, items }) => ({
           id: workspaceNavSectionId(workspace.id),
           name: getLocalizedWebUIContractTitle(workspace, i18n.language),
-          partition: 'scene' as const,
+          partition: workspacePartitionId(workspace.id),
           collapsible: true,
           accordionGroup: 'primary' as const,
           workspace,
-          actionsWorkspace: isSocWorkspace(workspace) ? workspace : undefined,
+          actionsWorkspace: workspace.enabled && items.length > 0 && isSocWorkspace(workspace) ? workspace : undefined,
           items,
         }));
       // Custom pages that do not belong to a workspace sit next to the scene
@@ -866,14 +869,23 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     [i18n.language, productName, settingsGroups, webuiContractPages, webuiContractWorkspaces, workspacePageOrders, t],
   );
 
-  // Which of the three top-bar partitions is showing. It follows the route, but
-  // a partition with no page yet (SOC not installed) can still be selected to
-  // show its own — empty — menu.
-  const routePartition = resolveNavPartition(location.pathname);
-  const [selectedPartition, setSelectedPartition] = useState<NavPartitionId>(routePartition);
+  // Selection comes from the live route, so a failed/empty navigation cannot
+  // highlight one workspace while another workspace's content stays visible.
+  const sceneSections = useMemo(() => navigation.filter((section) => section.workspace), [navigation]);
+  const requestedWorkspace = viewingScenes ? new URLSearchParams(location.search).get('workspace') : null;
+  const routePartition = requestedWorkspace && sceneSections.some((section) => section.workspace?.id === requestedWorkspace)
+    ? workspacePartitionId(requestedWorkspace)
+    : resolveNavPartition(location.pathname, webuiContractWorkspaces);
+  const selectedPartition = routePartition;
+
   useEffect(() => {
-    setSelectedPartition(routePartition);
-  }, [routePartition]);
+    if (webuiContractNavLoading || webuiContractNavError || viewingScenes || !routePartition.startsWith('workspace:')) return;
+    const section = sceneSections.find((item) => item.partition === routePartition);
+    if (!section) navigate('/scenes/suites', { replace: true });
+    else if (section.workspace && (!section.workspace.enabled || section.items.length === 0)) {
+      navigate(`/scenes/suites?workspace=${encodeURIComponent(section.workspace.id)}${section.workspace.enabled ? '&reason=pages-unavailable' : ''}`, { replace: true });
+    }
+  }, [navigate, routePartition, sceneSections, viewingScenes, webuiContractNavError, webuiContractNavLoading]);
 
   const visibleNavigation = useMemo(
     () => navigation.filter((section) => section.partition === selectedPartition),
@@ -882,38 +894,48 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const partitionItems = useMemo<PartitionTopBarItem[]>(() => [
     { id: 'agent', name: t('partitionAgent'), icon: Sparkles },
-    { id: 'scene', name: t('partitionScene'), icon: LayoutGrid },
-    { id: 'settings', name: t('partitionSettings'), icon: Settings },
-  ], [t]);
+    ...sceneSections.map((section) => ({
+      id: section.partition,
+      name: section.name,
+      icon: resolveWebUIContractPageIcon(section.workspace!.icon),
+    })),
+    ...(navigation.some((section) => section.id === 'customPages')
+      ? [{ id: 'scene' as const, name: t('customPages'), icon: LayoutGrid }]
+      : []),
+  ], [navigation, sceneSections, t]);
+  const topBarSettings = useMemo(() => navigation.filter((section) => section.partition === 'settings'), [navigation]);
 
   // Remember where each partition was left so the top bar returns to it.
   const partitionPathsRef = useRef<NavPartitionPaths>(readPartitionPaths());
   useEffect(() => {
+    if (viewingScenes) return;
     const next = { ...partitionPathsRef.current, [routePartition]: `${location.pathname}${location.search}` };
     partitionPathsRef.current = next;
     savePartitionPaths(next);
-  }, [location.pathname, location.search, routePartition]);
+  }, [location.pathname, location.search, routePartition, viewingScenes]);
 
   const partitionTargetPath = useCallback((id: NavPartitionId): string | null => {
     const hrefs = navigation
       .filter((section) => section.partition === id)
       .flatMap((section) => section.items)
+      .filter((item) => !item.external)
       .map((item) => item.href);
     const stored = partitionPathsRef.current[id];
     // Only reuse the stored page while it still exists in that partition.
     if (stored && findActiveTabHref(hrefs, stored.split('?')[0])) return stored;
     if (id === 'agent') return AGENT_PARTITION_DEFAULT_PATH;
     if (id === 'settings') return SETTINGS_PARTITION_DEFAULT_PATH;
-    return hrefs[0] ?? null;
-  }, [navigation]);
+    if (hrefs.length > 0) return hrefs[0];
+    const workspace = sceneSections.find((section) => section.partition === id)?.workspace;
+    return workspace ? `/scenes/suites?workspace=${encodeURIComponent(workspace.id)}${workspace.enabled ? '&reason=pages-unavailable' : ''}` : null;
+  }, [navigation, sceneSections]);
 
   const selectPartition = useCallback((id: NavPartitionId) => {
-    setSelectedPartition(id);
     setSidebarOpen(false);
-    if (id === routePartition) return;
+    if (id === routePartition && !viewingScenes) return;
     const target = partitionTargetPath(id);
     if (target) navigate(target);
-  }, [navigate, partitionTargetPath, routePartition]);
+  }, [navigate, partitionTargetPath, routePartition, viewingScenes]);
 
   const displayVersion = isFlocksproActive
     ? updateInfo?.edition === 'flockspro'
@@ -1641,16 +1663,16 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       >
         <PartitionTopBar
           items={partitionItems}
-          activeId={selectedPartition}
+          activeId={viewingScenes && !routePartition.startsWith('workspace:') ? null : selectedPartition}
           onSelect={selectPartition}
-          action={selectedPartition === 'scene'
-            ? {
+          action={{
               href: '/scenes/suites',
               name: t('sceneSuiteManager'),
-              icon: Boxes,
-              active: location.pathname.startsWith('/scenes/'),
-            }
-            : undefined}
+              icon: Plus,
+              active: viewingScenes && !routePartition.startsWith('workspace:'),
+              badge: hasUnseenSuites,
+            }}
+          settingsGroups={topBarSettings}
         />
         <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           <KeepAlivePanes
