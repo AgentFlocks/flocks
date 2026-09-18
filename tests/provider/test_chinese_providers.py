@@ -341,9 +341,10 @@ class TestCuratedCatalogModels:
             "kimi-k2.6",
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
+            "deepseek-v4.1-flash",
         }
 
-        assert models[0].id == "deepseek-v4-flash-0731"
+        assert models[0].id == "deepseek-v4.1-flash"
         kimi_code = next(m for m in models if m.id == "kimi-k2.7-code")
         assert kimi_code.capabilities.supports_vision is True
         assert kimi_code.capabilities.supports_reasoning is True
@@ -412,9 +413,10 @@ class TestCuratedCatalogModels:
             "qwen3-max",
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
+            "deepseek-v4.1-flash",
         }
 
-        assert models[0].id == "deepseek-v4-flash-0731"
+        assert models[0].id == "deepseek-v4.1-flash"
         kimi_code = next(m for m in models if m.id == "kimi-k2.7-code")
         assert kimi_code.capabilities.supports_vision is True
         assert kimi_code.capabilities.supports_reasoning is True
