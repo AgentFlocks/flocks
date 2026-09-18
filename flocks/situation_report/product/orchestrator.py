@@ -33,6 +33,9 @@ ALLOWED_PRODUCT_MODELS = frozenset(
         ("threatbook-cn-llm", "bailian:deepseek-v4-flash-0731"),
         ("anthropic", "claude-opus-4-6"),
         ("anthropic", "claude-opus-4-8"),
+        ("anthropic", "claude-opus-5"),
+        ("anthropic", "claude-fable-5"),
+        ("anthropic", "claude-fable-5-1"),
     }
 )
 _model_slots: Optional[asyncio.Semaphore] = None

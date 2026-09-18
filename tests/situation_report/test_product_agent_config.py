@@ -38,6 +38,9 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
         ("threatbook-cn-llm", "bailian:deepseek-v4-flash-0731"),
         ("anthropic", "claude-opus-4-6"),
         ("anthropic", "claude-opus-4-8"),
+        ("anthropic", "claude-opus-5"),
+        ("anthropic", "claude-fable-5"),
+        ("anthropic", "claude-fable-5-1"),
     }
     assert {
         "delegate_task",
