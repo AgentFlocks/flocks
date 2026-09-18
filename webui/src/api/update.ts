@@ -16,7 +16,7 @@ export type UpdateStage =
   | 'done'
   | 'error';
 
-export type DeployMode = 'docker' | 'source';
+export type DeployMode = 'docker' | 'source' | 'offline';
 export type UpdateEdition = 'flocks' | 'flockspro';
 
 export interface VersionInfo {

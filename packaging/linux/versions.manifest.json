@@ -1,0 +1,29 @@
+{
+  "description": "Pinned toolchain versions bundled into the Linux offline installer (flocks-offline.run). Bump here when upgrading; the build script downloads exactly these.",
+  "install_root": "/opt/flocks",
+  "python": {
+    "version": "3.12.12",
+    "python_build_standalone_release": "20251202",
+    "archive_template": "cpython-{version}+{release}-{triple}-unknown-linux-gnu-install_only_stripped.tar.gz",
+    "base_url": "https://github.com/astral-sh/python-build-standalone/releases/download"
+  },
+  "nodejs": {
+    "version": "22.12.0",
+    "archive_template": "node-v{version}-linux-{node_arch}.tar.gz",
+    "base_url": "https://nodejs.org/dist",
+    "cn_base_url": "https://registry.npmmirror.com/-/binary/node"
+  },
+  "uv": {
+    "version": "0.9.15",
+    "archive_template": "uv-{triple}-unknown-linux-gnu.tar.gz",
+    "base_url": "https://github.com/astral-sh/uv/releases/download"
+  },
+  "makeself": {
+    "version": "2.5.0",
+    "archive_url": "https://github.com/megastep/makeself/archive/refs/tags/release-{version}.tar.gz"
+  },
+  "arch": {
+    "x86_64": { "triple": "x86_64", "node_arch": "x64" },
+    "aarch64": { "triple": "aarch64", "node_arch": "arm64" }
+  }
+}

@@ -23,6 +23,16 @@ def update_command(
         "--region",
         help="升级镜像区域。设置为 cn 时优先使用中国大陆镜像源。",
     ),
+    pro_bundle: bool = typer.Option(
+        False,
+        "--pro-bundle",
+        help="安装 Flocks Pro bundle（离线安装包设置了 FLOCKS_PRO_BUNDLE_DIR 时用本地包，否则从 Console 下载）",
+    ),
+    no_restart: bool = typer.Option(
+        False,
+        "--no-restart",
+        help="与 --pro-bundle 连用：只安装组件，不自动重启服务（之后自行执行 flocks restart --server-only）",
+    ),
 ):
     """
     Check for and upgrade Flocks to the latest version.
@@ -31,7 +41,27 @@ def update_command(
     current version to ~/.flocks/version/, extracts and replaces source files,
     re-syncs dependencies, then restarts the service automatically.
     """
+    if pro_bundle:
+        asyncio.run(_install_pro_bundle(restart=not no_restart))
+        return
     asyncio.run(_update(check=check, yes=yes, force=force, region=region))
+
+
+async def _install_pro_bundle(*, restart: bool) -> None:
+    """Install the Pro bundle (local offline bundle first, Console otherwise)."""
+    from flocks.updater import perform_pro_bundle_install
+
+    async for progress in perform_pro_bundle_install(restart=restart):
+        if progress.stage == "error":
+            append_upgrade_text_log(f"ERROR cli_pro_bundle: {progress.message}")
+            console.print(f"[red]✗ Pro 组件安装失败：{progress.message}[/red]")
+            raise typer.Exit(1)
+        if progress.stage == "fetching" and progress.percent is not None:
+            continue
+        console.print(f"[cyan]{progress.stage}[/cyan] {progress.message}")
+        if progress.stage == "done":
+            append_upgrade_text_log("OK cli_pro_bundle_installed")
+            console.print("[green]✓ Pro 组件已安装[/green]")
 
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
@@ -72,6 +102,11 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             "  [bold]docker pull ghcr.io/agentflocks/flocks:latest[/bold]\n"
             "  [bold]docker restart <container>[/bold][/yellow]"
         )
+        return
+    if detect_deploy_mode() == "offline":
+        from flocks.updater.updater import OFFLINE_UPGRADE_REFUSED_MESSAGE
+
+        console.print(f"\n[yellow]{OFFLINE_UPGRADE_REFUSED_MESSAGE}[/yellow]")
         return
 
     if check:

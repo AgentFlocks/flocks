@@ -9,6 +9,7 @@ import {
   Loader2,
   Sparkles,
   Container,
+  HardDrive,
   BellOff,
 } from 'lucide-react';
 import NoticeCard, { NoticePrimaryAction } from './NoticeCard';
@@ -354,12 +355,18 @@ export default function UpdateModal({
                 {info.update_allowed === false && (
                   <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
                     <div className="flex items-center gap-1.5 font-medium">
-                      <Container className="w-3.5 h-3.5 flex-shrink-0" />
-                      {t('dockerModeTitle')}
+                      {info.deploy_mode === 'offline' ? (
+                        <HardDrive className="w-3.5 h-3.5 flex-shrink-0" />
+                      ) : (
+                        <Container className="w-3.5 h-3.5 flex-shrink-0" />
+                      )}
+                      {t(info.deploy_mode === 'offline' ? 'offlineModeTitle' : 'dockerModeTitle')}
                     </div>
-                    <p className="mt-1 leading-5">{t('dockerModeDesc')}</p>
+                    <p className="mt-1 leading-5">
+                      {t(info.deploy_mode === 'offline' ? 'offlineModeDesc' : 'dockerModeDesc')}
+                    </p>
                     <code className="mt-1.5 block rounded bg-blue-100 px-2 py-1 text-xs text-blue-900 select-all">
-                      {t('dockerUpgradeHint')}
+                      {t(info.deploy_mode === 'offline' ? 'offlineUpgradeHint' : 'dockerUpgradeHint')}
                     </code>
                   </div>
                 )}

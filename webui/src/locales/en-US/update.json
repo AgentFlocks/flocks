@@ -32,6 +32,9 @@
   "dockerModeTitle": "Docker Deployment",
   "dockerModeDesc": "You are running Flocks via Docker. In-place upgrade is not available. Please pull the latest image and restart the container to upgrade.",
   "dockerUpgradeHint": "docker pull ghcr.io/agentflocks/flocks:latest",
+  "offlineModeTitle": "Offline Package Deployment",
+  "offlineModeDesc": "This instance was installed from the offline package (flocks-offline.run); network-based in-place upgrades are disabled. Get the newer package, upload it to the server and run the install command again; data and licenses are kept.",
+  "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
   "stageLabels": {
     "fetching": "Downloading latest source archive",
     "fetchingPro": "Downloading Pro bundle",
