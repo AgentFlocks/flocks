@@ -16,12 +16,16 @@ Stats:      GET /stats
 
 from __future__ import annotations
 
+import asyncio
 import io
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
 from tests.utils.file_type_samples import ALL_SUPPORTED_UPLOAD_FILENAMES, create_sample_file
 
 
@@ -83,6 +87,36 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Cleanup
     WorkspaceManager._instance = None
     Config._global_config = None
+
+
+@pytest.fixture()
+def chat_staging(workspace_client, monkeypatch):
+    """Track newly created targets alongside an unrelated existing upload."""
+    from flocks.session import files as session_files
+
+    create_target = session_files.create_chat_upload_target
+    existing = create_target("usr_workspace", "part_existing", "keep.txt")
+    existing.write_bytes(b"keep")
+    created = []
+
+    def track_target(owner_id, upload_id, filename):
+        target = create_target(owner_id, upload_id, filename)
+        created.append(target)
+        return target
+
+    monkeypatch.setattr(session_files, "create_chat_upload_target", track_target)
+    return created, existing
+
+
+@pytest.fixture()
+def upload_request():
+    from flocks.auth.context import AuthUser
+
+    request = Request({"type": "http"})
+    request.state.auth_user = AuthUser(
+        id="usr_workspace", username="workspace", role="member", status="active",
+    )
+    return request
 
 
 # Convenience unpacking helpers used in every test
@@ -354,7 +388,13 @@ class TestUpload:
         result = response.json()["uploaded"][0]
         assert result.get("error") is None
         assert result["name"] == filename
-        assert (_ws(workspace_client) / filename).exists()
+        assert result.get("uploadID")
+        assert "path" not in result
+        assert "abs_path" not in result
+        from flocks.session.files import resolve_staged_chat_upload
+
+        staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+        assert staged.read_bytes() == source.read_bytes()
 
     def test_upload_multiple_files(self, workspace_client):
         client = _client(workspace_client)
@@ -382,6 +422,59 @@ class TestUpload:
         # The file should be saved as just "evil.txt" in the workspace root
         uploaded = r.json()["uploaded"]
         assert uploaded[0]["name"] == "evil.txt"
+
+    @pytest.mark.parametrize(("raw_name", "filename"), [
+        ("folder\\report\x01.pdf", "report_.pdf"),
+        ("folder%5Creport%0A.pdf", "report_.pdf"),
+        ("folder/report%3F%3C.pdf", "report_.pdf"),
+        ("  report   notes.txt  ", "report notes.txt"),
+        ("café.txt", "café.txt"),
+    ])
+    def test_chat_upload_sanitizes_filename(self, workspace_client, raw_name, filename):
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (raw_name, b"report", "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == filename
+
+    @pytest.mark.parametrize("filename", [None, "", "  ", ".", "..", "folder/", "%20", "%2e%2e"])
+    async def test_chat_upload_rejects_empty_filename(
+        self, chat_staging, upload_request, filename,
+    ):
+        from flocks.server.routes.workspace import upload_files
+
+        upload = UploadFile(filename=filename, file=io.BytesIO(b"report"))
+        try:
+            response = await upload_files(upload_request, dest="", purpose="chat", files=[upload])
+            assert response["uploaded"][0] == {
+                "name": "",
+                "error": "Filename is missing" if not filename else "Filename is invalid",
+            }
+            assert upload.file.tell() == 0
+        finally:
+            await upload.close()
+        created, existing = chat_staging
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+
+    async def test_chat_upload_requires_user_before_reading(self, chat_staging):
+        from flocks.server.routes.workspace import upload_files
+
+        upload = UploadFile(filename="report.txt", file=io.BytesIO(b"report"))
+        try:
+            with pytest.raises(HTTPException) as exc:
+                await upload_files(Request({"type": "http"}), dest="", purpose="chat", files=[upload])
+            assert exc.value.status_code == 401
+            assert upload.file.tell() == 0
+        finally:
+            await upload.close()
+        created, existing = chat_staging
+        assert created == []
+        assert existing.read_bytes() == b"keep"
 
     def test_upload_to_nonexistent_dest_creates_it(self, workspace_client):
         client = _client(workspace_client)
@@ -421,9 +514,17 @@ class TestUpload:
         assert response.status_code == 200
         result = response.json()["uploaded"][0]
         assert result.get("error") is None
-        assert result["path"] == "uploads/report.pdf"
-        assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
-        assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
+        if purpose == "chat":
+            from flocks.session.files import resolve_staged_chat_upload
+
+            assert "path" not in result
+            assert "abs_path" not in result
+            staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+            assert staged.read_bytes() == b"report"
+        else:
+            assert result["path"] == "uploads/report.pdf"
+            assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
+            assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
 
     def test_upload_to_root_when_workspace_root_is_symlink(
         self,
@@ -452,27 +553,39 @@ class TestUpload:
         assert result["abs_path"] == str(link / "root.txt")
         assert (ws / "root.txt").read_bytes() == b"root"
 
-    def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client):
+    @pytest.mark.parametrize("filename", [
+        "report.pdf",
+        "normalfilename.txt",
+        "report%20notes.txt",
+        "report%2Fnotes.txt",
+        "r" * 210 + ".txt",
+        "  report   notes.txt",
+        "folder\\report.txt",
+    ])
+    def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client, filename):
         client = _client(workspace_client)
         first = client.post(
             "/api/workspace/upload?dest=uploads",
-            files=[("files", ("report.pdf", b"first", "application/pdf"))],
+            files=[("files", (filename, b"first", "application/octet-stream"))],
         )
         second = client.post(
             "/api/workspace/upload?dest=uploads",
-            files=[("files", ("report.pdf", b"second", "application/pdf"))],
+            files=[("files", (filename, b"second", "application/octet-stream"))],
         )
         assert first.status_code == 200
         assert second.status_code == 200
-        first_item = first.json()["uploaded"][0]
-        second_item = second.json()["uploaded"][0]
-        assert first_item["name"] == "report.pdf"
-        assert second_item["name"] == "report.pdf"
-        assert first_item["path"] == "uploads/report.pdf"
-        assert second_item["path"] == "uploads/report.pdf"
-        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
+        expected_name = Path(filename).name
+        target = _ws(workspace_client) / "uploads" / expected_name
+        for response in (first, second):
+            item = response.json()["uploaded"][0]
+            assert item.get("error") is None
+            assert item["name"] == expected_name
+            assert item["path"] == str(Path("uploads") / expected_name)
+            assert item["abs_path"] == str(target)
+        assert target.read_bytes() == b"second"
+        assert list(target.parent.iterdir()) == [target]
 
-    def test_chat_upload_overwrites_duplicate_file(self, workspace_client):
+    def test_chat_upload_keeps_duplicate_filenames_isolated(self, workspace_client):
         client = _client(workspace_client)
         first = client.post(
             "/api/workspace/upload?dest=uploads&purpose=chat",
@@ -488,9 +601,242 @@ class TestUpload:
         second_item = second.json()["uploaded"][0]
         assert first_item["name"] == "report.pdf"
         assert second_item["name"] == "report.pdf"
-        assert first_item["path"] == "uploads/report.pdf"
-        assert second_item["path"] == "uploads/report.pdf"
-        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
+        assert first_item["uploadID"] != second_item["uploadID"]
+        assert "path" not in first_item
+        assert "abs_path" not in first_item
+
+        from flocks.session.files import resolve_staged_chat_upload
+
+        assert resolve_staged_chat_upload("usr_workspace", first_item["uploadID"]).read_bytes() == b"first"
+        assert resolve_staged_chat_upload("usr_workspace", second_item["uploadID"]).read_bytes() == b"second"
+
+    @pytest.mark.parametrize("content", [b"", b"x" * (3 * 65536)], ids=["empty", "multiple-chunks"])
+    def test_chat_upload_streams_chunks_to_disk(
+        self, workspace_client, chat_staging, monkeypatch, content,
+    ):
+        from flocks.server.routes import workspace as workspace_routes
+        from flocks.session.files import resolve_staged_chat_upload
+
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        read_sizes = []
+        bytes_read = 0
+
+        async def tracked_read(upload, size=-1):
+            nonlocal bytes_read
+            assert size == 65536
+            assert len(created) == 1  # Staging must precede the first read.
+            assert created[0].stat().st_size == bytes_read
+            read_sizes.append(size)
+            chunk = await original_read(upload, size)
+            bytes_read += len(chunk)
+            return chunk
+
+        def reject_write_bytes(*args, **kwargs):
+            pytest.fail("Chat uploads must not buffer content for write_bytes")
+
+        monkeypatch.setattr(UploadFile, "read", tracked_read)
+        monkeypatch.setattr(Path, "write_bytes", reject_write_bytes)
+        monkeypatch.setattr(workspace_routes, "_max_upload_bytes", lambda: len(content))
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", content, "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["size"] == len(content)
+        assert read_sizes == [65536] * (len(content) // 65536 + 1)
+        assert resolve_staged_chat_upload("usr_workspace", result["uploadID"]).read_bytes() == content
+        assert existing.read_bytes() == b"keep"
+
+    def test_chat_upload_size_limit_cleans_partial_file_and_continues(
+        self, workspace_client, chat_staging, monkeypatch,
+    ):
+        from flocks.server.routes import workspace as workspace_routes
+
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        big_reads = []
+
+        async def tracked_read(upload, size=-1):
+            chunk = await original_read(upload, size)
+            if upload.filename == "big.txt":
+                big_reads.append(len(chunk))
+            return chunk
+
+        monkeypatch.setattr(UploadFile, "read", tracked_read)
+        monkeypatch.setattr(workspace_routes, "_max_upload_bytes", lambda: 65536)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[
+                ("files", ("big.txt", b"x" * (3 * 65536), "text/plain")),
+                ("files", ("small.txt", b"ok", "text/plain")),
+            ],
+        )
+
+        assert response.status_code == 200
+        failed, succeeded = response.json()["uploaded"]
+        assert "File too large" in failed["error"]
+        assert "uploadID" not in failed
+        assert succeeded.get("error") is None
+        assert big_reads == [65536, 65536]  # Stop as soon as the sum exceeds the limit.
+        assert len(created) == 2
+        assert not created[0].parent.exists()
+        assert created[1].read_bytes() == b"ok"
+        assert existing.read_bytes() == b"keep"
+        assert set(existing.parent.parent.iterdir()) == {existing.parent, created[1].parent}
+
+    @pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+    def test_chat_upload_read_exception_cleans_partial_file(
+        self, workspace_client, chat_staging, monkeypatch, error_type,
+    ):
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        reads = 0
+
+        async def failing_read(upload, size=-1):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                assert created[0].stat().st_size == 65536
+                raise error_type("read failed")
+            return await original_read(upload, size)
+
+        monkeypatch.setattr(UploadFile, "read", failing_read)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", b"x" * (2 * 65536), "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert "Failed to stage upload: read failed" == result["error"]
+        assert "uploadID" not in result
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    @pytest.mark.parametrize("failure", ["open", "write", "close"])
+    def test_chat_upload_disk_exception_cleans_partial_file(
+        self, workspace_client, chat_staging, monkeypatch, failure,
+    ):
+        created, existing = chat_staging
+        original_open = Path.open
+
+        @contextmanager
+        def failing_writer(path):
+            if failure == "open":
+                raise OSError("open failed")
+            with original_open(path, "xb") as handle:
+                class FailingWriter:
+                    def write(self, chunk):
+                        handle.write(chunk[:16])
+                        handle.flush()
+                        raise OSError("write failed")
+
+                yield FailingWriter() if failure == "write" else handle
+            if failure == "close":
+                raise OSError("close failed")
+
+        def patched_open(path, mode="r", *args, **kwargs):
+            if path in created and mode == "xb":
+                return failing_writer(path)
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", patched_open)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", b"x" * 65536, "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result["error"] == f"Failed to stage upload: {failure} failed"
+        assert "uploadID" not in result
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    async def test_chat_upload_cancellation_cleans_partial_file(
+        self, chat_staging, upload_request, monkeypatch,
+    ):
+        from flocks.server.routes.workspace import upload_files
+
+        created, existing = chat_staging
+        upload = UploadFile(filename="report.txt", file=io.BytesIO(b"x" * 65536))
+        original_read = upload.read
+        waiting_for_chunk = asyncio.Event()
+
+        async def blocking_read(size=-1):
+            if upload.file.tell():
+                assert created[0].stat().st_size == 65536
+                waiting_for_chunk.set()
+                await asyncio.Future()
+            return await original_read(size)
+
+        monkeypatch.setattr(upload, "read", blocking_read)
+        task = asyncio.create_task(
+            upload_files(upload_request, dest="", purpose="chat", files=[upload])
+        )
+        try:
+            await asyncio.wait_for(waiting_for_chunk.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await upload.close()
+
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    @pytest.mark.parametrize("filename", ["keep.txt", "report.pdf"])
+    def test_chat_upload_id_collision_preserves_existing_upload(
+        self, workspace_client, chat_staging, monkeypatch, filename,
+    ):
+        from flocks.utils.id import Identifier
+
+        created, existing = chat_staging
+        monkeypatch.setattr(Identifier, "ascending", staticmethod(lambda prefix: "part_existing"))
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (filename, b"replacement", "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert "Failed to stage upload" in result["error"]
+        assert "uploadID" not in result
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.iterdir()) == [existing]
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    def test_discard_chat_upload_removes_staged_file(self, workspace_client):
+        client = _client(workspace_client)
+        uploaded = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("draft.md", b"draft", "text/markdown"))],
+        ).json()["uploaded"][0]
+
+        response = client.delete(
+            f"/api/workspace/upload/chat/{uploaded['uploadID']}"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["removed"] is True
+        from flocks.session.files import resolve_staged_chat_upload
+
+        with pytest.raises(FileNotFoundError):
+            resolve_staged_chat_upload("usr_workspace", uploaded["uploadID"])
 
     def test_upload_too_large_file_rejected(self, workspace_client, monkeypatch):
         # Set the limit to 0 MB; _max_upload_bytes() reads the env var at
