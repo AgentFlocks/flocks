@@ -114,10 +114,33 @@ describe('Home create WebUI contract page entry', () => {
     expect(
       screen.queryByRole('button', { name: 'createWebUIContractPage' }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: 'getStarted' }),
-    ).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['admin', 'member'])('opens onboarding without creating a contract-page session for %s', async (role) => {
+    useAuthMock.mockReturnValue({
+      user: {
+        id: `user-${role}`,
+        username: role,
+        role,
+        status: 'active',
+        must_reset_password: false,
+      },
+    });
+    const user = userEvent.setup();
+    const onOpenOnboarding = vi.fn();
+    window.addEventListener('flocks:open-onboarding', onOpenOnboarding);
+    try {
+      render(<MemoryRouter><Home /></MemoryRouter>);
+
+      await user.click(screen.getByRole('button', { name: 'getStarted' }));
+
+      expect(onOpenOnboarding).toHaveBeenCalledTimes(1);
+      expect(createMock).not.toHaveBeenCalled();
+      expect(navigateMock).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('flocks:open-onboarding', onOpenOnboarding);
+    }
   });
 
   it('shows the concrete stats load failure instead of a backend-not-running hint', () => {

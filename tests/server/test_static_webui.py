@@ -62,7 +62,7 @@ async def test_static_webui_serves_assets_with_immutable_cache(monkeypatch, tmp_
 async def test_static_webui_falls_back_for_browser_deep_link(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("FLOCKS_WEBUI_DIST_DIR", str(_write_dist(tmp_path)))
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
-        response = await client.get("/session/abc", headers={"Accept": "text/html"})
+        response = await client.get("/sessions/ses_abc", headers={"Accept": "text/html"})
 
     assert response.status_code == 200
     assert "Flocks WebUI" in response.text
@@ -75,7 +75,7 @@ async def test_static_webui_falls_back_before_full_app_auth(monkeypatch, tmp_pat
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(
-            "/session/abc",
+            "/sessions/ses_abc",
             headers={
                 "Accept": "text/html",
                 "User-Agent": "Mozilla/5.0",
