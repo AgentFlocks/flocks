@@ -155,6 +155,54 @@ async def test_session_schema_probe_degrades_when_fts5_module_is_missing(
 
 
 @pytest.mark.asyncio
+async def test_ensure_session_search_tables_falls_back_on_old_sqlite_tokenizer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """SQLite 3.26 (RHEL 8 / Alibaba Cloud Linux 3) has FTS5 but rejects
+    ``remove_diacritics 2``: the schema must be created with the next
+    tokenizer instead of failing application startup."""
+
+    class OldSqliteConnection:
+        def __init__(self):
+            self.statements: list[str] = []
+            self.fetch_rows: list[tuple[str]] = []
+
+        async def executescript(self, sql: str):
+            self.statements.append(sql)
+
+        async def execute(self, sql: str, _parameters=()):
+            self.statements.append(sql)
+            if "_flocks_session_fts5_probe" in sql and "remove_diacritics 2" in sql:
+                raise sqlite3.OperationalError("error in tokenizer constructor")
+            cursor = Mock()
+            cursor.fetchall = AsyncMock(return_value=self.fetch_rows)
+            return cursor
+
+        async def commit(self):
+            return None
+
+    class OldSqliteContext:
+        def __init__(self):
+            self.connection = OldSqliteConnection()
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return None
+
+    context = OldSqliteContext()
+    monkeypatch.setattr(Storage, "connect", classmethod(lambda _cls, _path=None: context))
+
+    assert await ensure_session_search_tables(tmp_path / "old-sqlite.db")
+    schema = [s for s in context.connection.statements if "session_transcript_fts USING fts5" in s]
+    assert len(schema) == 1
+    assert "tokenize = 'unicode61 remove_diacritics 1'" in schema[0]
+    assert "{tokenizer}" not in schema[0]
+
+
+@pytest.mark.asyncio
 async def test_messages_persist_when_session_search_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
