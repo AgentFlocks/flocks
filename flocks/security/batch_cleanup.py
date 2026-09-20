@@ -95,3 +95,55 @@ def reconcile(task_dir: Path, result: dict) -> None:
         summary = store.prune_scan_execution_history(scan_id)
         if summary.get("status") != "completed":
             raise RuntimeError(f"Cleanup {scan_id}: {summary}")
+
+
+CLEANUP_BUSY = 75
+
+
+def main() -> None:
+    """Private bounded cleanup process; its lock survives scheduler termination."""
+    import signal
+    import threading
+    import time
+    from contextlib import ExitStack
+    from flocks.security.batch import _cleanup_child_work, atomic_json, file_lock, read_json
+    from flocks.utils.process_identity import process_identity
+
+    task_dir, attempt = Path(sys.argv[1]), sys.argv[2]
+    with ExitStack() as ownership:
+        try:
+            ownership.enter_context(file_lock(task_dir / "cleanup.lock"))
+        except BlockingIOError:
+            raise SystemExit(CLEANUP_BUSY) from None
+        current = read_json(task_dir / "current.json")
+        if current.get("attempt") != attempt:
+            raise ValueError("Superseded cleanup attempt")
+        result = read_json(task_dir / "result.json")
+        if (result.get("cleanup_status") == "completed"
+                and result.get("source_cleanup_status") == "completed" and not current.get("work_dir")):
+            return
+        state = current["phase_timeout"]
+        if state["phase"] != "cleanup":
+            raise ValueError("Cleanup has no active budget")
+        remaining = state["deadline"] - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Cleanup budget exhausted")
+
+        def expired():
+            if os.name == "posix" and os.getpgrp() == os.getpid():
+                os.killpg(os.getpid(), signal.SIGKILL)
+            os._exit(124)
+
+        timer = threading.Timer(remaining, expired)
+        timer.daemon = True
+        timer.start()
+        try:
+            current.update(pid=os.getpid(), process_identity=process_identity(os.getpid()))
+            atomic_json(task_dir / "current.json", current)
+            _cleanup_child_work(task_dir, result)
+        finally:
+            timer.cancel()
+
+
+if __name__ == "__main__":
+    main()

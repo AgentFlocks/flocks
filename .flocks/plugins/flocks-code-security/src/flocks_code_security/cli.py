@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from flocks.config.config import Config
 from flocks.provider.provider import Provider
 from flocks.session.callable_state import set_session_callable_tools
 from flocks.session.message import Message, MessageRole
+from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED, ModelQuotaExhaustedError
 from flocks.session.session_loop import SessionLoop
 from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 from flocks.utils.langfuse import (
@@ -144,6 +146,8 @@ def _end_observation(scope: Any, **kwargs: Any) -> None:
 
 def _require_success(result: ToolResult) -> dict[str, Any]:
     if not result.success:
+        if (result.metadata or {}).get("error_code") == MODEL_QUOTA_EXHAUSTED:
+            raise ModelQuotaExhaustedError(str(result.error or "Model provider quota exhausted"))
         raise RuntimeError(str(result.error or result.title or "Code audit operation failed"))
     return result.output if isinstance(result.output, dict) else {}
 
@@ -208,6 +212,13 @@ async def _wait_for_batch(
             return output
 
 
+def enter_audit_phase(ctx: ToolContext | None, phase: str) -> None:
+    """Execution control runs before business work, independently of telemetry."""
+    callback = ctx.extra.get("audit_phase_started") if ctx is not None else None
+    if callback is not None:
+        callback(phase)
+
+
 async def _run_phase(
     ctx: ToolContext,
     scan_id: str,
@@ -217,6 +228,7 @@ async def _run_phase(
     *,
     attempt_ordinal: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    enter_audit_phase(ctx, phase)
     phase_scope = _start_phase_observation(scan_observation, phase)
     phase_parent = None if phase_scope is None else phase_scope.observation
     previous_trace_context = ctx.extra.get("langfuse_trace_context")
@@ -373,6 +385,7 @@ class AuditOrchestrator:
     ) -> dict[str, Any]:
         if not self.dynamic_enabled:
             return status
+        enter_audit_phase(self.ctx, "dynamic_validation")
         scope = _start_phase_observation(scan_observation, "dynamic_validation")
         observation_parent = scan_observation if scope is None else scope.observation
         _emit(
@@ -434,6 +447,7 @@ class AuditOrchestrator:
                 observation_parent=scan_observation,
             )
             return status
+        enter_audit_phase(self.ctx, "poc_generation")
         while remaining > 0:
             available = await asyncio.to_thread(
                 get_runtime().store.list_confirmed_without_poc_record, scan_id,
@@ -538,6 +552,7 @@ class AuditOrchestrator:
         scan_id: str,
         scan_observation: Any,
     ) -> dict[str, Any]:
+        enter_audit_phase(self.ctx, "adjudication")
         store = get_runtime().store
         previous = await asyncio.to_thread(
             store.get_latest_adjudication,
@@ -632,13 +647,23 @@ class AuditOrchestrator:
             model_id=model.get("modelID"),
             agent_name="code-security",
         )
-        if result.action == "error":
-            raise RuntimeError(f"Parent adjudication failed: {result.error or 'model loop error'}")
-        decision = await asyncio.to_thread(
-            store.get_latest_adjudication,
-            scan_id,
-        )
+        metadata = getattr(result, "metadata", {}) or {}
+        if metadata.get("aborted"):
+            raise asyncio.CancelledError
+        try:
+            decision = await asyncio.to_thread(
+                store.get_latest_adjudication,
+                scan_id,
+            )
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            if metadata.get("error_code") == MODEL_QUOTA_EXHAUSTED:
+                raise ModelQuotaExhaustedError(result.error or "Model provider quota exhausted") from exc
+            raise
         if decision is None or decision["adjudication_round"] != expected_round:
+            if metadata.get("error_code") == MODEL_QUOTA_EXHAUSTED:
+                raise ModelQuotaExhaustedError(result.error or "Model provider quota exhausted")
+            if result.action == "error":
+                raise RuntimeError(f"Parent adjudication failed: {result.error or 'model loop error'}")
             raise RuntimeError("Parent Agent did not submit the required audit adjudication")
         _emit(
             self.progress,
@@ -657,6 +682,7 @@ class AuditOrchestrator:
         """Run CyberGym as a dynamic validator over the generic PoC input."""
         if self.scan_mode != "cybergym_level1":
             return status
+        enter_audit_phase(self.ctx, "dynamic_validation")
         scope = _start_phase_observation(scan_observation, "dynamic_validation")
         parent = scan_observation if scope is None else scope.observation
         runtime = None
@@ -907,6 +933,7 @@ class AuditOrchestrator:
                 scan_observation,
             )
 
+            enter_audit_phase(self.ctx, "finalization")
             _emit(
                 self.progress,
                 "finalization.started",
@@ -976,6 +1003,7 @@ async def run_standard_audit(
     *,
     model: str | None = None,
     progress: ProgressCallback | None = None,
+    phase_started: Callable[[str], None] | None = None,
     max_file_bytes: int | None = None,
     max_total_bytes: int | None = None,
     max_files: int = 50_000,
@@ -1035,6 +1063,7 @@ async def run_standard_audit(
             authorized_root=target,
         ),
         progress=progress,
+        **({"phase_started": phase_started} if phase_started is not None else {}),
     )
 
 

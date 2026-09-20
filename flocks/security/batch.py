@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 import json
 import os
@@ -18,6 +18,11 @@ from typing import Iterator
 from uuid import uuid4
 
 from flocks.utils.process_identity import process_identity
+from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED
+from flocks.security.batch_timeouts import (
+    DEFAULT_PHASE_TIMEOUTS, ExecutionControlError, PhaseTimeout, enter_phase, read_control,
+    timeout_details, validate_budgets,
+)
 
 
 UI_PATH = "/contracts/webui/workspaces/code_security/code-security-workspace"
@@ -79,9 +84,12 @@ def file_lock(path: Path, *, blocking: bool = False) -> Iterator[None]:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def task_running(task_dir: Path) -> bool:
+def task_running(task_dir: Path, *, cleanup_only: bool = False) -> bool:
     try:
-        with file_lock(task_dir / "task.lock"):
+        with ExitStack() as locks:
+            if not cleanup_only:
+                locks.enter_context(file_lock(task_dir / "task.lock"))
+            locks.enter_context(file_lock(task_dir / "cleanup.lock"))
             return False
     except BlockingIOError:
         return True
@@ -137,7 +145,8 @@ def prepare_batch(
     *,
     run_dir: Path | None,
     concurrency: int,
-    task_timeout: int,
+    task_timeout: int | None = None,
+    phase_timeouts: dict[str, int] | None = None,
     model: str | None,
     poc: bool,
     max_snapshot_bytes: int,
@@ -148,7 +157,15 @@ def prepare_batch(
     exclude_cyclic_symlinks: bool = False,
     max_snapshot_files: int = 50_000,
 ) -> Path:
-    if concurrency < 1 or task_timeout < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
+    if phase_timeouts is None and task_timeout is None:
+        phase_timeouts = DEFAULT_PHASE_TIMEOUTS
+    if phase_timeouts is not None:
+        if task_timeout is not None:
+            raise ValueError("Choose phase_timeouts or legacy task_timeout, not both")
+        phase_timeouts = validate_budgets(phase_timeouts, poc=poc, dynamic=dynamic)
+    elif type(task_timeout) is not int or task_timeout < 1:
+        raise ValueError("task_timeout must be a positive integer in seconds")
+    if concurrency < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
         raise ValueError("Concurrency, timeout and size limit must be positive")
     if type(max_snapshot_files) is not int or max_snapshot_files < 1:
         raise ValueError("max_snapshot_files must be a positive integer")
@@ -202,11 +219,11 @@ def prepare_batch(
         atomic_json(
             root / "batch.json",
             {
-                "version": 1,
+                "version": 2 if phase_timeouts is not None else 1,
                 "batch_id": batch_id,
                 "created_at": datetime.now().astimezone().isoformat(),
                 "concurrency": concurrency,
-                "task_timeout": task_timeout,
+                **({"phase_timeouts": phase_timeouts} if phase_timeouts is not None else {"task_timeout": task_timeout}),
                 "model": model,
                 "poc": poc or dynamic,
                 "dynamic": dynamic,
@@ -276,7 +293,7 @@ def delete_batch_task(task_dir: Path) -> None:
     from flocks_code_security.paths import outputs_root
     from flocks_code_security.service import _remove_owned_tree
 
-    with file_lock(task_dir / "task.lock"):
+    with file_lock(task_dir / "task.lock"), file_lock(task_dir / "cleanup.lock"):
         marker = task_dir / "deleted.json"
         if marker.exists() and read_json(marker).get("status") == "deleted":
             return
@@ -319,9 +336,16 @@ def delete_batch_task(task_dir: Path) -> None:
             (task_dir / name).unlink(missing_ok=True)
 
 
-def request_cancel(task_dir: Path) -> None:
+def request_cancel(task_dir: Path, termination: dict | None = None) -> None:
     current = read_json(task_dir / "current.json") if (task_dir / "current.json").exists() else {"attempt": "pending"}
-    atomic_json(task_dir / "cancel.json", {"attempt": current["attempt"]})
+    request = {"attempt": current["attempt"]}
+    if (task_dir / "cancel.json").exists():
+        previous = read_json(task_dir / "cancel.json")
+        if previous.get("attempt") == current["attempt"] and previous.get("termination"):
+            termination = previous["termination"]
+    if termination is not None:
+        request["termination"] = termination
+    atomic_json(task_dir / "cancel.json", request)
 
 
 async def stop_process(process: asyncio.subprocess.Process) -> None:
@@ -358,12 +382,100 @@ async def stop_process(process: asyncio.subprocess.Process) -> None:
 
 async def cleanup_child_work(task_dir: Path, result: dict) -> None:
     """Finish cleanup before releasing ownership, even if the scheduler is cancelled."""
+    config = read_json(task_dir.parents[1] / "batch.json")
+    if "phase_timeouts" in config:
+        await _cleanup_child_process(task_dir, result, config["phase_timeouts"])
+        return
     operation = asyncio.create_task(asyncio.to_thread(_cleanup_child_work, task_dir, result))
     try:
         await asyncio.shield(operation)
     except asyncio.CancelledError:
         await operation
         raise
+
+
+async def _cleanup_child_process(task_dir: Path, result: dict, budgets: dict) -> None:
+    """Bound synchronous cleanup in a process; never leave a detached thread deleting files."""
+    from flocks.security.batch_cleanup import CLEANUP_BUSY, task_environment
+
+    current = read_json(task_dir / "current.json")
+    if (result.get("cleanup_status") == "completed"
+            and result.get("source_cleanup_status") == "completed" and not current.get("work_dir")):
+        return
+    process = None
+    cleanup_started = False
+    try:
+        busy = False
+        with ExitStack() as ownership:
+            try:
+                ownership.enter_context(file_lock(task_dir / "cleanup.lock"))
+            except BlockingIOError:
+                busy = True
+            if not busy:
+                # A recovering scheduler must not overwrite a live owner's PID
+                # or result while that owner is completing cleanup.
+                current = read_json(task_dir / "current.json")
+                saved = task_result(task_dir)
+                if (saved and saved.get("cleanup_status") == "completed"
+                        and saved.get("source_cleanup_status") == "completed" and not current.get("work_dir")):
+                    result.clear()
+                    result.update(saved)
+                    return
+                enter_phase(current, budgets, "cleanup", after_exit=True)
+                atomic_json(task_dir / "current.json", current)
+                atomic_json(task_dir / "result.json", result)
+        if not busy:
+            remaining = max(0, current["phase_timeout"]["deadline"] - time.monotonic())
+            cleanup_started = True
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "flocks.security.batch_cleanup", str(task_dir), current["attempt"],
+                env=task_environment(task_dir), stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL, start_new_session=(os.name == "posix"),
+            )
+            # Allow the child's exit notification to arrive after its timer fires.
+            await asyncio.wait_for(process.wait(), remaining + 1)
+            busy = process.returncode == CLEANUP_BUSY
+        if busy:
+            # A previously spawned child can acquire the lock during startup.
+            # Adopt its existing budget rather than launching cleanup again.
+            current = read_control(task_dir, current["attempt"], current)
+            while task_running(task_dir, cleanup_only=True):
+                if time.monotonic() >= current["phase_timeout"]["deadline"] + 1:
+                    await stop_adopted(task_dir, cleanup_only=True)
+                    break
+                await asyncio.sleep(0.1)
+        saved = task_result(task_dir)
+        if saved:
+            result.clear()
+            result.update(saved)
+        if busy:
+            if result.get("cleanup_status") != "completed" or result.get("source_cleanup_status") != "completed":
+                raise RuntimeError(result.get("cleanup_error") or "Existing cleanup exited without completing")
+        elif process.returncode != 0:
+            raise RuntimeError(f"Cleanup process exited with status {process.returncode}")
+    except (asyncio.CancelledError, OSError, ValueError, RuntimeError) as exc:
+        cleanup_started = cleanup_started or busy
+        if process:
+            await stop_process(process)
+        if task_running(task_dir, cleanup_only=True):
+            cleanup_started = True
+            await stop_adopted(task_dir, cleanup_only=True)
+        # Reconciliation may have committed a newer audit result before cleanup
+        # stopped. Read it only after its writer exits, and discard stale fields.
+        if cleanup_started:
+            saved = task_result(task_dir)
+            if saved:
+                result.clear()
+                result.update(saved)
+        cancelled = isinstance(exc, asyncio.CancelledError)
+        result.update(
+            cleanup_status="failed",
+            cleanup_error="Cleanup interrupted" if cancelled else f"{type(exc).__name__}: {exc}",
+        )
+        if cancelled:
+            atomic_json(task_dir / "result.json", result)
+            raise
+    atomic_json(task_dir / "result.json", result)
 
 
 def _cleanup_child_work(task_dir: Path, result: dict) -> None:
@@ -430,7 +542,18 @@ async def clean_batch(root: Path) -> dict:
                         continue
                     if not (task_dir / "current.json").exists():
                         continue
-                    current = read_json(task_dir / "current.json")
+                    # An explicit clean command may retry failed cleanup, but must
+                    # never race a cleanup child left by a previous scheduler.
+                    with file_lock(task_dir / "cleanup.lock"):
+                        current = read_json(task_dir / "current.json")
+                        if "phase_timeouts" in config:
+                            previous = current.pop("phase_timeout", {})
+                            enter_phase(current, config["phase_timeouts"], "cleanup")
+                            current["phase_timeout"]["spent_seconds"] = {
+                                phase: seconds for phase, seconds in previous.get("spent_seconds", {}).items()
+                                if phase != "cleanup"
+                            }
+                            atomic_json(task_dir / "current.json", current)
                     result = task_result(task_dir) or {"attempt": current["attempt"], "status": "interrupted"}
                     await cleanup_child_work(task_dir, result)
                     state["tasks"][task_id] = result
@@ -440,19 +563,20 @@ async def clean_batch(root: Path) -> dict:
     return batch_status(root)
 
 
-async def stop_adopted(task_dir: Path) -> None:
+async def stop_adopted(task_dir: Path, termination: dict | None = None, *, cleanup_only: bool = False) -> None:
     """Only signal a verified birth identity, never a bare PID from a stale file."""
     current = read_json(task_dir / "current.json")
-    request_cancel(task_dir)
-    for _ in range(100):
-        if not task_running(task_dir):
+    request_cancel(task_dir, termination)
+    # Cleanup has no cancellation watcher; signal its verified owner directly.
+    for _ in range(0 if cleanup_only else 100):
+        if not task_running(task_dir, cleanup_only=cleanup_only):
             return
         await asyncio.sleep(0.2)
     pid, identity = current.get("pid"), current.get("process_identity")
-    if not task_running(task_dir):
+    if not task_running(task_dir, cleanup_only=cleanup_only):
         return
     if not identity or process_identity(pid) != identity:
-        if not task_running(task_dir):
+        if not task_running(task_dir, cleanup_only=cleanup_only):
             return
         raise RuntimeError("Cannot safely terminate adopted task: process identity is unavailable")
     if os.name == "posix":
@@ -466,7 +590,7 @@ async def stop_adopted(task_dir: Path) -> None:
         process = await asyncio.create_subprocess_exec("taskkill", "/PID", str(pid), "/T", "/F")
         await process.wait()
     for _ in range(50):
-        if not task_running(task_dir):
+        if not task_running(task_dir, cleanup_only=cleanup_only):
             return
         await asyncio.sleep(0.1)
     raise RuntimeError("Adopted worker did not release its task lock")
@@ -476,16 +600,53 @@ def _worker_command(root: Path, task_id: str, attempt: str) -> list[str]:
     return [sys.executable, "-m", "flocks.security.batch_worker", str(root), task_id, attempt]
 
 
+def apply_termination(result: dict, termination: dict) -> None:
+    """Record why execution stopped without replacing a known audit outcome."""
+    reason = termination.get("failure_code") or termination["status"]
+    result["termination_reason"] = reason
+    if result.get("runtime"):
+        result["runtime"]["termination_reason"] = reason
+    # The service may persist failed/phase_timeout before the worker catches
+    # that same timeout. Complete its details instead of treating it as a
+    # separate business failure. A later cleanup timeout must not replace it.
+    projected_timeout = (
+        result.get("failure_code") == termination.get("failure_code") == PhaseTimeout.code
+        and not result.get("timeout_phase")
+        and termination.get("timeout_phase") != "cleanup"
+    )
+    known_failure = (
+        result.get("audit_status") == "failed"
+        or result.get("failure_code") in {
+            MODEL_QUOTA_EXHAUSTED, PhaseTimeout.code, ExecutionControlError.code,
+        }
+    )
+    if result.get("status") != "completed" and (projected_timeout or not known_failure):
+        result.update(termination)
+    if termination.get("timeout_phase") == "cleanup":
+        result.update(cleanup_status="failed", cleanup_error="Cleanup budget exhausted")
+
+
 async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -> dict:
     root = root.expanduser().resolve()
     with file_lock(root / "run.lock"):
         config = read_json(root / "batch.json")
+        budgets = config.get("phase_timeouts")
+        if budgets is not None:
+            validate_budgets(budgets, poc=config["poc"], dynamic=config.get("dynamic", False))
         state = read_json(root / "state.json")
         queue = asyncio.Queue()
         # Adopt running tasks before dispatching pending tasks, so they count toward the limit.
         ordered = sorted(config["tasks"], key=lambda key: not task_running(resolve_task(root, key, config=config)))
         for task_id in ordered:
             queue.put_nowait(task_id)
+
+        quota_exhausted = False
+
+        def observe_quota(result: dict) -> None:
+            nonlocal quota_exhausted
+            if result.get("failure_code") == MODEL_QUOTA_EXHAUSTED and not quota_exhausted:
+                quota_exhausted = True
+                progress("Model provider quota exhausted; new tasks remain pending. Restore quota before resuming.")
 
         def save(task_id: str, item: dict) -> None:
             state["tasks"][task_id] = item
@@ -498,10 +659,30 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
         async def run_one(task_id: str) -> None:
             task_dir = resolve_task(root, task_id, config=config)
             cancel_file = task_dir / "cancel.json"
+            adopted = state["tasks"].get(task_id, {}).get("status") == "running"
+            adopted_timeout = None
+            last_control = None
             while True:
                 # A child can survive a killed scheduler. Never launch a duplicate.
                 try:
                     while task_running(task_dir):
+                        adopted = True
+                        if budgets is not None:
+                            if last_control is None:
+                                last_control = read_json(task_dir / "current.json")
+                            try:
+                                last_control = read_control(task_dir, last_control["attempt"], last_control)
+                                adopted_timeout = timeout_details(last_control)
+                                if adopted_timeout:
+                                    last_control = read_control(task_dir, last_control["attempt"], last_control)
+                                    adopted_timeout = timeout_details(last_control)
+                            except ExecutionControlError as exc:
+                                adopted_timeout = {"status": "failed", "failure_code": exc.code, "error": str(exc)}
+                            if adopted_timeout:
+                                await stop_adopted(task_dir, adopted_timeout)
+                                break
+                            await asyncio.sleep(0.2)
+                            continue
                         current = read_json(task_dir / "current.json")
                         if (
                             current.get("started_at")
@@ -513,9 +694,9 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                 except asyncio.CancelledError:
                     await stop_adopted(task_dir)
                     result = task_result(task_dir) or {}
-                    if result.get("status") != "completed" and result.get("audit_status") != "failed":
-                        result.update(status="interrupted", attempt=read_json(task_dir / "current.json")["attempt"])
-                        atomic_json(task_dir / "result.json", result)
+                    result.setdefault("attempt", read_json(task_dir / "current.json")["attempt"])
+                    apply_termination(result, {"status": "interrupted"})
+                    atomic_json(task_dir / "result.json", result)
                     await cleanup_child_work(task_dir, result)
                     save(task_id, result)
                     raise
@@ -542,7 +723,14 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                                 "status": "interrupted",
                                 "attempt": read_json(task_dir / "current.json")["attempt"],
                             }
+                            if adopted_timeout:
+                                apply_termination(result, adopted_timeout)
+                            if adopted:
+                                observe_quota(result)
+                            previous_failure_code = result.get("failure_code")
                             await cleanup_child_work(task_dir, result)
+                            if adopted or result.get("failure_code") != previous_failure_code:
+                                observe_quota(result)
                             if (
                                 result.get("cleanup_status") == "failed"
                                 or result.get("source_cleanup_status") == "failed"
@@ -559,12 +747,17 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                         ):
                             save(task_id, result)
                             return
-                        attempt = uuid4().hex
-                        atomic_json(
-                            task_dir / "current.json",
-                            {"attempt": attempt, "started_at": time.time()},
-                        )
-                        save(task_id, {"status": "running", "attempt": attempt})
+                        if quota_exhausted:
+                            if result:
+                                save(task_id, result)
+                            return
+                        with file_lock(task_dir / "cleanup.lock"):
+                            attempt = uuid4().hex
+                            last_control = {"attempt": attempt, "started_at": time.time()}
+                            if budgets is not None:
+                                enter_phase(last_control, budgets, "source_extraction")
+                            atomic_json(task_dir / "current.json", last_control)
+                            save(task_id, {"status": "running", "attempt": attempt})
                     break
                 except BlockingIOError:
                     await asyncio.sleep(0.2)
@@ -573,6 +766,7 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
             environment = task_environment(task_dir)
             process = None
             termination_reason = None
+            phase_termination = None
             runtime_at_termination = None
             try:
                 with (task_dir / "stdout.log").open("ab") as out, (task_dir / "stderr.log").open("ab") as err:
@@ -589,13 +783,24 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                             attempt,
                             "pending",
                         }
-                        expired = time.monotonic() - started >= config["task_timeout"]
+                        if budgets is not None:
+                            try:
+                                last_control = read_control(task_dir, attempt, last_control)
+                                phase_termination = timeout_details(last_control)
+                                if phase_termination:
+                                    last_control = read_control(task_dir, attempt, last_control)
+                                    phase_termination = timeout_details(last_control)
+                            except ExecutionControlError as exc:
+                                phase_termination = {"status": "failed", "failure_code": exc.code, "error": str(exc)}
+                            expired = phase_termination is not None
+                        else:
+                            expired = time.monotonic() - started >= config["task_timeout"]
                         if cancelled or expired:
                             from flocks.security.batch_diagnostics import termination_snapshot
 
-                            termination_reason = "cancelled" if cancelled else "timed_out"
+                            termination_reason = "cancelled" if cancelled else (phase_termination["status"] if phase_termination else "timed_out")
                             runtime_at_termination = termination_snapshot(task_dir, attempt, termination_reason)
-                            request_cancel(task_dir)
+                            request_cancel(task_dir, phase_termination if not cancelled else None)
                             try:
                                 await asyncio.wait_for(process.wait(), 20)
                             except asyncio.TimeoutError:
@@ -619,20 +824,21 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                         "error": f"Worker exited without a result (exit {process.returncode}); resume to reconcile",
                     }
                 if termination_reason:
-                    result["termination_reason"] = termination_reason
                     result.setdefault("runtime", runtime_at_termination)
-                    result["runtime"]["termination_reason"] = termination_reason
-                    if result["status"] != "completed" and result.get("audit_status") != "failed":
-                        result["status"] = termination_reason
+                    apply_termination(result, (
+                        phase_termination if phase_termination and termination_reason != "cancelled"
+                        else {"status": termination_reason}
+                    ))
+                observe_quota(result)
                 await cleanup_child_work(task_dir, result)
             except asyncio.CancelledError:
                 if process:
                     request_cancel(task_dir)
                     await stop_process(process)
                 result = task_result(task_dir) or {}
-                if result.get("status") != "completed" and result.get("audit_status") != "failed":
-                    result.update(status="interrupted", attempt=attempt)
-                    atomic_json(task_dir / "result.json", result)
+                result.setdefault("attempt", attempt)
+                apply_termination(result, {"status": "interrupted"})
+                atomic_json(task_dir / "result.json", result)
                 await cleanup_child_work(task_dir, result)
                 save(task_id, result)
                 raise
@@ -641,6 +847,7 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                     await stop_process(process)
                 result = {"status": "failed", "attempt": attempt, "error": str(exc)}
                 await cleanup_child_work(task_dir, result)
+            observe_quota(result)
             save(task_id, result)
 
         async def worker() -> None:

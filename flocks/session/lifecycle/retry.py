@@ -6,6 +6,7 @@ Based on Flocks' ported src/session/retry.ts
 """
 
 import asyncio
+import re
 from typing import Optional, Dict, Any
 
 from flocks.utils.log import Log
@@ -20,6 +21,15 @@ RETRY_BACKOFF_FACTOR = 2
 RETRY_MAX_DELAY_NO_HEADERS = 30_000  # 30 seconds
 RETRY_MAX_DELAY = 2_147_483_647  # max 32-bit signed integer
 MAX_ERROR_RETRIES = 5
+MODEL_QUOTA_EXHAUSTED = "model_quota_exhausted"
+
+
+class ModelQuotaExhaustedError(RuntimeError):
+    """A provider quota that cannot be recovered by retrying this audit."""
+
+    code = MODEL_QUOTA_EXHAUSTED
+
+
 CONNECTION_ERROR_DISPLAY_MESSAGE = (
     "Model is unavailable. Please check the provider connection and model configuration."
 )
@@ -46,6 +56,22 @@ class SessionRetry:
     Handles retry logic for API failures with exponential backoff.
     Matches Flocks SessionRetry namespace.
     """
+
+    @staticmethod
+    def is_quota_exhausted(error: Dict[str, Any]) -> bool:
+        """Recognize explicit quota errors, never generic 429/TPM exhaustion."""
+        data = error.get("data") or {}
+        if data.get("error_code") == MODEL_QUOTA_EXHAUSTED:
+            return True
+        code = str(data.get("providerCode") or "").lower()
+        if code in {"insufficient_quota", "billing_hard_limit_reached"}:
+            return True
+        message = str(data.get("message") or error.get("message") or "")
+        return bool(re.search(
+            r"\b(?:insufficient[ _-]quota|billing[ _-]hard[ _-]limit[ _-]reached)\b",
+            message,
+            re.IGNORECASE,
+        ))
     
     @staticmethod
     async def sleep(ms: int, abort_event: asyncio.Event) -> None:
@@ -133,6 +159,8 @@ class SessionRetry:
         Returns:
             Error message string if retryable, None if not retryable
         """
+        if SessionRetry.is_quota_exhausted(error):
+            return None
         error_name = error.get("name", "")
         error_data = error.get("data", {})
 

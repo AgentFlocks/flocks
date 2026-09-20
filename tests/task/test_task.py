@@ -641,8 +641,8 @@ async def test_existing_background_session_preserves_loop_error_for_supervisor(
 ) -> None:
     manager = BackgroundManager()
     monkeypatch.setattr(
-        manager,
-        "_run_session_with_watchdog",
+        background_module.SessionLoop,
+        "run",
         AsyncMock(
             return_value=SimpleNamespace(
                 action="error",

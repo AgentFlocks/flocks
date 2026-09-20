@@ -286,6 +286,7 @@ class StepResult:
     error: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
     failure: Optional[StepFailure] = None
+    error_code: Optional[str] = None
 
 
 @dataclass
@@ -1423,6 +1424,9 @@ class SessionRunner:
         if error_name in {"CancelledError", "MessageAbortedError", "AbortedError"}:
             return FailoverDecision(False, "cancelled")
 
+        if SessionRetry.is_quota_exhausted(error):
+            return FailoverDecision(True, "billing")
+
         quota_or_rate_limited = any(pattern in lowered for pattern in (
             "rate limit", "too many requests", "quota exceeded", "resource exhausted",
             "insufficient quota", "billing limit",
@@ -1508,6 +1512,7 @@ class SessionRunner:
         return StepResult(
             action="stop",
             error=message,
+            error_code=error_data.get("data", {}).get("error_code"),
             failure=StepFailure(
                 message=message,
                 error_data=error_data,
@@ -2161,7 +2166,10 @@ class SessionRunner:
                         text_part=text_part,
                     )
                     
-                    return StepResult(action="stop", error=final_error_message)
+                    return StepResult(
+                        action="stop", error=final_error_message,
+                        error_code=error_dict["data"].get("error_code"),
+                    )
         
         # Aborted
         return StepResult(action="stop", error="Aborted")
@@ -2835,7 +2843,30 @@ class SessionRunner:
             error_dict["name"] = "APIError"
             error_dict["data"]["isRetryable"] = True
             error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
-        
+
+        # SDK errors may keep the provider code in a structured body rather
+        # than their human-readable message. Preserve only the code.
+        current = exception
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            body = getattr(current, "body", None)
+            details = body.get("error", body) if isinstance(body, dict) else {}
+            code = (
+                details.get("code") if isinstance(details, dict) else None
+            ) or getattr(current, "code", None)
+            candidate = {"data": {"providerCode": code, "message": str(current)}}
+            if SessionRetry.is_quota_exhausted(candidate):
+                from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED
+
+                error_dict["data"].update(
+                    providerCode=code,
+                    error_code=MODEL_QUOTA_EXHAUSTED,
+                    isRetryable=False,
+                )
+                break
+            current = current.__cause__ or current.__context__
+
         return error_dict
     
     def _get_context_window_tokens(self) -> int:

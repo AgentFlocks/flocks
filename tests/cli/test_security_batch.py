@@ -124,8 +124,41 @@ def test_lock_is_process_owned_and_released_on_exit(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_resume_adopts_live_child_without_duplicate(tmp_path, monkeypatch):
-    root = make_batch(tmp_path, monkeypatch)
+@pytest.mark.parametrize("quota", [False, True])
+async def test_provider_quota_stops_dispatch_but_allows_explicit_resume(tmp_path, monkeypatch, quota):
+    root = make_batch(tmp_path, monkeypatch, count=4, concurrency=1)
+    batch.request_cancel(batch.resolve_task(root, "3"))
+    script = tmp_path / "quota_worker.py"
+    script.write_text('''
+import sys
+from pathlib import Path
+from flocks.security.batch import atomic_json
+root, key, attempt, quota = sys.argv[1:]
+directory = Path(root) / "tasks" / key
+atomic_json(directory / "result.json", {
+    "attempt": attempt, "status": "failed" if key == "0" else "completed",
+    "failure_code": "model_quota_exhausted" if quota == "True" and key == "0" else "audit_execution_failed",
+    "cleanup_status": "completed", "source_cleanup_status": "completed",
+})
+''')
+    monkeypatch.setattr(batch, "_worker_command", lambda root, key, attempt: [
+        sys.executable, str(script), str(root), key, attempt, str(quota),
+    ])
+    progress = []
+    result = await batch.run_batch(root, progress=progress.append)
+    assert result["counts"] == {"failed": 1, "pending" if quota else "completed": 2, "cancelled": 1}
+    assert any("quota exhausted" in item for item in progress) == quota
+    if quota:
+        assert not (root / "tasks/1/current.json").exists()
+        quota = False
+        result = await batch.run_batch(root, retry_failed=True, progress=lambda _: None)
+        assert result["counts"] == {"failed": 1, "completed": 3}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quota", [False, True])
+async def test_resume_adopts_live_child_without_duplicate(tmp_path, monkeypatch, quota):
+    root = make_batch(tmp_path, monkeypatch, count=2 if quota else 1, concurrency=1)
     task_dir = batch.resolve_task(root, "0")
     batch.atomic_json(task_dir / "current.json", {"attempt": "old"})
     script = """
@@ -136,16 +169,91 @@ root = Path(sys.argv[1])
 with file_lock(root / "task.lock"):
  print("ready", flush=True)
  time.sleep(.7)
- atomic_json(root / "result.json", {"attempt":"old", "status":"completed", "cleanup_status":"completed", "source_cleanup_status":"completed"})
+ atomic_json(root / "result.json", {"attempt":"old", "status":"failed" if sys.argv[2] == "True" else "completed",
+   "failure_code": "model_quota_exhausted" if sys.argv[2] == "True" else None,
+   "cleanup_status":"completed", "source_cleanup_status":"completed"})
 """
-    child = subprocess.Popen([sys.executable, "-c", script, str(task_dir)], stdout=subprocess.PIPE, text=True)
+    child = subprocess.Popen([sys.executable, "-c", script, str(task_dir), str(quota)], stdout=subprocess.PIPE, text=True)
     try:
         assert child.stdout.readline().strip() == "ready"
         monkeypatch.setattr(batch, "_worker_command", lambda *_: pytest.fail("Must not relaunch a live task"))
         result = await batch.run_batch(root, progress=lambda _: None)
-        assert result["counts"] == {"completed": 1}
+        assert result["counts"] == ({"failed": 1, "pending": 1} if quota else {"completed": 1})
     finally:
         child.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_quota_stop_keeps_inflight_worker_and_cleanup(tmp_path, monkeypatch):
+    root = make_batch(tmp_path, monkeypatch, count=4, concurrency=2)
+    script = tmp_path / "inflight_worker.py"
+    script.write_text('''
+import sys, time
+from pathlib import Path
+from flocks.security.batch import atomic_json
+root, key, attempt = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+if key == "0":
+    while not (root / "second-started").exists(): time.sleep(.01)
+else:
+    assert key == "1", "Pending worker must not start after quota stop"
+    (root / "second-started").touch()
+    while not (root / "quota-observed").exists(): time.sleep(.01)
+atomic_json(root / "tasks" / key / "result.json", {
+    "attempt": attempt, "status": "failed" if key == "0" else "completed",
+    "failure_code": "model_quota_exhausted" if key == "0" else None,
+    "cleanup_status": "completed", "source_cleanup_status": "completed",
+})
+''')
+    monkeypatch.setattr(batch, "_worker_command", lambda root, key, attempt: [
+        sys.executable, str(script), str(root), key, attempt,
+    ])
+
+    def progress(message):
+        if "quota exhausted" in message:
+            (root / "quota-observed").touch()
+
+    result = await asyncio.wait_for(batch.run_batch(root, progress=progress), 10)
+    assert result["counts"] == {"failed": 1, "completed": 1, "pending": 2}
+    for key in ("0", "1"):
+        saved = batch.task_result(batch.resolve_task(root, key))
+        assert saved["cleanup_status"] == "completed"
+        assert saved["source_cleanup_status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["fresh", "adopted", "recovered", "launch_error"])
+async def test_quota_reconciled_during_cleanup_stops_dispatch(tmp_path, monkeypatch, source):
+    from unittest.mock import AsyncMock
+
+    root = make_batch(tmp_path, monkeypatch, count=2, concurrency=1)
+    launched = []
+
+    def command(root, key, attempt):
+        launched.append(key)
+        return [sys.executable, "-c", "pass"]
+
+    async def reconcile(task_dir, result):
+        # Simulate the scan failure restored by batch_cleanup.reconcile after
+        # a worker exits before writing its final result.json.
+        result.update(status="failed", failure_code="model_quota_exhausted",
+                      cleanup_status="completed", source_cleanup_status="completed")
+        batch.atomic_json(task_dir / "result.json", result)
+
+    monkeypatch.setattr(batch, "_worker_command", command)
+    monkeypatch.setattr(batch, "cleanup_child_work", reconcile)
+    if source in {"adopted", "recovered"}:
+        task_dir = batch.resolve_task(root, "0")
+        batch.atomic_json(task_dir / "current.json", {"attempt": "old"})
+        batch.atomic_json(task_dir / "result.json", {"attempt": "old", "status": "interrupted"})
+        state = batch.read_json(root / "state.json")
+        state["tasks"]["0"] = {"status": "running" if source == "adopted" else "interrupted"}
+        batch.atomic_json(root / "state.json", state)
+    elif source == "launch_error":
+        monkeypatch.setattr(batch.asyncio, "create_subprocess_exec", AsyncMock(side_effect=OSError("spawn failed")))
+    result = await batch.run_batch(root, progress=lambda _: None)
+    assert result["counts"] == {"failed": 1, "pending": 1}
+    assert launched == ([] if source in {"adopted", "recovered"} else ["0"])
+    assert not (root / "tasks/1/current.json").exists()
 
 
 def test_registration_rejects_task_traversal_and_symlinks(tmp_path, monkeypatch):
@@ -616,7 +724,7 @@ def test_batch_freezes_exact_link_policy_and_cli_exposes_option(tmp_path, monkey
     from flocks.cli.commands import security_batch
     monkeypatch.setattr(security_batch, "_run", lambda *_: None)
     result = CliRunner().invoke(security_app, ["batch", "run", str(tmp_path / "input"),
-        "--run-dir", str(tmp_path / "cli"), "--skip-external-symlink", "install-sh=/usr/share/install-sh"])
+        "--task-timeout", "10", "--run-dir", str(tmp_path / "cli"), "--skip-external-symlink", "install-sh=/usr/share/install-sh"])
     assert result.exit_code == 0, result.stdout
     assert batch.read_json(tmp_path / "cli/batch.json")["skip_external_symlinks"] == {"install-sh": "/usr/share/install-sh"}
 
@@ -676,7 +784,7 @@ def test_automatic_mode_is_frozen_by_cli(tmp_path, monkeypatch):
     from flocks.cli.commands import security_batch
     monkeypatch.setattr(security_batch, '_run', lambda *_: None)
     result = CliRunner().invoke(security_app, ['batch', 'run', str(tmp_path / 'input'),
-        '--run-dir', str(tmp_path / 'auto'), '--auto-exclude-external-symlinks'])
+        '--task-timeout', '10', '--run-dir', str(tmp_path / 'auto'), '--auto-exclude-external-symlinks'])
     assert result.exit_code == 0, result.stdout
     assert batch.read_json(tmp_path / 'auto/batch.json')['auto_exclude_external_symlinks'] is True
     assert batch.read_json(tmp_path / 'run/batch.json')['auto_exclude_external_symlinks'] is False
@@ -1000,6 +1108,7 @@ def test_worker_shutdown_error_preserves_saved_business_result(tmp_path, monkeyp
     from flocks.security import batch_worker
     from flocks.cli.commands import security
     batch.atomic_json(tmp_path / 'current.json', {'attempt': 'current'})
+    batch.atomic_json(tmp_path / 'batch.json', {'task_timeout': 30})
     async def execute(*args):
         result = {'attempt': 'current', 'status': 'completed', 'audit_status': 'completed'}
         batch.atomic_json(tmp_path / 'result.json', result)
@@ -1112,3 +1221,60 @@ def test_cycles_can_be_explicitly_excluded_without_losing_siblings(tmp_path, tar
     assert (relaxed / 'main.c').read_text() == 'code'
     assert not (relaxed / 'loop').exists()
     assert exclusions == [{'path': 'loop', 'target': target, 'reason': 'cyclic_symlink'}]
+
+
+@pytest.mark.parametrize('audit_status', ['running', 'failed', 'cancelled', 'completed'])
+def test_worker_quota_survives_stale_scan_summary(audit_status):
+    from flocks.security.batch_worker import merge_scan_summary
+    from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED
+
+    result = {'status': 'failed', 'failure_code': MODEL_QUOTA_EXHAUSTED, 'error': 'provider quota exhausted'}
+    merge_scan_summary(result, {
+        'status': 'completed' if audit_status == 'completed' else 'failed',
+        'audit_status': audit_status, 'failure_code': None, 'error': None,
+    })
+    if audit_status == 'completed':
+        assert result['status'] == 'completed'
+        assert result['failure_code'] is None
+        assert 'error' not in result
+    else:
+        assert result['status'] == 'failed'
+        assert result['failure_code'] == MODEL_QUOTA_EXHAUSTED
+        assert result['error'] == 'provider quota exhausted'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('summary_unavailable', [False, True])
+async def test_worker_serializes_quota_without_database_failure_code(tmp_path, monkeypatch, summary_unavailable):
+    import sqlite3
+    import time
+    from types import SimpleNamespace
+    from flocks.cli.commands import security
+    from flocks.security import batch_worker
+    from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED, ModelQuotaExhaustedError
+
+    root = make_batch(tmp_path, monkeypatch)
+    task_dir = batch.resolve_task(root, '0')
+    batch.atomic_json(task_dir / 'current.json', {'attempt': 'attempt', 'started_at': time.time()})
+
+    def scan_status(_):
+        if summary_unavailable:
+            raise sqlite3.OperationalError('database is locked')
+        return {'status': 'running', 'integrity_status': 'pending', 'counts': {}, 'failure_code': None}
+
+    store = SimpleNamespace(get_scan=lambda _: {}, list_worker_batches=lambda _: [], scan_status=scan_status)
+    monkeypatch.setitem(sys.modules, 'flocks_code_security.runtime', SimpleNamespace(get_runtime=lambda: SimpleNamespace(store=store)))
+    monkeypatch.setattr(batch_worker, 'extract_source', lambda *a, **kw: [])
+
+    async def audit(source, *, progress, **kwargs):
+        progress('scan.prepared', {'scan_id': 'scan'})
+        raise ModelQuotaExhaustedError('provider quota exhausted')
+
+    monkeypatch.setattr(security, '_load_plugin_cli', lambda: (audit, None))
+    try:
+        result = await batch_worker.execute(root, '0', 'attempt')
+        assert result['status'] == 'failed'
+        assert result['failure_code'] == MODEL_QUOTA_EXHAUSTED
+        assert batch.read_json(task_dir / 'result.json')['failure_code'] == MODEL_QUOTA_EXHAUSTED
+    finally:
+        batch_worker.cleanup_work(batch.read_json(task_dir / 'current.json')['work_dir'], task_dir)

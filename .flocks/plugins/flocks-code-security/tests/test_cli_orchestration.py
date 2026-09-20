@@ -962,10 +962,13 @@ async def test_orchestrator_runs_one_parent_directed_rescan(
         ),
     ],
 )
+@pytest.mark.parametrize("loop_error,has_decision", [(False, True), (True, True), (True, False)])
 async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
     monkeypatch: pytest.MonkeyPatch,
     knowledge_base: dict | None,
     expected_tools: set[str],
+    loop_error: bool,
+    has_decision: bool,
 ) -> None:
     decision = {
         "scan_id": "scan_parent",
@@ -982,7 +985,7 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         @classmethod
         def get_latest_adjudication(cls, _scan_id: str):
             cls.calls += 1
-            return None if cls.calls == 1 else decision
+            return None if cls.calls == 1 or not has_decision else decision
 
         @staticmethod
         def get_knowledge_base_metadata(_scan_id: str):
@@ -997,7 +1000,11 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
             return SimpleNamespace(root_path="/snapshot")
 
     create_message = AsyncMock()
-    run_loop = AsyncMock(return_value=SimpleNamespace(action="stop", error=None))
+    run_loop = AsyncMock(return_value=SimpleNamespace(
+        action="error" if loop_error else "stop",
+        error="quota exhausted" if loop_error else None,
+        metadata={"error_code": "model_quota_exhausted"} if loop_error else {},
+    ))
     set_callable_tools = AsyncMock()
     monkeypatch.setattr(
         audit_cli,
@@ -1019,11 +1026,19 @@ async def test_orchestrator_invokes_primary_agent_only_for_adjudication(
         extra={"model": {"providerID": "provider", "modelID": "model"}},
     )
 
-    result = await audit_cli.AuditOrchestrator(
+    orchestrator = audit_cli.AuditOrchestrator(
         ctx,
         Path("/target"),
         lambda event, payload: events.append((event, payload)),
-    )._run_parent_adjudication("scan_parent", None)
+    )
+    if not has_decision:
+        from flocks.session.lifecycle.retry import ModelQuotaExhaustedError
+
+        with pytest.raises(ModelQuotaExhaustedError):
+            await orchestrator._run_parent_adjudication("scan_parent", None)
+        run_loop.assert_awaited_once()
+        return
+    result = await orchestrator._run_parent_adjudication("scan_parent", None)
 
     assert result == decision
     assert "host has already completed" in create_message.await_args.kwargs["content"].lower()
@@ -1321,7 +1336,7 @@ async def test_poc_partial_batch_drains_unassigned_candidates(tmp_path, monkeypa
     monkeypatch.setattr(audit_cli, "_run_phase", phase)
     events = []
     orchestrator = audit_cli.AuditOrchestrator(
-        SimpleNamespace(), tmp_path, lambda event, payload: events.append(event), poc_enabled=True,
+        SimpleNamespace(extra={}), tmp_path, lambda event, payload: events.append(event), poc_enabled=True,
     )
     result = await orchestrator._run_poc_generation(
         "scan-test", {"counts": {"confirmed_without_poc_bundle": 3}}, None,
@@ -1342,3 +1357,56 @@ async def test_cli_passes_archive_exclusions_to_service(tmp_path, monkeypatch):
         return {"status": "completed"}
     monkeypatch.setattr(service_module, "get_audit_service", lambda: SimpleNamespace(run_scan=run_scan))
     await audit_cli.run_standard_audit(tmp_path, source_exclusions=exclusions, exclude_patterns=["install-sh"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quota", [False, True])
+async def test_parent_adjudication_preserves_quota_when_decision_read_fails(monkeypatch, quota):
+    import sqlite3
+    from unittest.mock import Mock
+    from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED, ModelQuotaExhaustedError
+    from flocks_code_security.service import AuditService
+
+    locked = sqlite3.OperationalError("database is locked")
+    store = SimpleNamespace(
+        get_knowledge_base_metadata=Mock(return_value=None),
+        get_scan=Mock(return_value={"snapshot_id": "snapshot"}),
+        get_latest_adjudication=Mock(side_effect=locked),
+    )
+    loop = SimpleNamespace(
+        action="error", error="provider quota exhausted" if quota else "connection failed",
+        metadata={"error_code": MODEL_QUOTA_EXHAUSTED} if quota else {},
+    )
+    monkeypatch.setattr(audit_cli, "get_runtime", lambda: SimpleNamespace(store=store))
+    monkeypatch.setattr(audit_cli, "source_workspace_prompt", lambda *args: "")
+    monkeypatch.setattr(audit_cli, "set_session_callable_tools", AsyncMock())
+    monkeypatch.setattr(audit_cli.Message, "create", AsyncMock())
+    monkeypatch.setattr(audit_cli.SessionLoop, "run", AsyncMock(return_value=loop))
+    orchestrator = audit_cli.AuditOrchestrator(
+        ToolContext("parent", "message", agent="code-security", extra={}), Path("/target"), None,
+    )
+    with pytest.raises(ModelQuotaExhaustedError if quota else sqlite3.OperationalError) as caught:
+        await orchestrator._execute_parent_adjudication("scan", None, 1)
+    if quota:
+        assert str(caught.value) == "provider quota exhausted"
+        assert caught.value.__cause__ is locked
+        assert AuditService._failure_code(caught.value) == MODEL_QUOTA_EXHAUSTED
+    else:
+        assert caught.value is locked
+
+
+@pytest.mark.asyncio
+async def test_phase_control_precedes_dispatch_and_bypasses_telemetry(monkeypatch):
+    from unittest.mock import Mock
+    from flocks.security.batch_timeouts import ExecutionControlError
+
+    control = Mock(side_effect=ExecutionControlError("cannot write deadline"))
+    ctx = ToolContext("parent", "message", agent="code-security", extra={"audit_phase_started": control})
+    dispatch = AsyncMock()
+    monkeypatch.setattr(audit_cli, "audit_run_workers", dispatch)
+    progress = Mock()
+    with pytest.raises(ExecutionControlError):
+        await audit_cli._run_phase(ctx, "scan", "baseline", progress)
+    control.assert_called_once_with("baseline")
+    dispatch.assert_not_awaited()
+    progress.assert_not_called()

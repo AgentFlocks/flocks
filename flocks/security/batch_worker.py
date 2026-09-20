@@ -16,8 +16,10 @@ import tarfile
 import tempfile
 import time
 
-from flocks.security.batch import atomic_json, file_lock, read_json, resolve_task, task_result
+from flocks.security.batch import apply_termination, atomic_json, file_lock, read_json, resolve_task, task_result
+from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED, ModelQuotaExhaustedError
 from flocks.utils.process_identity import process_identity
+from flocks.security.batch_timeouts import ExecutionControlError, PhaseTimeout, enter_phase, timeout_details
 
 
 def extract_source(
@@ -192,22 +194,44 @@ def scan_summary(store, scan_id: str) -> dict:
 
 def merge_scan_summary(result: dict, summary: dict) -> None:
     """Keep business failures distinct from the scheduler's termination reason."""
-    result.update({key: value for key, value in summary.items() if key not in {"status", "error"}})
+    # A stale or unavailable database cannot erase a failure caught by the worker.
+    preserve_failure = (
+        result.get("failure_code") in {MODEL_QUOTA_EXHAUSTED, PhaseTimeout.code, ExecutionControlError.code}
+        and summary["status"] != "completed"
+    )
+    excluded = {"status", "error", "failure_code"}
+    if result.get("cleanup_status") == "failed" and summary.get("cleanup_status") != "completed":
+        excluded.add("cleanup_status")
+    result.update({key: value for key, value in summary.items() if key not in excluded})
+    if not preserve_failure and ("failure_code" in summary or summary["status"] == "completed"):
+        result["failure_code"] = summary.get("failure_code")
     if summary["status"] == "completed" or summary.get("audit_status") == "failed":
-        result["status"] = summary["status"]
+        if not (preserve_failure and result.get("status") == "timed_out"):
+            result["status"] = summary["status"]
+        if preserve_failure:
+            return
         if summary.get("error"):
             result["error"] = summary["error"]
         else:
             result.pop("error", None)
 
 
-async def wait_for_cancel(task_dir: Path, attempt: str, started_at: float, timeout: float) -> str:
+async def wait_for_cancel(
+    task_dir: Path, attempt: str, started_at: float, timeout: float | None,
+    *, current: dict | None = None,
+) -> str | dict:
     """Worker-side deadline remains a fallback if its scheduler disappears."""
     while True:
         cancel = task_dir / "cancel.json"
-        if cancel.exists() and read_json(cancel).get("attempt") in {attempt, "pending"}:
-            return "cancelled"
-        if time.time() - started_at >= timeout:
+        if cancel.exists():
+            request = read_json(cancel)
+            if request.get("attempt") in {attempt, "pending"}:
+                return request.get("termination") or "cancelled"
+        if current is not None:
+            expired = timeout_details(current)
+            if expired:
+                return expired
+        elif time.time() - started_at >= timeout:
             return "timed_out"
         await asyncio.sleep(0.2)
 
@@ -248,6 +272,27 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
     diagnostics = RuntimeDiagnostics(task_dir, attempt, runtime.store)
     diagnostics.persist()
     monitor = None
+
+    def phase_started(phase: str) -> None:
+        running = asyncio.current_task()
+        if result["status"] in {"timed_out", "cancelled"} or (running and running.cancelling()):
+            raise asyncio.CancelledError
+        # Publish a committed audit outcome before entering potentially blocking
+        # cleanup, so a hard kill there cannot turn success into a task timeout.
+        if phase == "cleanup" and scan_id:
+            try:
+                summary = scan_summary(runtime.store, scan_id)
+                if summary.get("audit_status") in {"completed", "failed"}:
+                    merge_scan_summary(result, summary)
+                    atomic_json(task_dir / "result.json", result)
+            except Exception as exc:
+                result["state_error"] = str(exc)
+        enter_phase(current, config["phase_timeouts"], phase)
+        try:
+            atomic_json(task_dir / "current.json", current)
+        except OSError as exc:
+            raise ExecutionControlError("Unable to persist phase deadline") from exc
+
     try:
         task = config["tasks"][task_id]
         archive = Path(task["archive"])
@@ -271,6 +316,8 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
         atomic_json(task_dir / "source-exclusions.json", {"exclusions": exclusions})
         description = work / "description.txt"
         description.write_text(task["description_content"], encoding="utf-8")
+        if "phase_timeouts" in config:
+            phase_started("snapshot")
         diagnostics.progress("snapshot.started", {"current_phase": "snapshot"})
 
         def progress(event: str, payload: dict) -> None:
@@ -287,6 +334,7 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 source,
                 model=config["model"],
                 progress=progress,
+                **({"phase_started": phase_started} if "phase_timeouts" in config else {}),
                 knowledge_base=_read_knowledge_base(description, audited_target=source),
                 poc_enabled=config["poc"],
                 scan_mode="cybergym_level1" if config.get("dynamic") else "standard",
@@ -303,7 +351,8 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
         audit_task = asyncio.create_task(audit())
 
         watcher = asyncio.create_task(wait_for_cancel(
-            task_dir, attempt, current["started_at"], config["task_timeout"],
+            task_dir, attempt, current["started_at"], config.get("task_timeout"),
+            current=current if "phase_timeouts" in config else None,
         ))
         try:
             done, _ = await asyncio.wait({audit_task, watcher}, return_when=asyncio.FIRST_COMPLETED)
@@ -312,15 +361,21 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 result.update(scan_summary(runtime.store, scan_id))
                 atomic_json(task_dir / "result.json", result)
             else:
-                result["status"] = watcher.result()
-                result["runtime"] = diagnostics.freeze(result["status"])
+                termination = watcher.result()
+                if isinstance(termination, dict):
+                    apply_termination(result, termination)
+                else:
+                    apply_termination(result, {"status": termination})
+                result["runtime"] = diagnostics.freeze(
+                    termination["failure_code"] if isinstance(termination, dict) else termination,
+                )
                 atomic_json(task_dir / "result.json", result)
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
             if not audit_task.done():
                 if result["status"] == "failed" and not result.get("error"):
-                    result.update(status="cancelled", error="Audit cancelled")
+                    apply_termination(result, {"status": "cancelled", "error": "Audit cancelled"})
                 if "runtime" not in result:
                     result["runtime"] = diagnostics.freeze(result["status"])
                 stopping = asyncio.create_task(stop_audit_task(audit_task, task_dir, result))
@@ -329,10 +384,17 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 except asyncio.CancelledError:
                     await asyncio.shield(stopping)
                     raise
+    except PhaseTimeout as exc:
+        apply_termination(result, exc.details)
+        result.setdefault("error", str(exc))
+    except ExecutionControlError as exc:
+        result.update(status="failed", failure_code=exc.code, error=str(exc))
     except asyncio.CancelledError:
-        result.update(status="cancelled", error="Audit cancelled")
+        apply_termination(result, {"status": "cancelled", "error": "Audit cancelled"})
     except Exception as exc:
         result.update(error=f"{type(exc).__name__}: {exc}")
+        if isinstance(exc, ModelQuotaExhaustedError):
+            result["failure_code"] = MODEL_QUOTA_EXHAUSTED
     finally:
         diagnostics.closed = True
         if monitor:
@@ -379,10 +441,13 @@ def main() -> None:
             }
             result.update(cleanup_status="failed", cleanup_error=f"{type(exc).__name__}: {exc}")
             atomic_json(task_dir / "result.json", result)
-        # Reconcile the isolated store and remove local files only after resource shutdown.
-        from flocks.security.batch import cleanup_child_work
+        # In phase mode the supervisor owns final cleanup after this worker
+        # exits. On scheduler loss, resume performs it; no detached cleanup
+        # child can outlive a cancelled worker and race its supervisor.
+        if "phase_timeouts" not in read_json(root / "batch.json"):
+            from flocks.security.batch import cleanup_child_work
 
-        asyncio.run(cleanup_child_work(task_dir, result))
+            asyncio.run(cleanup_child_work(task_dir, result))
     raise SystemExit(0 if result["status"] == "completed" else 1)
 
 

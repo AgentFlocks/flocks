@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from flocks.session.callable_state import get_session_callable_tools
+from flocks.session.lifecycle.retry import (
+    MODEL_QUOTA_EXHAUSTED,
+    ModelQuotaExhaustedError,
+    SessionRetry,
+)
 from flocks.tool.registry import (
     ParameterType,
     Tool,
@@ -182,7 +187,7 @@ def _error(error: Exception | str, *, title: str) -> ToolResult:
             metadata=details,
             title=title,
         )
-    if isinstance(error, FollowUpPlanningError):
+    if isinstance(error, (FollowUpPlanningError, ModelQuotaExhaustedError)):
         details = {
             "error_code": error.code,
             "retryable": False,
@@ -1725,6 +1730,7 @@ async def _launch_worker(
     candidate: dict[str, Any] | None,
     open_questions: list[dict[str, Any]] | None = None,
     recovery_reason: str | None = None,
+    recovery_batch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from flocks.session.message import Message, MessageRole
     from flocks.session.session import Session
@@ -1903,6 +1909,10 @@ async def _launch_worker(
             content=prompt,
             agent=agent_name,
         )
+        if recovery_batch is not None:
+            quota_error = _worker_batch_quota_error(recovery_batch)
+            if quota_error:
+                raise ModelQuotaExhaustedError(quota_error)
         task = await manager.run_existing_session(
             session_id=child.id,
             parent_session_id=(
@@ -1917,6 +1927,8 @@ async def _launch_worker(
             model_id=model_id,
             execution_capsule=attempt["capsule"],
         )
+        # Keep this refresh's snapshot pointed at the live task across DB awaits.
+        unit["background_task_id"] = task.id
         await asyncio.to_thread(
             runtime.store.set_work_attempt_runtime,
             attempt["attempt_id"],
@@ -1943,16 +1955,21 @@ async def _launch_worker(
                 "capsule_digest": attempt["capsule_digest"],
             },
         )
-    except BaseException:
+    except BaseException as exc:
         if "task" in locals():
             manager.cancel(task_id=task.id)
-        await asyncio.to_thread(
-            runtime.store.finish_work_attempt,
-            attempt["attempt_id"],
-            status="failed",
-            failure_class="launch_failure",
-            work_unit_status="failed",
-        )
+        try:
+            await asyncio.to_thread(
+                runtime.store.finish_work_attempt,
+                attempt["attempt_id"],
+                status="failed",
+                failure_class=(MODEL_QUOTA_EXHAUSTED if isinstance(exc, ModelQuotaExhaustedError) else "launch_failure"),
+                work_unit_status="failed",
+            )
+        except STORE_ERRORS as state_error:
+            if isinstance(exc, ModelQuotaExhaustedError):
+                raise exc from state_error
+            raise
         raise
     return attempt
 
@@ -1962,6 +1979,7 @@ async def _resume_worker_attempt(
     unit: dict[str, Any],
     *,
     coverage_only: bool = False,
+    batch: dict[str, Any],
 ) -> None:
     from flocks.session.message import Message, MessageRole
     from flocks.session.session import Session
@@ -2010,6 +2028,9 @@ async def _resume_worker_attempt(
     )
     manager = _background_manager()
     start_gate = asyncio.Event()
+    quota_error = _worker_batch_quota_error(batch)
+    if quota_error:
+        raise ModelQuotaExhaustedError(quota_error)
     task = await manager.run_existing_session(
         session_id=session_id,
         parent_session_id=(
@@ -2026,12 +2047,16 @@ async def _resume_worker_attempt(
         start_gate=start_gate,
     )
     try:
+        unit["background_task_id"] = task.id
         await asyncio.to_thread(
             runtime.store.set_work_attempt_runtime,
             attempt_id,
             background_task_id=task.id,
             started_at=_background_timestamp(getattr(task, "started_at", None)),
         )
+        quota_error = _worker_batch_quota_error(batch)
+        if quota_error:
+            raise ModelQuotaExhaustedError(quota_error)
         start_gate.set()
         await asyncio.to_thread(
             runtime.store.append_scan_event,
@@ -2120,6 +2145,7 @@ async def _start_fresh_worker_attempt(
         unit,
         candidate=candidate,
         open_questions=open_questions,
+        recovery_batch=batch,
         recovery_reason=(
             failure_class if unit["role"] == "cybergym_solver" else None
         ),
@@ -2191,6 +2217,32 @@ async def _ensure_capsule_mismatch_terminal(
     )
 
 
+def _worker_quota_error(unit: dict[str, Any], task: Any) -> str | None:
+    if unit["status"] in {"completed", "cancelled"}:
+        return None
+    if unit.get("attempt_failure_class") == MODEL_QUOTA_EXHAUSTED:
+        return "Model provider quota exhausted"
+    if task is None or task.status not in {"error", "completed"}:
+        return None
+    metadata = getattr(task, "execution_metadata", {}) or {}
+    message = getattr(task, "error", None) or metadata.get("stop_reason")
+    if SessionRetry.is_quota_exhausted({"data": {
+        "error_code": metadata.get("error_code"), "message": message,
+    }}):
+        return message or "Model provider quota exhausted"
+    return None
+
+
+def _worker_batch_quota_error(batch: dict[str, Any]) -> str | None:
+    manager = _background_manager()
+    for unit in batch["units"]:
+        task_id = unit.get("background_task_id")
+        error = _worker_quota_error(unit, manager.get_task(task_id) if task_id else None)
+        if error:
+            return error
+    return None
+
+
 async def _refresh_worker_batch(
     batch_id: str,
     *,
@@ -2200,7 +2252,24 @@ async def _refresh_worker_batch(
     batch = await asyncio.to_thread(runtime.store.get_worker_batch, batch_id)
     if batch is None:
         raise ValueError("Worker batch not found")
+    quota_error = _worker_batch_quota_error(batch)
+    try:
+        return await _reconcile_worker_batch(batch, ctx=ctx)
+    except STORE_ERRORS as exc:
+        # Persistence must not hide a provider failure already visible in memory.
+        quota_error = quota_error or _worker_batch_quota_error(batch)
+        if quota_error:
+            raise ModelQuotaExhaustedError(quota_error) from exc
+        raise
+
+
+async def _reconcile_worker_batch(
+    batch: dict[str, Any], *, ctx: ToolContext | None,
+) -> dict[str, Any]:
+    runtime = get_runtime()
     manager = _background_manager()
+    batch_id = batch["batch_id"]
+    quota_error = _worker_batch_quota_error(batch)
     for unit in batch["units"]:
         task_id = unit.get("background_task_id")
         task = manager.get_task(task_id) if task_id else None
@@ -2233,6 +2302,8 @@ async def _refresh_worker_batch(
                     status="completed",
                 )
                 continue
+            if quota_error:
+                continue
             analysis_progress = (
                 unit["role"] in {"baseline", "investigator"}
                 and isinstance(unit.get("attempt_id"), str)
@@ -2246,8 +2317,14 @@ async def _refresh_worker_batch(
                     ctx is not None
                     and int(unit.get("resume_count") or 0) < MAX_SAME_SESSION_RESUMES
                 ):
+                    quota_error = quota_error or _worker_batch_quota_error(batch)
+                    if quota_error:
+                        continue
                     try:
-                        await _resume_worker_attempt(ctx, unit, coverage_only=True)
+                        await _resume_worker_attempt(ctx, unit, coverage_only=True, batch=batch)
+                        continue
+                    except ModelQuotaExhaustedError as exc:
+                        quota_error = str(exc)
                         continue
                     except ExecutionCapsuleError:
                         await _ensure_capsule_mismatch_terminal(
@@ -2271,8 +2348,14 @@ async def _refresh_worker_batch(
                 and ctx is not None
                 and unit.get("attempt_id") is not None
             ):
+                quota_error = quota_error or _worker_batch_quota_error(batch)
+                if quota_error:
+                    continue
                 try:
-                    await _resume_worker_attempt(ctx, unit)
+                    await _resume_worker_attempt(ctx, unit, batch=batch)
+                    continue
+                except ModelQuotaExhaustedError as exc:
+                    quota_error = str(exc)
                     continue
                 except ExecutionCapsuleError:
                     await _ensure_capsule_mismatch_terminal(
@@ -2284,6 +2367,9 @@ async def _refresh_worker_batch(
                 except (OSError, RuntimeError, ValueError, sqlite3.Error):
                     pass
             if unit.get("attempt_id") is not None and ctx is not None:
+                quota_error = quota_error or _worker_batch_quota_error(batch)
+                if quota_error:
+                    continue
                 try:
                     if await _start_fresh_worker_attempt(
                         ctx,
@@ -2292,6 +2378,9 @@ async def _refresh_worker_batch(
                         failure_class="session_missing",
                     ):
                         continue
+                except ModelQuotaExhaustedError as exc:
+                    quota_error = str(exc)
+                    continue
                 except (OSError, RuntimeError, ValueError, sqlite3.Error):
                     pass
             current = await asyncio.to_thread(
@@ -2339,12 +2428,28 @@ async def _refresh_worker_batch(
             )
         else:
             continue
+        # A running task can fail while the timing/fact reads above yield.
+        # Classify its current terminal outcome before any recovery path.
+        task_quota_error = _worker_quota_error(unit, task)
+        quota_error = quota_error or task_quota_error
         if facts_complete:
             await asyncio.to_thread(
                 runtime.store.finish_work_attempt,
                 unit.get("attempt_id"),
                 status="completed",
             )
+            continue
+        if task_quota_error:
+            await asyncio.to_thread(
+                runtime.store.record_worker_failure, unit, task, MODEL_QUOTA_EXHAUSTED,
+            )
+            await asyncio.to_thread(
+                runtime.store.finish_work_attempt,
+                unit.get("attempt_id"), status="failed",
+                failure_class=MODEL_QUOTA_EXHAUSTED, work_unit_status="failed",
+            )
+            continue
+        if quota_error:
             continue
         if unit["role"] in {"baseline", "investigator"} and isinstance(unit.get("session_id"), str):
             try:
@@ -2378,8 +2483,14 @@ async def _refresh_worker_batch(
                 ctx is not None
                 and int(unit.get("resume_count") or 0) < MAX_SAME_SESSION_RESUMES
             ):
+                quota_error = quota_error or _worker_batch_quota_error(batch)
+                if quota_error:
+                    continue
                 try:
-                    await _resume_worker_attempt(ctx, unit, coverage_only=True)
+                    await _resume_worker_attempt(ctx, unit, coverage_only=True, batch=batch)
+                    continue
+                except ModelQuotaExhaustedError as exc:
+                    quota_error = str(exc)
                     continue
                 except ExecutionCapsuleError:
                     await _ensure_capsule_mismatch_terminal(
@@ -2415,8 +2526,14 @@ async def _refresh_worker_batch(
             and int(unit.get("resume_count") or 0) < MAX_SAME_SESSION_RESUMES
             and ctx is not None
         ):
+            quota_error = quota_error or _worker_batch_quota_error(batch)
+            if quota_error:
+                continue
             try:
-                await _resume_worker_attempt(ctx, unit)
+                await _resume_worker_attempt(ctx, unit, batch=batch)
+                continue
+            except ModelQuotaExhaustedError as exc:
+                quota_error = str(exc)
                 continue
             except ExecutionCapsuleError:
                 await _ensure_capsule_mismatch_terminal(
@@ -2428,6 +2545,9 @@ async def _refresh_worker_batch(
             except (OSError, RuntimeError, ValueError, sqlite3.Error):
                 pass
         if ctx is not None:
+            quota_error = quota_error or _worker_batch_quota_error(batch)
+            if quota_error:
+                continue
             try:
                 if await _start_fresh_worker_attempt(
                     ctx,
@@ -2436,6 +2556,9 @@ async def _refresh_worker_batch(
                     failure_class=failure_class,
                 ):
                     continue
+            except ModelQuotaExhaustedError as exc:
+                quota_error = str(exc)
+                continue
             except ExecutionCapsuleError:
                 await _ensure_capsule_mismatch_terminal(
                     batch_id,
@@ -2477,6 +2600,9 @@ async def _refresh_worker_batch(
             batch_status,
         )
         refreshed["status"] = batch_status
+    quota_error = quota_error or _worker_batch_quota_error(refreshed)
+    if quota_error and batch_status not in {"completed", "cancelled"}:
+        raise ModelQuotaExhaustedError(quota_error)
     return refreshed
 
 

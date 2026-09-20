@@ -23,6 +23,26 @@ from flocks.session.lifecycle.retry import (
 # ---------------------------------------------------------------------------
 
 class TestRetryable:
+    @pytest.mark.parametrize("data", [
+        {"providerCode": "insufficient_quota"},
+        {"providerCode": "billing_hard_limit_reached"},
+        {"message": '429 {"code": "insufficient_quota"}'},
+        {"message": "Insufficient quota"},
+        {"error_code": "model_quota_exhausted"},
+    ])
+    def test_explicit_quota_never_retries(self, data):
+        error = {"name": "APIError", "data": {"isRetryable": True, **data}}
+        assert SessionRetry.is_quota_exhausted(error)
+        assert SessionRetry.retryable(error) is None
+
+    @pytest.mark.parametrize("message", [
+        "429 rate limit exceeded", "429 TPM quota exceeded", "429 resource_exhausted",
+    ])
+    def test_transient_limits_still_retry(self, message):
+        error = {"name": "APIError", "data": {"isRetryable": True, "message": message}}
+        assert not SessionRetry.is_quota_exhausted(error)
+        assert SessionRetry.retryable(error) is not None
+
     def test_non_api_error_with_no_pattern_returns_none(self):
         error = {"name": "SomeOtherError", "data": {"message": "something went wrong"}}
         assert SessionRetry.retryable(error) is None

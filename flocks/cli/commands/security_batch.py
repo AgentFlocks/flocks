@@ -9,7 +9,7 @@ from typing import Optional
 
 import typer
 
-from flocks.security.batch import batch_status, clean_batch, prepare_batch, run_batch
+from flocks.security.batch import batch_status, clean_batch, prepare_batch, read_json, run_batch
 
 batch_app = typer.Typer(help="Run isolated Arvo audits concurrently and resume interrupted batches.")
 
@@ -46,7 +46,11 @@ def start(
     dynamic_concurrency: int = typer.Option(
         2, min=1, max=128, help="Maximum active dynamic containers per batch; each uses 1 CPU and 1024 MiB."
     ),
-    task_timeout: int = typer.Option(7200, min=1, help="Total seconds allowed per task, including preparation."),
+    phase_timeouts: Optional[Path] = typer.Option(
+        None, exists=True, dir_okay=False,
+        help="JSON file of cumulative per-phase budgets in seconds. Uses built-in phase budgets when neither timeout option is given; no overall task timeout.",
+    ),
+    task_timeout: Optional[int] = typer.Option(None, min=1, help="Explicit legacy overall task timeout; incompatible with --phase-timeouts."),
     max_snapshot_bytes: int = typer.Option(4 * 1024**3, min=1),
     max_snapshot_files: int = typer.Option(50_000, min=1, help="Maximum files included in each audit snapshot."),
     exclude_cyclic_symlinks: bool = typer.Option(False, help="Exclude cyclic source symlinks and record coverage exclusions."),
@@ -83,6 +87,7 @@ def start(
             dynamic=dynamic,
             dynamic_concurrency=dynamic_concurrency,
             task_timeout=task_timeout,
+            phase_timeouts=read_json(phase_timeouts) if phase_timeouts else None,
             max_snapshot_bytes=max_snapshot_bytes,
             max_snapshot_files=max_snapshot_files,
             exclude_cyclic_symlinks=exclude_cyclic_symlinks,

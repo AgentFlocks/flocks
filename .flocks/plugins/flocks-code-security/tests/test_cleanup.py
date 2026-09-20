@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -187,15 +187,36 @@ async def test_session_cleanup_refuses_unrelated_descendants(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_service_failure_runs_optional_cleanup(tmp_path, monkeypatch, enabled):
+@pytest.mark.parametrize("quota", [False, True])
+async def test_service_failure_runs_optional_cleanup(tmp_path, monkeypatch, enabled, quota):
     from types import SimpleNamespace
     from flocks_code_security import service as service_module
+    from flocks.session.lifecycle.retry import ModelQuotaExhaustedError
+    from flocks.task import background
 
     runtime, scan_id, snapshot, _ = prepare(tmp_path, monkeypatch, enabled=enabled)
     monkeypatch.setattr(service_module, "get_runtime", lambda: runtime)
-    orchestrator = SimpleNamespace(run=AsyncMock(side_effect=RuntimeError("audit failed")))
+    error = ModelQuotaExhaustedError("audit failed") if quota else RuntimeError("audit failed")
+    orchestrator = SimpleNamespace(run=AsyncMock(side_effect=error))
     monkeypatch.setattr(service_module, "AuditOrchestrator", lambda *a, **kw: orchestrator)
     service = AuditService()
+    if quota and not enabled:
+        batch = runtime.store.create_worker_batch(
+            scan_id=scan_id, phase="threat_modeling", units=[{"role": "threat_modeler", "paths": ["."]}],
+        )
+        attempt = runtime.store.create_work_attempt(
+            work_unit_id=batch["units"][0]["work_unit_id"], session_id="live_session", agent_name="code-security-threat-modeler",
+        )
+        runtime.store.set_work_attempt_runtime(
+            attempt["attempt_id"], background_task_id="live_worker", started_at=None,
+        )
+    cancel_work = Mock(wraps=runtime.store.cancel_scan_work)
+    monkeypatch.setattr(runtime.store, "cancel_scan_work", cancel_work)
+    manager = Mock()
+    manager.list_tasks.return_value = [SimpleNamespace(
+        id="live_worker", status="running", execution_capsule={"scan_id": scan_id},
+    )] if quota and not enabled else []
+    monkeypatch.setattr(background, "get_background_manager", lambda: manager)
     events = []
     recorder = service_module._ProgressRecorder(
         scan_id, dynamic_enabled=False, downstream=lambda event, payload: events.append((event, payload)),
@@ -206,6 +227,15 @@ async def test_service_failure_runs_optional_cleanup(tmp_path, monkeypatch, enab
             StartScanRequest(target_path=tmp_path, cleanup_intermediates=enabled), None, {"scan_id": scan_id}, recorder
         )
     assert runtime.store.get_scan(scan_id)["status"] == "failed"
+    assert cancel_work.call_count == int(quota) + int(enabled)
+    if quota and not enabled:
+        manager.cancel.assert_called_once_with(task_id="live_worker")
+        assert runtime.store.get_work_attempt(attempt["attempt_id"])["status"] == "cancelled"
+    from flocks.security.batch_worker import scan_summary
+
+    assert scan_summary(runtime.store, scan_id)["failure_code"] == (
+        "model_quota_exhausted" if quota else "audit_execution_failed"
+    )
     assert Path(snapshot.root_path).exists() is (not enabled)
     assert bool(runtime.store.list_phase_runs(scan_id)) is (not enabled)
     if enabled:
@@ -230,6 +260,46 @@ async def test_recovery_cleans_opted_in_interrupted_scan(tmp_path, monkeypatch):
     assert runtime.store.get_scan(scan_id)["status"] == "interrupted"
     assert not Path(snapshot.root_path).exists()
     assert runtime.store.list_phase_runs(scan_id) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_write", ["mark_scan_terminal", "cancel_scan_work"])
+async def test_quota_cancels_owned_live_workers_even_when_database_is_locked(tmp_path, monkeypatch, failed_write):
+    import sqlite3
+    from types import SimpleNamespace
+    from unittest.mock import call
+    from flocks.session.lifecycle.retry import ModelQuotaExhaustedError
+    from flocks.task import background
+    from flocks_code_security import service as service_module
+
+    runtime, scan_id, snapshot, _ = prepare(tmp_path, monkeypatch, enabled=False)
+    service = AuditService(runtime=runtime)
+    manager = Mock()
+    manager.list_tasks.return_value = [
+        SimpleNamespace(id="running", status="running", parent_session_id=None, execution_capsule={"scan_id": scan_id}),
+        SimpleNamespace(id="pending", status="pending", execution_capsule={"scan_id": scan_id}),
+        SimpleNamespace(id="completed", status="completed", execution_capsule={"scan_id": scan_id}),
+        SimpleNamespace(id="other_scan", status="running", execution_capsule={"scan_id": "other"}),
+        SimpleNamespace(id="ordinary", status="running", execution_capsule=None),
+    ]
+    monkeypatch.setattr(background, "get_background_manager", lambda: manager)
+
+    def locked(*args, **kwargs):
+        assert manager.cancel.call_args_list == [call(task_id="running"), call(task_id="pending")]
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(runtime.store, failed_write, locked)
+    orchestrator = SimpleNamespace(run=AsyncMock(side_effect=ModelQuotaExhaustedError("quota exhausted")))
+    monkeypatch.setattr(service_module, "AuditOrchestrator", lambda *a, **kw: orchestrator)
+    with pytest.raises(ModelQuotaExhaustedError, match="quota exhausted"):
+        await service._run_background(
+            StartScanRequest(target_path=tmp_path, cleanup_intermediates=False),
+            None, {"scan_id": scan_id}, Mock(),
+        )
+    assert manager.cancel.call_args_list == [call(task_id="running"), call(task_id="pending")]
+    assert Path(snapshot.root_path).exists()
+    if failed_write == "cancel_scan_work":
+        assert runtime.store.get_scan(scan_id)["failure_code"] == "model_quota_exhausted"
 
 
 @pytest.mark.asyncio
@@ -329,3 +399,54 @@ def test_cleanup_recovery_skips_live_owners_and_completed_cleanup(tmp_path, monk
     assert runtime.store.pending_cleanup_scan_ids(active_owner_tokens=set()) == [scan_id]
     runtime.store.prune_scan_execution_history(scan_id)
     assert runtime.store.pending_cleanup_scan_ids(active_owner_tokens=set()) == []
+
+
+@pytest.mark.asyncio
+async def test_service_quota_reaches_worker_result_when_scan_write_is_locked(tmp_path, monkeypatch):
+    import sqlite3
+    import time
+    from types import SimpleNamespace
+    from flocks.cli.commands import security
+    from flocks.security import batch_worker
+    from flocks.security.batch import atomic_json, read_json
+    from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED, ModelQuotaExhaustedError
+    from flocks.task import background
+    from flocks_code_security import service as service_module, runtime as runtime_module
+
+    runtime, scan_id, _, target = prepare(tmp_path, monkeypatch, enabled=False)
+    monkeypatch.setattr(runtime_module, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(runtime.store, "mark_scan_terminal", Mock(side_effect=sqlite3.OperationalError("database is locked")))
+    monkeypatch.setattr(background, "get_background_manager", lambda: SimpleNamespace(list_tasks=lambda: []))
+    orchestrator = SimpleNamespace(run=AsyncMock(side_effect=ModelQuotaExhaustedError("provider quota exhausted")))
+    monkeypatch.setattr(service_module, "AuditOrchestrator", lambda *a, **kw: orchestrator)
+    service = AuditService(runtime=runtime)
+
+    async def audit(source, *, progress, **kwargs):
+        progress("scan.prepared", {"scan_id": scan_id})
+        return await service._run_background(
+            StartScanRequest(target_path=target, cleanup_intermediates=False),
+            None, {"scan_id": scan_id}, Mock(),
+        )
+
+    monkeypatch.setattr(security, "_load_plugin_cli", lambda: (audit, None))
+    monkeypatch.setattr(batch_worker, "extract_source", lambda *a, **kw: [])
+    root = tmp_path / "batch"
+    task_dir = root / "tasks" / "0"
+    task_dir.mkdir(parents=True)
+    archive = tmp_path / "source.tar.gz"
+    archive.write_bytes(b"unused: extraction is mocked")
+    stat = archive.stat()
+    atomic_json(root / "batch.json", {
+        "tasks": {"0": {"archive": str(archive), "archive_size": stat.st_size,
+                        "archive_mtime_ns": stat.st_mtime_ns, "description_content": "Review source"}},
+        "max_snapshot_bytes": 1024, "model": "test/model", "poc": False, "task_timeout": 30,
+    })
+    atomic_json(task_dir / "current.json", {"attempt": "attempt", "started_at": time.time()})
+    try:
+        result = await batch_worker.execute(root, "0", "attempt")
+        assert runtime.store.get_scan(scan_id)["failure_code"] is None
+        assert result["status"] == "failed"
+        assert result["failure_code"] == MODEL_QUOTA_EXHAUSTED
+        assert read_json(task_dir / "result.json")["failure_code"] == MODEL_QUOTA_EXHAUSTED
+    finally:
+        batch_worker.cleanup_work(read_json(task_dir / "current.json")["work_dir"], task_dir)

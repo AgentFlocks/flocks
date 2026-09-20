@@ -1,12 +1,14 @@
 """Focused tests for WebUI Auto runtime model failover."""
 
 import time
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from flocks.session.message import Message, MessageRole
+from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED, SessionRetry
 from flocks.session.runner import (
     LlmAttemptState,
     SessionRunner,
@@ -389,6 +391,50 @@ def test_exception_status_is_normalized_from_cause_chain():
 
     assert error["data"]["statusCode"] == 401
     assert SessionRunner.classify_failover_error(error).reason == "auth"
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_quota_code_survives_sdk_body_and_exception_wrapping(wrapped):
+    inner = type("SdkError", (RuntimeError,), {
+        "code": 429,
+        "body": {"error": {"code": "insufficient_quota"}},
+    })("Provider request failed")
+    outer = RuntimeError("Wrapped provider failure")
+    outer.__cause__ = inner
+    runner = SessionRunner(session=_session(), provider_id="primary", model_id="primary-model")
+    error = runner._exception_to_error_dict(outer if wrapped else inner)
+    assert error["data"]["error_code"] == MODEL_QUOTA_EXHAUSTED
+    assert error["data"]["providerCode"] == "insufficient_quota"
+    assert error["data"]["isRetryable"] is False
+    assert SessionRetry.retryable(error) is None
+    assert SessionRunner.classify_failover_error(error).reason == "billing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_fixed_model_loop_preserves_quota_or_cancellation(monkeypatch, cancelled):
+    ctx = _ctx(auto=False)
+    ctx.session.memory_enabled = False
+    user = SimpleNamespace(id="msg_user", role=MessageRole.USER, agent="rex")
+    ctx.turn_user_id = user.id
+    ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=[user]))
+    process = AsyncMock(
+        side_effect=asyncio.CancelledError if cancelled else None,
+        return_value=StepResult(action="stop", error="billing failure", error_code=MODEL_QUOTA_EXHAUSTED),
+    )
+    monkeypatch.setattr(SessionLoop, "_process_step_with_failover", process)
+    queued = AsyncMock(return_value=user)
+    monkeypatch.setattr(SessionLoop, "_detect_queued_user_message", queued)
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await SessionLoop._run_loop(ctx, LoopCallbacks())
+    else:
+        result = await SessionLoop._run_loop(ctx, LoopCallbacks())
+        assert result.action == "error"
+        assert result.error == "billing failure"
+        assert result.metadata["error_code"] == MODEL_QUOTA_EXHAUSTED
+    process.assert_awaited_once()
+    queued.assert_not_awaited()
 
 
 def test_local_validation_error_never_fails_over():

@@ -18,12 +18,15 @@ from uuid import uuid4
 
 from flocks.project.project import Project
 from flocks.session.session import Session
+from flocks.session.lifecycle.retry import ModelQuotaExhaustedError
+from flocks.security.batch_timeouts import ExecutionControlError, PhaseTimeout
 from flocks.storage.storage import Storage
 from flocks.tool.registry import ToolContext
 from flocks.workspace.manager import WorkspaceManager
 
 from flocks_code_security.cli import (
     AuditOrchestrator,
+    enter_audit_phase,
     _require_enabled_audit_tools,
     _require_success,
     _resolve_model,
@@ -629,6 +632,7 @@ class AuditService:
         caller: AuditCaller,
         *,
         progress: Callable[[str, dict[str, Any]], None] | None = None,
+        phase_started: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         if not caller.subject.strip() or len(caller.subject) > 256:
             raise AuditServiceError("invalid_caller", "Audit caller identity is invalid", status_code=403)
@@ -743,6 +747,8 @@ class AuditService:
 
             ctx = await self._create_execution_context(normalized, caller)
             ctx.extra["audit_managed_cleanup"] = True
+            if phase_started is not None:
+                ctx.extra["audit_phase_started"] = phase_started
             prepare_result = await audit_prepare(
                 ctx,
                 str(normalized.target_path),
@@ -828,8 +834,12 @@ class AuditService:
         caller: AuditCaller,
         *,
         progress: Callable[[str, dict[str, Any]], None] | None = None,
+        phase_started: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
-        started = await self.start_scan(request, caller, progress=progress)
+        started = await self.start_scan(
+            request, caller, progress=progress,
+            **({"phase_started": phase_started} if phase_started is not None else {}),
+        )
         scan_id = started["scan"]["scan_id"]
         active = self._active.get(scan_id)
         if active is not None:
@@ -865,44 +875,70 @@ class AuditService:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            stop_workers = isinstance(exc, (ModelQuotaExhaustedError, PhaseTimeout, ExecutionControlError))
+            if stop_workers:
+                # Runtime ownership is available even when SQLite is locked.
+                # Capsules also identify workers whose parent notifications
+                # are suppressed (parent_session_id is then None).
+                try:
+                    from flocks.task.background import get_background_manager
+
+                    manager = get_background_manager()
+                    for task in manager.list_tasks():
+                        capsule = task.execution_capsule or {}
+                        if capsule.get("scan_id") == scan_id and task.status in {"pending", "running"}:
+                            manager.cancel(task_id=task.id)
+                except Exception:
+                    logger.warning("Failed to stop terminated audit workers for %s", scan_id, exc_info=True)
             summary = str(exc).strip()[:1_000] or type(exc).__name__
             failure_code = self._failure_code(exc)
-            terminal_changed = self.store.mark_scan_terminal(
-                scan_id,
-                "failed",
-                failure_code=failure_code,
-                failure_summary=summary,
-            )
-            if terminal_changed:
-                for phase in self.store.list_phase_runs(scan_id):
-                    if phase["status"] != "running":
-                        continue
-                    failed_phase = self.store.finish_phase_run(
-                        phase["phase_run_id"],
-                        "failed",
-                        summary={"code": failure_code, "summary": summary},
-                    )
-                    self.store.append_scan_event(
-                        scan_id,
-                        "phase.failed",
-                        "代码审计阶段执行失败",
-                        {"phase": failed_phase["phase"], "code": failure_code},
-                        level="error",
-                        phase_run_id=failed_phase["phase_run_id"],
-                    )
-                event = self.store.append_scan_event(
+            try:
+                terminal_changed = self.store.mark_scan_terminal(
                     scan_id,
-                    "scan.failed",
-                    "代码审计执行失败",
-                    {"code": failure_code, "summary": summary},
-                    level="error",
+                    "failed",
+                    failure_code=failure_code,
+                    failure_summary=summary,
                 )
-                recorder._publish_change(event["seq"])
+                if terminal_changed:
+                    for phase in self.store.list_phase_runs(scan_id):
+                        if phase["status"] != "running":
+                            continue
+                        failed_phase = self.store.finish_phase_run(
+                            phase["phase_run_id"],
+                            "failed",
+                            summary={"code": failure_code, "summary": summary},
+                        )
+                        self.store.append_scan_event(
+                            scan_id,
+                            "phase.failed",
+                            "代码审计阶段执行失败",
+                            {"phase": failed_phase["phase"], "code": failure_code},
+                            level="error",
+                            phase_run_id=failed_phase["phase_run_id"],
+                        )
+                    event = self.store.append_scan_event(
+                        scan_id,
+                        "scan.failed",
+                        "代码审计执行失败",
+                        {"code": failure_code, "summary": summary},
+                        level="error",
+                    )
+                    recorder._publish_change(event["seq"])
+            except Exception:
+                if not stop_workers:
+                    raise
+                logger.warning("Failed to persist terminal failure for %s", scan_id, exc_info=True)
+            if stop_workers:
+                try:
+                    await asyncio.to_thread(self.store.cancel_scan_work, scan_id)
+                except Exception:
+                    logger.warning("Failed to persist cancelled audit work for %s", scan_id, exc_info=True)
             raise
         finally:
             try:
                 if request.cleanup_intermediates:
                     from flocks_code_security.cleanup import cleanup_scan
+                    enter_audit_phase(ctx, "cleanup")
                     recorder("cleanup.started", {})
                     summary = await cleanup_scan(self.runtime, scan_id, owned_parent_session=True)
                     recorder("cleanup.completed" if summary.get("status") == "completed" else "cleanup.failed", summary)
@@ -2377,6 +2413,8 @@ class AuditService:
 
     @staticmethod
     def _failure_code(exc: BaseException) -> str:
+        if isinstance(exc, (ModelQuotaExhaustedError, PhaseTimeout, ExecutionControlError)):
+            return exc.code
         text = str(exc).casefold()
         if ("model" in text or "llm" in text) and ("available" in text or "configured" in text):
             return "model_unavailable"

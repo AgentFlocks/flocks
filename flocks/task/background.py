@@ -272,11 +272,6 @@ class BackgroundManager:
                     model_id=task.model_id,
                     agent_name=task.agent,
                 )
-                if getattr(result, "action", None) == "error":
-                    raise RuntimeError(
-                        getattr(result, "error", None)
-                        or "Background session loop failed"
-                    )
                 output = ""
                 if result.last_message:
                     output = await Message.get_text_content(result.last_message)
@@ -595,6 +590,18 @@ class BackgroundManager:
         try:
             result = await loop_task
             task.execution_metadata = dict(getattr(result, "metadata", {}) or {})
+            # A loop may return after catching cancellation. Preserve the watchdog
+            # or caller's termination intent instead of reporting completion.
+            current = asyncio.current_task()
+            if (
+                inactivity_triggered[0]
+                or question_blocked[0]
+                or task.execution_metadata.get("aborted")
+                or (current is not None and current.cancelling())
+            ):
+                raise asyncio.CancelledError
+            if getattr(result, "action", None) == "error":
+                raise RuntimeError(getattr(result, "error", None) or "Background session loop failed")
             return result
         except asyncio.CancelledError:
             if question_blocked[0]:

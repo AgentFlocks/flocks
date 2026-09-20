@@ -1365,6 +1365,7 @@ class SessionLoop:
         """
         last_message: Optional[MessageInfo] = None
         loop_error: Optional[str] = None
+        loop_error_code: Optional[str] = None
         
         while not ctx.should_abort():
             # Set status to busy
@@ -2089,7 +2090,7 @@ class SessionLoop:
                 step_result = await step_task
             except asyncio.CancelledError:
                 log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
-                break
+                raise
             finally:
                 ctx._current_step_task = None
                 log.debug("loop.step_complete", {
@@ -2105,6 +2106,7 @@ class SessionLoop:
             # Handle result
             if step_result.action == "stop":
                 loop_error = step_result.error
+                loop_error_code = getattr(step_result, "error_code", None)
                 # Report error if step failed
                 if step_result.error and callbacks.on_error:
                     await callbacks.on_error(step_result.error)
@@ -2124,6 +2126,8 @@ class SessionLoop:
                     None,
                 )
 
+                if loop_error_code:
+                    break
                 queued_user = await cls._detect_queued_user_message(
                     ctx.session.id,
                     post_messages,
@@ -2296,13 +2300,10 @@ class SessionLoop:
                 break
         
         # Return result
-        loop_guard_halt = bool(
-            loop_error and loop_error.startswith("runner_tool_loop_guard_halt:")
-        )
         return LoopResult(
-            action="error" if (ctx.auto_failover and loop_error) or loop_guard_halt else "stop",
+            action="error" if loop_error else "stop",
             last_message=last_message,
-            error=loop_error if (ctx.auto_failover or loop_guard_halt) else None,
+            error=loop_error,
             provider_id=ctx.provider_id,
             model_id=ctx.model_id,
             metadata={
@@ -2312,6 +2313,7 @@ class SessionLoop:
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
                 **({"stop_reason": loop_error} if loop_error else {}),
+                **({"error_code": loop_error_code} if loop_error_code else {}),
                 **({"aborted": True} if ctx.should_abort() else {}),
             },
         )

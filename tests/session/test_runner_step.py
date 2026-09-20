@@ -3192,9 +3192,11 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_step_retries_empty_transport_exception(monkeypatch):
+@pytest.mark.parametrize("failure", ["transport", "throttle", "quota", "quota_deferred"])
+async def test_process_step_retries_only_transient_provider_errors(monkeypatch, failure):
     runner = _make_runner("ses_runner_transport_retry")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._defer_step_errors = failure == "quota_deferred"
 
     last_user = UserMessageInfo(
         id="msg_user_transport_retry",
@@ -3208,9 +3210,12 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
     provider = MagicMock()
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_transport_retry")
+    error = httpcore.ReadError() if failure == "transport" else RuntimeError(
+        "429 insufficient_quota" if failure.startswith("quota") else "429 rate limit exceeded"
+    )
     call_llm_mock = AsyncMock(
         side_effect=[
-            httpcore.ReadError(),
+            error,
             StepResult(action="stop", content="recovered"),
         ]
     )
@@ -3231,9 +3236,17 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
     monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
     monkeypatch.setattr(runner, "_call_llm", call_llm_mock)
     monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+    monkeypatch.setattr(runner, "_ensure_visible_error_text", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_publish_assistant_error_message", AsyncMock())
 
     result = await runner._process_step([last_user], last_user)
 
+    if failure.startswith("quota"):
+        assert result.action == "stop"
+        assert result.error_code == "model_quota_exhausted"
+        call_llm_mock.assert_awaited_once()
+        sleep_mock.assert_not_awaited()
+        return
     assert result.content == "recovered"
     assert call_llm_mock.await_count == 2
     sleep_mock.assert_awaited_once()
