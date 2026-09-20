@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable
 from dataclasses import dataclass
 
 from flocks.utils.log import Log
+from flocks.situation_report.product.tool_display import failure_metadata as report_failure_metadata
 from flocks.utils.id import Identifier
 from flocks.session.message import (
     Message,
@@ -533,12 +534,14 @@ class StreamProcessor:
             tool_state.name = original_tool
             tool_state.status = "error"
             tool_state.error = parse_error
+            display_metadata = await report_failure_metadata(original_tool, self.session_id, "")
 
             tool_error_time = int(datetime.now().timestamp() * 1000)
             error_state = ToolStateError(
                 status="error",
                 input=tool_input,
                 error=parse_error,
+                metadata=display_metadata,
                 time={"start": tool_error_time, "end": tool_error_time},
             )
             error_part = ToolPart(
@@ -565,6 +568,7 @@ class StreamProcessor:
                             "status": "error",
                             "input": tool_input,
                             "error": parse_error,
+                            **({"metadata": display_metadata} if display_metadata else {}),
                             "time": {"start": tool_error_time, "end": tool_error_time},
                         },
                     },
@@ -601,6 +605,9 @@ class StreamProcessor:
                     status="error",
                     input=tool_input,
                     error=error,
+                    metadata=await report_failure_metadata(
+                        tool_name, self.session_id, tool_input.get("generation_id", ""),
+                    ),
                     time={"start": tool_error_time, "end": tool_error_time},
                 ),
             )
@@ -963,6 +970,13 @@ class StreamProcessor:
                 tool_start_time=tool_start_time,
             )
             
+            if not result.success and "display" not in (result.metadata or {}):
+                display_metadata = await report_failure_metadata(
+                    tool_name, self.session_id, tool_input.get("generation_id", ""),
+                )
+                if display_metadata:
+                    result.metadata = {**(result.metadata or {}), **display_metadata}
+
             # Update tool state
             tool_state.status = "completed" if result.success else "error"
             tool_state.output = result.output if result.success else None
@@ -1107,6 +1121,9 @@ class StreamProcessor:
             
             tool_state.status = "error"
             tool_state.error = str(e)
+            display_metadata = await report_failure_metadata(
+                tool_name, self.session_id, tool_input.get("generation_id", ""),
+            )
             
             # Update ToolPart in storage with error state
             try:
@@ -1115,6 +1132,7 @@ class StreamProcessor:
                     status="error",
                     input=tool_input,
                     error=str(e),
+                    metadata=display_metadata,
                     time={"start": tool_start_time if 'tool_start_time' in locals() else tool_error_time, "end": tool_error_time},
                 )
                 
@@ -1143,6 +1161,7 @@ class StreamProcessor:
                                 "status": "error",
                                 "input": tool_input,
                                 "error": str(e),
+                                **({"metadata": display_metadata} if display_metadata else {}),
                                 "time": {"start": tool_start_time if 'tool_start_time' in locals() else tool_error_time, "end": tool_error_time},
                             }
                         }
@@ -1180,6 +1199,9 @@ class StreamProcessor:
     ) -> None:
         """Emit and persist the terminal state for an interrupted tool call."""
         interrupt_msg = "Tool execution was interrupted"
+        display_metadata = await report_failure_metadata(
+            tool_name, self.session_id, tool_input.get("generation_id", ""), "cancelled",
+        )
         log.info("stream.tool_call.cancelled", {
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
@@ -1222,6 +1244,7 @@ class StreamProcessor:
                 status="error",
                 input=tool_input,
                 error=interrupt_msg,
+                metadata=display_metadata,
                 time={"start": tool_start_time, "end": tool_end_time},
             )
             error_part = ToolPart(
@@ -1254,6 +1277,7 @@ class StreamProcessor:
                                     "status": "error",
                                     "input": tool_input,
                                     "error": interrupt_msg,
+                                    **({"metadata": display_metadata} if display_metadata else {}),
                                     "time": {
                                         "start": tool_start_time,
                                         "end": tool_end_time,

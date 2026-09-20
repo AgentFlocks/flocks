@@ -8,7 +8,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Awaitable, Callable, cast
 
 from flocks.session.session import Session
 
@@ -124,6 +124,18 @@ def _verified_context_file(workspace_dir: Path, metadata: Any, label: str) -> Pa
     ):
         raise ProductWorkspaceError(f"{label} verification failed")
     return path
+
+
+async def read_tool_display_settings(*, session_id: str, generation_id: str) -> dict[str, Any]:
+    """Read frozen language and candidate existence without loading report contents."""
+    workspace_dir, _, _ = await _resolve_run(session_id, generation_id)
+    context = _load_generation_context(workspace_dir, generation_id)
+    from .language import resolve_report_language
+
+    return {
+        "language": resolve_report_language(session_id, context.get("language")),
+        "revision": (workspace_dir / "work" / generation_id / "report.md").is_file(),
+    }
 
 
 async def read_generation_context(*, session_id: str, generation_id: str) -> dict[str, Any]:
@@ -468,6 +480,7 @@ async def write_candidate_report(
     content: str,
     evidence_map: dict[str, list[str]],
     expected_sha256: str = "",
+    on_validation: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     encoded = content.strip().encode("utf-8")
     if not encoded or len(encoded) > 10 * 1024 * 1024:
@@ -529,6 +542,8 @@ async def write_candidate_report(
                 raise ProductWorkspaceError("Validation attempt budget is exhausted")
         atomic_write_bytes(path, encoded + b"\n")
         atomic_write_bytes(evidence_path, encoded_evidence)
+        if on_validation is not None:
+            await on_validation()
         validation = _validate_candidate_report(workspace_dir, generation_id)
         return {
             "generationID": generation_id,

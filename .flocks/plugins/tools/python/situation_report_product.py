@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Awaitable, Callable
 
+from flocks.situation_report.product import tool_display
 from flocks.situation_report.product.workspace import (
     read_generation_context,
     read_material_detail,
@@ -21,19 +23,47 @@ from flocks.tool.registry import (
 )
 
 
-async def _run(operation: Callable[..., Awaitable[dict[str, Any]]], **kwargs: Any) -> ToolResult:
+async def _run(
+    ctx: ToolContext, step: str, operation: Callable[..., Awaitable[dict[str, Any]]], **kwargs: Any
+) -> ToolResult:
+    config = await tool_display.settings(ctx.session_id, kwargs["generation_id"])
+    language = config["language"]
+    if step == "write" and config["revision"]:
+        step = "revision"
+
+    async def progress(current_step: str) -> None:
+        if ctx.aborted:
+            raise asyncio.CancelledError()
+        value = tool_display.metadata(current_step, "running", language)
+        if current_step == "materials":
+            start = kwargs.get("offset", 0) + 1
+            value["display"]["detail"] = (
+                f"Reading from material {start}." if language == "en-US" else f"从第{start}条素材开始读取。"
+            )
+        ctx.metadata({"title": value["display"]["title"], "metadata": value})
+        await asyncio.sleep(0)  # Let the existing SSE/persistence callback run.
+        if ctx.aborted:
+            raise asyncio.CancelledError()
+
     try:
+        await progress(step)
+        if step in {"write", "revision"}:
+            kwargs["on_validation"] = lambda: progress("validate")
         output = await operation(**kwargs)
+        if ctx.aborted:
+            raise asyncio.CancelledError()
+        display = tool_display.completed_metadata(step, output, language)
         return ToolResult(
             success=True,
             output=output,
-            metadata={"runtime": "situation-report-product-v1"},
+            title=display["display"]["title"],
+            metadata=display,
         )
     except Exception as exc:
         return ToolResult(
             success=False,
             error=f"{type(exc).__name__}: {exc}",
-            metadata={"runtime": "situation-report-product-v1"},
+            metadata=tool_display.metadata(step, "failed", language),
         )
 
 
@@ -56,6 +86,8 @@ async def _run(operation: Callable[..., Awaitable[dict[str, Any]]], **kwargs: An
 )
 async def situation_product_context_read(ctx: ToolContext, generation_id: str) -> ToolResult:
     return await _run(
+        ctx,
+        "context",
         read_generation_context,
         session_id=ctx.session_id,
         generation_id=generation_id,
@@ -95,7 +127,10 @@ async def situation_product_context_read(ctx: ToolContext, generation_id: str) -
             default=20,
         ),
         ToolParameter(
-            name="content_offset", type=ParameterType.INTEGER, required=False, default=0,
+            name="content_offset",
+            type=ParameterType.INTEGER,
+            required=False,
+            default=0,
             description="Character cursor inside a large material; copy top-level nextContentOffset with nextOffset.",
         ),
     ],
@@ -108,6 +143,8 @@ async def situation_product_material_read(
     content_offset: int = 0,
 ) -> ToolResult:
     return await _run(
+        ctx,
+        "materials",
         read_material_page,
         session_id=ctx.session_id,
         generation_id=generation_id,
@@ -147,15 +184,24 @@ async def situation_product_material_read(
             required=True,
         ),
         ToolParameter(
-            name="offset", type=ParameterType.INTEGER, required=False, default=0,
+            name="offset",
+            type=ParameterType.INTEGER,
+            required=False,
+            default=0,
             description="Zero-based character offset in cached detail JSON; use nextOffset to continue.",
         ),
         ToolParameter(
-            name="limit", type=ParameterType.INTEGER, required=False, default=6_000,
+            name="limit",
+            type=ParameterType.INTEGER,
+            required=False,
+            default=6_000,
             description="Maximum detail characters per response, from 1 through 8000.",
         ),
         ToolParameter(
-            name="query", type=ParameterType.STRING, required=False, default="",
+            name="query",
+            type=ParameterType.STRING,
+            required=False,
+            default="",
             description="Optional case-sensitive literal text to find at or after offset. Not a regex or path.",
         ),
     ],
@@ -170,6 +216,8 @@ async def situation_product_source_read(
     query: str = "",
 ) -> ToolResult:
     return await _run(
+        ctx,
+        "source",
         read_material_detail,
         session_id=ctx.session_id,
         generation_id=generation_id,
@@ -239,6 +287,8 @@ async def situation_product_report_write(
     expected_sha256: str = "",
 ) -> ToolResult:
     return await _run(
+        ctx,
+        "write",
         write_candidate_report,
         session_id=ctx.session_id,
         generation_id=generation_id,
@@ -268,6 +318,8 @@ async def situation_product_report_write(
 )
 async def situation_product_report_validate(ctx: ToolContext, generation_id: str) -> ToolResult:
     return await _run(
+        ctx,
+        "validate",
         validate_candidate_report,
         session_id=ctx.session_id,
         generation_id=generation_id,

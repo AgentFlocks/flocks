@@ -31,6 +31,24 @@ def _validation_path(root: Path) -> Path:
 
 
 @pytest.mark.asyncio
+async def test_validation_progress_runs_after_write_and_can_cancel(run):
+    root, params, _ = run
+
+    async def on_validation():
+        assert (root / "work/gen_unit/report.md").is_file()
+        assert not _validation_path(root).exists()
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await ws.write_candidate_report(
+            **params, content="## Custom chapter\n事实",
+            evidence_map={"REPORT:synthetic-id": ["Custom chapter"]},
+            on_validation=on_validation,
+        )
+    assert not _validation_path(root).exists()
+
+
+@pytest.mark.asyncio
 async def test_write_validates_immediately_and_duplicate_calls_are_idempotent(run):
     root, params, _ = run
     result = await ws.write_candidate_report(

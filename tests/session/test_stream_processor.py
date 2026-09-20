@@ -38,6 +38,53 @@ from flocks.session.message import MessageRole
 # Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["cancelled", "failed", "exception", "needs_revision"])
+async def test_report_display_persisted_and_sse_match(outcome):
+    from flocks.server.routes.session import _part_to_response_info
+    from flocks.situation_report.product import tool_display
+
+    events = AsyncMock()
+    store = AsyncMock()
+    proc = _make_processor(event_callback=events)
+    saved = {}
+
+    async def execute(*, ctx, **kwargs):
+        saved["callback"] = ctx._metadata_callback
+        if outcome == "cancelled":
+            raise asyncio.CancelledError()
+        if outcome == "exception":
+            raise RuntimeError("synthetic failure")
+        if outcome == "failed":
+            return ToolResult(success=False, error="synthetic parameter rejection")
+        return ToolResult(success=True, output={}, metadata=tool_display.metadata("validate", "needs_revision", "en-US"))
+
+    with (
+        patch("flocks.session.streaming.stream_processor.Message.store_part", store),
+        patch("flocks.session.streaming.stream_processor.Message.update_part", AsyncMock()),
+        patch("flocks.session.streaming.stream_processor.ToolRegistry.execute", AsyncMock(side_effect=execute)),
+        patch.object(tool_display, "settings", AsyncMock(return_value={"language": "en-US", "revision": False})),
+    ):
+        name = "situation_product_report_write"
+        await proc.process_event(ToolInputStartEvent(id="tc_display", tool_name=name))
+        event = ToolCallEvent(tool_call_id="tc_display", tool_name=name, input={"generation_id": "synthetic"})
+        if outcome == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await proc.process_event(event)
+        else:
+            await proc.process_event(event)
+        part = store.await_args_list[-1].args[2]
+        snapshot = _part_to_response_info(part, session_id=proc.session_id, message_id=proc.assistant_message.id)
+        live = events.await_args_list[-1].args[1]["part"]
+        expected = "failed" if outcome == "exception" else outcome
+        assert snapshot.state["metadata"]["display"]["status"] == expected
+        assert live["state"]["metadata"]["display"] == snapshot.state["metadata"]["display"]
+        assert part.state.status == ("completed" if outcome == "needs_revision" else "error")
+        count = events.await_count
+        saved["callback"]({"display": {"status": "running"}})
+        await asyncio.sleep(0)
+        assert events.await_count == count
+
 def _make_agent(name="rex"):
     agent = MagicMock()
     agent.name = name
