@@ -126,6 +126,7 @@ async def execute_ssh_script_content(
 
 @ToolRegistry.register_function(
     name="ssh_run_script",
+    group="终端执行",
     description="Execute a local shell script on a remote Linux host via SSH.",
     category=ToolCategory.TERMINAL,
     parameters=[

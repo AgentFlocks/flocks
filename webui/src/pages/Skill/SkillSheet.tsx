@@ -10,7 +10,7 @@
 import { lazy, Suspense, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BookOpen, Lock, Pencil, Eye, Save, Loader2, Trash2 } from 'lucide-react';
-import { skillAPI, Skill } from '@/api/skill';
+import { isSkillDefinitionReadOnly, skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
 import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
@@ -95,8 +95,8 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
   const { t } = useTranslation('skill');
   const toast = useToast();
   const isEdit = !!skill;
-  // Custom skills (source !== 'project') are editable and deletable
-  const isUserSkill = isEdit && skill.source !== 'project';
+  // User definitions remain editable; bundled/core definitions are always read-only.
+  const isUserSkill = isEdit && !isSkillDefinitionReadOnly(skill);
   const isReadonly = isEdit && !isUserSkill;
 
   // Strip YAML front matter — name/description are already shown as separate fields
@@ -138,7 +138,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
   };
 
   const handleDelete = async () => {
-    if (!skill || skill.source === 'project') return;
+    if (!skill || isSkillDefinitionReadOnly(skill)) return;
     if (!confirm(t('sheet.deleteConfirm', { name: skill.name }))) return;
     try {
       setDeleting(true);
@@ -152,7 +152,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
   };
 
   const handleSaveContent = async () => {
-    if (!isEdit || !skill) return;
+    if (!isEdit || !skill || isReadonly) return;
     try {
       setSaving(true);
       await skillAPI.update(skill.name, formData);

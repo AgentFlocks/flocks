@@ -1,4 +1,5 @@
 name: vul-threat-intelligence
+group: 威胁情报
 name_cn: 漏洞情报智能体
 description: >-
   Vulnerability threat intelligence subagent for querying and analyzing vulnerability data.

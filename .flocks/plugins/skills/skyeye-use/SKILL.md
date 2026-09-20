@@ -1,5 +1,6 @@
 ---
 name: skyeye-use
+group: 平台集成
 description: 用于处理 SkyEye/天眼/网神分析平台相关任务，支持通过API或者结合浏览器进行操作。只要用户提到 SkyEye、天眼、网神分析平台的相关操作时，必须先加载本 skill。本 skill 是 天眼 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `skyeye_*` tool。
 ---
 

@@ -13,6 +13,10 @@ import EmptyState from '@/components/common/EmptyState';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { MCPServerDetailPanel } from './ServiceDetailPanel';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
+import GroupNav, { useGroupDrag } from '@/components/plugin-groups/GroupNav';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { useAuth } from '@/contexts/AuthContext';
+import { extractErrorMessage } from '@/utils/error';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const TOOL_PANEL_WIDTH = 720;
@@ -40,6 +44,7 @@ interface MCPTabContentProps {
   searchQuery: string;
   onSelectTool: (tool: Tool) => void;
   onRefreshTools: () => Promise<void>;
+  viewMode?: 'list' | 'cards';
   catalogEntries: MCPCatalogEntry[];
   catalogCategories: Record<string, MCPCatalogCategory>;
   catalogLoading: boolean;
@@ -49,11 +54,24 @@ interface MCPTabContentProps {
   refreshKey?: number;
 }
 
+function serverRows(data: Record<string, any> | MCPServer[]): MCPServer[] {
+  if (Array.isArray(data)) return data;
+  return Object.entries(data || {}).map(([name, info]) => ({
+    name,
+    status: info.status === 'failed' ? 'error' : (info.status || 'disconnected'),
+    url: info.url || info.metadata?.url,
+    tools: info.tools || [], resources: info.resources || [], error: info.error,
+    connected_at: info.connected_at, tools_count: info.tools_count || 0,
+    resources_count: info.resources_count || 0, metadata: info.metadata, group: info.group, group_readonly: info.group_readonly,
+  }));
+}
+
 export default function MCPTabContent({
   tools,
   searchQuery,
   onSelectTool,
   onRefreshTools,
+  viewMode = 'list',
   catalogEntries,
   catalogCategories,
   catalogLoading,
@@ -65,6 +83,7 @@ export default function MCPTabContent({
   const { t, i18n } = useTranslation('tool');
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [serversLoading, setServersLoading] = useState(true);
+  const [serversError, setServersError] = useState<unknown>(null);
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
   const [selectedServerData, setSelectedServerData] = useState<MCPServer | null>(null);
   const [selectedToolFromMCP, setSelectedToolFromMCP] = useState<Tool | null>(null);
@@ -75,36 +94,22 @@ export default function MCPTabContent({
   const [setupEnvOverrides, setSetupEnvOverrides] = useState<Record<string, string>>({});
   const [serverToolCache, setServerToolCache] = useState<Record<string, Tool[]>>({});
 
-  const fetchServers = useCallback(async () => {
+  const fetchServers = useCallback(async (rejectOnError = false) => {
     try {
       setServersLoading(true);
       const response = await mcpAPI.list();
-      const data = response.data;
-      let newServers: MCPServer[] = [];
-      if (Array.isArray(data)) {
-        newServers = data;
-      } else if (data && typeof data === 'object') {
-        newServers = Object.entries(data).map(([name, info]: [string, any]) => ({
-          name,
-          status: info.status === 'failed' ? 'error' as const : (info.status || 'disconnected') as MCPServer['status'],
-          url: info.url || info.metadata?.url,
-          tools: info.tools || [],
-          resources: info.resources || [],
-          error: info.error,
-          connected_at: info.connected_at,
-          tools_count: info.tools_count || 0,
-          resources_count: info.resources_count || 0,
-          metadata: info.metadata,
-        }));
-      }
+      const newServers = serverRows(response.data);
       setServers(newServers);
+      setServersError(null);
       setSelectedServerData((prev) => {
         if (!prev) return prev;
         const updated = newServers.find((server) => server.name === prev.name);
         return updated ?? prev;
       });
-    } catch {
-      setServers([]);
+    } catch (error) {
+      if (rejectOnError) throw error;
+      // A failed reload is not an empty native inventory or a deleted group.
+      setServersError(error);
     } finally {
       setServersLoading(false);
     }
@@ -439,8 +444,55 @@ export default function MCPTabContent({
     });
   }, [filteredServers, filteredCatalogEntries, servers, isConfigured, catalogEntryById]);
 
+  const { user } = useAuth();
+  const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
+  // Derive from the original service inventory before category/search/group filters.
+  // A configured service wins over its catalog default, including an explicit clear.
+  const asServerGroupItem = (server: MCPServer) => ({
+    key: server.name, name: catalogEntryById.get(server.name)?.name || server.name, group: server.group,
+    readOnlyReason: server.group_readonly ? t('pluginGroups:readOnly.system')
+      : user?.role === 'admin' ? undefined : t('pluginGroups:readOnly.admin'),
+  });
+  const asCatalogGroupItem = (entry: MCPCatalogEntry) => ({
+    key: entry.id, name: entry.name, group: entry.group,
+    readOnlyReason: t(entry.group_readonly ? 'pluginGroups:readOnly.system' : 'pluginGroups:readOnly.catalog'),
+  });
+  const groupInventory = (nativeServers: MCPServer[]) => [
+    ...nativeServers.map(asServerGroupItem),
+    ...catalogEntries.filter((entry) => !nativeServers.some((server) => server.name === entry.id)).map(asCatalogGroupItem),
+  ];
+  const groupItems = groupInventory(servers);
+  const groupDrag = useGroupDrag(groupItems);
+  const reloadGroupData = () => fetchServers(true);
+  const saveGroup = (name: string, group: string | null) => mcpAPI.update(name, { group });
+  const loadGroupItems = async () => groupInventory(serverRows((await mcpAPI.list()).data));
+  const moveGroup = async (key: string, group: string | null) => {
+    const inventory = await loadGroupItems();
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t);
+  };
+  const createGroup = async (key: string, group: string) => {
+    const inventory = await loadGroupItems();
+    if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t);
+  };
+  const changeGroup = async (from: string, to: string | null) => {
+    const inventory = await loadGroupItems();
+    if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
+    const members = inventory.filter((item) => matchesGroup(item.group, from));
+    await saveGroupItems(members, to, saveGroup, reloadGroupData, t, true);
+  };
+  const visibleCards = unifiedCards.filter(({ runtimeServer, entry }) => (
+    matchesGroup(runtimeServer ? runtimeServer.group : entry?.group, groupSelection)
+  ));
+
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4 md:flex-row">
+      <GroupNav inventoryComplete={!serversLoading && serversError === null && !catalogLoading} preferenceKey="tools.mcp" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+      <div className="min-w-0 flex-1 space-y-4">
+      {serversError !== null && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <span>{extractErrorMessage(serversError, t('alert.refreshFailedTitle'))}</span>
+        <button type="button" onClick={() => void fetchServers()} disabled={serversLoading} className="shrink-0 rounded border px-3 py-1.5 disabled:opacity-50">{t('button.retry')}</button>
+      </div>}
       <div className="flex items-center gap-1.5 flex-wrap">
         <button
           onClick={() => setSelectedCategory('all')}
@@ -465,11 +517,11 @@ export default function MCPTabContent({
         <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
           <LoadingSpinner delayMs={180} />
         </div>
-      ) : unifiedCards.length === 0 ? (
+      ) : visibleCards.length === 0 ? (
         <EmptyState icon={<Server className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
       ) : (
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
-          {unifiedCards.map(({ id, entry, server, configured }) => {
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
+          {visibleCards.map(({ id, entry, server, runtimeServer, configured }) => {
             const displayName = entry?.name || server.name;
             const metadataDescription = getMetadataDescription(server.metadata, i18n.language);
             const rowDescription = getCatalogDescription(entry, i18n.language)
@@ -497,8 +549,9 @@ export default function MCPTabContent({
             return (
               <div
                 key={id}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}`}
-                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
+                {...groupDrag.dragProps(id)}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
+                style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${isActive ? 'bg-green-50' : isError ? 'bg-red-50' : 'bg-gray-50'}`}>
@@ -632,6 +685,8 @@ export default function MCPTabContent({
           })}
         </div>
       )}
+
+      </div>
 
       {setupEntry && (
         <>

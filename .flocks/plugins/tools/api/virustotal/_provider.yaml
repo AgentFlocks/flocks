@@ -1,4 +1,6 @@
 name: VirusTotal
+group: 威胁情报
+service_id: virustotal
 description: VirusTotal threat intelligence service for IP, domain, URL, file hash, and analysis lookups.
 description_cn: VirusTotal 威胁情报服务，提供 IP、域名、URL、文件哈希与分析结果查询能力。
 auth:

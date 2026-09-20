@@ -1,4 +1,5 @@
 name: tdp_policy_settings
+group: NDR
 description: >
   管理 TDP 策略配置相关接口，覆盖自定义情报、IP信誉、旁路阻断、联动阻断、
   告警处置状态和处理记录。通过 action 可切换到各子目录下的列表、新增、编辑、

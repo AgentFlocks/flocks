@@ -1,0 +1,61 @@
+{
+  "title": "业务分组",
+  "navigation": "按业务分组筛选",
+  "countsDescription": "从可见插件属性派生。拖动插件到此处，或在插件上按 Alt+M 移组。组顺序仅为个人偏好。",
+  "all": "全部",
+  "ungrouped": "未分组",
+  "create": "新建分组",
+  "rename": "重命名",
+  "delete": "删除分组",
+  "renameNamed": "重命名分组 {{name}}",
+  "deleteNamed": "删除分组 {{name}}",
+  "save": "保存",
+  "saving": "正在保存…",
+  "saved": "分组更改已保存。",
+  "cancel": "取消",
+  "close": "关闭",
+  "confirmScope": "将 {{count}} 个可见插件改为“{{group}}”？\n操作范围：{{items}}\n仅修改这些插件，逐个保存而非原子操作，不会删除插件。",
+  "dialog": {
+    "createTitle": "新建业务分组",
+    "renameTitle": "重命名业务分组",
+    "moveTitle": "移动 {{name}}",
+    "sharedDescription": "修改各插件原生 group 属性。新分组必须关联首个插件，不保存空组。",
+    "name": "分组名称",
+    "firstPlugin": "首个可编辑插件",
+    "choosePlugin": "选择一个可见插件",
+    "destination": "目标分组"
+  },
+  "validation": {
+    "length": "名称需为 1–32 个字符，不计首尾空格，不能包含控制字符。",
+    "duplicate": "已有同名分组，请使用其他名称。",
+    "firstPlugin": "请选择首个可编辑插件，不能保存空组。"
+  },
+  "readOnly": {
+    "system": "系统自带定义的业务分组固定，管理员也不能修改。",
+    "builtinSkill": "内置 Skill 定义（包括分组）完全只读，管理员也不能修改。",
+    "admin": "仅管理员可修改这些原生设置。",
+    "catalog": "未配置的目录项只读，安装或配置服务后才能修改分组。",
+    "noEditable": "当前没有可编辑的可见插件。"
+  },
+  "errors": {
+    "missing": "插件或分组已不可见，请刷新清单后重试。",
+    "readOnlyMembers": "包含只读成员，不能整体操作：{{items}}",
+    "write": "无法保存此插件的分组。",
+    "partial": "已保存 {{succeeded}} 个，失败 {{failed}} 个。已成功的更改不会回滚。",
+    "succeededItems": "已保存插件：",
+    "failedItems": "失败插件：",
+    "refresh": "原生清单刷新失败，当前显示可能过期，请先刷新再操作。"
+  },
+  "drag": {
+    "sourceLabel": "{{name}}。按 Alt+M 移入业务分组。",
+    "reorderLabel": "调整分组 {{name}} 的顺序",
+    "reorderHint": "拖动或按上/下方向键调整个人分组顺序。",
+    "orderPlaced": "个人分组顺序已更新，未修改插件属性。",
+    "cancelled": "已取消，未修改插件属性。"
+  },
+  "view": {
+    "label": "展示布局",
+    "cards": "卡片视图",
+    "list": "列表视图"
+  }
+}

@@ -3,7 +3,7 @@
 
 验证：
 1. is_delegatable / get_agent_mode / is_hidden 等查询函数正常
-2. delegatable 逻辑正确（primary/hidden agents 不可委派）
+2. 显式 delegatable 与 hidden 共同决定委派资格，subagent 模式不自动允许委派
 3. 不存在循环依赖
 
 注意：模块级同步函数（is_delegatable 等）依赖 _agents_ref，
@@ -33,23 +33,25 @@ class TestAgentMetadata:
     """测试 Agent 元数据查询函数（_agents_ref 已加载后）"""
 
     def test_is_delegatable_primary_agents(self):
-        """Primary agents 不应该被委派"""
+        """The built-in Rex orchestrator is not a delegation target."""
         assert is_delegatable("rex") is False
 
     def test_is_delegatable_subagents(self):
-        """常规 subagents 应该返回 True"""
+        """These bundled subagents explicitly opt into delegation."""
         assert is_delegatable("explore") is True
-        assert is_delegatable("hephaestus") is True
+        assert is_delegatable("rex-junior") is True
+        assert is_delegatable("prometheus") is True
         assert is_delegatable("oracle") is True
         assert is_delegatable("librarian") is True
 
     def test_is_delegatable_special_agents(self):
-        """特殊 agents（plan, rex-junior）不应该被委派"""
-        assert is_delegatable("plan") is False
-        assert is_delegatable("rex-junior") is False
+        """Visible Hephaestus and hidden Dream both explicitly disable delegation."""
+        assert is_delegatable("hephaestus") is False
+        assert is_delegatable("self-improve") is False
 
     def test_is_delegatable_unknown_agent(self):
-        """Unknown agents must be rejected instead of falling back at runtime."""
+        """Unknown/retired agents must be rejected instead of falling back at runtime."""
+        assert is_delegatable("plan") is False
         assert is_delegatable("unknown-agent") is False
         assert is_delegatable("custom-agent-123") is False
 
@@ -71,17 +73,21 @@ class TestAgentMetadata:
     def test_is_delegatable_resolves_legacy_aliases(self):
         """Known aliases should use the target agent's delegation policy."""
         assert is_delegatable("sisyphus") is False
+        assert is_delegatable("sisyphus-junior") is True
 
     def test_get_agent_mode(self):
         """测试获取 agent 模式"""
         assert get_agent_mode("rex") == "primary"
         assert get_agent_mode("explore") == "subagent"
         assert get_agent_mode("hephaestus") == "subagent"
+        assert get_agent_mode("self-improve") == "subagent"
+        assert get_agent_mode("plan") is None
         assert get_agent_mode("nonexistent") is None
 
     def test_is_hidden(self):
         """测试 hidden 属性"""
-        assert is_hidden("plan") is True
+        assert is_hidden("self-improve") is True
+        assert is_hidden("plan") is False
         assert is_hidden("explore") is False
         assert is_hidden("rex") is False
         assert is_hidden("nonexistent") is False
@@ -91,11 +97,14 @@ class TestAgentMetadata:
         delegatable = list_delegatable_agents()
         assert isinstance(delegatable, list)
         assert "explore" in delegatable
-        assert "hephaestus" in delegatable
+        assert "rex-junior" in delegatable
+        assert "prometheus" in delegatable
         assert "oracle" in delegatable
         assert "rex" not in delegatable
+        assert "hephaestus" not in delegatable
+        assert "self-improve" not in delegatable
         assert "plan" not in delegatable
-        assert "rex-junior" not in delegatable
+        assert all(is_delegatable(name) for name in delegatable)
 
     def test_list_primary_agents(self):
         """测试列出 primary agents"""

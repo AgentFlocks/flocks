@@ -229,6 +229,7 @@ def _existing_memory_write_error(filepath: str) -> Optional[str]:
 
 @ToolRegistry.register_function(
     name="write",
+    group="文件操作",
     description=DESCRIPTION,
     category=ToolCategory.FILE,
     parameters=[

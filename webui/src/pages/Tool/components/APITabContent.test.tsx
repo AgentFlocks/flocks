@@ -1,8 +1,10 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import APITabContent from './APITabContent';
+
+vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: { role: 'admin' } }) }));
 
 const { apiDetailProps, listAllToolPages, mcpAPI, providerAPI } = vi.hoisted(() => ({
   apiDetailProps: vi.fn(),
@@ -54,6 +56,145 @@ describe('APITabContent', () => {
     vi.clearAllMocks();
     providerAPI.listApiServices.mockResolvedValue({ data: [] });
     listAllToolPages.mockResolvedValue([]);
+  });
+
+  it('keeps versioned service identities, full group counts, card fields/actions and independent drawer tools', async () => {
+    providerAPI.listApiServices.mockResolvedValue({ data: [
+      { id: 'service-a__v9_2', name: 'Service A', version: '9.2', description: 'Service A description', enabled: true, status: 'connected', tool_count: 40, latency_ms: 12, verify_ssl: false, group: 'Alpha' },
+      { id: 'service-b', name: 'Service B', enabled: false, status: 'disabled', tool_count: 0, verify_ssl: true, group: null, builtin: true, group_readonly: false },
+      { id: 'device-hidden', name: 'Not an API row', integration_type: 'device', enabled: true, tool_count: 10, verify_ssl: false },
+    ] });
+    listAllToolPages.mockResolvedValue([{ name: 'ungrouped-child-tool', source: 'api', group: null }]);
+    const props = {
+      tools: [], onSelectTool: vi.fn(), onRefreshTools: vi.fn().mockResolvedValue(undefined),
+      catalogEntries: [], catalogCategories: {}, catalogLoading: false, configuredIds: new Set<string>(), onConfiguredChange: vi.fn(),
+    };
+    const { rerender } = render(<APITabContent {...props} />);
+    await screen.findByText('Service A');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'all 2' })).toBeInTheDocument());
+    expect(screen.queryByText('Not an API row')).not.toBeInTheDocument();
+    const nativeRow = screen.getByText('Service A').closest('[draggable]') as HTMLElement;
+    expect(nativeRow.children).toHaveLength(6);
+    const originalText = nativeRow.textContent;
+    expect(within(nativeRow).getByText('v9.2')).toBeInTheDocument();
+    expect(within(nativeRow).getByText('40')).toBeInTheDocument();
+    expect(within(nativeRow).getByText('12ms')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha 1' }));
+    expect(screen.queryByText('Service B')).not.toBeInTheDocument();
+    rerender(<APITabContent {...props} viewMode="cards" />);
+    const card = screen.getByText('Service A').closest('[draggable]') as HTMLElement;
+    expect(card.textContent).toBe(originalText);
+    fireEvent.click(within(card).getByRole('button', { name: 'mcp.manage' }));
+    expect(await screen.findByText('ungrouped-child-tool')).toBeInTheDocument();
+    expect(listAllToolPages).toHaveBeenCalledWith({ source: 'api', sourceName: 'service-a__v9_2', sortBy: 'name', sortDir: 'asc' });
+    fireEvent.click(screen.getByRole('button', { name: 'ungrouped 1' }));
+    expect(screen.getByText('Service B')).toBeInTheDocument();
+    expect(screen.getByText('ungrouped-child-tool')).toBeInTheDocument();
+
+    const ungroupedRow = screen.getByText('Service B').closest('[draggable]') as HTMLElement;
+    fireEvent.keyDown(ungroupedRow, { key: 'm', altKey: true });
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Alpha' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(providerAPI.updateApiService).toHaveBeenCalledWith('service-b', { group: 'Alpha' }));
+    await waitFor(() => expect(providerAPI.listApiServices).toHaveBeenCalledWith({ force: true }));
+    expect(props.onRefreshTools).not.toHaveBeenCalled();
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+  });
+
+  it('locks definition-only API rows but leaves builtin configured instances editable', async () => {
+    providerAPI.listApiServices.mockResolvedValue({ data: [
+      { id: 'definition', name: 'System API definition', builtin: true, group_readonly: true, group: 'Mixed', enabled: false, tool_count: 0 },
+      { id: 'configured', name: 'Configured API', builtin: true, group_readonly: false, group: 'Mixed', enabled: false, tool_count: 0 },
+    ] });
+    render(<APITabContent tools={[]} onSelectTool={vi.fn()} onRefreshTools={vi.fn()}
+      catalogEntries={[]} catalogCategories={{}} catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
+    await screen.findByText('System API definition');
+    const definition = screen.getByText('System API definition').closest('[draggable]')!;
+    expect(definition).toHaveAttribute('draggable', 'false');
+    expect(definition).toHaveAttribute('title', 'pluginGroups:readOnly.system');
+    expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
+    fireEvent.keyDown(definition, { key: 'm', altKey: true });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'create' }));
+    expect(within(screen.getByRole('combobox')).queryByRole('option', { name: /System API definition/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
+    fireEvent.keyDown(screen.getByText('Configured API').closest('[draggable]')!, { key: 'm', altKey: true });
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(providerAPI.updateApiService).toHaveBeenCalledExactlyOnceWith('configured', { group: null }));
+  });
+
+  it.each(['move', 'create', 'rename', 'delete'])('rechecks fresh definition-only API rows before %s', async (operation) => {
+    const service = { id: 'service', name: 'Native API', group: 'Ops', group_readonly: false, enabled: false, tool_count: 0 };
+    providerAPI.listApiServices.mockResolvedValueOnce({ data: [service] }).mockResolvedValue({ data: [{ ...service, group_readonly: true }] });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<APITabContent tools={[]} onSelectTool={vi.fn()} onRefreshTools={vi.fn()}
+      catalogEntries={[]} catalogCategories={{}} catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
+    await screen.findByText('Native API');
+    if (operation === 'move') fireEvent.keyDown(screen.getByText('Native API').closest('[draggable]')!, { key: 'm', altKey: true });
+    else fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : `${operation}Named` }));
+    if (operation === 'create' || operation === 'rename') fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New' } });
+    if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'service' } });
+    if (operation !== 'delete') fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:errors.readOnlyMembers'));
+    expect(providerAPI.updateApiService).not.toHaveBeenCalled();
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it('keeps unconfigured catalog attributes read-only, with no artificial service creation', async () => {
+    render(<APITabContent
+      tools={[]} onSelectTool={vi.fn()} onRefreshTools={vi.fn().mockResolvedValue(undefined)}
+      catalogEntries={[{
+        id: 'catalog-native', name: 'Catalog API', description: 'Catalog description', category: 'intel', tool_type: 'api',
+        github: '', language: 'python', license: 'MIT', stars: 7, transport: 'stdio', install: {}, env_vars: {},
+        system_deps: [], tags: [], official: false, requires_auth: false, group: 'Pack default', group_readonly: true,
+      }]}
+      catalogCategories={{ intel: { label: 'Intel', description: 'intel' } }} catalogLoading={false}
+      configuredIds={new Set()} onConfiguredChange={vi.fn()}
+    />);
+    await screen.findByText('Catalog API');
+    const row = screen.getByText('Catalog API').closest('[draggable]') as HTMLElement;
+    expect(row).toHaveAttribute('draggable', 'false');
+    expect(row).toHaveAttribute('title', 'pluginGroups:readOnly.system');
+    fireEvent.keyDown(row, { key: 'm', altKey: true });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
+    expect(providerAPI.updateApiService).not.toHaveBeenCalled();
+    expect(mcpAPI.catalogInstall).not.toHaveBeenCalled();
+  });
+
+  it('keeps the native rows and selected group when reloading after an action fails', async () => {
+    const response = { data: [{ id: 'service', name: 'Native API', group: 'Ops', enabled: true, tool_count: 0 }] };
+    providerAPI.listApiServices.mockResolvedValueOnce(response).mockRejectedValueOnce(new Error('API list offline')).mockResolvedValue(response);
+    providerAPI.updateApiService.mockResolvedValue({ data: {} });
+    render(<APITabContent tools={[]} onSelectTool={vi.fn()} onRefreshTools={vi.fn()}
+      catalogEntries={[]} catalogCategories={{}} catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
+    await screen.findByText('Native API');
+    fireEvent.click(screen.getByRole('button', { name: 'Ops 1' }));
+    fireEvent.click(screen.getByTitle('detail.disableServer'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('API list offline'));
+    expect(screen.getByText('Native API')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Ops 1' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'button.retry' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(providerAPI.updateApiService).toHaveBeenCalledExactlyOnceWith('service', { enabled: false });
+  });
+
+  it.each(['create', 'rename'])('rejects fresh native API name collisions before %s writes', async (operation) => {
+    const service = { id: 'service__v1', name: 'Native API', group: 'Ops', enabled: true, tool_count: 0 };
+    providerAPI.listApiServices.mockResolvedValueOnce({ data: [service] }).mockResolvedValue({ data: [service, { ...service, id: 'other__v2', group: 'Existing' }] });
+    render(<APITabContent tools={[]} onSelectTool={vi.fn()} onRefreshTools={vi.fn()}
+      catalogEntries={[]} catalogCategories={{}} catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
+    await screen.findByText('Native API');
+    fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : 'renameNamed' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'dialog.name' }), { target: { value: 'Existing' } });
+    if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'service__v1' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:validation.duplicate'));
+    expect(providerAPI.listApiServices).toHaveBeenLastCalledWith({ force: true });
+    expect(providerAPI.updateApiService).not.toHaveBeenCalled();
   });
 
   it('loads the complete tool list when a service detail drawer opens', async () => {

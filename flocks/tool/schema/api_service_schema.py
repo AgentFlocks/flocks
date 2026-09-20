@@ -16,10 +16,12 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 from pydantic import BaseModel
+from pydantic_core import PydanticCustomError
 
 from flocks.config.api_versioning import discover_api_service_descriptors
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.tool_loader import extract_provider_version
+from flocks.tool.registry import is_shipped_tool_path
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.api_service.schema")
@@ -48,6 +50,20 @@ class APIServiceCredentialField(BaseModel):
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+def normalize_api_service_group(value: Optional[str]) -> Optional[str]:
+    """Validate native service metadata independently of credential fields."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group cannot contain control characters")
+    return value
+
 
 def _default_api_service_field_label(field_key: str) -> str:
     labels = {
@@ -147,6 +163,8 @@ def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
             "name": prov.get("name", provider_id),
             "service_id": prov.get("service_id", provider_id),
             "version": extract_provider_version(prov),
+            "group": normalize_api_service_group(prov.get("group")),
+            "group_readonly": is_shipped_tool_path(descriptor.provider_yaml),
             "description": prov.get("description"),
             "description_cn": prov.get("description_cn"),
             "docs_url": prov.get("docs_url"),
@@ -162,8 +180,26 @@ def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def project_api_service_group(
+    merged: Dict[str, Any], definition: Optional[Dict[str, Any]], raw_service: Optional[Dict[str, Any]],
+) -> None:
+    """Project source ownership, never a client-supplied readonly flag.
+
+    Even an empty raw record is an editable connection instance. Definition-only
+    rows keep their canonical descriptor group, including with old JSON metadata.
+    """
+    readonly = bool(definition and definition.get("group_readonly") and raw_service is None)
+    if merged:
+        merged["group_readonly"] = readonly
+    if readonly:
+        merged["group"] = definition.get("group")
+
+
 def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
     """Load raw API service metadata from config, metadata JSON, or YAML provider."""
+    from flocks.config.api_versioning import versioned_storage_key_for
+
+    provider_id = versioned_storage_key_for(provider_id) or provider_id
     merged: Dict[str, Any] = {}
 
     config_data = ConfigWriter.get_api_service_raw(provider_id)
@@ -181,6 +217,7 @@ def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]
     if isinstance(yaml_data, dict):
         merged = {**yaml_data, **merged}
 
+    project_api_service_group(merged, yaml_data, config_data)
     return merged or None
 
 
@@ -208,6 +245,10 @@ def _normalize_api_service_credential_field(
     config_key = raw_field.get("config_key")
     if not isinstance(config_key, str) or not config_key.strip():
         config_key = "apiKey" if key == "api_key" else key
+
+    # Native plugin metadata must never become a credential/runtime field.
+    if key == "group" or config_key.strip() == "group":
+        return None
 
     label = raw_field.get("label")
     if not isinstance(label, str) or not label.strip():

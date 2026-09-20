@@ -1,4 +1,5 @@
 name: tdp_assets_domain_list
+group: NDR
 description: >
   查询 TDP 域名资产列表，支持按二级域名、域名或 IP、活跃状态、开放状态和暴露面筛选。
   优先使用顶层语义化参数；`condition` / `page` 仅作为高级兼容入口。

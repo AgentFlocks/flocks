@@ -1,4 +1,5 @@
 name: ngsoc_risks
+group: SIEM
 description: >
   NGSOC risk management grouped tool. Use the `action` parameter to fetch
   the asset risk list and per-asset risk-score detail under `/risks/*`

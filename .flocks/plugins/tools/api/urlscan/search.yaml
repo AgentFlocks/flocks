@@ -1,4 +1,5 @@
 name: urlscan_search
+group: 威胁情报
 description: >
   Search URLScan.io's historical scan database. Query by domain, IP, URL, filename,
   or other attributes to find previous scans. Useful for threat intelligence gathering,

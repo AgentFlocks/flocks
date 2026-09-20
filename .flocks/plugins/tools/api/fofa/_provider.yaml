@@ -1,4 +1,5 @@
 name: fofa
+group: 网络测绘
 description: FOFA network space mapping engine - search for internet assets, devices, and services
 description_cn: FOFA 网络空间测绘服务，用于检索互联网资产、设备与暴露服务。
 auth:

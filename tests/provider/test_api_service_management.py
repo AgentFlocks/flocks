@@ -6,6 +6,195 @@ from fastapi import HTTPException
 from flocks.tool.registry import Tool, ToolCategory, ToolInfo, ToolRegistry
 
 
+class TestNativeAPIServiceGroup:
+    @pytest.fixture
+    def native_services(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from flocks.config.config_writer import ConfigWriter
+        from flocks.config import api_versioning
+        from flocks.server.routes import provider as routes
+        from flocks.tool.schema import api_service_schema
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        descriptors = []
+        for version in ("1", "2"):
+            path = tmp_path / version / "_provider.yaml"
+            path.parent.mkdir()
+            path.write_text(yaml.safe_dump({"name": "Native API", "service_id": "native_api", "version": version, "group": " Package "}))
+            descriptors.append(SimpleNamespace(storage_key=f"native_api_v{version}", service_id="native_api", provider_yaml=path))
+        monkeypatch.setattr(api_versioning, "discover_api_service_descriptors", lambda **kw: descriptors)
+        monkeypatch.setattr(api_service_schema, "discover_api_service_descriptors", lambda **kw: descriptors)
+        monkeypatch.setattr(ToolRegistry, "init_async", AsyncMock())
+        monkeypatch.setattr(ToolRegistry, "get_api_service_ids", lambda: {d.storage_key for d in descriptors})
+        monkeypatch.setattr(routes, "_get_api_service_tool_infos", lambda name: [])
+        monkeypatch.setattr(routes, "_is_api_service_builtin", lambda *args: False)
+        monkeypatch.setattr(routes, "_read_api_service_status_cache", AsyncMock(return_value={"native_api_v1": {"status": "connected"}}))
+        no_toggle = MagicMock(side_effect=AssertionError("metadata cannot toggle tools"))
+        no_status_write = AsyncMock(side_effect=AssertionError("metadata cannot reset status"))
+        monkeypatch.setattr(routes, "_set_api_service_tools_enabled", no_toggle)
+        monkeypatch.setattr(routes, "_write_api_service_status_cache", no_status_write)
+        ConfigWriter.set_api_service("native_api_v1", {"enabled": True, "apiKey": "{secret:key1}", "future": {"kept": True}})
+        ConfigWriter.set_api_service("native_api_v2", {"enabled": False, "apiKey": "{secret:key2}", "group": "Sibling"})
+        routes._clear_api_service_summary_metadata_cache()
+        return routes, ConfigWriter, no_toggle, no_status_write
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record", [None, {}, {"enabled": False}, {"group": ""}])
+    async def test_shipped_definition_vs_empty_or_disabled_instance(self, native_services, monkeypatch, tmp_path, record):
+        from flocks.config import api_versioning
+        from flocks.tool import registry
+
+        routes, writer, _, _ = native_services
+        installation = tmp_path / "installation"
+        monkeypatch.setattr(registry, "__file__", str(installation / "flocks/tool/registry.py"))
+        descriptors = api_versioning.discover_api_service_descriptors()
+        selected = descriptors[0]
+        path = installation / ".flocks/plugins/tools/api/native/_provider.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(selected.provider_yaml.read_bytes())
+        selected.provider_yaml = path
+        monkeypatch.setattr(api_versioning, "discover_api_service_descriptors", lambda **kw: descriptors[:1])
+        writer.remove_api_service("native_api_v1")
+        if record is not None:
+            writer.set_api_service("native_api_v1", record)
+        routes._clear_api_service_summary_metadata_cache()
+        summary = routes._build_api_service_summary("native_api_v1", {})
+        assert summary.group_readonly is (record is None)
+        assert (await routes.get_api_service_metadata("native_api")).group_readonly is (record is None)
+        if record is None:
+            before = writer._get_config_path().read_bytes()
+            for group in (None, "", "Override"):
+                with pytest.raises(HTTPException) as exc:
+                    await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group=group, enabled=True))
+                assert exc.value.status_code == 400
+                assert writer._get_config_path().read_bytes() == before
+            # Same-value group-only requests must not manufacture an instance.
+            same = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Package"))
+            assert same.group_readonly is True
+            assert writer.get_api_service_raw("native_api_v1") is None
+            assert writer._get_config_path().read_bytes() == before
+        else:
+            changed = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Instance"))
+            assert changed.group == "Instance" and changed.group_readonly is False
+            cleared = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group=None))
+            assert cleared.group == "" and cleared.group_readonly is False
+            assert yaml.safe_load(path.read_text())["group"] == " Package "
+
+    @pytest.mark.asyncio
+    async def test_group_only_version_identity_preserves_credentials_and_enabled(self, native_services):
+        routes, writer, no_toggle, no_status_write = native_services
+        sibling = dict(writer.get_api_service_raw("native_api_v2"))
+        assert routes._build_api_service_summary("native_api_v1", {}).group == "Package"
+        result = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group="  Operations  "))
+        assert result.id == "native_api_v1"
+        assert result.group == "Operations"
+        assert result.enabled is True
+        assert writer.get_api_service_raw("native_api_v1") == {
+            "enabled": True, "apiKey": "{secret:key1}", "future": {"kept": True}, "group": "Operations",
+        }
+        assert writer.get_api_service_raw("native_api_v2") == sibling
+        for clear in (None, "", "   "):
+            cleared = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group=clear))
+            assert cleared.group == ""
+            assert cleared.enabled is True
+            assert writer.get_api_service_raw("native_api_v1")["group"] == ""
+            assert (await routes.get_api_service_metadata("native_api_v1")).group == ""
+        await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(verify_ssl=True))
+        assert writer.get_api_service_raw("native_api_v1")["group"] == ""
+        assert writer.get_api_service_raw("native_api_v1")["future"] == {"kept": True}
+        no_toggle.assert_not_called()
+        no_status_write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_single_version_alias_writes_only_canonical_native_record(self, native_services, monkeypatch):
+        from flocks.config import api_versioning
+
+        routes, writer, _, _ = native_services
+        descriptors = api_versioning.discover_api_service_descriptors()
+        monkeypatch.setattr(api_versioning, "discover_api_service_descriptors", lambda **kw: descriptors[:1])
+        sibling = dict(writer.get_api_service_raw("native_api_v2"))
+        updated = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Operations"))
+        assert updated.id == "native_api_v1"
+        assert writer.list_api_services_raw()["native_api_v1"]["group"] == "Operations"
+        assert "native_api" not in writer.list_api_services_raw()
+        assert writer.get_api_service_raw("native_api_v2") == sibling
+
+    @pytest.mark.asyncio
+    async def test_enabled_update_preserves_explicit_group_and_other_metadata(self, native_services, monkeypatch):
+        routes, writer, _, _ = native_services
+        await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group=None))
+        toggle = MagicMock(return_value=0)
+        monkeypatch.setattr(routes, "_set_api_service_tools_enabled", toggle)
+        monkeypatch.setattr(routes, "_write_api_service_status_cache", AsyncMock())
+        for enabled in (False, True):
+            updated = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(enabled=enabled))
+            assert updated.enabled is enabled
+            assert updated.group == ""
+            raw = writer.get_api_service_raw("native_api_v1")
+            assert raw["group"] == ""
+            assert raw["apiKey"] == "{secret:key1}"
+            assert raw["future"] == {"kept": True}
+        assert toggle.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_service_does_not_become_credential_ready(self, native_services, monkeypatch):
+        import flocks.security
+
+        routes, writer, _, _ = native_services
+        writer.remove_api_service("native_api_v1")
+        monkeypatch.setattr(flocks.security, "get_secret_manager", lambda: MagicMock(get=lambda key: None))
+        summary = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group="Operations"))
+        assert summary.enabled is False
+        assert writer.get_api_service_raw("native_api_v1") == {"group": "Operations"}
+        credentials = await routes.get_service_credentials("native_api_v1")
+        assert credentials.has_credential is False
+        assert not credentials.fields
+        assert "group" not in credentials.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_legacy_id_cannot_edit_version_groups(self, native_services):
+        routes, writer, _, _ = native_services
+        original = writer.list_api_services_raw()
+        with pytest.raises(HTTPException) as exc:
+            await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Wrong identity"))
+        assert exc.value.status_code == 400
+        assert writer.list_api_services_raw() == original
+
+    @pytest.mark.asyncio
+    async def test_group_cannot_be_written_as_credentials_or_mark_configured(self, native_services, monkeypatch):
+        import flocks.security
+
+        routes, writer, _, _ = native_services
+        raw = {"group": "Operations", "credential_fields": [
+            {"key": "group", "storage": "config"},
+            {"key": "alias", "storage": "secret", "config_key": "group"},
+        ]}
+        writer.set_api_service("native_api_v1", raw)
+        monkeypatch.setattr(flocks.security, "get_secret_manager", lambda: MagicMock(get=lambda key: None))
+        credentials = await routes.get_service_credentials("native_api_v1")
+        assert credentials.fields is None
+        assert credentials.has_credential is False
+        with pytest.raises(HTTPException) as exc:
+            await routes.set_service_credentials("native_api_v1", routes.ProviderCredentialRequest(fields={"group": "Bad"}))
+        assert exc.value.status_code == 400
+        assert writer.get_api_service_raw("native_api_v1") == raw
+        writer.set_api_service("native_api_v1", {"group": "Operations"})
+        save_status = AsyncMock()
+        monkeypatch.setattr(routes, "_save_api_service_status", save_status)
+        await routes._save_api_service_status_if_configured("native_api_v1", {"success": True})
+        save_status.assert_not_called()
+
+    @pytest.mark.parametrize("group", [42, {}, "x" * 33, "a\x7fb"])
+    def test_group_validation(self, group):
+        from pydantic import ValidationError
+        from flocks.server.routes.provider import APIServiceUpdateRequest
+
+        with pytest.raises(ValidationError):
+            APIServiceUpdateRequest(group=group)
+        with pytest.raises(ValidationError):
+            APIServiceUpdateRequest(enabled=None)
+
+
 class TestAPIServiceManagement:
     @pytest.mark.asyncio
     async def test_list_api_services_returns_enabled_state_and_bilingual_descriptions(self):

@@ -1,4 +1,5 @@
 name: sangfor_sip_vuln
+group: SIEM
 description: >
   Query Sangfor SIP vulnerability data. Use the `action` parameter to select:
   - `weak_password` – 脆弱性-弱密码（弱密码账号、服务类型、端口）

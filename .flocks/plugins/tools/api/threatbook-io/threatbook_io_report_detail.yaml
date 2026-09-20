@@ -1,4 +1,5 @@
 name: threatbook_io_report_detail
+group: 威胁情报
 description: >
   Retrieve detailed threat intelligence report including severity, threat types, summary,
   tags, targeted industries/regions/organizations/products, impacts, ATT&CK techniques,

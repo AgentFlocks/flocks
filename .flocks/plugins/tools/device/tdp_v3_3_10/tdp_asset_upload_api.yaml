@@ -1,4 +1,5 @@
 name: tdp_asset_upload_api
+group: NDR
 description: >
   查询 TDP 上传接口相关数据。`summary` 返回上传接口统计，`host_list` 返回域名列表，
   `interface_list` 返回上传接口明细。优先使用顶层语义化参数；`fuzzy`、`condition` 和 `page`

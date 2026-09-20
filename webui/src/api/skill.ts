@@ -17,6 +17,8 @@ export interface SkillInstallSpec {
 }
 
 export interface Skill {
+  group_readonly?: boolean;
+  group?: string | null;
   name: string;
   description: string;
   location: string;
@@ -31,6 +33,10 @@ export interface Skill {
   requires?: SkillRequires;
   install_specs?: SkillInstallSpec[];
 }
+
+/** Package/core definitions remain immutable, regardless of the user's role. */
+export const isSkillDefinitionReadOnly = (skill: Pick<Skill, 'source'>): boolean =>
+  skill.source === 'project' || skill.source === 'flocks';
 
 export interface Command {
   name: string;
@@ -101,6 +107,9 @@ export const skillAPI = {
     content: string;
   }) =>
     client.put<Skill>(`/api/skills/${name}`, data),
+
+  updateGroup: (name: string, group: string | null) =>
+    client.patch<Skill>(`/api/skills/${encodeURIComponent(name)}`, { group }),
 
   delete: (name: string) =>
     client.delete(`/api/skills/${name}`),

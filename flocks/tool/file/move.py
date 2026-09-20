@@ -14,6 +14,7 @@ from flocks.tool.registry import (
 
 @ToolRegistry.register_function(
     name="move",
+    group="文件操作",
     description="Move or rename a file or directory.",
     category=ToolCategory.FILE,
     parameters=[

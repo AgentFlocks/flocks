@@ -1,4 +1,5 @@
 name: librarian
+group: 系统辅助
 name_cn: 资料检索智能体
 description: >-
   Specialized codebase understanding agent for multi-repository analysis,

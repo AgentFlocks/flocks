@@ -35,6 +35,30 @@ def _reset_catalog(tmp_path, monkeypatch):
     Config._cached_config = None
 
 
+def test_shipped_catalog_group_ignores_old_mutable_copy_without_rewriting_it():
+    path = _resolve_catalog_file()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    canonical = {entry["id"]: entry["group"] for entry in raw["servers"]}
+    for entry in raw["servers"]:
+        entry["group"] = "Old user override"
+        entry["description"] = "Keep mutable details"
+    raw["servers"].append({
+        "id": "user-only", "name": "User", "description": "custom", "category": "custom",
+        "github": "example/custom", "language": "python", "group": "User group", "group_readonly": True,
+    })
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    catalog = McpCatalog.get()
+    for entry in catalog.entries:
+        if entry.id == "user-only":
+            assert entry.group == "User group" and entry.group_readonly is False
+        else:
+            assert entry.group == canonical[entry.id]
+            assert entry.group_readonly is True
+            assert entry.description == "Keep mutable details"
+    assert path.read_bytes() == before
+
+
 class TestCatalogDataIntegrity:
     """Validate the mcp_list.json / catalog_data.json file itself."""
 

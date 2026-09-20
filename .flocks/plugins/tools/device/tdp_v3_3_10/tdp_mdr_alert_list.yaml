@@ -1,4 +1,5 @@
 name: tdp_mdr_alert_list
+group: NDR
 description: >
   查询 TDP 的 MDR 告警研判相关接口。`indicator` 返回时间范围内的研判指标汇总；
   `list` 返回研判结果列表，适合按资产类型、严重级别、处置结果和关键词筛选。

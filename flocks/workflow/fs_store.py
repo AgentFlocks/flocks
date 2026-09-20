@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from pydantic_core import PydanticCustomError
 
 from flocks.utils.log import Log
 
@@ -14,11 +15,36 @@ from .center import resolve_workflow_scan_roots
 log = Log.create(service="workflow.fs-store")
 
 _workspace_root: Optional[Path] = None
+_SYSTEM_WORKFLOW_ROOT = Path(__file__).resolve().parents[2] / ".flocks" / "plugins" / "workflows"
+
+
+def is_system_workflow_definition(wf_dir: Path) -> bool:
+    """Check the actual selected source, never a project/native display flag."""
+    for filename in ("workflow.json", "workflow.md", "workflow.edit.md"):
+        source = wf_dir / filename
+        if source.is_file():
+            return source.resolve().is_relative_to(_SYSTEM_WORKFLOW_ROOT.resolve())
+    return False
+
 _EMPTY_DRAFT_WORKFLOW_JSON: Dict[str, Any] = {
     "start": "",
     "nodes": [],
     "edges": [],
 }
+
+
+def normalize_workflow_group(value: Any) -> str:
+    """Validate a workflow's native meta.json group value."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group must not contain control characters")
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    return value
 
 
 def _markdown_title(markdown_content: Optional[str], fallback: str) -> str:
@@ -138,19 +164,25 @@ def read_workflow_dir(
             updated_candidates.append(int(legacy_edit_md_file.stat().st_mtime * 1000))
 
         meta_file = wf_dir / "meta.json"
+        fallback_updated = max(updated_candidates)
+        meta = {
+            "name": workflow_json.get("name") or _markdown_title(markdown_content, workflow_id),
+            "description": workflow_json.get("description"),
+            "category": workflow_json.get("category", "default"),
+            "status": "active" if json_file.is_file() else "draft",
+            "createdBy": None,
+            "createdAt": fallback_updated,
+            "updatedAt": fallback_updated,
+        }
         if meta_file.is_file():
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
-        else:
-            fallback_updated = max(updated_candidates)
-            meta = {
-                "name": workflow_json.get("name") or _markdown_title(markdown_content, workflow_id),
-                "description": workflow_json.get("description"),
-                "category": workflow_json.get("category", "default"),
-                "status": "active" if json_file.is_file() else "draft",
-                "createdBy": None,
-                "createdAt": fallback_updated,
-                "updatedAt": fallback_updated,
-            }
+            meta.update(json.loads(meta_file.read_text(encoding="utf-8")))
+        if "group" in meta:
+            meta["group"] = normalize_workflow_group(meta["group"])
+
+        # metadata.group is an import/export transport field, not a second
+        # local authority. Local readers always use this workflow's meta.json.
+        if isinstance(workflow_json.get("metadata"), dict):
+            workflow_json["metadata"].pop("group", None)
 
         name_i18n = _workflow_name_i18n(workflow_json, meta)
         if name_i18n:
@@ -165,6 +197,7 @@ def read_workflow_dir(
             **meta,
             "id": workflow_id,
             "source": source,
+            "group_readonly": is_system_workflow_definition(wf_dir),
             "workflowJson": workflow_json,
             "markdownContent": markdown_content,
             "editMarkdownContent": markdown_content,
@@ -177,14 +210,60 @@ def read_workflow_dir(
         return None
 
 
+def patch_workflow_metadata(
+    wf_dir: Path, updates: Dict[str, Any], *, workflow_id: Optional[str] = None,
+    workflow_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Patch an existing workflow's meta.json without touching JSON or Markdown.
+
+    Also usable by the native installer after replacing a workflow package.
+    Unknown metadata is retained, including when the new package has no meta.json.
+    The directory must already contain a workflow definition or Markdown draft.
+    Installers staging a package can provide its final workflow_id for defaults.
+    """
+    if not any((wf_dir / name).is_file() for name in ("workflow.json", "workflow.md", "workflow.edit.md")):
+        raise FileNotFoundError(f"Workflow not found: {wf_dir}")
+    meta_file = wf_dir / "meta.json"
+    if meta_file.is_file():
+        # Patch the stored mapping, not the derived response: defaults and
+        # normalized/localized display names must not replace native values.
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    else:
+        data = workflow_data or read_workflow_dir(wf_dir, workflow_id or wf_dir.name, "")
+        if data is None:
+            raise FileNotFoundError(f"Workflow not found: {wf_dir}")
+        meta = {
+            key: value
+            for key, value in data.items()
+            if key not in {"id", "source", "group_readonly", "workflowJson", "markdownContent", "editMarkdownContent", "stats"}
+        }
+    updates = dict(updates)
+    updates.pop("group_readonly", None)
+    if "group" in updates:
+        updates["group"] = normalize_workflow_group(updates["group"])
+        if is_system_workflow_definition(wf_dir) and updates["group"] != normalize_workflow_group(meta.get("group")):
+            raise ValueError("System workflow group is read-only")
+    meta.update(updates)
+    (wf_dir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return meta
+
+
+def resolve_workflow_from_fs(workflow_id: str) -> Optional[tuple[Path, Dict[str, Any]]]:
+    """Resolve the selected directory and its data in one discovery pass."""
+    for root, source in reversed(workflow_scan_dirs()):
+        wf_dir = root / workflow_id
+        data = read_workflow_dir(wf_dir, workflow_id, source)
+        if data is not None:
+            return wf_dir, data
+    return None
+
+
 def read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     """Resolve a workflow by ID from workflow directories on disk."""
-    result = None
-    for root, source in workflow_scan_dirs():
-        data = read_workflow_dir(root / workflow_id, workflow_id, source)
-        if data is not None:
-            result = data
-    return result
+    selected = resolve_workflow_from_fs(workflow_id)
+    return selected[1] if selected is not None else None
 
 
 def resolve_workflow_id_from_source(workflow: Any) -> Optional[str]:

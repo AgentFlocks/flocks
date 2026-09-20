@@ -1,4 +1,5 @@
 name: TDP
+group: NDR
 vendor: threatbook
 service_id: tdp_api
 version: "3.3.10"
