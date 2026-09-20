@@ -7,6 +7,7 @@ regions and orchestrates validation + apply flows across LLM, API, and MCP.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -172,6 +173,8 @@ def _llm_provider_has_usable_credentials(provider_id: str) -> bool:
 
 
 ONBOARDING_REGION_PRESETS = THREATBOOK_REGION_PRESETS
+# Cross-region detection is optional and must not consume the UI request timeout.
+_THREATBOOK_REGION_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 async def _api_service_has_credentials(service_id: str) -> bool:
@@ -581,18 +584,26 @@ async def _validate_threatbook_resources(
 
     other_region: Region = "global" if region == "cn" else "cn"
     other_preset = ONBOARDING_REGION_PRESETS[other_region]
-    if include_services:
-        fallback_api_result = await _test_provider_or_service_with_temp_credentials(
-            other_preset["threatbook_api_service_id"],
-            threatbook_api_key,
-            service=True,
-        )
-    else:
-        fallback_api_result = await _test_provider_or_service_with_temp_credentials(
-            other_preset["threatbook_llm_provider_id"],
-            threatbook_api_key,
-            model_id=other_preset["threatbook_default_model_id"],
-        )
+    try:
+        async with asyncio.timeout(_THREATBOOK_REGION_PROBE_TIMEOUT_SECONDS):
+            if include_services:
+                fallback_api_result = await _test_provider_or_service_with_temp_credentials(
+                    other_preset["threatbook_api_service_id"],
+                    threatbook_api_key,
+                    service=True,
+                )
+            else:
+                fallback_api_result = await _test_provider_or_service_with_temp_credentials(
+                    other_preset["threatbook_llm_provider_id"],
+                    threatbook_api_key,
+                    model_id=other_preset["threatbook_default_model_id"],
+                )
+    except TimeoutError:
+        fallback_api_result = {
+            "success": False,
+            "code": "connection_timeout",
+            "message": "ThreatBook 地区探测超时。",
+        }
     fallback_api = _normalize_test_result(
         fallback_api_result,
         fallback_code="region_probe_failed",
@@ -615,6 +626,18 @@ async def _validate_threatbook_resources(
         fallback_api, resource_results, region_probe=True,
     )
     if failure is not None:
+        # A secondary probe cannot replace an explicit primary authentication
+        # failure. Keep overall key validity unknown while the region is unverified.
+        if any(
+            result.enabled and result.success is False
+            and result.code == "authentication_failed"
+            for result in resource_results.values()
+        ):
+            failure["error_code"] = "authentication_failed"
+            failure["message"] = (
+                "当前区域 ThreatBook Key 认证失败，请检查 Key 是否有效或所属区域。"
+                + failure["message"]
+            )
         return {**failure, "probe": fallback_api.model_dump()}
 
     partial_success = any(result.success is True for result in resource_results.values())
