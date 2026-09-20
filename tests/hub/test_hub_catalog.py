@@ -294,19 +294,20 @@ def test_catalog_uses_webui_workspace_version_for_inferred_installs(
     workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
     clear_catalog_caches()
 
+    bundled_version = load_manifest("webui", "soc_ui").version
     entry = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
-    assert entry.version == "1.1.8"
+    assert entry.version == bundled_version
     assert entry.state == "updateAvailable"
     assert entry.installedVersion == "1.0.0"
 
-    workspace["version"] = "1.1.8"
+    workspace["version"] = bundled_version
     workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
 
     refreshed = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
     assert refreshed.state == "installed"
-    assert refreshed.installedVersion == "1.1.8"
+    assert refreshed.installedVersion == bundled_version
 
 
 def test_pentest_agents_are_listed_in_agent_catalog():
@@ -1175,6 +1176,34 @@ async def test_scene_suite_infers_orphans_only_from_its_own_workflow_records(
         assert await uninstall_plugin("component", "soc-workspace") is False
         assert local.get_record("workflow", "stream_alert_triage") == record
         assert Path(record.installPath).is_dir()
+
+
+async def test_scene_suite_reports_page_package_versions(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    """The suite version can stay put while its page package is behind; the
+    manager needs both numbers to explain an "update available" badge."""
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.server.routes.hub import hub_scene_suites
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    await install_plugin("component", "soc-workspace")
+    latest_pages = load_manifest("webui", "soc_ui").version
+    suite = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert suite.state == "installed"
+    assert suite.workspaceVersion == latest_pages
+    assert suite.workspaceLatestVersion == latest_pages
+
+    # Pages installed by an older build: the suite itself is current, its pages are not.
+    local.save_installed_record(local.get_record("webui", "soc_ui").model_copy(update={"version": "0.0.1"}))
+    clear_catalog_caches()
+    stale = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert stale.state == "updateAvailable"
+    assert stale.installedVersion == load_manifest("component", "soc-workspace").version
+    assert stale.workspaceVersion == "0.0.1"
+    assert stale.workspaceLatestVersion == latest_pages
 
 
 @pytest.mark.parametrize("ownership", ["suite", "independent", "project"])

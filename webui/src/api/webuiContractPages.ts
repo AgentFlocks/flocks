@@ -40,6 +40,8 @@ export interface WebUIContractWorkspaceListItem {
   defaultPageId?: string | null;
   sections?: WebUIContractWorkspaceSection[];
   pages: WebUIContractPageListItem[];
+  /** Scene suite that ships the workspace; the API only lists scenes that have one. */
+  suiteId?: string | null;
 }
 
 export interface WebUIContractPageManifest {

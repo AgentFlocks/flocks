@@ -238,6 +238,10 @@ class SceneSuiteEntry(BaseModel):
     workspaceTitle: Optional[str] = None
     workspaceRoute: Optional[str] = None
     workspaceEnabled: Optional[bool] = None
+    # The suite's page package has its own version; an update can be pending
+    # there while the suite version itself has not moved.
+    workspaceVersion: Optional[str] = None
+    workspaceLatestVersion: Optional[str] = None
 
 
 def _suite_workspace_id(plugin_id: str) -> Optional[str]:
@@ -315,6 +319,8 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
                 workspaceTitle=workspace.title if workspace else None,
                 workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,
                 workspaceEnabled=workspace.enabled if workspace else None,
+                workspaceVersion=child.installedVersion if child is not None else None,
+                workspaceLatestVersion=child.version if child is not None else None,
             )
         )
     suites.sort(key=lambda item: (item.edition != "oss", item.id))

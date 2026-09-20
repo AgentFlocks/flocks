@@ -27,6 +27,7 @@ from flocks.contracts.webui.models import (
     WebUIWorkspaceListItem,
 )
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
+from flocks.hub.catalog import scene_suite_workspace_owners
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
 
@@ -155,7 +156,38 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
 
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
 async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
-    return _store.list_workspaces(enabled_only=enabled_only)
+    return _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only))
+
+
+def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUIWorkspaceListItem]:
+    """Tag each workspace with the scene suite that ships it and drop scene
+    workspaces no suite knows about.
+
+    Scenes are only ever installed through the suite manager, so a
+    ``sceneWorkspace`` directory without a suite in the catalog is a leftover
+    (typically from a build of another branch) whose backend is not here; the
+    navigation must not open it. Workbench pages are not scenes and stay.
+    """
+    try:
+        owners = scene_suite_workspace_owners()
+    except Exception as exc:
+        # Without the catalog nothing can be verified; keep everything reachable.
+        log.warning("webui.workspaces.suite_lookup_failed", {"error": str(exc)})
+        return workspaces
+    result: list[WebUIWorkspaceListItem] = []
+    for workspace in workspaces:
+        suite_id = owners.get(workspace.id)
+        if suite_id is None and workspace.placement == "sceneWorkspace":
+            # The list is fetched on every navigation refresh; say it once.
+            if workspace.id not in _hidden_scene_workspaces_logged:
+                _hidden_scene_workspaces_logged.add(workspace.id)
+                log.info("webui.workspaces.unmanaged_scene_hidden", {"workspaceId": workspace.id})
+            continue
+        result.append(workspace.model_copy(update={"suiteId": suite_id}))
+    return result
+
+
+_hidden_scene_workspaces_logged: set[str] = set()
 
 
 class WebUIWorkspaceEnabledRequest(BaseModel):

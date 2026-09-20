@@ -56,27 +56,25 @@ async def test_create_and_list_webui_pages(client: AsyncClient, webui_pages_env:
     assert items[0]["route"] == "/contracts/webui/dash-1"
 
 
-@pytest.mark.asyncio
-async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, webui_pages_env: WebUIPagesStore):
-    root = webui_pages_env.root
-    workspace_dir = root / "scene_workspace"
+def _write_workspace(root, workspace_id: str, title: str, placement: str, pages: list[tuple[str, str, str, int]]):
+    workspace_dir = root / workspace_id
     workspace_dir.mkdir(parents=True, exist_ok=True)
     (workspace_dir / "workspace.json").write_text(
         json.dumps(
             {
-                "id": "scene_workspace",
-                "title": "场景工作区",
+                "id": workspace_id,
+                "title": title,
                 "icon": "ShieldCheck",
                 "order": 10,
                 "enabled": True,
-                "placement": "sceneWorkspace",
-                "defaultPageId": "ops-overview",
+                "placement": placement,
+                "defaultPageId": pages[0][0],
                 "sections": [
                     {
                         "id": "operations",
                         "label": "调查列表",
-                        "pageIds": ["ops-overview", "investigation-list"],
-                        "defaultPageId": "ops-overview",
+                        "pageIds": [page_id for page_id, *_ in pages],
+                        "defaultPageId": pages[0][0],
                         "contentPadding": "comfortable",
                     }
                 ],
@@ -84,10 +82,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
         ),
         encoding="utf-8",
     )
-    for page_id, page_dir_name, title, order in [
-        ("ops-overview", "ops_overview", "运营总览", 10),
-        ("investigation-list", "investigation_list", "调查列表", 20),
-    ]:
+    for page_id, page_dir_name, page_title, order in pages:
         page_dir = workspace_dir / page_dir_name
         (page_dir / "src").mkdir(parents=True, exist_ok=True)
         (page_dir / "dist").mkdir(parents=True, exist_ok=True)
@@ -95,7 +90,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
             json.dumps(
                 {
                     "id": page_id,
-                    "title": title,
+                    "title": page_title,
                     "route": f"/contracts/webui/{page_id}",
                     "icon": "LayoutDashboard",
                     "order": order,
@@ -108,13 +103,27 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
             encoding="utf-8",
         )
 
-    resp = await client.get("/api/contracts/webui/workspaces", params={"enabledOnly": True})
+
+@pytest.mark.asyncio
+async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, webui_pages_env: WebUIPagesStore):
+    _write_workspace(
+        webui_pages_env.root,
+        "scene_workspace",
+        "场景工作区",
+        "sceneWorkspace",
+        [("ops-overview", "ops_overview", "运营总览", 10), ("investigation-list", "investigation_list", "调查列表", 20)],
+    )
+
+    with patch.object(webui_routes, "scene_suite_workspace_owners", return_value={"scene_workspace": "scene-suite"}):
+        resp = await client.get("/api/contracts/webui/workspaces", params={"enabledOnly": True})
 
     assert resp.status_code == 200
     assert resp.json() == [
         {
             "id": "scene_workspace",
+            "version": "0.0.0",
             "title": "场景工作区",
+            "titleEn": None,
             "route": "/contracts/webui/workspaces/scene_workspace",
             "icon": "ShieldCheck",
             "order": 10,
@@ -125,6 +134,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                 {
                     "id": "operations",
                     "label": "调查列表",
+                    "labelEn": None,
                     "pageIds": ["ops-overview", "investigation-list"],
                     "defaultPageId": "ops-overview",
                     "contentPadding": "comfortable",
@@ -135,6 +145,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                 {
                     "id": "ops-overview",
                     "title": "运营总览",
+                    "titleEn": None,
                     "route": "/contracts/webui/ops-overview",
                     "icon": "LayoutDashboard",
                     "order": 10,
@@ -144,11 +155,13 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                     "buildStatus": "idle",
                     "workspaceId": "scene_workspace",
                     "workspaceTitle": "场景工作区",
+                    "workspaceTitleEn": None,
                     "workspaceRoute": "/contracts/webui/workspaces/scene_workspace",
                 },
                 {
                     "id": "investigation-list",
                     "title": "调查列表",
+                    "titleEn": None,
                     "route": "/contracts/webui/investigation-list",
                     "icon": "LayoutDashboard",
                     "order": 20,
@@ -158,11 +171,51 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                     "buildStatus": "idle",
                     "workspaceId": "scene_workspace",
                     "workspaceTitle": "场景工作区",
+                    "workspaceTitleEn": None,
                     "workspaceRoute": "/contracts/webui/workspaces/scene_workspace",
                 },
             ],
+            "suiteId": "scene-suite",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_webui_workspaces_hides_scene_workspaces_without_a_suite(
+    client: AsyncClient, webui_pages_env: WebUIPagesStore
+):
+    """A scene directory left behind by another build has no suite in this
+    catalog (and no backend here): it must not become a navigation entry.
+    Workbench workspaces are not scenes and are kept as they are."""
+    _write_workspace(
+        webui_pages_env.root, "soc_ui", "SOC 工作区", "sceneWorkspace", [("soc-overview", "soc_overview", "SOC 总览", 10)]
+    )
+    _write_workspace(
+        webui_pages_env.root,
+        "code_security",
+        "代码审计",
+        "sceneWorkspace",
+        [("code-security-workspace", "code_security_workspace", "代码审计首页", 10)],
+    )
+    _write_workspace(
+        webui_pages_env.root, "bench_ui", "工作台页面", "aiWorkbench", [("bench-page", "bench_page", "工作台页", 10)]
+    )
+
+    with patch.object(webui_routes, "scene_suite_workspace_owners", return_value={"soc_ui": "soc-workspace"}):
+        resp = await client.get("/api/contracts/webui/workspaces")
+
+    assert resp.status_code == 200
+    assert sorted((item["id"], item["suiteId"]) for item in resp.json()) == [
+        ("bench_ui", None),
+        ("soc_ui", "soc-workspace"),
+    ]
+
+    # The catalog being unreadable must not hide every scene.
+    with patch.object(webui_routes, "scene_suite_workspace_owners", side_effect=RuntimeError("hub down")):
+        fallback = await client.get("/api/contracts/webui/workspaces")
+
+    assert fallback.status_code == 200
+    assert sorted(item["id"] for item in fallback.json()) == ["bench_ui", "code_security", "soc_ui"]
 
 
 @pytest.mark.asyncio

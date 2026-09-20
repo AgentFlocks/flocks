@@ -993,6 +993,27 @@ def list_manifests() -> list[HubPluginManifest]:
     return result
 
 
+def scene_suite_workspace_owners() -> dict[str, str]:
+    """Map each WebUI workspace id to the scene suite (component) that ships it.
+
+    A suite's ``webui`` component ref carries the workspace id, so a workspace
+    directory nobody in the catalog references (for example one left behind by
+    a build of another branch) is simply absent from the result.
+    """
+    owners: dict[str, str] = {}
+    for entry in _catalog_entries_snapshot():
+        if entry.type != "component":
+            continue
+        try:
+            refs = load_manifest("component", entry.id).components
+        except Exception:
+            continue
+        for ref in refs:
+            if ref.type == "webui":
+                owners.setdefault(ref.id, entry.id)
+    return owners
+
+
 def _contains_any(values: Iterable[str], selected: Optional[list[str]]) -> bool:
     if not selected:
         return True

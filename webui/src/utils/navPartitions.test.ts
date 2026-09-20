@@ -3,7 +3,7 @@ import {
   readPartitionPaths,
   resolveNavPartition,
   savePartitionPaths,
-  workspacePartitionId,
+  workspaceIdFromPath,
 } from './navPartitions';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 import { findActiveTabHref } from './layoutTabs';
@@ -13,9 +13,11 @@ describe('navPartitions', () => {
     localStorage.clear();
   });
 
-  it('identifies each installed scene workspace separately', () => {
-    expect(workspacePartitionId('soc_ui')).toBe('workspace:soc_ui');
-    expect(workspacePartitionId('code_audit_ui')).toBe('workspace:code_audit_ui');
+  it('reads the workspace id out of a workspace route', () => {
+    expect(workspaceIdFromPath('/contracts/webui/workspaces/soc_ui/soc-alerts')).toBe('soc_ui');
+    expect(workspaceIdFromPath('/contracts/webui/workspaces/code_audit_ui')).toBe('code_audit_ui');
+    expect(workspaceIdFromPath('/contracts/webui/dash-1')).toBeNull();
+    expect(workspaceIdFromPath('/sessions')).toBeNull();
   });
 
   it('maps a route to the partition that owns it', () => {
@@ -23,8 +25,9 @@ describe('navPartitions', () => {
     expect(resolveNavPartition('/sessions')).toBe('agent');
     expect(resolveNavPartition('/devices')).toBe('agent');
     expect(resolveNavPartition('/hub')).toBe('agent');
-    expect(resolveNavPartition('/contracts/webui/workspaces/soc_ui/soc-alerts')).toBe('workspace:soc_ui');
-    expect(resolveNavPartition('/contracts/webui/workspaces/code_audit_ui')).toBe('workspace:code_audit_ui');
+    // Every scene workspace belongs to the one SOC workspace partition.
+    expect(resolveNavPartition('/contracts/webui/workspaces/soc_ui/soc-alerts')).toBe('scene');
+    expect(resolveNavPartition('/contracts/webui/workspaces/code_audit_ui')).toBe('scene');
     expect(resolveNavPartition('/scenes/suites')).toBe('scene');
     expect(resolveNavPartition('/contracts/webui/dash-1')).toBe('scene');
     expect(resolveNavPartition('/user-defined-pages/dash-1')).toBe('scene');
@@ -34,28 +37,27 @@ describe('navPartitions', () => {
     expect(resolveNavPartition('/settings-export')).toBe('agent');
   });
 
-  it('resolves custom workspace routes and keeps AI workbench extensions under Agent', () => {
+  it('keeps AI workbench extensions under Agent once workspace placement is known', () => {
     const workspaces = [
-      { id: 'audit', route: '/audit', placement: 'sceneWorkspace' },
+      { id: 'audit', route: '/contracts/webui/workspaces/audit', placement: 'sceneWorkspace' },
       { id: 'assistant', route: '/contracts/webui/workspaces/assistant', placement: 'aiWorkbench' },
     ] as WebUIContractWorkspaceListItem[];
-    expect(resolveNavPartition('/audit/findings', workspaces)).toBe('workspace:audit');
-    expect(resolveNavPartition('/auditing', workspaces)).toBe('agent');
+    expect(resolveNavPartition('/contracts/webui/workspaces/audit/findings', workspaces)).toBe('scene');
     expect(resolveNavPartition('/contracts/webui/workspaces/assistant/chat', workspaces)).toBe('agent');
+    // Unknown workspace routes default to the scene partition.
+    expect(resolveNavPartition('/contracts/webui/workspaces/unknown/page', workspaces)).toBe('scene');
   });
 
   it('round-trips the last path of each partition', () => {
     savePartitionPaths({
       agent: '/workflows/wf-1',
-      scene: '/contracts/webui/dash-1',
-      'workspace:soc_ui': '/contracts/webui/workspaces/soc_ui/soc-alerts?severity=high',
-      'workspace:audit': '/audit/findings',
+      scene: '/contracts/webui/workspaces/soc_ui/soc-alerts?severity=high',
+      settings: '/settings/account',
     });
     expect(readPartitionPaths()).toEqual({
       agent: '/workflows/wf-1',
-      scene: '/contracts/webui/dash-1',
-      'workspace:soc_ui': '/contracts/webui/workspaces/soc_ui/soc-alerts?severity=high',
-      'workspace:audit': '/audit/findings',
+      scene: '/contracts/webui/workspaces/soc_ui/soc-alerts?severity=high',
+      settings: '/settings/account',
     });
   });
 
@@ -64,8 +66,7 @@ describe('navPartitions', () => {
       agent: '/settings/account',
       scene: 'not-a-path',
       settings: '/settings/preferences',
-      'workspace:bad/id': '/contracts/webui/workspaces/bad/id',
-      'workspace:external': '//example.com',
+      'workspace:soc_ui': '/contracts/webui/workspaces/soc_ui/soc-alerts',
       unexpected: '/sessions',
     }));
     expect(readPartitionPaths()).toEqual({ settings: '/settings/preferences' });
@@ -88,7 +89,7 @@ describe('navPartitions', () => {
     const scene = {
       id: 'soc_ui', route: '/contracts/webui/workspaces/soc_ui', placement: 'sceneWorkspace',
     } as WebUIContractWorkspaceListItem;
-    expect(resolveNavPartition(`${scene.route}/alerts`, [scene])).toBe('workspace:soc_ui');
+    expect(resolveNavPartition(`${scene.route}/alerts`, [scene])).toBe('scene');
     for (const path of [`${scene.route}/alerts`, '/contracts/webui/workspaces/assistant/removed-page']) {
       savePartitionPaths({ agent: path });
       const candidate = readPartitionPaths().agent;

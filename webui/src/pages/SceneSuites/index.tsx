@@ -41,16 +41,18 @@ const TEXT = {
     upgrade: '去升级',
     currentVersion: '已装 v{v}',
     latestVersion: '最新 v{v}',
+    pagesVersion: '场景页面 v{installed} → v{latest}',
     empty: '还没有可用的场景套件',
     loadFailed: '加载场景套件失败',
     actionFailed: '操作失败',
     installed_ok: '安装完成，场景已启用',
     installedEnableFailed: '安装已完成，但启用失败。请点击“启用”重试。',
+    updatedEnableFailed: '更新已完成，但启用失败。请点击“启用”重试。',
     workspaceMissing: '未找到该套件的场景工作区，请刷新后重试。',
     workspaceDisabled: '此场景尚未启用，点击“启用”即可打开场景。',
     workspacePending: '此场景已启用，页面尚未就绪。请刷新状态；如安装异常，请更新或重新安装场景。',
     uninstalled_ok: '已卸载',
-    updated_ok: '已更新',
+    updated_ok: '已更新，场景已启用',
     enabled_ok: '已启用',
     disabled_ok: '已停用',
   },
@@ -79,16 +81,18 @@ const TEXT = {
     upgrade: 'Upgrade',
     currentVersion: 'installed v{v}',
     latestVersion: 'latest v{v}',
+    pagesVersion: 'scene pages v{installed} → v{latest}',
     empty: 'No scene suite is available yet',
     loadFailed: 'Failed to load scene suites',
     actionFailed: 'Action failed',
     installed_ok: 'Installed and enabled',
     installedEnableFailed: 'Installed, but enabling failed. Click Enable to retry.',
+    updatedEnableFailed: 'Updated, but enabling failed. Click Enable to retry.',
     workspaceMissing: 'The scene workspace was not found. Refresh and try again.',
     workspaceDisabled: 'This scene is disabled. Click Enable to open it.',
     workspacePending: 'This scene is enabled, but its pages are not ready. Refresh its status, or update or reinstall the scene if installation is incomplete.',
     uninstalled_ok: 'Uninstalled',
-    updated_ok: 'Updated',
+    updated_ok: 'Updated and enabled',
     enabled_ok: 'Enabled',
     disabled_ok: 'Disabled',
   },
@@ -147,8 +151,20 @@ export default function SceneSuitesPage() {
     setBusyId(suite.id);
     if (action !== 'install') setInstallProgress(null);
     let installed = false;
+    let updated = false;
     let changed = false;
     let enabledWorkspaceId: string | null = null;
+    // Installing or updating a scene is done to use it: both leave it enabled,
+    // whatever an earlier 停用 left in the workspace state.
+    const enableSuiteWorkspace = async () => {
+      // A component ID and its WebUI workspace ID are different identifiers.
+      // Prefer the catalog's explicit mapping, and refresh when it was absent.
+      const workspaceId = suite.workspaceId || (await refetch({ silent: true, rejectOnError: true }))
+        .find((entry) => entry.id === suite.id)?.workspaceId;
+      if (!workspaceId) throw new Error(text.workspaceMissing);
+      await webuiContractPagesAPI.setWorkspaceEnabled(workspaceId, true);
+      enabledWorkspaceId = workspaceId;
+    };
     try {
       if (action === 'install') {
         setInstallProgress(createSuiteInstallProgressState(progressEntry(suite)));
@@ -157,17 +173,16 @@ export default function SceneSuitesPage() {
         });
         installed = true;
         changed = true;
-        // A component ID and its WebUI workspace ID are different identifiers.
-        // Prefer the catalog's explicit mapping, and refresh when it was absent.
-        const workspaceId = suite.workspaceId || (await refetch({ silent: true, rejectOnError: true }))
-          .find((entry) => entry.id === suite.id)?.workspaceId;
-        if (!workspaceId) throw new Error(text.workspaceMissing);
-        await webuiContractPagesAPI.setWorkspaceEnabled(workspaceId, true);
-        enabledWorkspaceId = workspaceId;
+        await enableSuiteWorkspace();
       }
       // Updating the suite carries its pages along (the installer updates an
       // outdated child), so one call is enough.
-      if (action === 'update') await hubAPI.update('component', suite.id);
+      if (action === 'update') {
+        await hubAPI.update('component', suite.id);
+        updated = true;
+        changed = true;
+        await enableSuiteWorkspace();
+      }
       if (action === 'uninstall') await hubAPI.uninstall('component', suite.id);
       if (action === 'enable' || action === 'disable') {
         if (!suite.workspaceId) throw new Error(text.workspaceMissing);
@@ -194,7 +209,10 @@ export default function SceneSuitesPage() {
       if (action === 'install' && !installed) {
         setInstallProgress((current) => failSuiteInstallProgress(current, progressEntry(suite), detail || text.actionFailed));
       }
-      toast.error(installed ? text.installedEnableFailed : `${text.actionFailed}: ${suiteName(suite, zh)}`, detail);
+      toast.error(
+        installed ? text.installedEnableFailed : updated ? text.updatedEnableFailed : `${text.actionFailed}: ${suiteName(suite, zh)}`,
+        detail,
+      );
     } finally {
       if (changed) await notifySceneSuitesChanged();
       setBusyId(null);
@@ -263,6 +281,12 @@ export default function SceneSuitesPage() {
           const isPartial = suite.state === 'partial';
           const isInstalled = isPartial || suite.state === 'installed' || suite.state === 'updateAvailable' || suite.state === 'localOnly';
           const hasWorkspace = suite.workspaceEnabled != null;
+          // "有更新" can come from the page package alone while the suite
+          // version is unchanged; say so next to the suite versions.
+          const pagesBehind = isInstalled
+            && !!suite.workspaceVersion
+            && !!suite.workspaceLatestVersion
+            && suite.workspaceVersion !== suite.workspaceLatestVersion;
           const busy = busyId === suite.id;
           const targeted = !!targetWorkspace && targetWorkspace === suite.workspaceId;
           return (
@@ -295,6 +319,14 @@ export default function SceneSuitesPage() {
                   <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
                     {suite.installedVersion ? text.currentVersion.replace('{v}', suite.installedVersion) + ' · ' : ''}
                     {text.latestVersion.replace('{v}', suite.version)}
+                    {pagesBehind && (
+                      <>
+                        {' · '}
+                        <span className="text-amber-600 dark:text-amber-400">
+                          {text.pagesVersion.replace('{installed}', suite.workspaceVersion ?? '').replace('{latest}', suite.workspaceLatestVersion ?? '')}
+                        </span>
+                      </>
+                    )}
                   </p>
                   {proLocked && (
                     <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{text.proHint}</p>

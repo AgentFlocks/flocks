@@ -97,37 +97,56 @@ function createContractApi(pagePath: string, contractId: string): WebUIContractO
   };
 }
 
-export function installWebUIContractPageRuntime(pageId: string): void {
-  if (typeof window === 'undefined') return;
-  const api = apiClient as WebUIContractPageApiClient;
+function createPageApiClient(pageId: string): WebUIContractPageApiClient {
+  // One client object per page. The bundle's SDK shim captures `api` when its
+  // module evaluates, so pages kept alive side by side (SOC 告警态势 while
+  // 告警调查 is open) each keep their own `api.page` scope instead of the
+  // last installed page hijacking everyone's page API calls.
+  const api = Object.create(apiClient) as WebUIContractPageApiClient;
   api.page = createScopedApi(pageId);
   api.contract = createContractApi;
+  return api;
+}
+
+export function installWebUIContractPageRuntime(pageId: string): void {
+  if (typeof window === 'undefined') return;
   window.__FLOCKS_WEBUI_CONTRACT_SDK__ = {
     React,
     jsx,
     jsxs,
-    api,
+    api: createPageApiClient(pageId),
     Card,
     useCurrentUser,
   };
 }
 
+// Bundles evaluate one at a time: the SDK global must still name the page a
+// bundle belongs to when that bundle reads it, even while several kept-alive
+// panes load at once.
+let bundleImportQueue: Promise<unknown> = Promise.resolve();
+
 export async function loadWebUIContractPageBundle(
   url: string,
   missingExportMessage = 'Page bundle does not export a default component',
+  pageId?: string,
 ): Promise<ComponentType> {
   const response = await apiClient.get<string>(url, { responseType: 'text' });
   const source = typeof response.data === 'string' ? response.data : String(response.data ?? '');
   const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
 
-  try {
-    const mod = await import(/* @vite-ignore */ moduleUrl);
-    const component = mod.default as ComponentType | undefined;
-    if (!component) {
-      throw new Error(missingExportMessage);
+  const load = bundleImportQueue.then(async () => {
+    try {
+      if (pageId) installWebUIContractPageRuntime(pageId);
+      const mod = await import(/* @vite-ignore */ moduleUrl);
+      const component = mod.default as ComponentType | undefined;
+      if (!component) {
+        throw new Error(missingExportMessage);
+      }
+      return component;
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
     }
-    return component;
-  } finally {
-    URL.revokeObjectURL(moduleUrl);
-  }
+  });
+  bundleImportQueue = load.catch(() => undefined);
+  return load;
 }

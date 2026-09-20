@@ -19,7 +19,6 @@ import {
   Archive,
   ServerCog,
   LogOut,
-  LayoutGrid,
   ArrowUpCircle,
   RefreshCw,
   Gauge,
@@ -27,6 +26,7 @@ import {
   Loader2,
   Pencil,
   Plus,
+  ShieldCheck,
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
@@ -96,8 +96,8 @@ function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
 }
 
 /**
- * The AI workbench and each scene workspace (SOC) form an accordion: at most
- * one of them shows its second-level menu at a time. `undefined` means nothing
+ * The primary accordion (the AI workbench group today): at most one of its
+ * members shows its second-level menu at a time. `undefined` means nothing
  * has been stored yet, `null` means the user collapsed all of them.
  */
 function readExpandedPrimaryNavSectionId(): string | null | undefined {
@@ -204,19 +204,21 @@ import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import {
   buildWebUIContractWorkspacePageList,
+  buildWebUIContractWorkspaceSections,
   getLocalizedWebUIContractTitle,
 } from '@/utils/webuiContractWorkspaceSections';
 import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
-import { moveItem, saveNavItemOrder, saveWorkspacePageOrder } from '@/utils/workspaceNavOrder';
+import { moveItem, saveNavItemOrder } from '@/utils/workspaceNavOrder';
 import { useLayoutOpenTabs } from '@/hooks/useLayoutOpenTabs';
 import { findActiveTabHref, resolveOpenTabs } from '@/utils/layoutTabs';
 import {
   AGENT_PARTITION_DEFAULT_PATH,
+  SCENE_SUITES_PATH,
   SETTINGS_PARTITION_DEFAULT_PATH,
   readPartitionPaths,
   resolveNavPartition,
   savePartitionPaths,
-  workspacePartitionId,
+  workspaceIdFromPath,
   type NavPartitionId,
   type NavPartitionPaths,
 } from '@/utils/navPartitions';
@@ -254,11 +256,10 @@ interface LayoutNavSection {
   collapsible?: boolean;
   /** Sections in the same accordion group expand one at a time. */
   accordionGroup?: 'primary';
-  /** Set for sections that mirror a WebUI contract workspace (e.g. SOC). */
+  /** Scene workspace whose pages this group lists (one group per workspace section, e.g. SOC 态势 / 告警运营). */
   workspace?: WebUIContractWorkspaceListItem;
   /** Workspace the section's own actions belong to (自定义页面 / 自定义标题).
-   *  Kept separate from `workspace`: that one decides where a drag-reorder is
-   *  persisted, while the actions only exist for the SOC scene. */
+   *  Set on the last group of the SOC scene only, so the actions close its menu. */
   actionsWorkspace?: WebUIContractWorkspaceListItem;
 }
 
@@ -783,23 +784,45 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       // Built-in groups can be reordered by dragging too; the order is stored per group.
       const navItemKey = (item: LayoutNavItem) => item.pageId ?? item.href;
       const orderedGroup = (sectionId: string, items: LayoutNavItem[]) => workspacePageOrders.applyNav(sectionId, items, navItemKey);
-      // Every enabled scene suite is its own first-level group, its pages the
-      // second level. The groups share the accordion, so one scene is open at
-      // a time and entering a scene's route opens it: the menu on screen never
-      // mixes two scenes' pages (xlsx TC-09).
-      const sceneWorkspaceSections: LayoutNavSection[] = webuiContractWorkspaces
+      // The SOC workspace partition holds every installed scene. A scene's
+      // workspace.json sections (SOC: 态势 / 告警运营) are the first-level
+      // groups and their pages the second level, so the menu keeps the
+      // hierarchy the suite declares; a scene without sections is one group
+      // named after the scene (代码审计). Groups collapse independently.
+      const pageItem = (workspace: WebUIContractWorkspaceListItem) => (page: WebUIContractWorkspaceListItem['pages'][number]): LayoutNavItem => ({
+        pageId: page.id,
+        name: page.title,
+        href: `${workspace.route}/${page.id}`,
+        icon: resolveWebUIContractPageIcon(page.icon),
+      });
+      const readyPage = (page: WebUIContractWorkspaceListItem['pages'][number]) => page.enabled && page.buildStatus === 'ready';
+      const sceneWorkspaceSections: LayoutNavSection[] = enabledWorkspaces
         .filter((workspace) => workspace.placement === 'sceneWorkspace')
-        .map((workspace) => ({ workspace, items: workspace.enabled ? workspacePageItems(workspace) : [] }))
-        .map(({ workspace, items }) => ({
-          id: workspaceNavSectionId(workspace.id),
-          name: getLocalizedWebUIContractTitle(workspace, i18n.language),
-          partition: workspacePartitionId(workspace.id),
-          collapsible: true,
-          accordionGroup: 'primary' as const,
-          workspace,
-          actionsWorkspace: workspace.enabled && items.length > 0 && isSocWorkspace(workspace) ? workspace : undefined,
-          items,
-        }));
+        .flatMap((workspace) => {
+          const groups = (workspace.sections?.length ?? 0) > 0
+            ? buildWebUIContractWorkspaceSections(workspace, i18n.language).map((section) => ({
+              id: `${workspaceNavSectionId(workspace.id)}:${section.id}`,
+              name: section.label,
+              pages: section.pages,
+            }))
+            : [{
+              id: workspaceNavSectionId(workspace.id),
+              name: getLocalizedWebUIContractTitle(workspace, i18n.language),
+              pages: buildWebUIContractWorkspacePageList(workspace, i18n.language),
+            }];
+          return groups
+            .map((group) => ({ ...group, items: orderedGroup(group.id, group.pages.filter(readyPage).map(pageItem(workspace))) }))
+            .filter((group) => group.items.length > 0)
+            .map(({ id, name, items }): LayoutNavSection => ({ id, name, partition: 'scene', collapsible: true, workspace, items }));
+        });
+      // 自定义页面 / 自定义标题 belong to the SOC scene; they follow its last group.
+      for (let index = sceneWorkspaceSections.length - 1; index >= 0; index -= 1) {
+        const workspace = sceneWorkspaceSections[index].workspace;
+        if (workspace && isSocWorkspace(workspace)) {
+          sceneWorkspaceSections[index] = { ...sceneWorkspaceSections[index], actionsWorkspace: workspace };
+          break;
+        }
+      }
       // Custom pages that do not belong to a workspace sit next to the scene
       // workspaces rather than under the home entry.
       const customPageItems: LayoutNavItem[] = webuiContractPages
@@ -870,39 +893,47 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   );
 
   // Selection comes from the live route, so a failed/empty navigation cannot
-  // highlight one workspace while another workspace's content stays visible.
-  const sceneSections = useMemo(() => navigation.filter((section) => section.workspace), [navigation]);
+  // highlight the scene partition while another partition's content stays visible.
+  const sceneWorkspaces = useMemo(
+    () => webuiContractWorkspaces.filter((workspace) => workspace.placement === 'sceneWorkspace'),
+    [webuiContractWorkspaces],
+  );
   const requestedWorkspace = viewingScenes ? new URLSearchParams(location.search).get('workspace') : null;
-  const routePartition = requestedWorkspace && sceneSections.some((section) => section.workspace?.id === requestedWorkspace)
-    ? workspacePartitionId(requestedWorkspace)
-    : resolveNavPartition(location.pathname, webuiContractWorkspaces);
+  const routePartition = resolveNavPartition(location.pathname, webuiContractWorkspaces);
   const selectedPartition = routePartition;
+  // The suite manager highlights the scene tab only while it manages one of its scenes.
+  const managingScene = viewingScenes && sceneWorkspaces.some((workspace) => workspace.id === requestedWorkspace);
 
+  // Where the scene tab lands when the scene it should show has no page to
+  // open: the manager, targeted at that scene so its state is explained.
+  const sceneManagementPath = useCallback((workspace: WebUIContractWorkspaceListItem | undefined): string => (
+    workspace
+      ? `${SCENE_SUITES_PATH}?workspace=${encodeURIComponent(workspace.id)}${workspace.enabled ? '&reason=pages-unavailable' : ''}`
+      : SCENE_SUITES_PATH
+  ), []);
+
+  // A scene route whose workspace is gone, disabled or without a built page
+  // cannot stay on screen: it goes to the suite manager instead.
+  const routeWorkspaceId = workspaceIdFromPath(location.pathname);
   useEffect(() => {
-    if (webuiContractNavLoading || webuiContractNavError || viewingScenes || !routePartition.startsWith('workspace:')) return;
-    const section = sceneSections.find((item) => item.partition === routePartition);
-    if (!section) navigate('/scenes/suites', { replace: true });
-    else if (section.workspace && (!section.workspace.enabled || section.items.length === 0)) {
-      navigate(`/scenes/suites?workspace=${encodeURIComponent(section.workspace.id)}${section.workspace.enabled ? '&reason=pages-unavailable' : ''}`, { replace: true });
-    }
-  }, [navigate, routePartition, sceneSections, viewingScenes, webuiContractNavError, webuiContractNavLoading]);
+    if (webuiContractNavLoading || webuiContractNavError || viewingScenes || !routeWorkspaceId || routePartition !== 'scene') return;
+    const workspace = sceneWorkspaces.find((item) => item.id === routeWorkspaceId);
+    const hasPages = navigation.some((section) => section.workspace?.id === routeWorkspaceId && section.items.length > 0);
+    if (!workspace || !workspace.enabled || !hasPages) navigate(sceneManagementPath(workspace), { replace: true });
+  }, [navigate, navigation, routePartition, routeWorkspaceId, sceneManagementPath, sceneWorkspaces, viewingScenes, webuiContractNavError, webuiContractNavLoading]);
 
   const visibleNavigation = useMemo(
     () => navigation.filter((section) => section.partition === selectedPartition),
     [navigation, selectedPartition],
   );
 
+  // One SOC workspace tab for every installed scene (and the custom pages);
+  // it only disappears when there is nothing at all to show in it.
+  const hasScenePartition = sceneWorkspaces.length > 0 || navigation.some((section) => section.id === 'customPages');
   const partitionItems = useMemo<PartitionTopBarItem[]>(() => [
     { id: 'agent', name: t('partitionAgent'), icon: Sparkles },
-    ...sceneSections.map((section) => ({
-      id: section.partition,
-      name: section.name,
-      icon: resolveWebUIContractPageIcon(section.workspace!.icon),
-    })),
-    ...(navigation.some((section) => section.id === 'customPages')
-      ? [{ id: 'scene' as const, name: t('customPages'), icon: LayoutGrid }]
-      : []),
-  ], [navigation, sceneSections, t]);
+    ...(hasScenePartition ? [{ id: 'scene' as const, name: t('partitionScene'), icon: ShieldCheck }] : []),
+  ], [hasScenePartition, t]);
   const topBarSettings = useMemo(() => navigation.filter((section) => section.partition === 'settings'), [navigation]);
 
   // Remember where each partition was left so the top bar returns to it.
@@ -926,9 +957,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     if (id === 'agent') return AGENT_PARTITION_DEFAULT_PATH;
     if (id === 'settings') return SETTINGS_PARTITION_DEFAULT_PATH;
     if (hrefs.length > 0) return hrefs[0];
-    const workspace = sceneSections.find((section) => section.partition === id)?.workspace;
-    return workspace ? `/scenes/suites?workspace=${encodeURIComponent(workspace.id)}${workspace.enabled ? '&reason=pages-unavailable' : ''}` : null;
-  }, [navigation, sceneSections]);
+    return sceneManagementPath(sceneWorkspaces[0]);
+  }, [navigation, sceneManagementPath, sceneWorkspaces]);
 
   const selectPartition = useCallback((id: NavPartitionId) => {
     setSidebarOpen(false);
@@ -1029,16 +1059,13 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const effectiveExpandedPrimaryNavSectionId = useMemo(() => {
     if (expandedPrimaryNavSectionId === null) return null;
-    if (expandedPrimaryNavSectionId !== undefined) {
-      if (primaryNavSectionIds.includes(expandedPrimaryNavSectionId)) return expandedPrimaryNavSectionId;
-      // A stored workspace section that has not loaded yet: keep everything
-      // collapsed instead of flashing the AI workbench open.
-      if (webuiContractNavLoading && expandedPrimaryNavSectionId.startsWith(WORKSPACE_NAV_SECTION_PREFIX)) return null;
+    if (expandedPrimaryNavSectionId !== undefined && primaryNavSectionIds.includes(expandedPrimaryNavSectionId)) {
+      return expandedPrimaryNavSectionId;
     }
     // Fall back to the first accordion section of the partition on screen, so
     // switching partitions never lands on an all-collapsed menu.
     return routePrimaryNavSectionId ?? primaryNavSectionIds[0] ?? null;
-  }, [expandedPrimaryNavSectionId, primaryNavSectionIds, routePrimaryNavSectionId, webuiContractNavLoading]);
+  }, [expandedPrimaryNavSectionId, primaryNavSectionIds, routePrimaryNavSectionId]);
 
   // Mirrors the explicit (stored) choice so the route effect below can compare
   // against it without re-running on every render.
@@ -1048,9 +1075,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [expandedPrimaryNavSectionId]);
 
   // Entering a route owned by one accordion section opens that section and
-  // closes the other: people work in either the AI workbench or a scene
-  // workspace such as SOC, rarely both at once. The choice is persisted so
-  // leaving for the home page keeps the last group open.
+  // closes the others. The choice is persisted so leaving for the home page
+  // keeps the last group open.
   useEffect(() => {
     if (!routePrimaryNavSectionId) return;
     if (explicitExpandedPrimaryNavSectionRef.current === routePrimaryNavSectionId) return;
@@ -1090,11 +1116,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     const toIndex = keys.indexOf(toKey);
     if (fromIndex < 0 || toIndex < 0) return;
     const nextKeys = moveItem(keys, fromIndex, toIndex);
-    if (section.workspace) {
-      saveWorkspacePageOrder(section.workspace.id, nextKeys);
-    } else if (section.id) {
-      saveNavItemOrder(section.id, nextKeys);
-    }
+    if (section.id) saveNavItemOrder(section.id, nextKeys);
   }, []);
 
   const handleNavItemDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, sectionId: string, key: string) => {
@@ -1663,13 +1685,13 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       >
         <PartitionTopBar
           items={partitionItems}
-          activeId={viewingScenes && !routePartition.startsWith('workspace:') ? null : selectedPartition}
+          activeId={viewingScenes && !managingScene ? null : selectedPartition}
           onSelect={selectPartition}
           action={{
-              href: '/scenes/suites',
+              href: SCENE_SUITES_PATH,
               name: t('sceneSuiteManager'),
               icon: Plus,
-              active: viewingScenes && !routePartition.startsWith('workspace:'),
+              active: viewingScenes && !managingScene,
               badge: hasUnseenSuites,
             }}
           settingsGroups={topBarSettings}

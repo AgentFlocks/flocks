@@ -210,8 +210,8 @@ describe('SceneSuitesPage', () => {
     });
   });
 
-  it('updates a suite in one call so its pages come along', async () => {
-    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'updateAvailable' as const }] });
+  it('updates a suite in one call so its pages come along, and leaves the scene enabled', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'updateAvailable' as const, workspaceEnabled: false }] });
     const user = userEvent.setup();
     renderPage();
 
@@ -220,6 +220,45 @@ describe('SceneSuitesPage', () => {
 
     await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace'));
     expect(hubAPI.update).toHaveBeenCalledTimes(1);
+    // A scene left disabled by an earlier 停用 must not stay disabled after an
+    // update the user just asked for.
+    await waitFor(() => expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('soc_ui', true));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('已更新，场景已启用'));
+  });
+
+  it('tells apart an update that finished from an enable that failed after it', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'updateAvailable' as const, workspaceEnabled: false }] });
+    webuiContractPagesAPI.setWorkspaceEnabled.mockRejectedValue(new Error('workspace state locked'));
+    const user = userEvent.setup();
+    renderPage();
+
+    const soc = await waitFor(() => card('soc-workspace'));
+    await user.click(within(soc).getByRole('button', { name: '更新' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('更新已完成，但启用失败。请点击“启用”重试。', 'workspace state locked'));
+  });
+
+  it('explains an update that only concerns the scene pages', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{
+      ...SOC,
+      state: 'updateAvailable' as const,
+      workspaceVersion: '1.1.7',
+      workspaceLatestVersion: '1.1.8',
+    }] });
+    renderPage();
+
+    const soc = await waitFor(() => card('soc-workspace'));
+    expect(within(soc).getByText('有更新')).toBeInTheDocument();
+    // The suite version alone (1.0.0 → 1.0.0) would make the badge look wrong.
+    expect(soc.textContent).toContain('已装 v1.0.0 · 最新 v1.0.0 · 场景页面 v1.1.7 → v1.1.8');
+  });
+
+  it('does not mention the page package while it matches the catalog', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, workspaceVersion: '1.1.8', workspaceLatestVersion: '1.1.8' }] });
+    renderPage();
+
+    const soc = await waitFor(() => card('soc-workspace'));
+    expect(soc.textContent).not.toContain('场景页面');
   });
 
   it('reports a failed action instead of pretending it worked', async () => {

@@ -151,6 +151,9 @@ export interface HubSceneSuite {
   workspaceTitle?: string | null;
   workspaceRoute?: string | null;
   workspaceEnabled?: boolean | null;
+  /** Installed / latest version of the suite's page package (can lag behind the suite). */
+  workspaceVersion?: string | null;
+  workspaceLatestVersion?: string | null;
 }
 
 export const hubAPI = {

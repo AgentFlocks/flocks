@@ -1,16 +1,19 @@
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
-/** Scene tabs are identified by the installed workspace, never a fixed label. */
-export type NavPartitionId = 'agent' | 'scene' | 'settings' | `workspace:${string}`;
+/**
+ * The fixed partitions of the top bar. `scene` is the SOC workspace: every
+ * installed scene suite lives inside it, so a new scene never adds a tab.
+ */
+export type NavPartitionId = 'agent' | 'scene' | 'settings';
 
-export function workspacePartitionId(workspaceId: string): NavPartitionId {
-  return `workspace:${workspaceId}`;
-}
+export const NAV_PARTITION_IDS: readonly NavPartitionId[] = ['agent', 'scene', 'settings'] as const;
 
 export const AGENT_PARTITION_DEFAULT_PATH = '/';
 export const SETTINGS_PARTITION_DEFAULT_PATH = '/settings/preferences';
+export const SCENE_SUITES_PATH = '/scenes/suites';
 
 const PARTITION_PATHS_KEY = 'flocks_layout_partition_paths';
+const WORKSPACE_ROUTE_RE = /^\/contracts\/webui\/workspaces\/([^/]+)(?:\/|$)/;
 
 function isSettingsPath(pathname: string): boolean {
   return pathname === '/settings' || pathname.startsWith('/settings/');
@@ -25,15 +28,22 @@ function isScenePath(pathname: string): boolean {
     || pathname.startsWith('/user-defined-pages/');
 }
 
+/** Workspace id of a `/contracts/webui/workspaces/<id>/...` route, else null. */
+export function workspaceIdFromPath(pathname: string): string | null {
+  return pathname.match(WORKSPACE_ROUTE_RE)?.[1] ?? null;
+}
+
 export function resolveNavPartition(
   pathname: string,
   workspaces: readonly WebUIContractWorkspaceListItem[] = [],
 ): NavPartitionId {
-  const workspace = workspaces.find((item) => pathname === item.route || pathname.startsWith(`${item.route}/`));
-  if (workspace) return workspace.placement === 'aiWorkbench' ? 'agent' : workspacePartitionId(workspace.id);
+  const workspaceId = workspaceIdFromPath(pathname);
+  if (workspaceId) {
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    // Workbench-placed workspaces render their pages under the Agent menu.
+    return workspace?.placement === 'aiWorkbench' ? 'agent' : 'scene';
+  }
   if (isSettingsPath(pathname)) return 'settings';
-  const workspaceMatch = pathname.match(/^\/contracts\/webui\/workspaces\/([^/]+)(?:\/|$)/);
-  if (workspaceMatch) return workspacePartitionId(workspaceMatch[1]);
   if (isScenePath(pathname)) return 'scene';
   return 'agent';
 }
@@ -48,16 +58,16 @@ export function readPartitionPaths(): NavPartitionPaths {
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
     const result: NavPartitionPaths = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (!['agent', 'scene', 'settings'].includes(key) && !/^workspace:[^/]+$/.test(key)) continue;
-      const id = key as NavPartitionId;
+    for (const id of NAV_PARTITION_IDS) {
+      const value = (parsed as Record<string, unknown>)[id];
       if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) continue;
-      const inferredPartition = resolveNavPartition(value.split('?')[0]);
-      // Workspace placement is unknown until navigation loads. Keep Agent's
-      // workspace candidate too; Layout validates it against that partition's
-      // current available hrefs before navigating, including after uninstall.
-      const pendingAgentWorkspace = id === 'agent' && inferredPartition.startsWith('workspace:');
-      if (inferredPartition === id || id.startsWith('workspace:') || pendingAgentWorkspace) {
+      const pathname = value.split('?')[0];
+      const inferredPartition = resolveNavPartition(pathname);
+      // Workspace placement is unknown until navigation loads: a workspace
+      // route stored under Agent may be a workbench page. Layout validates
+      // every stored path against the partition's current entries anyway.
+      const pendingAgentWorkspace = id === 'agent' && workspaceIdFromPath(pathname) !== null;
+      if (inferredPartition === id || pendingAgentWorkspace) {
         result[id] = value;
       }
     }

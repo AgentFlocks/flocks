@@ -1,7 +1,13 @@
 import { severityKey, severityRows } from './severityValues';
 
+// The host installs the runtime for this page right before the bundle
+// evaluates. Bind it here once: this page keeps polling while another SOC
+// page is open in a kept-alive pane, and reading the global later would pick
+// up that page's `api.page` scope instead of ours.
+const boundSdk = globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
+
 function getSdk() {
-  const sdk = globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
+  const sdk = boundSdk ?? globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
   if (!sdk || !sdk.React || !sdk.api) {
     throw new Error('Flocks WebUI contract page runtime is not initialized.');
   }
