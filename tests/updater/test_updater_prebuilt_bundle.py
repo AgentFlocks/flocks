@@ -705,7 +705,7 @@ async def test_check_update_marks_offline_install_as_not_upgradable(
         return ["github"]
 
     async def _fake_release(*_args, **_kwargs):
-        return ("2026.10.1", "notes", "https://example/release", "https://example/zip", "https://example/tar")
+        raise AssertionError("an offline deployment must not query GitHub / Gitee for the core version")
 
     monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
     monkeypatch.setattr(updater, "_resolve_sources_for_edition", _fake_sources)
@@ -715,3 +715,211 @@ async def test_check_update_marks_offline_install_as_not_upgradable(
 
     assert info.deploy_mode == "offline"
     assert info.update_allowed is False
+    assert info.current_version == "2026.9.14"
+    assert info.latest_version is None and info.has_update is False and info.error is None
+
+    # the console-manifest (Pro) check still runs: Console is the endpoint such a machine may reach
+    async def _console(*_args, **_kwargs):
+        return updater.ConsoleManifestRelease(
+            version="v2026.9.14", release_notes=None, release_url="https://portal.example/r",
+            bundle_url="https://portal.example/b.tar.gz", bundle_sha256=None, bundle_format="tar.gz",
+            manifest={"bundle_version": "v2026.9.14", "core_version": "v2026.9.14", "flockspro_component_version": "2026.9.14"},
+        )
+
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _console)
+    pro_info = await updater.check_update(force_console_manifest=True)
+    assert pro_info.deploy_mode == "offline" and pro_info.update_allowed is False
+    assert pro_info.latest_version is not None
+
+
+@pytest.mark.parametrize(
+    ("deploy_mode", "expect_prebuilt"),
+    [("offline", True), ("source", False)],
+)
+@pytest.mark.asyncio
+async def test_pro_downgrade_handoff_is_prebuilt_only_on_offline_installs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    deploy_mode: str,
+    expect_prebuilt: bool,
+) -> None:
+    """An offline install has no index / npm registry: the downgrade restart must not sync or build."""
+    import sys
+    from types import SimpleNamespace
+
+    from flocks.cli import service_manager
+    from flocks.updater import deploy as deploy_mod
+
+    flocks_root = tmp_path / "flocks-root"
+    (flocks_root / "run").mkdir(parents=True)
+    (flocks_root / "run" / "pro-bundle-installed.json").write_text(
+        json.dumps(
+            {
+                "bundle_version": "v2026.9.14",
+                "core_version": "v2026.9.14",
+                "flockspro_component_version": "2026.8.12",
+                "installed_at": "2026-09-17T08:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_root = _prepare_install_root(tmp_path)
+    spawned: list[list[str]] = []
+
+    async def fake_uninstall_pro_component(*, uv_path, install_root, env):
+        return None
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: deploy_mode)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.9.14")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/opt/flocks/tools/uv/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_uninstall_pro_component", fake_uninstall_pro_component)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _version: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda _install_root: [sys.executable])
+    monkeypatch.setattr(updater, "_handoff_service_config", lambda: service_manager.ServiceConfig())
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, *, cwd: spawned.append(list(argv)) or SimpleNamespace(pid=4321),
+    )
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_pro_bundle_downgrade():
+            pass
+
+    assert spawned, "downgrade must spawn the restart handoff"
+    assert ("--prebuilt" in spawned[0]) is expect_prebuilt
+    assert "--pro-wheel-path" not in spawned[0]
+
+
+def test_restart_handoff_prebuilt_restart_skips_sync_and_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The handoff's restart mode with --prebuilt must not touch uv sync or npm (what an offline downgrade runs)."""
+    install_root = _prepare_install_root(tmp_path)
+    captured = _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+
+    async def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("dependency sync / frontend build must not run in prebuilt restart")
+
+    monkeypatch.setattr(restart_handoff.updater_module, "_sync_project_dependencies", _must_not_run)
+    monkeypatch.setattr(restart_handoff.updater_module, "_build_frontend_workspace", _must_not_run)
+    monkeypatch.setattr(restart_handoff.updater_module, "_write_version_marker", lambda *_a, **_k: None)
+
+    args = restart_handoff._parse_args(
+        [
+            "--backend-host", "0.0.0.0", "--backend-port", "5173",
+            "--frontend-host", "0.0.0.0", "--frontend-port", "5173",
+            "--install-root", str(install_root), "--uv-path", "/opt/flocks/tools/uv/uv",
+            "--sync-timeout", "300", "--version", "2026.9.14", "--current-version", "2026.9.14",
+            "--prebuilt", "--", "python",
+        ]
+    )
+    assert restart_handoff._run_upgrade_tasks(args) is None
+    assert captured == []  # no uv pip install either: nothing to install on a downgrade
+
+
+# --------------------------------------------------------------------------- #
+# R8: a version match alone must not let Console identity overwrite the local bundle
+# --------------------------------------------------------------------------- #
+
+
+def _console_release(manifest: dict, version: str = "v2026.9.14") -> updater.ConsoleManifestRelease:
+    return updater.ConsoleManifestRelease(
+        version=version,
+        release_notes=None,
+        release_url="https://portal.example/bundle.tar.gz",
+        bundle_url="https://portal.example/bundle.tar.gz",
+        bundle_sha256="a" * 64,  # archive digest: never comparable with the local wheel digest
+        bundle_format="tar.gz",
+        manifest=manifest,
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_bundle_keeps_its_own_identity_when_console_release_was_repacked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "opt-bundle"
+    _write_local_bundle(bundle_dir, extra_manifest={"build_id": "local-build"})
+    install_root = _prepare_install_root(tmp_path)
+    _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(bundle_dir))
+    monkeypatch.setattr(updater, "_download_console_bundle", _no_download)
+    marker_path = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
+
+    async def _console_same_version_other_wheel(*_args, **_kwargs):
+        return _console_release(
+            {
+                "release_id": "rel_repacked",
+                "bundle_version": "v2026.9.14",
+                "core_version": "v2026.9.14",
+                "flockspro_component_version": "2026.9.15",
+                "build_id": "remote-build",
+            }
+        )
+
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _console_same_version_other_wheel)
+    progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
+    assert progresses[-1].stage == "done", progresses[-1].message
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    # what was physically installed is the local wheel: its identity must be what the marker records
+    assert marker["flockspro_component_version"] == "2026.9.14"
+    assert marker["build_id"] == "local-build"
+    assert marker["release_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_local_bundle_borrows_only_release_ids_from_a_matching_console_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "opt-bundle"
+    _write_local_bundle(bundle_dir, extra_manifest={"build_id": "local-build"})
+    install_root = _prepare_install_root(tmp_path)
+    _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(bundle_dir))
+    monkeypatch.setattr(updater, "_download_console_bundle", _no_download)
+    marker_path = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
+
+    async def _console_matching(*_args, **_kwargs):
+        return _console_release(
+            {
+                "release_id": "rel_match",
+                "bundle_release_id": "brel_match",
+                "bundle_version": "v2026.9.14",
+                "compare_version": "2026.9.14.99",
+                "core_version": "2026.9.14",  # same version, only the "v" prefix differs
+                "flockspro_component_version": "2026.9.14",
+            }
+        )
+
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _console_matching)
+    progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
+    assert progresses[-1].stage == "done", progresses[-1].message
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["release_id"] == "rel_match"
+    assert marker["bundle_release_id"] == "brel_match"
+    assert marker["build_id"] == "local-build"
+    assert marker["flockspro_component_version"] == "2026.9.14"
+
+
+def test_console_identity_for_local_bundle_is_ids_only() -> None:
+    local = {"core_version": "v2026.9.14", "flockspro_component_version": "2026.9.14"}
+    assert updater._console_identity_for_local_bundle(local, None) is None
+    assert updater._console_identity_for_local_bundle(local, {"bundle_version": "v2026.9.14"}) is None
+    assert updater._console_identity_for_local_bundle(
+        local, {"release_id": "r1", "build_id": "remote-only", "flockspro_component_version": "2026.9.14"}
+    ) == {"release_id": "r1"}
+    assert updater._console_identity_for_local_bundle(
+        {**local, "build_id": "b1"}, {"release_id": "r1", "build_id": "b2"}
+    ) is None

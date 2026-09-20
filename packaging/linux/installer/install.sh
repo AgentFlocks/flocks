@@ -10,7 +10,7 @@
 # is left untouched and the Pro component is re-installed when it was active.
 #
 # Optional environment knobs (for operators / CI, never needed by the manual):
-#   FLOCKS_OFFLINE_PORT=5173          public port
+#   FLOCKS_OFFLINE_PORT=5173          public port (default: the FLOCKS_PORT an existing install already uses, else 5173)
 #   FLOCKS_OFFLINE_SKIP_SYSTEMD=1     start with `flocks start` instead of systemd (containers)
 #   FLOCKS_OFFLINE_SKIP_FIREWALL=1    do not touch firewalld
 #   FLOCKS_OFFLINE_SKIP_START=1       install only, do not start the service
@@ -24,11 +24,11 @@ umask 022
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_FILE="/var/log/flocks-offline-install.log"
 SERVICE_USER="flocks"
-DATA_HOME="/var/lib/flocks"
-ENV_FILE="/etc/flocks/flocks.env"
+DATA_HOME="${FLOCKS_OFFLINE_DATA_HOME:-/var/lib/flocks}"   # override is for tests only
+ENV_FILE="${FLOCKS_OFFLINE_ENV_FILE:-/etc/flocks/flocks.env}"   # override is for tests only
 UNIT_FILE="/etc/systemd/system/flocks.service"
 WRAPPER="/usr/local/bin/flocks"
-PORT="${FLOCKS_OFFLINE_PORT:-5173}"
+PORT_OVERRIDE="${FLOCKS_OFFLINE_PORT:-}"
 DRY_RUN="${FLOCKS_OFFLINE_DRY_RUN:-0}"
 HEALTH_TIMEOUT="${FLOCKS_OFFLINE_HEALTH_TIMEOUT:-180}"
 STAMP="$(date +%Y%m%d%H%M%S)"
@@ -43,6 +43,13 @@ log() {
 }
 fail() {
   log "错误: $*"
+  # makeself keeps the --target directory when the installer fails; a later package would untar
+  # on top of it and carry files of two versions into the install. Park it (never delete).
+  if [[ "$DRY_RUN" != "1" && -n "${INSTALL_ROOT:-}" && "$SRC_ROOT" != "$INSTALL_ROOT" && -d "$SRC_ROOT" ]]; then
+    if mv "$SRC_ROOT" "$SRC_ROOT.failed-$STAMP" 2>/dev/null; then
+      log "已解包的安装文件移到 ${SRC_ROOT}.failed-${STAMP}（可自行清理）"
+    fi
+  fi
   log "安装未完成。完整日志: $LOG_FILE"
   exit 1
 }
@@ -69,6 +76,9 @@ PKG_ARCH="$(json_get "$SRC_ROOT/versions.json" arch)"
 UPDATE_CHANNEL="$(json_get "$SRC_ROOT/versions.json" update_channel)"
 HAS_PRO_BUNDLE="$(json_get "$SRC_ROOT/versions.json" pro_bundle)"
 [[ -n "$INSTALL_ROOT" && "$INSTALL_ROOT" == /* ]] || fail "versions.json 里的 install_root 无效: $INSTALL_ROOT"
+if [[ "$SRC_ROOT" == "$INSTALL_ROOT" ]]; then
+  fail "这是已安装实例里保留的安装脚本副本（${SRC_ROOT}/installer），不能直接执行；请重新运行 flocks-offline.run"
+fi
 REPO_DIR="$INSTALL_ROOT/flocks"
 VENV_BIN="$REPO_DIR/.venv/bin"
 FLOCKS_CLI="$VENV_BIN/flocks"
@@ -79,6 +89,23 @@ MARKER="$DATA_ROOT/run/pro-bundle-installed.json"
 # ---------------------------------------------------------------------------
 # preflight
 # ---------------------------------------------------------------------------
+# One effective port for the env file, firewalld, the health check and the final URL:
+# an explicit FLOCKS_OFFLINE_PORT wins, then the FLOCKS_PORT an existing install already
+# runs on (a re-run must not silently fall back to 5173), then the default.
+valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
+if [[ -n "$PORT_OVERRIDE" ]]; then
+  valid_port "$PORT_OVERRIDE" || fail "FLOCKS_OFFLINE_PORT 无效: ${PORT_OVERRIDE}（需要 1-65535 的端口号）"
+  PORT="$PORT_OVERRIDE"
+else
+  PORT="$(sed -n 's/^FLOCKS_PORT=//p' "$ENV_FILE" 2>/dev/null | tail -n 1 | tr -d '[:space:]"'"'"'' || true)"
+  if [[ -n "$PORT" ]] && ! valid_port "$PORT"; then
+    log "警告: ${ENV_FILE} 里的 FLOCKS_PORT=${PORT} 无效，改用 5173（会改写该行）"
+    PORT=""
+    PORT_OVERRIDE=5173   # rewrite the broken value; the service cannot start with it
+  fi
+  [[ -n "$PORT" ]] || PORT=5173
+fi
+
 HOST_ARCH="$(uname -m)"
 [[ "$HOST_ARCH" == "$PKG_ARCH" ]] || fail "安装包是 $PKG_ARCH 版本，这台机器是 $HOST_ARCH"
 
@@ -131,8 +158,46 @@ elif port_in_use; then
   fail "端口 ${PORT} 已被其他程序占用，且没有检测到旧的 Flocks 安装；请先释放端口再安装"
 fi
 
+# An activated Pro instance (marker present) must not silently turn into OSS when the new
+# package ships no Pro bundle: either the previous bundle can be carried over (same core
+# version, wheel matches its manifest sha256) or we stop here, before anything is changed.
+CARRY_OVER_BUNDLE=0
+if [[ -d "$SRC_ROOT/bundle" && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
+  fail "安装包不完整：bundle/ 目录里没有 wheels/"
+fi
+bundle_compatible() {
+  "$BUNDLED_PY" - "$1" "$2" <<'PYCHECK'
+import hashlib, json, pathlib, sys
+bundle, new_core = pathlib.Path(sys.argv[1]), sys.argv[2].lstrip("v")
+manifest = json.load(open(bundle / "manifest.json", encoding="utf-8"))
+old_core = str(manifest.get("core_version", "")).lstrip("v")
+if old_core != new_core:
+    print(f"pro bundle core {old_core} != new core {new_core}", file=sys.stderr)
+    sys.exit(1)
+wheel = bundle / manifest["flockspro_wheel"]
+expected = str(manifest.get("bundle_sha256") or "").lower()
+actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
+if expected and expected != actual:
+    print("pro wheel sha256 does not match its manifest", file=sys.stderr)
+    sys.exit(1)
+PYCHECK
+}
+if [[ -f "$MARKER" && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
+  OLD_BUNDLE="$INSTALL_ROOT/bundle"
+  if [[ -f "$OLD_BUNDLE/manifest.json" ]] && ls "$OLD_BUNDLE"/wheels/flockspro-*.whl >/dev/null 2>&1; then
+    if bundle_compatible "$OLD_BUNDLE" "$CORE_VERSION"; then
+      CARRY_OVER_BUNDLE=1
+      log "新安装包不含 Pro 组件，沿用当前已激活的 Pro bundle（core 版本一致）"
+    else
+      fail "这台机器已激活 Flocks Pro，但新安装包不含 Pro 组件，且现有 Pro bundle 与新版本不匹配；请使用带 Pro 组件的配套安装包，或先在页面上把 Pro 降级为开源版再升级。本次未做任何改动"
+    fi
+  else
+    fail "这台机器已激活 Flocks Pro，但新安装包不含 Pro 组件；请使用带 Pro 组件的配套安装包，或先在页面上把 Pro 降级为开源版再升级。本次未做任何改动"
+  fi
+fi
+
 if [[ "$DRY_RUN" == "1" ]]; then
-  log "dry-run: 将安装到 ${INSTALL_ROOT}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，Pro bundle=${HAS_PRO_BUNDLE}"
+  log "dry-run: 将安装到 ${INSTALL_ROOT}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，Pro bundle=${HAS_PRO_BUNDLE}，carry-over-bundle=${CARRY_OVER_BUNDLE}"
   exit 0
 fi
 
@@ -181,6 +246,9 @@ fi
 if [[ "$PARKED" -eq 1 ]]; then
   log "旧程序目录已改名为 *.bak-${STAMP}（确认新版本正常后可自行清理）"
 fi
+if [[ "$CARRY_OVER_BUNDLE" -eq 1 && -d "$INSTALL_ROOT/bundle.bak-$STAMP" ]]; then
+  mv "$INSTALL_ROOT/bundle.bak-$STAMP" "$INSTALL_ROOT/bundle"
+fi
 
 # ---------------------------------------------------------------------------
 # place the payload
@@ -218,6 +286,10 @@ render_env_template() {
     "$SRC_ROOT/installer/flocks.env.template"
 }
 MANAGED_KEYS="FLOCKS_INSTALL_ROOT FLOCKS_REPO_ROOT FLOCKS_NODE_HOME FLOCKS_UPDATE_CHANNEL FLOCKS_PRO_BUNDLE_DIR UV_CACHE_DIR UV_PYTHON PATH"
+if [[ -n "$PORT_OVERRIDE" ]]; then
+  # only an explicit request changes the port of an existing install
+  MANAGED_KEYS="$MANAGED_KEYS FLOCKS_PORT"
+fi
 if [[ -f "$ENV_FILE" ]]; then
   cp "$ENV_FILE" "$ENV_FILE.bak-$STAMP"
   render_env_template > "$ENV_FILE.new"
@@ -319,16 +391,57 @@ if [[ "$HAVE_SYSTEMD" -eq 1 ]]; then
   fi
 fi
 
-if [[ "${FLOCKS_OFFLINE_SKIP_FIREWALL:-0}" != "1" ]] && command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-  if ! firewall-cmd --query-port="${PORT}/tcp" >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="${PORT}/tcp" >/dev/null && firewall-cmd --reload >/dev/null
-    log "已在 firewalld 放行 ${PORT}/tcp"
+open_firewall_port() {
+  # firewalld: the port must be in the permanent *and* the runtime config of every zone that
+  # is bound to an interface or source (plus the default zone). A rule someone added earlier
+  # with a plain `--add-port` lives in runtime only and is gone after reload / reboot, so the
+  # runtime query alone must never decide to skip the permanent rule.
+  local port="$1" zone zones changed=0
+  # every query is `|| true`: under set -e a failing firewall-cmd inside the substitution would
+  # abort the whole installer at this point, after the files have already been replaced
+  zones="$( { firewall-cmd --get-default-zone 2>/dev/null || true; firewall-cmd --get-active-zones 2>/dev/null | awk '/^[^[:space:]]/ {print $1}' || true; } | sort -u | tr '\n' ' ' || true)"
+  if [[ -z "${zones// /}" ]]; then
+    # zone queries failed although firewalld answered --state: fall back to firewalld's default zone
+    zones="public"
   fi
+  # writes are best effort too: the program files are already in place, a firewalld refusal
+  # must be reported, not turn into an aborted install with the service left stopped
+  local failed=0
+  for zone in $zones; do
+    if ! firewall-cmd --permanent --zone="$zone" --query-port="${port}/tcp" >/dev/null 2>&1; then
+      if firewall-cmd --permanent --zone="$zone" --add-port="${port}/tcp" >/dev/null 2>&1; then changed=1; else failed=1; fi
+    fi
+  done
+  if [[ "$changed" -eq 1 ]]; then
+    firewall-cmd --reload >/dev/null 2>&1 || failed=1
+  fi
+  for zone in $zones; do
+    if ! firewall-cmd --zone="$zone" --query-port="${port}/tcp" >/dev/null 2>&1; then
+      if firewall-cmd --zone="$zone" --add-port="${port}/tcp" >/dev/null 2>&1; then changed=1; else failed=1; fi
+    fi
+  done
+  if [[ "$failed" -eq 1 ]]; then
+    log "警告: firewalld 未能放行 ${port}/tcp（zone: ${zones}），请手动执行 firewall-cmd --permanent --add-port=${port}/tcp && firewall-cmd --reload"
+  elif [[ "$changed" -eq 1 ]]; then
+    log "已在 firewalld 放行 ${port}/tcp（zone: ${zones}）"
+  fi
+}
+if [[ "${FLOCKS_OFFLINE_SKIP_FIREWALL:-0}" != "1" ]] && command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  open_firewall_port "$PORT"
 fi
 
 # ---------------------------------------------------------------------------
 # start and verify
 # ---------------------------------------------------------------------------
+finish_staging() {
+  # the payload has been moved out; keep the installer files next to the install and
+  # drop the now-empty staging directory (rmdir refuses anything that is not empty)
+  if [[ -d "$SRC_ROOT/installer" && ! -e "$INSTALL_ROOT/installer" ]]; then
+    mv "$SRC_ROOT/installer" "$INSTALL_ROOT/installer"
+  fi
+  rmdir "$SRC_ROOT" 2>/dev/null || true
+}
+
 if [[ "${FLOCKS_OFFLINE_SKIP_START:-0}" == "1" ]]; then
   finish_staging
   log "已安装，未启动服务（FLOCKS_OFFLINE_SKIP_START=1）"
@@ -365,15 +478,6 @@ until health_ok; do
   sleep 3
   waited=$((waited + 3))
 done
-
-finish_staging() {
-  # the payload has been moved out; keep the installer files next to the install and
-  # drop the now-empty staging directory (rmdir refuses anything that is not empty)
-  if [[ -d "$SRC_ROOT/installer" && ! -e "$INSTALL_ROOT/installer" ]]; then
-    mv "$SRC_ROOT/installer" "$INSTALL_ROOT/installer"
-  fi
-  rmdir "$SRC_ROOT" 2>/dev/null || true
-}
 
 SERVER_IP="$( (ip -4 route get 1.1.1.1 2>/dev/null || true) | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -n 1 || true)"
 [[ -n "$SERVER_IP" ]] || SERVER_IP="$( (hostname -I 2>/dev/null || true) | awk '{print $1}' || true)"

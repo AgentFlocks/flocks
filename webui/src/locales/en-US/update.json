@@ -35,6 +35,7 @@
   "offlineModeTitle": "Offline Package Deployment",
   "offlineModeDesc": "This instance was installed from the offline package (flocks-offline.run); network-based in-place upgrades are disabled. Get the newer package, upload it to the server and run the install command again; data and licenses are kept.",
   "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
+  "offlineNotChecked": "Offline deployment: remote versions are not checked",
   "stageLabels": {
     "fetching": "Downloading latest source archive",
     "fetchingPro": "Downloading Pro bundle",

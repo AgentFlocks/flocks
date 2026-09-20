@@ -35,6 +35,7 @@
   "offlineModeTitle": "离线安装包部署",
   "offlineModeDesc": "当前实例由离线安装包（flocks-offline.run）部署，不支持联网就地升级。请向交付人员获取新版安装包，上传到服务器后重新执行安装命令，数据和授权会保留。",
   "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
+  "offlineNotChecked": "离线部署，未查询远端版本",
   "stageLabels": {
     "fetching": "下载最新源码包",
     "fetchingPro": "下载 Pro bundle",

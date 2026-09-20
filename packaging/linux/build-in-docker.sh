@@ -6,12 +6,14 @@
 # Usage:
 #   packaging/linux/build-in-docker.sh [--arch x86_64|aarch64|all] [--flockspro-wheel PATH]
 #       [--pro-release-id ID] [--pro-bundle-version VER] [--output-dir DIR] [--cache-dir DIR]
-#       [--cn] [--image IMAGE] [--keep-container]
+#       [--cn] [--image IMAGE] [--keep-container] [--allow-dirty]
 #
 #   --arch      defaults to the host architecture. Building the other architecture needs
 #               QEMU user emulation in Docker (docker run --privileged --rm tonistiigi/binfmt --install all)
 #               and is several times slower; a same-arch machine or the CI matrix is faster.
 #   --cn        use China mirrors for Node.js / npm (uv and python-build-standalone still come from GitHub).
+#   --allow-dirty  package the Git-visible working tree instead of the exact HEAD commit
+#               (uncommitted changes and untracked files included, ignored files never).
 #
 # Environment: DOCKER (docker binary, default "docker").
 
@@ -29,6 +31,7 @@ OUTPUT_DIR="$SCRIPT_DIR/Output"
 CACHE_DIR="${FLOCKS_CACHE_ROOT:-$HOME/.cache/flocks-offline-build}"
 CN=0
 KEEP=0
+ALLOW_DIRTY=0
 
 info() { printf '[build-in-docker] %s\n' "$*"; }
 fail() { printf '[build-in-docker] error: %s\n' "$*" >&2; exit 1; }
@@ -44,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --cn) CN=1; shift ;;
     --image) IMAGE="$2"; shift 2 ;;
     --keep-container) KEEP=1; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
     -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -91,7 +95,10 @@ build_one() {
   arch_cache="$CACHE_DIR/$arch"
   mkdir -p "$arch_cache/pro-dist" "$arch_cache/out"
   if [[ -n "$FLOCKSPRO_WHEEL" ]]; then
-    cp "$FLOCKSPRO_WHEEL" "$arch_cache/pro-dist/"
+    # the wheel may already be the cached copy itself (cp refuses to copy a file onto itself)
+    if ! cmp -s "$FLOCKSPRO_WHEEL" "$arch_cache/pro-dist/$(basename "$FLOCKSPRO_WHEEL")"; then
+      cp "$FLOCKSPRO_WHEEL" "$arch_cache/pro-dist/"
+    fi
     wheel_arg=(--flockspro-wheel "/root/.cache/flocks-offline-build/pro-dist/$(basename "$FLOCKSPRO_WHEEL")")
   fi
   if [[ -n "$PRO_RELEASE_ID" ]]; then wheel_arg+=(--pro-release-id "$PRO_RELEASE_ID"); fi
@@ -99,6 +106,18 @@ build_one() {
   if [[ "$CN" -eq 1 ]]; then
     mirror_env=(-e FLOCKS_NODE_BASE_URL=https://registry.npmmirror.com/-/binary/node -e FLOCKS_NPM_REGISTRY=https://registry.npmmirror.com/)
   fi
+
+  # export the sources here, where Git can see the checkout (a linked worktree's .git is a
+  # pointer into the main repo, which the container does not see); the container only gets
+  # the exported tree, so nothing ignored or uncommitted can leak into the package
+  local src_export="$arch_cache/source"
+  if [[ -e "$src_export" ]]; then
+    mv "$src_export" "$arch_cache/source.previous-$(date +%s)"
+  fi
+  local export_flags=()
+  if [[ "$ALLOW_DIRTY" -eq 1 ]]; then export_flags+=(--allow-dirty); fi
+  info "[$arch] exporting sources from Git → $src_export"
+  bash "$SCRIPT_DIR/export-source.sh" "$REPO_ROOT" "$src_export" ${export_flags[@]+"${export_flags[@]}"}
 
   info "[$arch] checking that $platform containers can run on this host"
   if ! "$DOCKER" run --rm --platform "$platform" "$IMAGE" uname -m >/dev/null 2>&1; then
@@ -109,20 +128,21 @@ build_one() {
   started="$(date +%s)"
   info "[$arch] building in $container (this takes 15-40 minutes; downloads are cached in $arch_cache)"
   "$DOCKER" run -d --name "$container" --platform "$platform" \
-    -v "$REPO_ROOT:/src:ro" \
+    -v "$src_export:/src:ro" \
+    -v "$SCRIPT_DIR:/pkg:ro" \
     -v "$arch_cache:/root/.cache/flocks-offline-build" \
     ${mirror_env[@]+"${mirror_env[@]}"} \
     "$IMAGE" sleep infinity >/dev/null
   CURRENT_CONTAINER="$container"
 
   "$DOCKER" exec "$container" bash -c \
-    'dnf -y install tar gzip findutils which diffutils procps-ng iproute python3 >/root/.cache/flocks-offline-build/dnf.log 2>&1 || { tail -n 20 /root/.cache/flocks-offline-build/dnf.log; exit 1; }'
+    'dnf -y install tar gzip findutils which diffutils procps-ng iproute python3 git >/root/.cache/flocks-offline-build/dnf.log 2>&1 || { tail -n 20 /root/.cache/flocks-offline-build/dnf.log; exit 1; }'
   local extra_args=""
   if [[ "${#wheel_arg[@]}" -gt 0 ]]; then
     extra_args="$(printf '%q ' "${wheel_arg[@]}")"
   fi
   "$DOCKER" exec "$container" bash -c \
-    "cd /src && HOME=/root bash packaging/linux/build-offline-run.sh --output-dir /root/.cache/flocks-offline-build/out $extra_args"
+    "HOME=/root bash /pkg/build-offline-run.sh --repo-root /src --output-dir /root/.cache/flocks-offline-build/out $extra_args"
 
   mkdir -p "$OUTPUT_DIR/$arch"
   cp "$arch_cache/out/flocks-offline.run" "$arch_cache/out/flocks-offline.run.sha256" "$arch_cache/out/versions.json" "$OUTPUT_DIR/$arch/"

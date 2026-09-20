@@ -12,9 +12,11 @@
 #   packaging/linux/build-offline-run.sh [--repo-root DIR] [--output-dir DIR]
 #       [--install-root /opt/flocks] [--cache-dir DIR]
 #       [--flockspro-wheel PATH] [--pro-bundle-version VER] [--pro-release-id ID] [--pro-build-id ID]
-#       [--skip-webui-build] [--no-dev-group] [--ship-uv-cache] [--repack]
+#       [--skip-webui-build] [--no-dev-group] [--ship-uv-cache] [--repack] [--allow-dirty]
 #   --repack reuses an existing staging root (toolchain, venv, WebUI) and only refreshes
-#   the installer files, the Pro bundle and versions.json before packing again.
+#   the sources, installer files, the Pro bundle and versions.json before packing again.
+#   --allow-dirty exports the working tree as Git sees it (uncommitted changes and untracked
+#   files included, ignored files excluded) instead of the exact HEAD commit; see export-source.sh.
 #
 # Environment overrides (mirrors):
 #   FLOCKS_PBS_BASE_URL   python-build-standalone release base URL
@@ -40,6 +42,7 @@ SKIP_WEBUI_BUILD=0
 DEV_GROUP=1
 SHIP_UV_CACHE=0
 REPACK=0
+ALLOW_DIRTY=0
 
 info() { printf '[build-offline-run] %s\n' "$*"; }
 fail() { printf '[build-offline-run] error: %s\n' "$*" >&2; exit 1; }
@@ -62,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --no-dev-group) DEV_GROUP=0; shift ;;
     --ship-uv-cache) SHIP_UV_CACHE=1; shift ;;
     --repack) REPACK=1; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -71,7 +75,11 @@ done
 command -v curl >/dev/null || fail "curl is required."
 command -v tar >/dev/null || fail "tar is required."
 command -v python3 >/dev/null || fail "python3 is required to read $MANIFEST."
+if [[ ! -f "$REPO_ROOT/.source-export.json" ]]; then
+  command -v git >/dev/null || fail "git is required to export the source tree from the repository."
+fi
 [[ -f "$REPO_ROOT/pyproject.toml" && -f "$REPO_ROOT/uv.lock" ]] || fail "repo root $REPO_ROOT has no pyproject.toml/uv.lock."
+[[ -e "$REPO_ROOT/.git" || -f "$REPO_ROOT/.source-export.json" ]] || fail "$REPO_ROOT is neither a git checkout nor a tree exported by export-source.sh."
 
 manifest_get() {
   python3 - "$MANIFEST" "$@" <<'PY'
@@ -110,11 +118,11 @@ MAKESELF_URL="${MAKESELF_URL//\{version\}/$MAKESELF_VERSION}"
 CORE_VERSION="$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["project"]["version"])' "$REPO_ROOT/pyproject.toml" 2>/dev/null \
   || python3 -c 'import re,sys; print(re.search(r"^version\s*=\s*\"([^\"]+)\"", open(sys.argv[1]).read(), re.M).group(1))' "$REPO_ROOT/pyproject.toml")"
 CORE_VERSION_PLAIN="${CORE_VERSION#v}"
-GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GIT_SHA="unknown"   # set from the export stamp below
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 UPDATE_CHANNEL="flockspro-offline-${CORE_VERSION_PLAIN}"
 
-info "core ${CORE_VERSION} (${GIT_SHA}) arch ${ARCH} → ${INSTALL_ROOT}"
+info "core ${CORE_VERSION} arch ${ARCH} → ${INSTALL_ROOT}"
 info "python ${PY_VERSION}+${PY_RELEASE}, node ${NODE_VERSION}, uv ${UV_VERSION}, makeself ${MAKESELF_VERSION}"
 
 # ---------------------------------------------------------------------------
@@ -178,18 +186,35 @@ MAKESELF="$CACHE_DIR/makeself/makeself.sh"
 chmod +x "$MAKESELF"
 
 # ---------------------------------------------------------------------------
-# repository copy (runtime files only; on --repack this refreshes changed sources
-# on top of the existing staging tree without touching .venv or webui/dist)
+# source tree: exported from Git (HEAD, or the Git-visible working tree with
+# --allow-dirty), never copied raw from the checkout, so .env / .secret.json /
+# logs / local data cannot leak into the package; on --repack this refreshes the
+# sources on top of the existing staging tree without touching .venv or webui/dist
 # ---------------------------------------------------------------------------
-info "copying repository → $INSTALL_ROOT/flocks"
 mkdir -p "$INSTALL_ROOT/flocks"
-tar -C "$REPO_ROOT" -cf - \
-  --exclude='./.git' --exclude='./.venv' --exclude='./webui/node_modules' --exclude='./webui/dist' \
-  --exclude='./tui/node_modules' --exclude='./temp' --exclude='./tests' --exclude='./dist' \
-  --exclude='./packaging' --exclude='./npm-wrapper' --exclude='./docs' --exclude='./assets' \
-  --exclude='__pycache__' --exclude='.pytest_cache' --exclude='.mypy_cache' --exclude='.ruff_cache' \
-  --exclude='./.github' --exclude='*.pyc' \
-  . | tar -C "$INSTALL_ROOT/flocks" -xf -
+stamp_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+if [[ -f "$REPO_ROOT/.source-export.json" && ! -e "$REPO_ROOT/.git" ]]; then
+  # a tree already exported by export-source.sh (build-in-docker.sh exports on the host,
+  # where the Git metadata lives, and mounts only the result): copy it and re-verify
+  info "using pre-exported source tree $REPO_ROOT"
+  tar -C "$REPO_ROOT" -cf - --exclude='./.source-export.json' . | tar -C "$INSTALL_ROOT/flocks" -xf -
+  bash "$SCRIPT_DIR/export-source.sh" --verify-only "$INSTALL_ROOT/flocks"
+  STAMP_FILE="$REPO_ROOT/.source-export.json"
+else
+  info "exporting repository → $INSTALL_ROOT/flocks"
+  EXPORT_ARGS=()
+  if [[ "$ALLOW_DIRTY" -eq 1 ]]; then
+    EXPORT_ARGS+=(--allow-dirty)
+  fi
+  EXPORT_SOURCE_ALLOW_NONEMPTY="$REPACK" \
+    bash "$SCRIPT_DIR/export-source.sh" "$REPO_ROOT" "$INSTALL_ROOT/flocks" ${EXPORT_ARGS[@]+"${EXPORT_ARGS[@]}"}
+  STAMP_FILE="$INSTALL_ROOT/flocks/.source-export.json"
+fi
+# the stamp is the single source of truth for what was exported; it does not ship
+GIT_SHA="$(stamp_field "$STAMP_FILE" commit)"
+SOURCE_DIRTY="$(stamp_field "$STAMP_FILE" dirty)"
+rm -f "$INSTALL_ROOT/flocks/.source-export.json"
+info "sources: commit ${GIT_SHA}, dirty=${SOURCE_DIRTY}"
 
 # ---------------------------------------------------------------------------
 # python environment at the final path
@@ -309,6 +334,7 @@ json.dump({
     "product": "flocks",
     "core_version": "v${CORE_VERSION_PLAIN}",
     "git_sha": "${GIT_SHA}",
+    "source_dirty": bool(${SOURCE_DIRTY:-0}),
     "built_at": "${BUILD_TIME}",
     "arch": "${ARCH}",
     "install_root": "${INSTALL_ROOT}",

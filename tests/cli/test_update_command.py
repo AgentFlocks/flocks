@@ -13,6 +13,13 @@ from flocks.updater.models import UpdateProgress, VersionInfo
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_upgrade_logs(monkeypatch, tmp_path):
+    # `flocks update` appends to the upgrade text log (FLOCKS_LOG_DIR, else ~/.flocks/logs);
+    # keep every test in this module out of the developer's real ~/.flocks
+    monkeypatch.setenv("FLOCKS_LOG_DIR", str(tmp_path / "logs"))
+
+
 async def _noop_log_init(**_: object) -> None:
     return None
 
@@ -432,3 +439,43 @@ def test_update_cli_explains_offline_install(monkeypatch, tmp_path) -> None:
 
     assert result.exit_code == 0, result.stdout
     assert "flocks-offline.run" in output.getvalue()
+
+
+def test_update_cli_offline_install_gets_run_guidance_even_when_the_version_check_fails(monkeypatch, tmp_path) -> None:
+    """R9: on an offline deployment the .run guidance comes first; a failed remote check is not an error."""
+    import flocks.updater.deploy as deploy_mod
+
+    output = StringIO()
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=200),
+    )
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "offline")
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "offline")
+
+    async def local_only_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        # what check_update returns on an offline deployment: local state, no latest, no error
+        return VersionInfo(current_version="2026.9.14", deploy_mode="offline", update_allowed=False)
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("perform_update must not run on an offline install")
+
+    monkeypatch.setattr(updater_pkg, "check_update", local_only_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+
+    # the third form has no --yes / --region: on an online install it would prompt for the CN
+    # mirror first; an offline install must answer before asking anything (stdin is closed here)
+    for args in (["update", "--check", "--region", "cn"], ["update", "--yes", "--region", "cn"], ["update"]):
+        output.seek(0)
+        output.truncate(0)
+        result = runner.invoke(cli_main.app, args)
+        text = output.getvalue()
+        assert result.exit_code == 0, text
+        assert "flocks-offline.run" in text
+        assert "检查失败" not in text and "是否使用中国镜像" not in text
+        assert "v2026.9.14" in text
+        # the guidance is printed before the version info, not after it
+        assert text.index("flocks-offline.run") < text.index("v2026.9.14")

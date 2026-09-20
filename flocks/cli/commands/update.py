@@ -71,6 +71,16 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
     if region is None and is_cn_install_language():
         region = "cn"
 
+    if detect_deploy_mode() == "offline":
+        # Offline package deployments upgrade by running a new .run; say so before asking
+        # about mirrors. check_update() does no network round trips in this mode (it reports
+        # the local version only), so there is nothing to wait for or to fail on here.
+        from flocks.updater.updater import OFFLINE_UPGRADE_REFUSED_MESSAGE
+
+        console.print(f"[yellow]{OFFLINE_UPGRADE_REFUSED_MESSAGE}[/yellow]")
+        _print_version_table(await check_update(region=region))
+        return
+
     if not yes and not check and region is None:
         use_cn_mirror = typer.confirm("\n是否使用中国镜像进行升级？", default=False)
         if use_cn_mirror:
@@ -103,12 +113,6 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             "  [bold]docker restart <container>[/bold][/yellow]"
         )
         return
-    if detect_deploy_mode() == "offline":
-        from flocks.updater.updater import OFFLINE_UPGRADE_REFUSED_MESSAGE
-
-        console.print(f"\n[yellow]{OFFLINE_UPGRADE_REFUSED_MESSAGE}[/yellow]")
-        return
-
     if check:
         command = "flocks update --force" if force else "flocks update"
         console.print(f"\n[yellow]运行 [bold]{command}[/bold] 执行升级[/yellow]")

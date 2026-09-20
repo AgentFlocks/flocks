@@ -2423,6 +2423,8 @@ def test_process_inspection_survives_missing_ps(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(service_manager, "which", lambda _name: None)  # no pgrep either
     monkeypatch.setattr(service_manager.sys, "platform", "linux")
 
+    monkeypatch.setattr(service_manager, "_proc_available", lambda: False)
+
     completed = service_manager._run_ps(["ps", "-eo", "pid="])
     assert isinstance(completed, _subprocess.CompletedProcess)
     assert completed.returncode == 127 and completed.stdout == ""
@@ -2431,3 +2433,43 @@ def test_process_inspection_survives_missing_ps(monkeypatch: pytest.MonkeyPatch)
     assert service_manager._process_command_line(12345) == ""
     assert service_manager._process_group_member_pids(12345) == []
     assert service_manager.child_pids(12345) == []
+
+
+@pytest.mark.parametrize("ps_flavour", ["missing", "busybox"])
+def test_process_inspection_falls_back_to_proc_without_ps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ps_flavour: str) -> None:
+    """Without a usable procps (binary missing, or a BusyBox `ps` that rejects -p / -eo) the
+    supervisor/backend must still be discoverable through /proc (stop, orphan cleanup)."""
+
+    def _no_ps(*_args, **_kwargs):
+        if ps_flavour == "missing":
+            raise FileNotFoundError(2, "No such file or directory", "ps")
+        return subprocess.CompletedProcess(_args[0], 1, "", "ps: unrecognized option: p\nBusyBox v1.36.1 multi-call binary.\n")
+
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    # pid 100: daemon (pgid 100, parent 1); pid 101: backend (parent 100, pgid 101); pid 102: zombie child of 101
+    entries = {
+        100: ("(python3) S 1 100 100", ["/opt/flocks/flocks/.venv/bin/python", "-m", "flocks.cli.main", "service-daemon"]),
+        101: ("(python3) S 100 101 100", ["/opt/flocks/flocks/.venv/bin/python", "-m", "flocks.cli.main", "serve"]),
+        102: ("(defunct child) Z 101 101 100", []),
+    }
+    for pid, (stat_tail, argv) in entries.items():
+        (proc / str(pid)).mkdir()
+        (proc / str(pid) / "stat").write_text(f"{pid} {stat_tail} 0 0 0 0 0\n", encoding="utf-8")
+        (proc / str(pid) / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + (b"\0" if argv else b""))
+    (proc / "not-a-pid").mkdir()
+
+    monkeypatch.setattr(service_manager.subprocess, "run", _no_ps)
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(service_manager, "_PROC_ROOT", proc)
+
+    assert service_manager._proc_available() is True
+    assert service_manager._process_list_pids() == [100, 101, 102]
+    assert service_manager._unix_process_stat(101) == "S"
+    assert service_manager._unix_pid_is_zombie(102) is True
+    assert service_manager.child_pids(100) == [101]
+    assert service_manager.child_pids(101) == [102]
+    assert service_manager._process_group_member_pids(101) == [101, 102]
+    assert "service-daemon" in service_manager._process_command_line(100)
+    assert service_manager._process_command_line(999) == ""

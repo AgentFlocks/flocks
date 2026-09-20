@@ -2415,7 +2415,12 @@ async def check_update(
     if not current:
         current = local_core_version
 
-    if not ucfg.enabled:
+    if not ucfg.enabled or (mode == "offline" and not is_console_manifest):
+        # An offline package deployment cannot reach GitHub / Gitee and does not upgrade the core
+        # in place anyway (a new .run does that): report the local state without any network
+        # round trips (each source would otherwise wait for its timeout, and the last fallback
+        # even runs `git tag` in the CLI's cwd). Console-manifest checks still run: Console is the
+        # one endpoint such a machine is allowed to reach.
         return VersionInfo(
             current_version=current,
             current_core_version=current_pro_state.core_version if current_pro_state else None,
@@ -2593,7 +2598,39 @@ async def _fetch_console_manifest_for_local_bundle(
             {"local_version": local_release.version, "console_version": console_info.version},
         )
         return None
-    return console_info.manifest
+    return _console_identity_for_local_bundle(local_release.manifest, console_info.manifest)
+
+
+def _console_identity_for_local_bundle(
+    local_manifest: dict[str, Any],
+    console_manifest: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reduce a Console manifest to the release ids a local bundle may borrow.
+
+    The same bundle version can be repacked with a different wheel, so a version match
+    alone does not make the Console release *this* bundle. Only when every identity field
+    both sides carry (core version, Pro component version, build id) agrees are the
+    release ids handed over; the local manifest stays authoritative for everything else
+    and a conflict merges nothing. ``bundle_sha256`` is not compared: Console hashes the
+    bundle archive, a local bundle directory hashes its wheel.
+    """
+    if not console_manifest:
+        return None
+    for key in ("core_version", "flockspro_component_version", "build_id"):
+        local_value = str(local_manifest.get(key) or "").strip().lstrip("v")
+        console_value = str(console_manifest.get(key) or "").strip().lstrip("v")
+        if local_value and console_value and local_value != console_value:
+            log.warning(
+                "updater.pro_bundle.local_identity_conflict",
+                {"field": key, "local": local_value, "console": console_value},
+            )
+            return None
+    identity: dict[str, Any] = {}
+    for key in ("release_id", "bundle_release_id"):
+        value = str(console_manifest.get(key) or "").strip()
+        if value:
+            identity[key] = value
+    return identity or None
 
 
 async def perform_pro_bundle_install(
@@ -2774,6 +2811,9 @@ async def perform_pro_bundle_downgrade(
     try:
         restart_argv = _build_restart_argv(install_root)
         sync_timeout = _dependency_sync_timeout_seconds()
+        # Offline installations carry a prebuilt runtime: the handoff must not try to
+        # uv sync / rebuild the WebUI (no index, no npm registry), only restart.
+        offline_install = detect_deploy_mode() == "offline"
         handoff_argv = _build_restart_handoff_argv(
             restart_argv,
             install_root,
@@ -2781,8 +2821,9 @@ async def perform_pro_bundle_downgrade(
             sync_timeout=sync_timeout,
             version=oss_core_version or current_version,
             current_version=current_version,
+            prebuilt=offline_install,
         )
-        log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv})
+        log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv, "prebuilt": offline_install})
         _spawn_restart_handoff(handoff_argv, cwd=install_root)
         os._exit(0)
     except Exception as exc:

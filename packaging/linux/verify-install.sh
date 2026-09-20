@@ -6,7 +6,8 @@
 # the installer. Prints one PASS/FAIL line per check and a final summary.
 #
 # Usage (as root):
-#   packaging/linux/verify-install.sh [--port 5173] [--rerun /var/tmp/flocks-offline.run]
+#   packaging/linux/verify-install.sh [--port <port>] [--rerun /var/tmp/flocks-offline.run]
+#     --port defaults to the FLOCKS_PORT in /etc/flocks/flocks.env (5173 when nothing is installed)
 #       [--admin-user admin] [--admin-pass '<password>'] [--skip-pro]
 #
 # The admin account is created only when the instance has not been bootstrapped yet;
@@ -15,7 +16,7 @@
 
 set -euo pipefail
 
-PORT=5173
+PORT=""
 RERUN=""
 ADMIN_USER="admin"
 ADMIN_PASS=""
@@ -31,12 +32,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+installed_port() {
+  # the port the installed instance actually uses; 5173 only when nothing is installed yet.
+  # (--rerun passes this port to the installer as an explicit override, so a wrong default
+  #  would silently move the instance to another port)
+  local from_env
+  from_env="$(sed -n 's/^FLOCKS_PORT=//p' /etc/flocks/flocks.env 2>/dev/null | tail -n 1 | tr -d '[:space:]"'"'"'' || true)"
+  if [[ "$from_env" =~ ^[0-9]+$ ]] && (( from_env >= 1 && from_env <= 65535 )); then
+    printf '%s\n' "$from_env"
+  else
+    printf '5173\n'
+  fi
+}
+[[ -n "$PORT" ]] || PORT="$(installed_port)"
 BASE="http://127.0.0.1:${PORT}"
 COOKIE="$(mktemp)"
 GENERATED_PASS=0
+gen_password() {
+  # never bake a default password into the script: generate one per run and print it.
+  # Not `tr </dev/urandom | head -c 16`: head closes the pipe early, tr dies with SIGPIPE
+  # and under `set -o pipefail` that is exit 141 before a single check has run.
+  local py
+  for py in /opt/flocks/tools/python/bin/python3 python3; do
+    if command -v "$py" >/dev/null 2>&1; then
+      "$py" -c 'import secrets, string; a = string.ascii_letters + string.digits; print("Verify-" + "".join(secrets.choice(a) for _ in range(16)))' && return 0
+    fi
+  done
+  # no python at all: read a fixed amount so nothing upstream is left writing into a closed pipe
+  printf 'Verify-%s\n' "$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-16)"
+}
 if [[ -z "$ADMIN_PASS" ]]; then
-  # never bake a default password into the script: generate one per run and print it
-  ADMIN_PASS="Verify-$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+  ADMIN_PASS="$(gen_password)"
   GENERATED_PASS=1
 fi
 PASS=0
