@@ -159,7 +159,7 @@ if in_ctr_q "grep -q flockspro_component_version /var/lib/flocks/.flocks/run/pro
   check "refused install left the running instance untouched" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health && /opt/flocks/flocks/.venv/bin/python -c 'import flockspro'"
   parked_after="$(in_ctr "ls -d /opt/flocks/*.bak-* 2>/dev/null | wc -l" | tr -d '[:space:]')"
   check "refused install parked nothing (bak dirs before=$parked_before after=$parked_after)" test "$parked_before" = "$parked_after"
-  check "refused install parked its staging dir instead of leaving it for the next package" in_ctr_q "test ! -e /var/tmp/staging-nobundle2/versions.json && ls -d /var/tmp/staging-nobundle2.failed-* >/dev/null"
+  check "refused install parked its payload instead of leaving it for the next package" in_ctr_q "test ! -e /var/tmp/staging-nobundle2/versions.json && ls -d /var/tmp/staging-nobundle2/flocks-offline-failed-*/versions.json >/dev/null && test -d /var/tmp/staging-nobundle2/bundle.moved"
   in_ctr_q "mv /opt/flocks/bundle.moved-by-smoke /opt/flocks/bundle"
 fi
 

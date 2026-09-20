@@ -17,7 +17,7 @@
 #   FLOCKS_OFFLINE_DRY_RUN=1          print the plan and exit without changing anything
 #   FLOCKS_OFFLINE_HEALTH_TIMEOUT=180 seconds to wait for /api/health
 
-set -euo pipefail
+set -Eeuo pipefail
 # makeself runs the installer with umask 077; everything we create must be world-readable
 umask 022
 
@@ -41,18 +41,34 @@ log() {
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line" >> "$LOG_FILE" 2>/dev/null || true
   fi
 }
+PAYLOAD_ENTRIES="versions.json installer tools flocks bundle cache"
+FAILED_DIR_PREFIX="flocks-offline-failed-"
+same_dir() { [[ "$(cd "$1" 2>/dev/null && pwd -P)" == "$(cd "$2" 2>/dev/null && pwd -P)" ]]; }
 fail() {
+  trap - ERR
   log "错误: $*"
   # makeself keeps the --target directory when the installer fails; a later package would untar
-  # on top of it and carry files of two versions into the install. Park it (never delete).
-  if [[ "$DRY_RUN" != "1" && -n "${INSTALL_ROOT:-}" && "$SRC_ROOT" != "$INSTALL_ROOT" && -d "$SRC_ROOT" ]]; then
-    if mv "$SRC_ROOT" "$SRC_ROOT.failed-$STAMP" 2>/dev/null; then
-      log "已解包的安装文件移到 ${SRC_ROOT}.failed-${STAMP}（可自行清理）"
+  # on top of it and carry files of two versions into the install. Park what is ours — the
+  # payload entries only, moved into a subdirectory of the same place. The directory itself
+  # is never renamed: with `--target /var/tmp` it is a shared system directory.
+  if [[ "$DRY_RUN" != "1" && -n "${INSTALL_ROOT:-}" && -d "$SRC_ROOT" ]] && ! same_dir "$SRC_ROOT" "$INSTALL_ROOT"; then
+    local parked="$SRC_ROOT/$FAILED_DIR_PREFIX$STAMP" entry moved=0
+    for entry in $PAYLOAD_ENTRIES; do
+      if [[ -e "$SRC_ROOT/$entry" ]]; then
+        mkdir -p "$parked" 2>/dev/null || break
+        mv "$SRC_ROOT/$entry" "$parked/" 2>/dev/null && moved=1
+      fi
+    done
+    if [[ "$moved" -eq 1 ]]; then
+      log "已解包的安装文件移到 ${parked}（可自行清理；下次安装不会与它混在一起）"
     fi
   fi
   log "安装未完成。完整日志: $LOG_FILE"
   exit 1
 }
+# any command that would make `set -e` bail out goes through fail() instead: the log gets a
+# line saying what died, and the extracted payload is parked like on every other failure
+trap 'fail "命令失败: ${BASH_COMMAND}（第 ${LINENO} 行）"' ERR
 
 # ---------------------------------------------------------------------------
 # payload facts
@@ -71,12 +87,13 @@ PY
 }
 
 INSTALL_ROOT="$(json_get "$SRC_ROOT/versions.json" install_root)"
+INSTALL_ROOT="${INSTALL_ROOT%/}"
 CORE_VERSION="$(json_get "$SRC_ROOT/versions.json" core_version)"
 PKG_ARCH="$(json_get "$SRC_ROOT/versions.json" arch)"
 UPDATE_CHANNEL="$(json_get "$SRC_ROOT/versions.json" update_channel)"
 HAS_PRO_BUNDLE="$(json_get "$SRC_ROOT/versions.json" pro_bundle)"
 [[ -n "$INSTALL_ROOT" && "$INSTALL_ROOT" == /* ]] || fail "versions.json 里的 install_root 无效: $INSTALL_ROOT"
-if [[ "$SRC_ROOT" == "$INSTALL_ROOT" ]]; then
+if same_dir "$SRC_ROOT" "$INSTALL_ROOT"; then
   fail "这是已安装实例里保留的安装脚本副本（${SRC_ROOT}/installer），不能直接执行；请重新运行 flocks-offline.run"
 fi
 REPO_DIR="$INSTALL_ROOT/flocks"
@@ -439,6 +456,12 @@ finish_staging() {
   if [[ -d "$SRC_ROOT/installer" && ! -e "$INSTALL_ROOT/installer" ]]; then
     mv "$SRC_ROOT/installer" "$INSTALL_ROOT/installer"
   fi
+  # leftovers parked by an earlier failed run go next to the *.bak-* dirs, out of the way
+  local leftover
+  for leftover in "$SRC_ROOT/$FAILED_DIR_PREFIX"*; do
+    [[ -d "$leftover" ]] || continue
+    mv "$leftover" "$INSTALL_ROOT/" 2>/dev/null || true
+  done
   rmdir "$SRC_ROOT" 2>/dev/null || true
 }
 

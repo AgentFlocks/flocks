@@ -114,6 +114,12 @@ build_one() {
   if [[ -e "$src_export" ]]; then
     mv "$src_export" "$arch_cache/source.previous-$(date +%s)"
   fi
+  # earlier exports are kept (never deleted here), but they add up: say so once it matters
+  local previous_count
+  previous_count="$(ls -d "$arch_cache"/source.previous-* 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "${previous_count:-0}" -ge 3 ]]; then
+    info "[$arch] $previous_count earlier source exports kept in $arch_cache/source.previous-* (~64 MB each); remove the ones you no longer need"
+  fi
   local export_flags=()
   if [[ "$ALLOW_DIRTY" -eq 1 ]]; then export_flags+=(--allow-dirty); fi
   info "[$arch] exporting sources from Git → $src_export"

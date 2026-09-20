@@ -45,7 +45,7 @@ def test_shell_scripts_are_executable_and_strict(script: Path) -> None:
     assert script.stat().st_mode & stat.S_IXUSR, f"{script.name} must be executable"
     text = script.read_text(encoding="utf-8")
     assert text.startswith("#!/usr/bin/env bash\n")
-    assert "set -euo pipefail" in text
+    assert re.search(r"^set -E?euo pipefail$", text, re.MULTILINE), f"{script.name} must run under set -euo pipefail"
 
 
 @pytest.mark.parametrize("script", SHELL_SCRIPTS, ids=lambda p: p.name)
@@ -766,3 +766,60 @@ def test_verify_script_defaults_to_the_installed_port(tmp_path: Path) -> None:
     assert subprocess.run([BASH, "-c", script], capture_output=True, text=True).stdout.strip() == "5173"
     env_file.unlink()
     assert subprocess.run([BASH, "-c", script], capture_output=True, text=True).stdout.strip() == "5173"
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_failed_install_parks_only_its_own_payload(tmp_path: Path) -> None:
+    """A preflight failure moves the payload entries into a subdirectory of the extraction dir and
+    touches nothing else there: `--target /var/tmp` makes that directory a shared system dir."""
+    payload = _fake_payload(tmp_path, core_version="v2026.9.14")
+    (payload / "versions.json").write_text(
+        json.dumps({"core_version": "v2026.9.14", "arch": "riscv64", "install_root": str(tmp_path / "opt-flocks")}),
+        encoding="utf-8",
+    )
+    (payload / "unrelated-other-service").mkdir()
+    (payload / "unrelated-other-service" / "important.txt").write_text("keep me\n", encoding="utf-8")
+    # not a dry run: the arch check fails before anything needs root
+    completed = subprocess.run(
+        [BASH, str(payload / "installer" / "install.sh")], capture_output=True, text=True,
+        env={**os.environ, "FLOCKS_OFFLINE_DRY_RUN": "0", "FLOCKS_OFFLINE_DATA_HOME": str(tmp_path / "data-home")},
+    )
+    assert completed.returncode == 1
+    assert "riscv64" in completed.stdout and "已解包的安装文件移到" in completed.stdout
+    assert payload.is_dir(), "the extraction directory itself must never be renamed"
+    assert (payload / "unrelated-other-service" / "important.txt").read_text(encoding="utf-8") == "keep me\n"
+    parked = [d for d in payload.iterdir() if d.name.startswith("flocks-offline-failed-")]
+    assert len(parked) == 1, sorted(x.name for x in payload.iterdir())
+    assert {x.name for x in parked[0].iterdir()} == {"versions.json", "installer", "tools", "flocks"}
+    assert not (payload / "versions.json").exists() and not (payload / "installer").exists()
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_unexpected_command_failure_is_reported_through_fail(tmp_path: Path) -> None:
+    """Implicit `set -e` exits go through the ERR trap: the log says what died instead of ending silently."""
+    payload = _fake_payload(tmp_path)
+    (payload / "versions.json").write_text("{not json", encoding="utf-8")
+    completed = _dry_run(payload)
+    assert completed.returncode == 1
+    assert "错误: 命令失败:" in completed.stdout and "安装未完成" in completed.stdout
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_installer_direct_run_guard_ignores_a_trailing_slash(tmp_path: Path) -> None:
+    install_root = tmp_path / "opt-flocks"
+    (install_root / "installer").mkdir(parents=True)
+    for name in ("install.sh", "flocks.service", "flocks.env.template", "flocks-cli-wrapper.sh"):
+        shutil.copy(INSTALLER_DIR / name, install_root / "installer" / name)
+    python_dir = install_root / "tools" / "python" / "bin"
+    python_dir.mkdir(parents=True)
+    os.symlink(sys.executable, python_dir / "python3")
+    (install_root / "versions.json").write_text(
+        json.dumps({"core_version": "v2026.9.14", "arch": os.uname().machine, "install_root": str(install_root) + "/"}),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [BASH, str(install_root / "installer" / "install.sh")], capture_output=True, text=True,
+        env={**os.environ, "FLOCKS_OFFLINE_DRY_RUN": "1", "FLOCKS_OFFLINE_DATA_HOME": str(tmp_path / "data-home")},
+    )
+    assert completed.returncode == 1 and "不能直接执行" in completed.stdout
+
