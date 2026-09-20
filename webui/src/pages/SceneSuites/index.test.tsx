@@ -185,6 +185,22 @@ describe('SceneSuitesPage', () => {
     expect(hubAPI.install).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['停用', true, false, '已停用'],
+    ['启用', false, true, '已启用'],
+  ] as const)('confirms %s with a toast that actually says so', async (button, enabledBefore, enabledAfter, message) => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, workspaceEnabled: enabledBefore }] });
+    const user = userEvent.setup();
+    renderPage();
+
+    const soc = await waitFor(() => card('soc-workspace'));
+    await user.click(within(soc).getByRole('button', { name: button }));
+
+    await waitFor(() => expect(webuiContractPagesAPI.setWorkspaceEnabled).toHaveBeenCalledWith('soc_ui', enabledAfter));
+    // The toast used to come out empty: the text key was derived from the action name.
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(message));
+  });
+
   it('disables a workspace through the contract API', async () => {
     const user = userEvent.setup();
     renderPage();

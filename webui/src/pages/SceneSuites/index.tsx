@@ -100,6 +100,17 @@ const TEXT = {
 
 type SuiteAction = 'install' | 'update' | 'uninstall' | 'enable' | 'disable';
 
+// Success toast per action. Spelled out because the keys are past tense and
+// the two toggles used to be derived from the action name, which yielded
+// `enable_ok` / `disable_ok` and an empty toast.
+const ACTION_SUCCESS_TEXT: Record<SuiteAction, 'installed_ok' | 'updated_ok' | 'uninstalled_ok' | 'enabled_ok' | 'disabled_ok'> = {
+  install: 'installed_ok',
+  update: 'updated_ok',
+  uninstall: 'uninstalled_ok',
+  enable: 'enabled_ok',
+  disable: 'disabled_ok',
+};
+
 /** The progress panel takes a catalog-shaped entry, whose nameCn is not nullable. */
 function progressEntry(suite: HubSceneSuite) {
   return { id: suite.id, name: suite.name, nameCn: suite.nameCn ?? undefined };
@@ -203,7 +214,7 @@ export default function SceneSuitesPage() {
         next.delete('reason');
         setSearchParams(next, { replace: true });
       }
-      toast.success(text[`${action === 'install' ? 'installed' : action === 'uninstall' ? 'uninstalled' : action === 'update' ? 'updated' : action}_ok` as keyof typeof text]);
+      toast.success(text[ACTION_SUCCESS_TEXT[action]]);
     } catch (err: unknown) {
       const detail = sceneSuiteErrorMessage(err, text.actionFailed);
       if (action === 'install' && !installed) {
