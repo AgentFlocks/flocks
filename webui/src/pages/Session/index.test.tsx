@@ -2,7 +2,7 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
 import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
@@ -25,6 +25,8 @@ vi.mock('@/components/common/FilePreview', () => ({
   FilePreviewRenderer: ({ node, content }: any) => <div data-testid="file-preview">{node.name}:{content}</div>,
   PreviewModal: () => null,
 }));
+
+const initialActionProbe = vi.hoisted(() => ({ enabled: false, delivered: vi.fn() }));
 
 const sessionStatusSSEOptionsRef = vi.hoisted(() => ({
   current: null as null | {
@@ -184,6 +186,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     centerToolbarSlot,
     welcomeContent,
     initialMessage,
+    onInitialMessageConsumed,
     initialDisplayText,
     initialOptimisticMessage,
     focusMessageId,
@@ -200,6 +203,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     display,
     hideInput,
   }: {
+    onInitialMessageConsumed?: () => void;
     sessionId?: string | null;
     agentName?: string;
     mentionAgents?: Array<{ name: string }>;
@@ -252,6 +256,13 @@ vi.mock('@/components/common/SessionChat', () => ({
   }) {
     sessionChatSSERef.current = onSSEEvent;
     const [input, setInput] = React.useState('');
+    const delivered = React.useRef(false);
+    React.useEffect(() => {
+      if (!initialActionProbe.enabled || !initialMessage || delivered.current) return;
+      delivered.current = true;
+      initialActionProbe.delivered(sessionId, initialMessage);
+      onInitialMessageConsumed?.();
+    }, [sessionId, initialMessage, onInitialMessageConsumed]);
     return (
       <div
         data-testid="session-chat"
@@ -417,12 +428,33 @@ const modelDefinitions = [
   },
 ];
 
+function SessionRoutes() {
+  return <Routes>
+    <Route path="/sessions/:sessionId?" element={<SessionPage />} />
+    <Route path="*" element={<div />} />
+  </Routes>;
+}
+
+function NavigationProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return <>
+    <output data-testid="session-location">{location.pathname}{location.search}</output>
+    <button onClick={() => navigate(-1)}>history-back</button>
+    <button onClick={() => navigate(1)}>history-forward</button>
+    <button onClick={() => navigate('/sessions/session-2')}>open-second</button>
+    <button onClick={() => navigate('/agents')}>leave-session-page</button>
+    <button onClick={() => navigate('/sessions/session-1')}>return-to-first</button>
+  </>;
+}
+
 function renderSessionPage(
   initialEntry: string | { pathname: string; state?: unknown } = '/sessions',
 ) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
-      <SessionPage />
+      <NavigationProbe />
+      <SessionRoutes />
     </MemoryRouter>,
   );
 }
@@ -481,6 +513,7 @@ async function advanceContextDebounce(ms = 250) {
 describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    initialActionProbe.enabled = false;
     __resetChatModelResourcesForTesting();
     sessionStatusSSEOptionsRef.current = null;
     sessionChatSSERef.current = undefined;
@@ -564,6 +597,217 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
+  it('consumes a legacy action once across StrictMode, back and remount', async () => {
+    initialActionProbe.enabled = true;
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    const user = userEvent.setup();
+    const view = render(<React.StrictMode><MemoryRouter initialEntries={['/sessions?session=session-1&message=once']}>
+      <NavigationProbe /><SessionRoutes />
+    </MemoryRouter></React.StrictMode>);
+    await waitFor(() => expect(initialActionProbe.delivered).toHaveBeenCalledTimes(1));
+    expect(initialActionProbe.delivered).toHaveBeenCalledWith('session-1', 'once');
+    await user.click(screen.getByText('open-second'));
+    await user.click(screen.getByText('history-back'));
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+    expect(initialActionProbe.delivered).toHaveBeenCalledTimes(1);
+    view.unmount();
+    renderSessionPage('/sessions/session-1');
+    expect(initialActionProbe.delivered).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a new session empty after restoring an earlier session', async () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
+    const user = userEvent.setup();
+    renderSessionPage();
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+    await user.click(screen.getByRole('button', { name: 'newSession' }));
+    expect(screen.getByTestId('session-location').textContent).toBe('/sessions');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+    await user.click(screen.getByText('history-back'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    await user.click(screen.getByText('history-forward'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('does not navigate away when an earlier create-and-send request finishes', async () => {
+    const request = deferred<{ data: typeof secondSession }>();
+    client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
+    const user = userEvent.setup();
+    renderSessionPage();
+    await user.click(screen.getByText('mock-create-and-send'));
+    await user.click(screen.getByText('Original Session'));
+    await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+    await waitFor(() => expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything()));
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+  });
+
+  describe.each(['create', 'create-and-send'] as const)('%s completion under StrictMode', (action) => {
+    it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
+      const request = deferred<{ data: typeof secondSession }>();
+      client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
+      const user = userEvent.setup();
+      render(<React.StrictMode><MemoryRouter initialEntries={['/sessions']}>
+        <NavigationProbe /><SessionRoutes />
+      </MemoryRouter></React.StrictMode>);
+      await user.click(action === 'create'
+        ? screen.getByRole('button', { name: 'createTaskSession' })
+        : screen.getByText('mock-create-and-send'));
+      expect(client.post).toHaveBeenCalledWith('/api/session', expect.anything());
+
+      if (destination !== 'stay') {
+        await user.click(screen.getByText('leave-session-page'));
+        expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+        if (destination === 'return') {
+          await user.click(screen.getByText('return-to-first'));
+          expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+        }
+      }
+      const savedSelection = localStorage.getItem('flocks:last-selected-session');
+      await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+      await waitFor(() => expect(addSession).toHaveBeenCalledWith(secondSession));
+      if (action === 'create-and-send') {
+        expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
+      }
+      expect(screen.getByTestId('session-location').textContent).toBe(
+        destination === 'stay' ? '/sessions/session-2'
+          : destination === 'leave' ? '/agents' : '/sessions/session-1',
+      );
+      if (destination !== 'stay') {
+        expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
+      }
+    });
+  });
+
+  describe.each(['archive', 'batch-archive'] as const)('%s completion under StrictMode', (action) => {
+    it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
+      useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+      const request = deferred<{ id: string; status: string }>();
+      sessionApi.archive.mockReturnValue(request.promise);
+      const user = userEvent.setup();
+      render(<React.StrictMode><MemoryRouter initialEntries={['/sessions/session-1']}>
+        <NavigationProbe /><SessionRoutes />
+      </MemoryRouter></React.StrictMode>);
+      if (action === 'archive') {
+        await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
+        await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+      } else {
+        await user.click(screen.getByRole('button', { name: 'selectMode' }));
+        await user.click(screen.getAllByText('Original Session')[0]);
+        await user.click(screen.getByRole('button', { name: 'archiveSelected' }));
+      }
+      expect(sessionApi.archive).toHaveBeenCalledWith(session.id);
+      if (destination !== 'stay') {
+        await user.click(screen.getByText('leave-session-page'));
+        expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+        if (destination === 'return') {
+          await user.click(screen.getByText('open-second'));
+          expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+        }
+      }
+      const savedSelection = localStorage.getItem('flocks:last-selected-session');
+      await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
+      expect(action === 'archive' ? removeSession : removeSessions).toHaveBeenCalledWith(
+        action === 'archive' ? session.id : [session.id],
+      );
+      expect(screen.getByTestId('session-location').textContent).toBe(
+        destination === 'stay' ? '/sessions'
+          : destination === 'leave' ? '/agents' : '/sessions/session-2',
+      );
+      if (destination !== 'stay') {
+        expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
+      }
+    });
+  });
+
+  it('does not leave the current session when another session finishes archiving', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    const request = deferred<{ id: string; status: string }>();
+    sessionApi.archive.mockReturnValue(request.promise);
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
+    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+    await user.click(screen.getByText('open-second'));
+    await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+  });
+
+  it('keeps a canonical URL through selection, back and forward without sending', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    renderSessionPage('/sessions/session-1');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    await user.click(screen.getByText('Second Session'));
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    await user.click(screen.getByText('history-back'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    await user.click(screen.getByText('history-forward'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('normalizes legacy links and retains only navigation parameters', async () => {
+    renderSessionPage('/sessions?session=session-1&focusMessage=msg-1&message=hello&display=label');
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1?focusMessage=msg-1');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', 'hello');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-focus-message', 'msg-1');
+  });
+
+  it('never sends a conflicting query action to the path session', async () => {
+    renderSessionPage('/sessions/session-1?session=session-2&message=wrong');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+    expect(toast.error).toHaveBeenCalledWith('linkTargetMismatch');
+  });
+
+  it('loads direct links independently of a slow sidebar and discards stale responses', async () => {
+    const request = deferred<typeof session>();
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [], loading: true });
+    sessionApi.get.mockImplementation((id: string) => id === session.id ? request.promise : Promise.resolve(secondSession));
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    expect(sessionApi.get).toHaveBeenCalledWith('session-1');
+    await user.click(screen.getByText('open-second'));
+    await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2'));
+    await act(async () => { request.resolve(session); await request.promise; });
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
+  });
+
+  it('revalidates a list-external session after navigating away and back', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [secondSession] });
+    sessionApi.get.mockResolvedValueOnce(session).mockRejectedValueOnce({ response: { status: 404 } });
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
+    await user.click(screen.getByText('open-second'));
+    await user.click(screen.getByText('history-back'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('sessionAccess.unavailable');
+    expect(sessionApi.get).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+  });
+
+  it('shows a retryable network error instead of a blank composer', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [] });
+    sessionApi.get.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(session);
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    expect(await screen.findByRole('alert')).toHaveTextContent('sessionAccess.failed');
+    expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+    await user.click(screen.getByText('sessionAccess.retry'));
+    await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
+  });
+
+  it('does not auto-send a legacy action to a read-only session', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [{ ...session, canWrite: false }] });
+    renderSessionPage('/sessions?session=session-1&message=do-not-send');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+  });
+
   it('renders Build by default and keeps Agent in the Add menu', async () => {
     renderSessionPage();
 
@@ -619,7 +863,7 @@ describe('SessionPage session actions menu', () => {
     render(
       <React.StrictMode>
         <MemoryRouter initialEntries={['/sessions?session=session-1']}>
-          <SessionPage />
+          <SessionRoutes />
         </MemoryRouter>
       </React.StrictMode>,
     );
@@ -1364,7 +1608,7 @@ describe('SessionPage session actions menu', () => {
     }
     render(
       <MemoryRouter initialEntries={['/sessions']}>
-        <SessionPage />
+        <SessionRoutes />
         <LocationProbe />
       </MemoryRouter>,
     );
@@ -3205,7 +3449,7 @@ describe('SessionPage session actions menu', () => {
     render(
       <MemoryRouter initialEntries={['/sessions']}>
         <NavigateButton />
-        <SessionPage />
+        <SessionRoutes />
       </MemoryRouter>,
     );
 
@@ -3258,7 +3502,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('clears the selected session after confirming it no longer exists', async () => {
+  it('keeps the target URL and shows an error when the session no longer exists', async () => {
     useSessions.mockReturnValue({
       sessions: [],
       loading: false,
@@ -3275,7 +3519,9 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
-      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+      expect(screen.getByRole('alert')).toHaveTextContent('sessionAccess.unavailable');
+      expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-deleted');
     });
   });
 
@@ -3288,8 +3534,9 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
-      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+      expect(screen.getByRole('alert')).toHaveTextContent('sessionAccess.unavailable');
+      expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-deleted');
     });
 
     await user.click(screen.getByText('Original Session'));

@@ -1541,6 +1541,17 @@ describe('SessionChat instruction display text', () => {
     expect(screen.queryByText(/Please read guide\.md/)).not.toBeInTheDocument();
   });
 
+  it('does not duplicate an initial message during StrictMode effects', async () => {
+    const consumed = vi.fn();
+    render(React.createElement(React.StrictMode, null, React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'one initial message',
+      onInitialMessageConsumed: consumed,
+    })));
+    await waitFor(() => expect(clientPostMock.mock.calls.filter(([url]) => url === '/api/session/sess-1/prompt_async')).toHaveLength(1));
+    expect(consumed).toHaveBeenCalledTimes(1);
+  });
+
   it('sends initialMessage with an instruction display label', async () => {
     render(React.createElement(SessionChat, {
       sessionId: 'sess-1',

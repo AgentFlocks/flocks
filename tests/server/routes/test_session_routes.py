@@ -89,36 +89,29 @@ async def test_missing_session_directory_uses_cwd_and_publishes_notice(
 
 @pytest.mark.asyncio
 async def test_shell_route_maps_extension_stop_to_forbidden(
-    monkeypatch: pytest.MonkeyPatch,
+    client: AsyncClient,
     session_id: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Pro policy stop must not surface as an unhandled server error."""
+    """An extension stop maps to 403 after real session/access checks pass."""
 
-    monkeypatch.setattr(session_routes, "require_user", lambda _request: object())
-    monkeypatch.setattr(
-        session_routes,
-        "_get_session_by_id_unfiltered",
-        AsyncMock(return_value=object()),
-    )
-    monkeypatch.setattr(
-        session_routes,
-        "_require_session_write_access",
-        lambda _session, _user: None,
-    )
-    monkeypatch.setattr(
-        "flocks.session.runner.SessionRunner.shell",
-        AsyncMock(side_effect=ExecutionStopped("hard_deny_system_delete")),
+    shell = AsyncMock(side_effect=ExecutionStopped("policy_test_deny"))
+    monkeypatch.setattr("flocks.session.runner.SessionRunner.shell", shell)
+
+    response = await client.post(
+        f"/api/session/{session_id}/shell",
+        json={"agent": "build", "command": "echo policy-check"},
     )
 
-    with pytest.raises(HTTPException) as error:
-        await session_routes.run_shell_command(
-            session_id,
-            session_routes.ShellRequest(agent="build", command="rm -rf /etc"),
-            SimpleNamespace(),
-        )
-
-    assert error.value.status_code == status.HTTP_403_FORBIDDEN
-    assert error.value.detail == "execution stopped by extension"
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert response.json() == {
+        "error": "HTTPException",
+        "message": "execution stopped by extension",
+    }
+    shell.assert_awaited_once()
+    assert shell.await_args.kwargs["session_id"] == session_id
+    assert shell.await_args.kwargs["command"] == "echo policy-check"
+    assert not Session.has_active_operations(session_id)
 
 
 @pytest.mark.asyncio

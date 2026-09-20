@@ -560,5 +560,14 @@
   "filterConversations": "Search tasks",
   "noResults": "No matching tasks",
   "showMore": "Show {{count}} more",
-  "showLess": "Show less"
+  "showLess": "Show less",
+  "copyLink": "Copy session link",
+  "linkTargetMismatch": "The link contains conflicting sessions. Automatic sending was cancelled.",
+  "sessionAccess": {
+    "unavailable": "This session is missing, archived, or unavailable.",
+    "forbidden": "You do not have permission to view this session.",
+    "failed": "Unable to load this session. Please retry.",
+    "retry": "Retry",
+    "back": "Back to workbench"
+  }
 }

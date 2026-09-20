@@ -12,6 +12,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple, cast
 from fastapi import APIRouter, HTTPException, status, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -276,6 +277,14 @@ class SessionResponse(BaseModel):
     goal: Optional[SessionGoalResponse] = Field(None, description="Persisted session goal state")
 
 
+def _session_web_url(session_id: str) -> str:
+    return f"/sessions/{quote(session_id, safe='')}"
+
+
+class SessionDetailResponse(SessionResponse):
+    webUrl: str = Field(..., description="Relative WebUI path; browser access requires session read permission")
+
+
 class SessionListItem(BaseModel):
     """Lightweight session row for the session manager sidebar."""
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
@@ -307,6 +316,7 @@ class SessionRuntimeStatusResponse(BaseModel):
     """Runtime status snapshot for one session."""
 
     sessionID: str = Field(..., description="Session ID")
+    webUrl: str = Field(..., description="Relative WebUI path; archived sessions may not be viewable")
     lifecycleStatus: Literal["active", "archived"] = Field(
         ...,
         description="Persisted session lifecycle status",
@@ -797,6 +807,7 @@ async def _build_session_runtime_status(session: SessionModel) -> SessionRuntime
 
     return SessionRuntimeStatusResponse(
         sessionID=session.id,
+        webUrl=_session_web_url(session.id),
         lifecycleStatus=cast(Literal["active", "archived"], session.status),
         status=runtime_status,
         isProcessing=runtime_status.type != "idle",
@@ -1201,11 +1212,11 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
 
 @router.get(
     "/{sessionID}",
-    response_model=SessionResponse,
+    response_model=SessionDetailResponse,
     summary="Get session",
     description="Get session by ID",
 )
-async def get_session(sessionID: str, request: Request) -> SessionResponse:
+async def get_session(sessionID: str, request: Request) -> SessionDetailResponse:
     """Get session by ID"""
     _current_user = require_user(request)
     session = await _get_session_by_id_unfiltered(sessionID)
@@ -1221,7 +1232,8 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    return await _session_to_response_with_goal(session)
+    response = await _session_to_response_with_goal(session)
+    return SessionDetailResponse(**response.model_dump(), webUrl=_session_web_url(session.id))
 
 
 @router.get(

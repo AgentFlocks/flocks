@@ -76,6 +76,7 @@ export interface SessionGoalState {
 
 export interface SessionResponse {
   id: string;
+  webUrl?: string;
   goal?: SessionGoalState | null;
   [key: string]: unknown;
 }
@@ -225,7 +226,7 @@ export const sessionApi = {
    * 获取单个会话
    */
   get: async (sessionId: string): Promise<SessionResponse> => {
-    const response = await client.get(`/api/session/${sessionId}`);
+    const response = await client.get(`/api/session/${encodeURIComponent(sessionId)}`);
     return response.data;
   },
 
