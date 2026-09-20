@@ -21,6 +21,7 @@ export interface SessionMessagePartPayload {
   url?: string | null;
   mime?: string;
   filename?: string;
+  resourceID?: string;
 }
 
 export interface QueuedPrompt {
@@ -106,6 +107,102 @@ export interface SessionMessageListParams {
   before?: string | null;
   page?: boolean;
   include_archived?: boolean;
+}
+
+export interface SessionContextFile {
+  resourceID: string;
+  fileKey: string;
+  displayName: string;
+  mimeType: string;
+  size?: number | null;
+  modifiedAt?: number | null;
+  createdAt?: number | null;
+  status: 'ready' | 'changed' | 'missing' | string;
+  previewStatus: 'text' | 'inline' | 'unsupported' | string;
+  canPreview: boolean;
+  isTextFile: boolean;
+  origin: 'user_upload' | 'agent_output' | string;
+  section: 'outputs' | 'context';
+  sourceMessageID: string;
+  logicalPath: string;
+}
+
+export interface SessionContextTodo {
+  id: string;
+  content: string;
+  activeForm?: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+  priority?: 'high' | 'medium' | 'low';
+}
+
+export interface SessionContextRoot {
+  id: string;
+  kind: 'project' | 'folder';
+  displayName: string;
+  status: 'available' | 'missing' | string;
+}
+
+export interface SessionContextSkill {
+  name: string;
+  description?: string | null;
+  status: 'loading' | 'loaded' | 'error' | 'unknown';
+  error?: string;
+}
+
+export interface SessionContextCounts {
+  total: number;
+  outputs: number;
+  contextFiles: number;
+  roots: number;
+  progress: number;
+}
+
+export interface SessionContextSnapshot {
+  sessionID: string;
+  canManageFolders: boolean;
+  hasMore: boolean;
+  nextBefore: string | null;
+  messageIDs?: string[];
+  outputs: SessionContextFile[];
+  contextFiles: SessionContextFile[];
+  progress: SessionContextTodo[];
+  progressKnown?: boolean;
+  roots: SessionContextRoot[];
+  skills: SessionContextSkill[];
+  counts: SessionContextCounts;
+}
+
+export interface SessionContextContent {
+  content: string;
+  truncated?: boolean;
+  size?: number;
+  previewLimitBytes?: number;
+}
+
+export interface SessionContextRootNode {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  size?: number | null;
+  modifiedAt?: number | null;
+  isTextFile?: boolean;
+}
+
+export interface SessionContextListParams {
+  before?: string;
+  limit?: number;
+}
+
+export interface SessionContextRootListParams {
+  path?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface SessionContextRootPage {
+  items: SessionContextRootNode[];
+  hasMore: boolean;
+  nextOffset: number | null;
 }
 
 export const sessionApi = {
@@ -231,12 +328,99 @@ export const sessionApi = {
     return response.data;
   },
 
+  getContext: async (
+    sessionId: string,
+    params: SessionContextListParams = {},
+    signal?: AbortSignal,
+  ): Promise<SessionContextSnapshot> => {
+    const response = await client.get<SessionContextSnapshot>(`/api/session/${sessionId}/context`, {
+      params: { ...params, limit: Math.min(params.limit ?? 100, 200) },
+      signal,
+    });
+    return response.data;
+  },
+
+  getContextFile: async (
+    sessionId: string,
+    resourceId: string,
+    signal?: AbortSignal,
+  ): Promise<SessionContextFile> => {
+    const response = await client.get<SessionContextFile>(
+      `/api/session/${sessionId}/context/files/${resourceId}/metadata`,
+      { signal },
+    );
+    return response.data;
+  },
+
+  readContextFile: async (
+    sessionId: string,
+    resourceId: string,
+    signal?: AbortSignal,
+  ): Promise<SessionContextContent> => {
+    const response = await client.get<SessionContextContent>(
+      `/api/session/${sessionId}/context/files/${resourceId}/content`,
+      { signal },
+    );
+    return response.data;
+  },
+
+  contextFilePreviewUrl: (sessionId: string, resourceId: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/files/${resourceId}/preview`,
+
+  contextFileDownloadUrl: (sessionId: string, resourceId: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/files/${resourceId}/download`,
+
+  addContextFolder: async (sessionId: string, path: string, displayName?: string) => {
+    const response = await client.post(`/api/session/${sessionId}/context/folders`, {
+      path,
+      ...(displayName ? { displayName } : {}),
+    });
+    return response.data;
+  },
+
+  removeContextFolder: async (sessionId: string, rootId: string) => {
+    const response = await client.delete(`/api/session/${sessionId}/context/folders/${rootId}`);
+    return response.data;
+  },
+
+  listContextRoot: async (
+    sessionId: string,
+    rootId: string,
+    params: SessionContextRootListParams = {},
+    signal?: AbortSignal,
+  ): Promise<SessionContextRootPage> => {
+    const response = await client.get<SessionContextRootPage>(
+      `/api/session/${sessionId}/context/roots/${rootId}/list`,
+      { params: { path: '', offset: 0, ...params, limit: Math.min(params.limit ?? 100, 200) }, signal },
+    );
+    return response.data;
+  },
+
+  readContextRootFile: async (
+    sessionId: string,
+    rootId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<SessionContextContent> => {
+    const response = await client.get<SessionContextContent>(
+      `/api/session/${sessionId}/context/roots/${rootId}/content`,
+      { params: { path }, signal },
+    );
+    return response.data;
+  },
+
+  contextRootPreviewUrl: (sessionId: string, rootId: string, path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/roots/${rootId}/preview?path=${encodeURIComponent(path)}`,
+
+  contextRootDownloadUrl: (sessionId: string, rootId: string, path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/session/${sessionId}/context/roots/${rootId}/download?path=${encodeURIComponent(path)}`,
+
   /**
    * 发送消息
    */
   sendMessage: async (sessionId: string, data: {
     role?: string;
-    parts: Array<{ type: string; text: string }>;
+    parts: Array<Record<string, unknown>>;
     noReply?: boolean;
     mockReply?: string;
   }) => {

@@ -235,6 +235,13 @@ class TestSystemPromptRuntimeMetadata:
         assert "Model: claude-sonnet-4-20250514" in block
         assert "Provider: anthropic" in block
 
+    def test_describes_owner_safe_output_routing_without_a_host_path(self) -> None:
+        block = SystemPrompt.runtime_metadata()[0]
+
+        assert "use a filename-only path" in block
+        assert "dated Workspace outputs directory" in block
+        assert "workspace/users/" not in block
+
     def test_omits_optional_lines_when_unset(self) -> None:
         block = SystemPrompt.runtime_metadata()[0]
         assert "Session ID:" not in block

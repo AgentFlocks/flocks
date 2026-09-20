@@ -13,6 +13,7 @@ import datetime as dt
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -76,13 +77,27 @@ def _get_workspace_dir() -> Path:
     return Config.get_data_path().parent / "workspace"
 
 
+@dataclass(frozen=True)
+class WorkspaceOutputScope:
+    """Canonical path/root and POSIX relative path for a Workspace output.
+
+    ``username`` is the matched normalized username, or None for global outputs.
+    """
+
+    path: Path
+    root: Path
+    relative_path: str
+    username: Optional[str]
+
+
 class WorkspaceManager:
     """
     Singleton manager for the workspace directory.
 
-    All path arguments accepted by public methods are relative to the
-    workspace root (or memory root for memory methods).  Absolute paths
-    are rejected to prevent path traversal attacks.
+    Path arguments accepted by public methods are relative to the workspace
+    root (or memory root for memory methods); absolute paths are rejected to
+    prevent path traversal attacks. The read-only ``resolve_output_scope``
+    classifier is the exception: it accepts absolute host paths.
     """
 
     _instance: Optional["WorkspaceManager"] = None
@@ -231,6 +246,60 @@ class WorkspaceManager:
     # ------------------------------------------------------------------ #
     # Path safety
     # ------------------------------------------------------------------ #
+
+    def resolve_output_scope(
+        self,
+        filepath: str | Path,
+        *,
+        username: Optional[str] = None,
+    ) -> Optional[WorkspaceOutputScope]:
+        """Classify an absolute host path in the supplied user's or global outputs.
+
+        Unlike the relative-path APIs, this only describes a path: it neither
+        creates directories nor requires the target to exist. Callers must
+        check file existence/type separately. Traversal and cross-scope symlinks
+        are rejected. The workspace itself may be a symlink, but scope roots
+        must retain their location beneath it; links within a root may only
+        resolve within that same root.
+        """
+        try:
+            candidate = Path(filepath).expanduser()
+            if not candidate.is_absolute() or ".." in candidate.parts:
+                return None
+            lexical_workspace = self.get_workspace_dir().expanduser().absolute()
+            workspace = lexical_workspace.resolve(strict=False)
+            target = candidate.resolve(strict=False)
+            roots = []
+            if username:
+                roots.append((
+                    self.get_user_workspace_dir(username) / "outputs",
+                    self.normalize_username_for_path(username),
+                ))
+            roots.append((self.get_workspace_dir() / "outputs", None))
+            for output_root, scope_username in roots:
+                lexical_root = output_root.expanduser().absolute()
+                expected_root = workspace / lexical_root.relative_to(lexical_workspace)
+                if not (
+                    candidate.is_relative_to(lexical_root)
+                    or candidate.is_relative_to(expected_root)
+                ):
+                    continue
+                root = lexical_root.resolve(strict=False)
+                # Checking workspace containment alone could label another user's
+                # outputs as this scope when outputs/ or one of its parents links there.
+                if root != expected_root:
+                    continue
+                if target == root or not target.is_relative_to(root):
+                    continue
+                return WorkspaceOutputScope(
+                    path=target,
+                    root=root,
+                    relative_path=target.relative_to(root).as_posix(),
+                    username=scope_username,
+                )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+        return None
 
     def resolve_workspace_path(self, rel_path: str) -> Path:
         """
