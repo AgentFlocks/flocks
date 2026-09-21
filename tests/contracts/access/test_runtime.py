@@ -393,6 +393,66 @@ def test_query_sqlite_json_driver_treats_unwritten_store_as_empty(
     assert response.body["meta"]["sourcePageId"] == SOURCE_PAGE_ID
 
 
+def test_query_sqlite_json_driver_leaves_name_resolution_to_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """SQLite table names are case-insensitive; a configured name in another
+    case is a real source and the empty-store shortcut must not swallow it."""
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    _write_contract_sqlite(db_path, [_contract_record(id="present")])
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={"table": "Records", "recordColumn": "record_json", "dateColumn": "record_date"},
+            ),
+        ),
+    )
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"limit": 10}},
+        principal=AuthUser(id="u1", username="alice", role="admin"),
+    )
+
+    assert [item["id"] for item in response.body["items"]] == ["present"]
+
+
+def test_query_sqlite_json_driver_reports_a_misconfigured_column(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Only a missing table is an empty store; any other query failure (here a
+    wrong record column) is still a 500 so a bad config does not look like
+    "no alerts yet"."""
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    _write_contract_sqlite(db_path, [_contract_record(id="present")])
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={"table": "records", "recordColumn": "nope", "dateColumn": "record_date"},
+            ),
+        ),
+    )
+
+    with pytest.raises(ContractRuntimeError) as exc_info:
+        runtime.execute(
+            page_id=PAGE_ID,
+            contract_id=CONTRACT_ID,
+            operation_name="list",
+            payload={"params": {"limit": 10}},
+            principal=AuthUser(id="u1", username="alice", role="admin"),
+        )
+
+    assert exc_info.value.code == "data_source_unavailable"
+    assert exc_info.value.status_code == 500
+    assert "no such column" in exc_info.value.admin_message
+
+
 def test_query_sqlite_json_driver_still_reports_a_broken_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
     db_path = tmp_path / "contract_records.db"

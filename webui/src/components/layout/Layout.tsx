@@ -1409,7 +1409,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                   ? effectiveExpandedPrimaryNavSectionId !== sectionId
                   : collapsedNavSectionIds.has(sectionId)
               );
-              const sectionWorkspace = section.workspace ?? null;
               const reorderable = Boolean(section.collapsible) && section.items.length > 1;
               const actionsWorkspace = section.actionsWorkspace ?? null;
               const showSocWorkspaceActions = !collapsed && isSocWorkspace(actionsWorkspace);

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -156,17 +157,22 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
 
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
 async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
-    return _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only))
+    # Directory scans plus the hub catalog signature: keep them off the event loop.
+    return await asyncio.to_thread(
+        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only))
+    )
 
 
 def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUIWorkspaceListItem]:
-    """Tag each workspace with the scene suite that ships it and drop scene
-    workspaces no suite knows about.
+    """Tag each workspace with the scene suite that ships it and drop
+    user-root scene workspaces no suite knows about.
 
-    Scenes are only ever installed through the suite manager, so a
-    ``sceneWorkspace`` directory without a suite in the catalog is a leftover
-    (typically from a build of another branch) whose backend is not here; the
-    navigation must not open it. Workbench pages are not scenes and stay.
+    Scenes reach the user root (~/.flocks/plugins/contracts/webui) only through
+    the suite manager, so a ``sceneWorkspace`` directory there without a suite
+    in the catalog is a leftover (typically from a build of another branch)
+    whose backend is not here; the navigation must not open it. Scenes checked
+    into the project root are development work and stay, as do workbench pages,
+    which are not scenes.
     """
     try:
         owners = scene_suite_workspace_owners()
@@ -177,7 +183,7 @@ def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUI
     result: list[WebUIWorkspaceListItem] = []
     for workspace in workspaces:
         suite_id = owners.get(workspace.id)
-        if suite_id is None and workspace.placement == "sceneWorkspace":
+        if suite_id is None and workspace.placement == "sceneWorkspace" and not workspace.native:
             # The list is fetched on every navigation refresh; say it once.
             if workspace.id not in _hidden_scene_workspaces_logged:
                 _hidden_scene_workspaces_logged.add(workspace.id)

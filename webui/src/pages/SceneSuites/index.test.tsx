@@ -269,12 +269,25 @@ describe('SceneSuitesPage', () => {
     expect(soc.textContent).toContain('已装 v1.0.0 · 最新 v1.0.0 · 场景页面 v1.1.7 → v1.1.8');
   });
 
-  it('does not mention the page package while it matches the catalog', async () => {
-    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, workspaceVersion: '1.1.8', workspaceLatestVersion: '1.1.8' }] });
+  it.each([
+    ['matches the catalog', '1.1.8', '1.1.8'],
+    ['is newer than the catalog', '1.1.10', '1.1.9'],
+  ])('does not mention the page package while it %s', async (_label, installed, latest) => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, workspaceVersion: installed, workspaceLatestVersion: latest }] });
     renderPage();
 
     const soc = await waitFor(() => card('soc-workspace'));
     expect(soc.textContent).not.toContain('场景页面');
+  });
+
+  it('compares page package versions numerically, not as strings', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{
+      ...SOC, state: 'updateAvailable' as const, workspaceVersion: '1.1.9', workspaceLatestVersion: '1.1.10',
+    }] });
+    renderPage();
+
+    const soc = await waitFor(() => card('soc-workspace'));
+    expect(soc.textContent).toContain('场景页面 v1.1.9 → v1.1.10');
   });
 
   it('reports a failed action instead of pretending it worked', async () => {

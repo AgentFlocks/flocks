@@ -90,12 +90,22 @@ class SqliteJsonDriverExecutor:
         try:
             connection = sqlite3.connect(db_path)
             try:
-                if not _sqlite_table_exists(connection, table):
-                    return _empty_sqlite_result(db_path)
                 cursor = connection.execute(query, query_params)
                 raw_records = cursor.fetchall()
             finally:
                 connection.close()
+        except sqlite3.OperationalError as exc:
+            # Let SQLite resolve the table name itself (case-insensitive; views
+            # are not a supported source, the query orders by rowid) and only
+            # treat "the table is not there yet" as an empty store.
+            if _is_missing_table_error(exc):
+                return _empty_sqlite_result(db_path)
+            raise ContractRuntimeError(
+                "data_source_unavailable",
+                status_code=500,
+                user_message="WebUI contract SQLite database cannot be queried.",
+                admin_message=f"SQLite query failed for {db_path}: {exc}",
+            ) from exc
         except sqlite3.Error as exc:
             raise ContractRuntimeError(
                 "data_source_unavailable",
@@ -410,12 +420,8 @@ def _read_string(value: Any, fallback: str) -> str:
     return value if isinstance(value, str) and value else fallback
 
 
-def _sqlite_table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    cursor = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-        (table,),
-    )
-    return cursor.fetchone() is not None
+def _is_missing_table_error(exc: sqlite3.OperationalError) -> bool:
+    return str(exc).lower().startswith("no such table")
 
 
 def _empty_sqlite_result(db_path: Path) -> DriverResult:

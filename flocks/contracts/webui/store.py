@@ -102,6 +102,23 @@ def get_project_webui_pages_root(project_dir: Optional[Path] = None) -> Path:
     return (base / ".flocks" / "plugins" / "contracts" / "webui").resolve()
 
 
+def _replace_with_retry(src: Path, dst: Path, attempts: int = 4) -> None:
+    """``os.replace`` that survives a reader holding ``dst`` open on Windows.
+
+    Windows refuses to replace a file another handle has open (WinError 32);
+    a reader on a worker thread only holds it for microseconds, so a few short
+    retries are enough. Other platforms never raise here.
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 class WebUIPagesStore:
     """CRUD and scan helpers for user-space WebUI pages."""
 
@@ -226,10 +243,15 @@ class WebUIPagesStore:
         overrides = self.read_workspace_enabled_overrides()
         overrides[workspace_id] = bool(enabled)
         self.ensure_root()
-        self._workspace_state_path().write_text(
+        # Readers may run on a worker thread; swap the file in whole so they
+        # never see a truncated state.
+        state_path = self._workspace_state_path()
+        tmp_path = state_path.with_name(f"{state_path.name}.tmp-{os.getpid()}")
+        tmp_path.write_text(
             json.dumps({"enabled": overrides}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        _replace_with_retry(tmp_path, state_path)
         for workspace in self.list_workspaces():
             if workspace.id == workspace_id:
                 return workspace
@@ -344,6 +366,7 @@ class WebUIPagesStore:
                         defaultPageId=manifest.defaultPageId,
                         sections=manifest.sections,
                         pages=pages,
+                        native=self._project_root is not None and root == self._project_root,
                     )
                 )
         workspaces.sort(key=lambda item: (item.order, item.title))

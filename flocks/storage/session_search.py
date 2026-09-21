@@ -23,8 +23,9 @@ _SESSION_BACKFILL_KEY = "history-v1"
 _reconcile_locks: dict[str, asyncio.Lock] = {}
 
 _SESSION_SEARCH_UNAVAILABLE_MESSAGE = (
-    "Session search is unavailable because this SQLite runtime does not "
-    "support FTS5. Session messages will continue to be stored normally."
+    "Session search is unavailable because this SQLite runtime cannot provide "
+    "the session search index (FTS5 missing, or an index it cannot open). "
+    "Session messages will continue to be stored normally."
 )
 
 
@@ -203,6 +204,24 @@ async def ensure_session_search_tables(db_path: Path) -> bool:
         )
         existing_tables = {row[0] for row in await cursor.fetchall()}
         await db.executescript(session_search_schema_sql(tokenizer))
+        # A database created on a newer SQLite keeps the tokenizer it was built
+        # with; if this runtime cannot open that table every message write
+        # would fail inside the FTS sync hook. Turn search off instead.
+        try:
+            await db.execute("SELECT rowid FROM session_transcript_fts LIMIT 0")
+        except sqlite3.OperationalError as exc:
+            if not _is_tokenizer_error(exc):
+                raise
+            log.warning(
+                "session_search.existing_index_unsupported",
+                {"sqlite": sqlite3.sqlite_version, "error": str(exc)},
+            )
+            await db.execute(
+                "DELETE FROM session_transcript_meta WHERE key = ?",
+                (_SESSION_BACKFILL_KEY,),
+            )
+            await db.commit()
+            return False
         if existing_tables != {
             "session_transcript_index_state",
             "session_transcript_fts",

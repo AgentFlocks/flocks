@@ -9,7 +9,6 @@ import {
 import { hubAPI, type HubSceneSuite } from '@/api/hub';
 import { useSSE } from '@/hooks/useSSE';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
-import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
@@ -28,7 +27,6 @@ export default function WebUIContractWorkspaceHost() {
   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
   // Hidden tabs stay mounted; the override must follow the tab on screen.
   const paneActive = useContext(PaneActiveContext);
-  const workspacePageOrders = useWorkspacePageOrders();
   // A workspace that is missing may simply belong to a suite this edition
   // cannot install; say so instead of "not found".
   const [missingSuite, setMissingSuite] = useState<HubSceneSuite | null>(null);
@@ -74,12 +72,11 @@ export default function WebUIContractWorkspaceHost() {
     () => (workspace ? buildWebUIContractWorkspaceSections(workspace, i18n.language) : []),
     [i18n.language, workspace],
   );
-  // Same sequence as the sidebar menu: section order, then the user's drag order.
+  // Declared order (section by section); only used to find the current page
+  // and a fallback default, so the sidebar's per-section drag order is not needed here.
   const pages = useMemo(
-    () => (workspace
-      ? workspacePageOrders.apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language))
-      : []),
-    [i18n.language, workspace, workspacePageOrders],
+    () => (workspace ? buildWebUIContractWorkspacePageList(workspace, i18n.language) : []),
+    [i18n.language, workspace],
   );
   useEffect(() => {
     if (loading || !workspaceId || workspace) {

@@ -203,6 +203,52 @@ async def test_ensure_session_search_tables_falls_back_on_old_sqlite_tokenizer(
 
 
 @pytest.mark.asyncio
+async def test_ensure_session_search_tables_disables_search_when_existing_index_cannot_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """An FTS table built on a newer SQLite keeps its tokenizer; when this
+    runtime cannot open it, search is switched off rather than letting every
+    message write fail inside the sync hook."""
+
+    class ForeignIndexConnection:
+        def __init__(self):
+            self.statements: list[str] = []
+            self.committed = False
+
+        async def executescript(self, sql: str):
+            self.statements.append(sql)
+
+        async def execute(self, sql: str, _parameters=()):
+            self.statements.append(sql)
+            if "SELECT rowid FROM session_transcript_fts" in sql:
+                raise sqlite3.OperationalError("error in tokenizer constructor")
+            cursor = Mock()
+            cursor.fetchall = AsyncMock(return_value=[("session_transcript_index_state",), ("session_transcript_fts",)])
+            return cursor
+
+        async def commit(self):
+            self.committed = True
+
+    class ForeignIndexContext:
+        def __init__(self):
+            self.connection = ForeignIndexConnection()
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return None
+
+    context = ForeignIndexContext()
+    monkeypatch.setattr(Storage, "connect", classmethod(lambda _cls, _path=None: context))
+
+    assert not await ensure_session_search_tables(tmp_path / "foreign-index.db")
+    assert context.connection.committed
+    assert any("DELETE FROM session_transcript_meta" in s for s in context.connection.statements)
+
+
+@pytest.mark.asyncio
 async def test_messages_persist_when_session_search_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -241,7 +287,7 @@ async def test_session_search_reports_fts5_unavailable(
 
     with pytest.raises(
         SessionSearchUnavailableError,
-        match="SQLite runtime does not support FTS5",
+        match="cannot provide the session search index",
     ):
         await session_fts_search(
             db_path=Storage.get_db_path(),
@@ -271,7 +317,7 @@ async def test_memory_manager_starts_without_fts5_and_session_search_fails_clear
     assert manager._initialized
     with pytest.raises(
         SessionSearchUnavailableError,
-        match="SQLite runtime does not support FTS5",
+        match="cannot provide the session search index",
     ):
         await manager.search(
             query="anything",

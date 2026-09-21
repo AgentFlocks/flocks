@@ -116,6 +116,18 @@ function progressEntry(suite: HubSceneSuite) {
   return { id: suite.id, name: suite.name, nameCn: suite.nameCn ?? undefined };
 }
 
+/** Numeric compare of dotted versions ("1.1.8" < "1.1.10"); non-numeric parts count as 0. */
+function compareVersions(a: string, b: string): number {
+  const parse = (value: string) => (value.match(/\d+/g) ?? []).map(Number);
+  const left = parse(a);
+  const right = parse(b);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 function suiteName(suite: HubSceneSuite, zh: boolean): string {
   return (zh && suite.nameCn) ? suite.nameCn : suite.name;
 }
@@ -297,7 +309,7 @@ export default function SceneSuitesPage() {
           const pagesBehind = isInstalled
             && !!suite.workspaceVersion
             && !!suite.workspaceLatestVersion
-            && suite.workspaceVersion !== suite.workspaceLatestVersion;
+            && compareVersions(suite.workspaceVersion, suite.workspaceLatestVersion) < 0;
           const busy = busyId === suite.id;
           const targeted = !!targetWorkspace && targetWorkspace === suite.workspaceId;
           return (

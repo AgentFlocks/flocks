@@ -1420,7 +1420,7 @@ class Storage:
             cls._log.warn(
                 "storage.session_search.disabled",
                 {
-                    "reason": "SQLite runtime does not support FTS5",
+                    "reason": "SQLite runtime cannot provide the session search index (see session_search.* warnings)",
                     "db_path": str(cls._db_path),
                 },
             )

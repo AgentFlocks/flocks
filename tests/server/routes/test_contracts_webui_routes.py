@@ -176,6 +176,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                 },
             ],
             "suiteId": "scene-suite",
+            "native": False,
         }
     ]
 
@@ -216,6 +217,27 @@ async def test_list_webui_workspaces_hides_scene_workspaces_without_a_suite(
 
     assert fallback.status_code == 200
     assert sorted(item["id"] for item in fallback.json()) == ["bench_ui", "code_security", "soc_ui"]
+
+
+@pytest.mark.asyncio
+async def test_list_webui_workspaces_keeps_project_scenes_without_a_suite(
+    client: AsyncClient, tmp_path, monkeypatch
+):
+    """A scene checked into the project root is development work, not a leftover:
+    it stays reachable even though no suite in the catalog references it."""
+    user_root = tmp_path / "user_webui"
+    project_root = tmp_path / "project_webui"
+    monkeypatch.setenv("FLOCKS_CONTRACTS_WEBUI_ROOT", str(user_root))
+    store = WebUIPagesStore(root=user_root, project_root=project_root)
+    webui_routes.reset_route_dependencies(store=store, builder=WebUIPageBuilder(store))
+    _write_workspace(project_root, "draft_scene", "开发中的场景", "sceneWorkspace", [("draft-page", "draft_page", "草稿页", 10)])
+    _write_workspace(user_root, "leftover_scene", "残留场景", "sceneWorkspace", [("left-page", "left_page", "残留页", 10)])
+
+    with patch.object(webui_routes, "scene_suite_workspace_owners", return_value={}):
+        resp = await client.get("/api/contracts/webui/workspaces")
+
+    assert resp.status_code == 200
+    assert [(item["id"], item["native"], item["suiteId"]) for item in resp.json()] == [("draft_scene", True, None)]
 
 
 @pytest.mark.asyncio
