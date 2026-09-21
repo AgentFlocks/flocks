@@ -13,6 +13,13 @@ from flocks.updater.models import UpdateProgress, VersionInfo
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_upgrade_logs(monkeypatch, tmp_path):
+    # `flocks update` appends to the upgrade text log (FLOCKS_LOG_DIR, else ~/.flocks/logs);
+    # keep every test in this module out of the developer's real ~/.flocks
+    monkeypatch.setenv("FLOCKS_LOG_DIR", str(tmp_path / "logs"))
+
+
 async def _noop_log_init(**_: object) -> None:
     return None
 
@@ -344,3 +351,183 @@ def test_update_reports_handoff_preparation_failure(monkeypatch, tmp_path) -> No
 
     assert excinfo.value.exit_code == 1
     assert "handoff preparation failed" in output.getvalue()
+
+
+def test_update_pro_bundle_option_installs_without_touching_core_update(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = StringIO()
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    async def fail_update(**_: object) -> None:
+        raise AssertionError("core update must not run with --pro-bundle")
+
+    monkeypatch.setattr(update_cmd, "_update", fail_update)
+
+    captured: dict[str, object] = {}
+
+    async def fake_pro_install(*, restart: bool):
+        captured["restart"] = restart
+        yield UpdateProgress(stage="fetching", message="Using local Flocks Pro bundle /opt/flocks/bundle...")
+        yield UpdateProgress(stage="applying", message="Keeping local Flocks v2026.9.14 and installing the Pro component...")
+        yield UpdateProgress(stage="done", message="Upgraded to v2026.9.14", success=True)
+
+    monkeypatch.setattr(updater_pkg, "perform_pro_bundle_install", fake_pro_install)
+
+    result = runner.invoke(cli_main.app, ["update", "--pro-bundle", "--no-restart"])
+
+    assert result.exit_code == 0, result.stdout
+    assert captured == {"restart": False}
+    assert "Pro 组件已安装" in output.getvalue()
+
+
+def test_update_pro_bundle_option_reports_error_stage(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = StringIO()
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    async def fake_pro_install(*, restart: bool):
+        yield UpdateProgress(stage="error", message="Local Flocks Pro bundle is invalid: missing wheel", success=False)
+
+    monkeypatch.setattr(updater_pkg, "perform_pro_bundle_install", fake_pro_install)
+
+    result = runner.invoke(cli_main.app, ["update", "--pro-bundle"])
+
+    assert result.exit_code == 1
+    assert "missing wheel" in output.getvalue()
+
+
+def test_update_cli_explains_offline_install(monkeypatch, tmp_path) -> None:
+    import flocks.updater.deploy as deploy_mod
+
+    output = StringIO()
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=200),
+    )
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "offline")
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "offline")
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        return VersionInfo(
+            current_version="2026.9.14",
+            latest_version="2026.10.1",
+            has_update=True,
+            deploy_mode="offline",
+            update_allowed=False,
+        )
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("perform_update must not run on an offline install")
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+
+    result = runner.invoke(cli_main.app, ["update", "--yes", "--region", "cn"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "flocks-offline.run" in output.getvalue()
+
+
+def test_update_cli_offline_install_gets_run_guidance_even_when_the_version_check_fails(monkeypatch, tmp_path) -> None:
+    """R9: on an offline deployment the .run guidance comes first; a failed remote check is not an error."""
+    import flocks.updater.deploy as deploy_mod
+
+    output = StringIO()
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=200),
+    )
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "offline")
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "offline")
+
+    async def local_only_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        # what check_update returns on an offline deployment: local state, no latest, no error
+        return VersionInfo(current_version="2026.9.14", deploy_mode="offline", update_allowed=False)
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("perform_update must not run on an offline install")
+
+    monkeypatch.setattr(updater_pkg, "check_update", local_only_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+
+    # the third form has no --yes / --region: on an online install it would prompt for the CN
+    # mirror first; an offline install must answer before asking anything (stdin is closed here)
+    for args in (["update", "--check", "--region", "cn"], ["update", "--yes", "--region", "cn"], ["update"]):
+        output.seek(0)
+        output.truncate(0)
+        result = runner.invoke(cli_main.app, args)
+        text = output.getvalue()
+        assert result.exit_code == 0, text
+        assert "flocks-offline.run" in text
+        assert "检查失败" not in text and "是否使用中国镜像" not in text
+        assert "v2026.9.14" in text
+        # the guidance is printed before the version info, not after it
+        assert text.index("flocks-offline.run") < text.index("v2026.9.14")
+
+
+def test_update_check_with_pro_bundle_only_reports_and_never_installs(monkeypatch, tmp_path) -> None:
+    """`--check --pro-bundle` must describe the bundle and stop: no install, no restart, with or without --no-restart."""
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = StringIO()
+    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, color_system=None, width=160))
+
+    async def fail_pro_install(**_: object):
+        raise AssertionError("--check must not install the Pro bundle")
+        yield  # pragma: no cover - makes this an async generator like the real one
+
+    async def fail_update(**_: object) -> None:
+        raise AssertionError("core update must not run with --pro-bundle")
+
+    async def fake_describe(**_: object) -> dict:
+        return {
+            "source": "local", "location": "/opt/flocks/bundle", "bundle_version": "v2026.9.14",
+            "core_version": "v2026.9.14", "component_version": "2026.8.12", "release_id": "rel_offline_test_1",
+            "prebuilt": True, "current_core_version": "2026.9.14", "installed": False,
+            "installed_bundle_version": None, "installed_component_version": None,
+        }
+
+    monkeypatch.setattr(updater_pkg, "perform_pro_bundle_install", fail_pro_install)
+    monkeypatch.setattr(updater_pkg, "describe_pro_bundle", fake_describe)
+    monkeypatch.setattr(update_cmd, "_update", fail_update)
+
+    for args in (["update", "--check", "--pro-bundle"], ["update", "--check", "--pro-bundle", "--no-restart"]):
+        output.seek(0)
+        output.truncate(0)
+        result = runner.invoke(cli_main.app, args)
+        text = output.getvalue()
+        assert result.exit_code == 0, text
+        assert "/opt/flocks/bundle" in text and "2026.8.12" in text and "rel_offline_test_1" in text
+        assert "未安装" in text and "本次未安装任何东西" in text
+
+
+def test_update_check_with_pro_bundle_reports_lookup_failure(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = StringIO()
+    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, color_system=None, width=160))
+
+    async def no_bundle(**_: object) -> dict:
+        raise RuntimeError("Console unreachable and no local bundle")
+
+    monkeypatch.setattr(updater_pkg, "describe_pro_bundle", no_bundle)
+    result = runner.invoke(cli_main.app, ["update", "--check", "--pro-bundle"])
+    assert result.exit_code == 1
+    assert "检查失败" in output.getvalue() and "Console unreachable" in output.getvalue()
+

@@ -15,13 +15,23 @@ console = Console()
 
 
 def update_command(
-    check: bool = typer.Option(False, "--check", help="仅检查是否有新版本，不执行升级"),
+    check: bool = typer.Option(False, "--check", help="仅检查是否有新版本，不执行升级（与 --pro-bundle 连用时只显示将安装的 Pro bundle，不安装）"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认直接升级"),
     force: bool = typer.Option(False, "--force", "-f", help="即使已是最新版本也强制重新安装"),
     region: str | None = typer.Option(
         None,
         "--region",
         help="升级镜像区域。设置为 cn 时优先使用中国大陆镜像源。",
+    ),
+    pro_bundle: bool = typer.Option(
+        False,
+        "--pro-bundle",
+        help="安装 Flocks Pro bundle（离线安装包设置了 FLOCKS_PRO_BUNDLE_DIR 时用本地包，否则从 Console 下载）",
+    ),
+    no_restart: bool = typer.Option(
+        False,
+        "--no-restart",
+        help="与 --pro-bundle 连用：只安装组件，不自动重启服务（之后自行执行 flocks restart --server-only）",
     ),
 ):
     """
@@ -31,7 +41,63 @@ def update_command(
     current version to ~/.flocks/version/, extracts and replaces source files,
     re-syncs dependencies, then restarts the service automatically.
     """
+    if pro_bundle:
+        if check:
+            asyncio.run(_check_pro_bundle())
+        else:
+            asyncio.run(_install_pro_bundle(restart=not no_restart))
+        return
     asyncio.run(_update(check=check, yes=yes, force=force, region=region))
+
+
+async def _check_pro_bundle() -> None:
+    """Show what --pro-bundle would install; never installs or restarts."""
+    from flocks.updater import describe_pro_bundle
+
+    try:
+        info = await describe_pro_bundle()
+    except Exception as exc:
+        console.print(f"[red]检查失败：{exc}[/red]")
+        raise typer.Exit(1)
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="dim")
+    table.add_column()
+    table.add_row("来源", ("本地离线包 " if info["source"] == "local" else "Console ") + str(info["location"]))
+    table.add_row("Pro bundle 版本", str(info["bundle_version"]))
+    if info.get("component_version"):
+        table.add_row("Pro 组件版本", str(info["component_version"]))
+    if info.get("core_version"):
+        table.add_row("对应核心版本", f"{info['core_version']}（当前 v{info['current_core_version']}）")
+    if info.get("release_id"):
+        table.add_row("release id", str(info["release_id"]))
+    if info["installed"]:
+        installed = info.get("installed_component_version") or info.get("installed_bundle_version") or "版本未知"
+        table.add_row("当前 Pro 组件", f"已安装（{installed}）")
+    else:
+        table.add_row("当前 Pro 组件", "未安装")
+    console.print(table)
+    if info["installed"] and info.get("installed_component_version") and info.get("component_version") == info.get("installed_component_version"):
+        console.print("[green]✓ 已安装同一版本的 Pro 组件；flocks update --pro-bundle 会原样重装[/green]")
+    else:
+        console.print("[yellow]运行 [bold]flocks update --pro-bundle[/bold] 安装（只检查，本次未安装任何东西）[/yellow]")
+
+
+async def _install_pro_bundle(*, restart: bool) -> None:
+    """Install the Pro bundle (local offline bundle first, Console otherwise)."""
+    from flocks.updater import perform_pro_bundle_install
+
+    async for progress in perform_pro_bundle_install(restart=restart):
+        if progress.stage == "error":
+            append_upgrade_text_log(f"ERROR cli_pro_bundle: {progress.message}")
+            console.print(f"[red]✗ Pro 组件安装失败：{progress.message}[/red]")
+            raise typer.Exit(1)
+        if progress.stage == "fetching" and progress.percent is not None:
+            continue
+        console.print(f"[cyan]{progress.stage}[/cyan] {progress.message}")
+        if progress.stage == "done":
+            append_upgrade_text_log("OK cli_pro_bundle_installed")
+            console.print("[green]✓ Pro 组件已安装[/green]")
 
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
@@ -40,6 +106,16 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
 
     if region is None and is_cn_install_language():
         region = "cn"
+
+    if detect_deploy_mode() == "offline":
+        # Offline package deployments upgrade by running a new .run; say so before asking
+        # about mirrors. check_update() does no network round trips in this mode (it reports
+        # the local version only), so there is nothing to wait for or to fail on here.
+        from flocks.updater.updater import OFFLINE_UPGRADE_REFUSED_MESSAGE
+
+        console.print(f"[yellow]{OFFLINE_UPGRADE_REFUSED_MESSAGE}[/yellow]")
+        _print_version_table(await check_update(region=region))
+        return
 
     if not yes and not check and region is None:
         use_cn_mirror = typer.confirm("\n是否使用中国镜像进行升级？", default=False)
@@ -73,7 +149,6 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             "  [bold]docker restart <container>[/bold][/yellow]"
         )
         return
-
     if check:
         command = "flocks update --force" if force else "flocks update"
         console.print(f"\n[yellow]运行 [bold]{command}[/bold] 执行升级[/yellow]")

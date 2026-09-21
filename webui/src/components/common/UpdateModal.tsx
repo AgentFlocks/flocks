@@ -9,6 +9,7 @@ import {
   Loader2,
   Sparkles,
   Container,
+  HardDrive,
   BellOff,
 } from 'lucide-react';
 import NoticeCard, { NoticePrimaryAction } from './NoticeCard';
@@ -77,7 +78,7 @@ export default function UpdateModal({
   const [checking, setChecking] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialInfo?.error ?? null);
   const [restarting, setRestarting] = useState(false);
   const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
   const currentDisplayVersion = edition === 'flockspro'
@@ -344,29 +345,38 @@ export default function UpdateModal({
       >
           <div className="px-4 py-4">
             {info?.has_update ? (
-              <>
-                <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
-                  <div className="font-medium">
-                    {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
-                  </div>
-                  <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
+              <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+                <div className="font-medium">
+                  {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
                 </div>
-                {info.update_allowed === false && (
-                  <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
-                    <div className="flex items-center gap-1.5 font-medium">
-                      <Container className="w-3.5 h-3.5 flex-shrink-0" />
-                      {t('dockerModeTitle')}
-                    </div>
-                    <p className="mt-1 leading-5">{t('dockerModeDesc')}</p>
-                    <code className="mt-1.5 block rounded bg-blue-100 px-2 py-1 text-xs text-blue-900 select-all">
-                      {t('dockerUpgradeHint')}
-                    </code>
-                  </div>
-                )}
-              </>
+                <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
+              </div>
             ) : (
               <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-                {checking ? t('checkUpdate') : error ?? t('upToDate')}
+                {checking
+                  ? t('checkUpdate')
+                  : error ?? (info?.deploy_mode === 'offline' && !info.latest_version ? t('offlineNotChecked') : t('upToDate'))}
+              </div>
+            )}
+            {/* The deploy-mode notice does not depend on has_update: an offline package
+                deployment usually cannot reach the update server at all, and the answer to
+                "how do I upgrade" is the .run either way. */}
+            {info?.update_allowed === false && (
+              <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
+                <div className="flex items-center gap-1.5 font-medium">
+                  {info.deploy_mode === 'offline' ? (
+                    <HardDrive className="w-3.5 h-3.5 flex-shrink-0" />
+                  ) : (
+                    <Container className="w-3.5 h-3.5 flex-shrink-0" />
+                  )}
+                  {t(info.deploy_mode === 'offline' ? 'offlineModeTitle' : 'dockerModeTitle')}
+                </div>
+                <p className="mt-1 leading-5">
+                  {t(info.deploy_mode === 'offline' ? 'offlineModeDesc' : 'dockerModeDesc')}
+                </p>
+                <code className="mt-1.5 block rounded bg-blue-100 px-2 py-1 text-xs text-blue-900 select-all">
+                  {t(info.deploy_mode === 'offline' ? 'offlineUpgradeHint' : 'dockerUpgradeHint')}
+                </code>
               </div>
             )}
           </div>
