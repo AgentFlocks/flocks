@@ -38,11 +38,13 @@ function Pane({ active, location, routes }: PaneProps) {
   // inside it, so a hidden tab never reacts to the active tab's route.
   const element = useRoutes(routes, location);
   const fullScreen = isFullScreenPath(location.pathname);
+  // Descendants with transition-all can delay inherited visibility changes.
+  // Hide the whole pane immediately with opacity while preserving its layout.
   return (
     <LocationContext.Provider value={{ location, navigationType: NavigationType.Pop }}>
       <PaneActiveContext.Provider value={active}>
         <div
-          className={`absolute inset-0 ${active ? '' : 'invisible pointer-events-none'}`}
+          className={`absolute inset-0 ${active ? '' : 'invisible opacity-0 pointer-events-none'}`}
           aria-hidden={active ? undefined : true}
           inert={!active}
           data-keep-alive-pane={active ? 'active' : 'inactive'}
