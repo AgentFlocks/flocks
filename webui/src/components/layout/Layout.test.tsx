@@ -730,6 +730,23 @@ describe('Layout onboarding entry', () => {
     expect(contentWrapper).not.toHaveClass('flex-col');
   });
 
+  it('keeps the mobile menu button above the partition top bar', async () => {
+    // The top bar is opaque and sits above page toolbars (z-[35]); the fixed
+    // hamburger that opens the drawer on narrow screens lives in the same
+    // stacking context and must stay clickable above it.
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const { container } = renderHomeWithLayout();
+    await flushEffects();
+
+    const level = (el: Element | null) => Number((el?.className.toString().match(/\bz-\[(\d+)\]/) || [])[1]);
+    const hamburger = container.querySelector('[data-mobile-menu-button]');
+    const topBar = container.querySelector('[data-partition-top-bar]');
+    expect(hamburger).not.toBeNull();
+    expect(topBar).not.toBeNull();
+    expect(level(hamburger)).toBeGreaterThan(level(topBar));
+    expect(level(hamburger)).toBeLessThan(40);
+  });
+
   it('polls update checks hourly', async () => {
     vi.useFakeTimers();
 

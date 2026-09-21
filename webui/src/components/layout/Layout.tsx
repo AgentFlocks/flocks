@@ -1668,7 +1668,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       </aside>
 
       {/* Mobile top menu button */}
-      <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-11 px-3 pointer-events-none ${sidebarOpen ? 'hidden' : ''}`}>
+      {/* z-[36]: above the partition top bar (z-[35], opaque, leaves pl-16 for this button) and
+          below the drawer backdrop (z-40); hidden while the drawer is open. */}
+      <div data-mobile-menu-button className={`lg:hidden fixed top-0 left-0 z-[36] flex items-center h-11 px-3 pointer-events-none ${sidebarOpen ? 'hidden' : ''}`}>
         <button
           onClick={() => setSidebarOpen(true)}
           className="pointer-events-auto p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"

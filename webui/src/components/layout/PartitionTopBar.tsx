@@ -60,8 +60,11 @@ export default function PartitionTopBar({
     };
   }, [settingsOpen]);
 
+  // z-[35]: the settings menu hangs below the bar over page content, so the bar
+  // must sit above page chrome (contract pages use z-30 for sticky toolbars)
+  // while staying under the mobile drawer backdrop (z-40) and page dialogs (z-40/50).
   return (
-    <div data-partition-top-bar className="relative z-20 flex h-11 shrink-0 items-center gap-1 border-b border-zinc-200 bg-zinc-100 pl-16 pr-2 lg:pl-3 dark:border-zinc-800 dark:bg-zinc-900">
+    <div data-partition-top-bar className="relative z-[35] flex h-11 shrink-0 items-center gap-1 border-b border-zinc-200 bg-zinc-100 pl-16 pr-2 lg:pl-3 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex min-w-0 flex-1 items-center gap-1">
       <div
         role="tablist"

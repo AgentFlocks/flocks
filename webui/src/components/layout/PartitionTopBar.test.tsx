@@ -74,6 +74,20 @@ describe('PartitionTopBar', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
+  it('stacks the bar above page toolbars so the settings menu is not covered', async () => {
+    // Contract pages put sticky toolbars at z-30 (SOC 概览的时间范围栏); the bar
+    // hosts the menu, so it has to sit above that while staying under the
+    // mobile drawer backdrop (z-40) and page dialogs.
+    const user = userEvent.setup();
+    renderBar();
+    const bar = document.querySelector('[data-partition-top-bar]') as HTMLElement;
+    const level = Number((bar.className.match(/\bz-\[(\d+)\]/) || [])[1]);
+    expect(level).toBeGreaterThan(30);
+    expect(level).toBeLessThan(40);
+    await user.click(screen.getByRole('button', { name: 'partitionSettings' }));
+    expect(bar.contains(screen.getByRole('menu'))).toBe(true);
+  });
+
   it('closes the menu when the pointer leaves it', async () => {
     const user = userEvent.setup();
     renderBar();
