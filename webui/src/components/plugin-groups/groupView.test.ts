@@ -3,7 +3,7 @@ import { createInstance } from 'i18next';
 import enGroups from '@/locales/en-US/pluginGroups.json';
 const i18n = createInstance();
 const t = i18n.t.bind(i18n);
-import { deriveGroupNav, GroupActionCancelled, matchesGroup, orderGroupNames, saveGroupItems } from './groupView';
+import { deriveGroupNav, GroupActionCancelled, groupLabel, matchesGroup, orderGroupNames, saveGroupItems } from './groupView';
 
 beforeEach(async () => {
   vi.restoreAllMocks();
@@ -11,6 +11,24 @@ beforeEach(async () => {
 });
 
 describe('native group view helpers', () => {
+  it('only translates exact known defaults, not custom names or translation-key-like names', () => {
+    for (const [nativeName, label] of Object.entries(enGroups.defaultNames)) {
+      expect(groupLabel(nativeName, t)).toBe(label);
+    }
+    for (const name of ['客户自定义', 'NDR', 'defaultNames', 'toString', '__proto__', 'custom.group', 'custom:group']) {
+      expect(groupLabel(name, t)).toBe(name);
+    }
+  });
+
+  it('localizes the confirmation destination without changing the saved group', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const save = vi.fn().mockResolvedValue(undefined);
+    await saveGroupItems([{ key: 'custom', name: 'Custom' }], '平台集成', save, vi.fn(), t, true);
+    expect(confirm.mock.lastCall?.[0]).toContain('Platform Integrations');
+    expect(confirm.mock.lastCall?.[0]).not.toContain('平台集成');
+    expect(save).toHaveBeenCalledExactlyOnceWith('custom', '平台集成');
+  });
+
   it('derives trimmed nonempty names and keeps All distinct from Ungrouped and literal all', () => {
     const result = deriveGroupNav([
       { key: 'a', name: 'A', group: ' Operations ' },

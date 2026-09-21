@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -8,6 +8,7 @@ import PluginGroupButton from './PluginGroupButton';
 import { ToastProvider, useToast } from '@/components/common/Toast';
 import { deriveGroupNav, type GroupNavItem, type GroupSelection } from './groupView';
 import messages from '@/locales/en-US/pluginGroups.json';
+import zhMessages from '@/locales/zh-CN/pluginGroups.json';
 
 const move = vi.fn();
 const rename = vi.fn();
@@ -31,9 +32,9 @@ function Example({ inventory, showItems = true, onCreate, onReadOnly = notify }:
 }
 async function mount(items: GroupNavItem[], onCreate?: (key: string, group: string) => Promise<void>) {
   const i18n = createInstance();
-  await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: messages } }, interpolation: { escapeValue: false } });
+  await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: messages }, 'zh-CN': { pluginGroups: zhMessages } }, interpolation: { escapeValue: false } });
   const view = render(<I18nextProvider i18n={i18n}><Example inventory={items} onCreate={onCreate} /></I18nextProvider>);
-  return { ...view, showItems: (showItems: boolean) => view.rerender(<I18nextProvider i18n={i18n}><Example inventory={items} showItems={showItems} onCreate={onCreate} /></I18nextProvider>) };
+  return { ...view, i18n, showItems: (showItems: boolean) => view.rerender(<I18nextProvider i18n={i18n}><Example inventory={items} showItems={showItems} onCreate={onCreate} /></I18nextProvider>) };
 }
 function transfer() {
   const values = new Map<string, string>();
@@ -53,6 +54,53 @@ beforeEach(() => {
 });
 
 describe('pure native GroupNav', () => {
+  it('localizes default names while keeping custom names and the selected native value', async () => {
+    const { i18n } = await mount([
+      { key: 'a', name: 'A', group: '平台集成' },
+      { key: 'b', name: 'B', group: '安全研判' },
+      { key: 'c', name: 'C', group: '系统辅助' },
+      { key: 'custom', name: 'Custom', group: '客户业务组' },
+    ]);
+    expect(screen.getByRole('button', { name: 'Platform Integrations 1' })).toHaveAttribute('title', 'Platform Integrations');
+    expect(screen.getByRole('button', { name: 'Security Analysis 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'System Utilities 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '客户业务组 1' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Platform Integrations 1' }));
+    expect(screen.getByTestId('selection')).toHaveTextContent('"平台集成"');
+    await act(async () => { await i18n.changeLanguage('zh-CN'); });
+    expect(screen.getByRole('button', { name: '平台集成 1' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '安全研判 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '系统辅助 1' })).toBeInTheDocument();
+    expect(move).not.toHaveBeenCalled();
+    expect(localStorage.length).toBe(0);
+  });
+
+  it('shows translated picker labels but sends native values for picker saves and drops', async () => {
+    await mount([
+      { key: 'a', name: 'Alpha' }, { key: 'b', name: 'Beta' },
+      { key: 'builtin', name: 'Built-in', group: '平台集成', readOnlyReason: messages.readOnly.system },
+    ]);
+    fireEvent.click(within(screen.getByTestId('a')).getByRole('button', { name: 'Edit group' }));
+    expect(screen.getByRole('option', { name: 'Platform Integrations' })).toHaveValue('平台集成');
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '平台集成' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(move).toHaveBeenCalledExactlyOnceWith('a', '平台集成'));
+    await screen.findByRole('button', { name: 'Platform Integrations 2' });
+    const dataTransfer = transfer();
+    fireEvent.dragStart(screen.getByTestId('b'), { dataTransfer });
+    fireEvent.drop(screen.getByRole('button', { name: 'Platform Integrations 2' }).parentElement!, { dataTransfer });
+    await waitFor(() => expect(move).toHaveBeenLastCalledWith('b', '平台集成'));
+  });
+
+  it('uses translated action labels without storing translated ordering keys', async () => {
+    await mount([{ key: 'a', name: 'A', group: '平台集成' }, { key: 'b', name: 'B', group: '安全研判' }]);
+    expect(screen.getByRole('button', { name: 'Rename group Platform Integrations' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete group Platform Integrations' })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder group Security Analysis' }), { key: 'ArrowUp' });
+    expect(JSON.parse(localStorage.getItem('flocks:plugin-group-order:test')!)).toEqual(['安全研判', '平台集成']);
+    expect(move).not.toHaveBeenCalled();
+  });
+
   it('only shows a short drag hint, without permanent readonly or implementation explanations', async () => {
     await mount([{ key: 'builtin', name: 'Built-in', group: 'Fixed', readOnlyReason: messages.readOnly.system }]);
     const sidebar = screen.getByRole('complementary');

@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from 'react';
 import { GripVertical, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { GroupActionCancelled, groupItemLabel, groupName, orderGroupNames, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
+import { GroupActionCancelled, groupItemLabel, groupLabel, groupName, orderGroupNames, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
 
 const RESOURCE_MIME = 'application/x-flocks-visible-plugin';
 const ORDER_MIME = 'application/x-flocks-group-order';
@@ -274,8 +274,9 @@ export default function GroupNav({
         <div className="flex" {...dropProps('')}>{navigationButton('', t('ungrouped'), ungroupedCount)}</div>
         {ordered.map((group) => {
           const entry = groups.find((row) => row.name === group) ?? { name: group, count: 0 };
+          const label = groupLabel(group, t);
           return <div key={group} className="flex items-center gap-0.5" {...dropProps(group, group)}>
-            <button type="button" draggable aria-label={t('drag.reorderLabel', { name: group })}
+            <button type="button" draggable aria-label={t('drag.reorderLabel', { name: label })}
               title={t('drag.reorderHint')} className="rounded p-0.5 text-gray-300 hover:text-gray-500"
               onDragStart={(event) => {
                 const token = `${dialogTitleId}-${++orderSequence.current}`;
@@ -291,12 +292,12 @@ export default function GroupNav({
                 const index = ordered.indexOf(group) + (event.key === 'ArrowUp' ? -1 : 1);
                 if (ordered[index]) reorder(group, ordered[index]);
               }}><GripVertical className="h-3 w-3" /></button>
-            {navigationButton(group, group, entry.count)}
+            {navigationButton(group, label, entry.count)}
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('rename')}
-              aria-label={t('renameNamed', { name: group })} onClick={() => { setName(group); setError(''); setDialog({ kind: 'rename', name: group }); }}
+              aria-label={t('renameNamed', { name: label })} onClick={() => { setName(group); setError(''); setDialog({ kind: 'rename', name: group }); }}
               className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Pencil className="h-3 w-3" /></button>
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('delete')}
-              aria-label={t('deleteNamed', { name: group })} onClick={() => void run(() => onDelete(group))}
+              aria-label={t('deleteNamed', { name: label })} onClick={() => void run(() => onDelete(group))}
               className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Trash2 className="h-3 w-3" /></button>
           </div>;
         })}
@@ -324,7 +325,7 @@ export default function GroupNav({
             <select value={destination} onChange={(event) => setDestination(event.target.value)} disabled={busy}
               className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm">
               <option value="">{t('ungrouped')}</option>
-              {ordered.map((group) => <option key={group} value={group}>{group}</option>)}
+              {ordered.map((group) => <option key={group} value={group}>{groupLabel(group, t)}</option>)}
             </select>
           </label>}
           {error && <p role="alert" className="mt-3 whitespace-pre-wrap text-xs text-red-600">{error}</p>}

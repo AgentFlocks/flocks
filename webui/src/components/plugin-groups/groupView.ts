@@ -19,6 +19,16 @@ export interface GroupNavEntry {
 export type GroupSelection = string | null;
 export const groupItemLabel = (item: GroupNavItem): string => item.name === item.key ? item.name : `${item.name} (${item.key})`;
 export const groupName = (value?: string | null): string => value?.trim() ?? '';
+
+/** Localize known default names for display only; native values stay unchanged. */
+export function groupLabel(name: string, t: TFunction): string {
+  const labels = t('pluginGroups:defaultNames', { returnObjects: true });
+  if (labels && typeof labels === 'object' && Object.prototype.hasOwnProperty.call(labels, name)) {
+    const label = (labels as Record<string, unknown>)[name];
+    if (typeof label === 'string') return label;
+  }
+  return name;
+}
 export const matchesGroup = (value: string | null | undefined, selection: GroupSelection): boolean => (
   selection === null || groupName(value) === selection
 );
@@ -71,7 +81,7 @@ export async function saveGroupItems(
   assertGroupItemsEditable(items, t);
   if (confirmScope && !window.confirm(t('pluginGroups:confirmScope', {
     count: items.length,
-    group: group ?? t('pluginGroups:ungrouped'),
+    group: group === null ? t('pluginGroups:ungrouped') : groupLabel(group, t),
     items: items.map(groupItemLabel).join(', '),
   }))) throw new GroupActionCancelled();
 
