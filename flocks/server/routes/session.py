@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 import os
 import time
 from dataclasses import dataclass
@@ -2642,11 +2643,16 @@ def _part_to_response_info(
     resource_id = None
     url_value = getattr(part, "url", None) if part.type == "file" else None
     if part.type == "file":
-        from flocks.session.files import public_resource_id
+        from flocks.session.files import public_resource_id, session_upload_part_path
 
-        resource_id = public_resource_id(message_id, str(part.id))
-        if isinstance(url_value, str) and url_value.startswith("file:"):
-            url_value = f"/api/session/{session_id}/context/files/{resource_id}/preview"
+        # Only a file uploaded into this Session resolves as a context
+        # resource. Channel media keeps its file:// URL: the WebUI turns that
+        # into /api/file/download, which allows the data directory, whereas
+        # the context preview route would answer 404 for it.
+        if session_upload_part_path(session_id, part) is not None:
+            resource_id = public_resource_id(message_id, str(part.id))
+            if isinstance(url_value, str) and url_value.startswith("file:"):
+                url_value = f"/api/session/{session_id}/context/files/{resource_id}/preview"
 
     state_value = None
     if part.type == "tool":
@@ -4170,14 +4176,15 @@ async def _process_session_message_impl(
                 )
             except (FileNotFoundError, OSError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            from flocks.session.files import public_resource_id
+            from flocks.session.files import public_resource_id, session_upload_part_path
 
-            resource_id = public_resource_id(user_message_id, str(file_part_id))
-            public_url = (
-                f"/api/session/{sessionID}/context/files/{resource_id}/preview"
-                if url.startswith("file:")
-                else url
-            )
+            # Same criterion as the history serializer: only a part stored in
+            # this Session's uploads directory is a context resource.
+            resource_id = None
+            public_url = url
+            if session_upload_part_path(sessionID, SimpleNamespace(url=url)) is not None:
+                resource_id = public_resource_id(user_message_id, str(file_part_id))
+                public_url = f"/api/session/{sessionID}/context/files/{resource_id}/preview"
             await publish_event("message.part.updated", {
                 "part": {
                     "id": file_part_id,

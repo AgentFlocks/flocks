@@ -620,6 +620,36 @@ describe('ChatToolPart file operation titles', () => {
     expect(download).toHaveAttribute('href', '/api/session/sess-1/context/files/res-output/download');
   });
 
+  it('renders channel attachments without a context resource through the file route', () => {
+    // Channel inbound media (WeCom / Feishu ...) keeps its file:// URL and has
+    // no resourceID: the image must still render and a non-image file must
+    // still show a chip, both served by /api/file/download.
+    const imageUrl = 'file:///data/channel_media/wecom/acct/2026-09-21/msg_1_shot.png';
+    const fileUrl = 'file:///data/channel_media/wecom/acct/2026-09-21/msg_2_report.pdf';
+    const { container } = render(React.createElement(ChatMessageBubble, {
+      message: {
+        id: 'msg-channel',
+        sessionID: 'sess-1',
+        role: 'user',
+        timestamp: Date.now(),
+        parts: [
+          { id: 'text-1', sessionID: 'sess-1', type: 'text', text: '[图片] 分析图片内容' },
+          { id: 'file-img', sessionID: 'sess-1', type: 'file', mime: 'image/png', filename: '企业微信截图.png', url: imageUrl },
+          { id: 'file-doc', sessionID: 'sess-1', type: 'file', mime: 'application/pdf', filename: 'report.pdf', url: fileUrl },
+        ],
+      } as any,
+    }));
+
+    const image = container.querySelector('img[alt="企业微信截图.png"]');
+    expect(image).toHaveAttribute('src', expect.stringContaining('/api/file/download?path='));
+    expect(image?.getAttribute('src')).toContain(encodeURIComponent('/data/channel_media/wecom/acct/2026-09-21/msg_1_shot.png'));
+    expect(screen.queryByTitle('context.download')).toBeNull();
+
+    const chip = screen.getByText('report.pdf').closest('a');
+    expect(chip).toHaveAttribute('href', expect.stringContaining('/api/file/download?path='));
+    expect(chip).toHaveAttribute('download', 'report.pdf');
+  });
+
   it('does not change summaries for non-file tools', () => {
     const { container } = render(React.createElement(ChatToolPart, {
       part: {

@@ -1,0 +1,11 @@
+{
+  "id": "ai_redteam_ui",
+  "version": "1.0.0",
+  "title": "AI 红队",
+  "titleEn": "AI Redteam",
+  "icon": "Crosshair",
+  "order": 30,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "ai-redteam-overview"
+}

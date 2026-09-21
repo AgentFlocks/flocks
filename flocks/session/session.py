@@ -221,8 +221,16 @@ class Session:
             ]
 
     @classmethod
-    def invalidate_cache(cls) -> None:
-        """Clear in-memory indexes when the underlying storage changes."""
+    def invalidate_cache(cls, session_id: Optional[str] = None) -> None:
+        """Clear in-memory indexes when the underlying storage changes.
+
+        With ``session_id`` only that session leaves the id index and the
+        list cache; without it (database swap / full clear) everything resets.
+        """
+        if session_id:
+            cls._id_index.pop(session_id, None)
+            cls._remove_from_list_cache(session_id)
+            return
         cls._id_index.clear()
         cls._all_sessions_cache = None
 

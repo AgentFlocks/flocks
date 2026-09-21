@@ -5651,7 +5651,31 @@ function ChatMessageBubbleInner({
                     }
                     const messageSessionId = part.sessionID || message.sessionID;
                     const resourceId = part.resourceID || null;
-                    if (!messageSessionId || !resourceId) return null;
+                    if (!messageSessionId || !resourceId) {
+                      // Not a Session upload (channel attachments, for one):
+                      // there is no context resource to open, so show the
+                      // plain chip, downloadable through the file route.
+                      const href = part.url ? getRenderableFileUrl(part.url) : null;
+                      const chipClassName = 'inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700';
+                      const chipBody = (
+                        <>
+                          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
+                        </>
+                      );
+                      return href ? (
+                        <a
+                          key={part.id || `file-${i}`}
+                          href={href}
+                          download={part.filename || 'file'}
+                          className={`${chipClassName} hover:bg-gray-100`}
+                        >
+                          {chipBody}
+                        </a>
+                      ) : (
+                        <div key={part.id || `file-${i}`} className={chipClassName}>{chipBody}</div>
+                      );
+                    }
                     return (
                       <ContextFileCard
                         key={part.id || `file-${i}`}

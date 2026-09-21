@@ -333,10 +333,24 @@ def session_outputs_root(session: Any) -> Path:
 
 
 def _session_file_part_path(session: Any, part: Any) -> Path | None:
+    return session_upload_part_path(str(session.id), part)
+
+
+def session_upload_part_path(session_id: str, part: Any) -> Path | None:
+    """Return the on-disk path of a file part that was uploaded into this Session.
+
+    Only parts stored under the Session's uploads directory are Session
+    resources. Channel media (WeCom / Feishu / DingTalk ... inbound images) is
+    saved under the data directory's ``channel_media`` tree and is served
+    through the guarded ``/api/file/download`` path instead, so it yields None.
+    """
     target = _file_uri_path(str(getattr(part, "url", "") or ""))
     if target is None:
         return None
-    upload_root = session_uploads_dir(str(session.id)).resolve(strict=False)
+    try:
+        upload_root = session_uploads_dir(session_id).resolve(strict=False)
+    except ValueError:
+        return None
     return target if _is_within(upload_root, target) else None
 
 

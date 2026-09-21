@@ -3340,6 +3340,55 @@ class TestSessionContext:
 
 class TestSessionContextRegressions:
     @pytest.mark.asyncio
+    async def test_channel_media_part_keeps_file_url_and_downloads(self, client: AsyncClient, session_id: str):
+        """Channel inbound images live outside the Session uploads dir.
+
+        They are not context resources, so the history API must keep their
+        file:// URL (the WebUI serves it through /api/file/download, which
+        allows the data directory) instead of pointing at the context preview
+        route, which would answer 404 and leave a broken image in the chat.
+        """
+        from flocks.config.config import Config
+        from flocks.session.files import session_uploads_dir
+
+        media_dir = Config.get_data_path() / "channel_media" / "wecom" / "acct" / "2026-09-21"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        image = media_dir / "msg_1_screenshot.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\nchannel")
+        upload_root = session_uploads_dir(session_id)
+        upload_root.mkdir(parents=True, exist_ok=True)
+        upload = upload_root / "prt_upload.png"
+        upload.write_bytes(b"\x89PNG\r\n\x1a\nupload")
+
+        message = await Message.create(session_id, MessageRole.USER, "[图片] 分析图片内容")
+        await Message.add_part(session_id, message.id, FilePart(
+            id="prt_channel_image", sessionID=session_id, messageID=message.id,
+            url=image.as_uri(), mime="image/png", filename="screenshot.png",
+            source={"channel": "wecom", "account_id": "acct", "message_id": "msg_1"},
+        ))
+        await Message.add_part(session_id, message.id, FilePart(
+            id="prt_session_upload", sessionID=session_id, messageID=message.id,
+            url=upload.as_uri(), mime="image/png", filename="upload.png",
+        ))
+
+        history = await client.get(f"/api/session/{session_id}/message")
+        assert history.status_code == status.HTTP_200_OK
+        parts = {part["id"]: part for item in history.json() for part in item["parts"]}
+
+        channel_part = parts["prt_channel_image"]
+        assert channel_part["url"] == image.as_uri()
+        assert channel_part["resourceID"] is None
+        download = await client.get("/api/file/download", params={"path": str(image)})
+        assert download.status_code == status.HTTP_200_OK
+        assert download.content == image.read_bytes()
+
+        upload_part = parts["prt_session_upload"]
+        assert upload_part["resourceID"].startswith("res_")
+        assert upload_part["url"] == (
+            f"/api/session/{session_id}/context/files/{upload_part['resourceID']}/preview"
+        )
+
+    @pytest.mark.asyncio
     async def test_context_pages_and_direct_old_file_metadata(self, client: AsyncClient, session_id: str):
         from flocks.session.files import public_resource_id, session_uploads_dir
 
