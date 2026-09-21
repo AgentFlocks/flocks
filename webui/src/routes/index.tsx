@@ -2,6 +2,7 @@ import { Suspense, lazy } from 'react';
 import type { ComponentType, ReactNode } from 'react';
 import { Routes as RouterRoutes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { safeReturnTo } from '@/utils/sessionUrl';
 import Layout from '@/components/layout/Layout';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
@@ -89,6 +90,17 @@ export function LegacyWebUIContractPageRedirect() {
   );
 }
 
+export function LoginRedirect({ setup = false }: { setup?: boolean }) {
+  const location = useLocation();
+  const returnTo = safeReturnTo(`${location.pathname}${location.search}${location.hash}`);
+  return <Navigate to={`${setup ? '/setup-admin' : '/login'}?${new URLSearchParams({ returnTo })}`} replace />;
+}
+
+export function AuthReturnRedirect() {
+  const location = useLocation();
+  return <Navigate to={safeReturnTo(new URLSearchParams(location.search).get('returnTo'))} replace />;
+}
+
 export function Routes() {
   const { t } = useTranslation('auth');
   const { loading, bootstrapped, error, user, refresh } = useAuth();
@@ -123,7 +135,7 @@ export function Routes() {
         <Suspense fallback={<RoutePageSkeleton />}>
           <RouterRoutes>
             <Route path="/setup-admin" element={<SetupAdminPage />} />
-            <Route path="*" element={<Navigate to="/setup-admin" replace />} />
+            <Route path="*" element={<LoginRedirect setup />} />
           </RouterRoutes>
         </Suspense>
       </LazyLoadErrorBoundary>
@@ -136,7 +148,7 @@ export function Routes() {
         <Suspense fallback={<RoutePageSkeleton />}>
           <RouterRoutes>
             <Route path="/login" element={<LoginPage />} />
-            <Route path="*" element={<Navigate to="/login" replace />} />
+            <Route path="*" element={<LoginRedirect />} />
           </RouterRoutes>
         </Suspense>
       </LazyLoadErrorBoundary>
@@ -155,8 +167,8 @@ export function Routes() {
 
   return (
     <RouterRoutes>
-      <Route path="/login" element={<Navigate to="/" replace />} />
-      <Route path="/setup-admin" element={<Navigate to="/" replace />} />
+      <Route path="/login" element={<AuthReturnRedirect />} />
+      <Route path="/setup-admin" element={<AuthReturnRedirect />} />
       <Route path="/settings/:sectionId?" element={<LazyRoute><SettingsPage /></LazyRoute>} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
@@ -165,7 +177,7 @@ export function Routes() {
         <Route path="user-defined-pages/:pageId/*" element={<LegacyWebUIContractPageRedirect />} />
 
         {/* AI 工作台 */}
-        <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />
+        <Route path="sessions/:sessionId?" element={<LazyRoute><SessionPage /></LazyRoute>} />
         <Route path="agents" element={<LazyRoute><AgentPage /></LazyRoute>} />
         <Route path="workflows" element={<LazyRoute><WorkflowListPage /></LazyRoute>} />
         <Route path="workflows/new" element={<LazyRoute><WorkflowCreate /></LazyRoute>} />
