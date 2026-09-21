@@ -39,6 +39,54 @@ class TestNativeAPIServiceGroup:
         return routes, ConfigWriter, no_toggle, no_status_write
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("stored_group,expected", [
+        (["legacy"], None), ("x" * 33, None), ("a\x00b", None),
+        ("a\nb", None), ("a\x7fb", None), (None, None), ("", ""), (" Valid ", "Valid"),
+    ])
+    async def test_bad_stored_group_cannot_break_mixed_service_reads(
+        self, native_services, monkeypatch, stored_group, expected,
+    ):
+        import json
+        from flocks.tool.schema import api_service_schema
+
+        routes, writer, no_toggle, no_status_write = native_services
+        # Simulate historical data without going through today's strict writer.
+        path = writer._get_config_path()
+        raw = writer._read_raw()
+        raw["api_services"]["native_api_v1"]["group"] = stored_group
+        raw["api_services"].pop("native_api_v2")
+        raw["api_services"]["healthy"] = {"name": "Healthy", "enabled": True, "group": " Operations "}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        before = path.read_bytes()
+        monkeypatch.setattr(api_service_schema, "is_shipped_tool_path", lambda path: True)
+        routes._clear_api_service_summary_metadata_cache()
+
+        for _ in range(2):  # Cached list metadata must also retain the safe projection.
+            summaries = {row.id: row for row in await routes.list_api_services()}
+            assert set(summaries) == {"native_api_v1", "native_api_v2", "healthy"}
+            assert summaries["healthy"].group == "Operations"
+            assert summaries["native_api_v1"].group == expected
+            assert summaries["native_api_v1"].enabled is True
+            assert summaries["native_api_v1"].group_readonly is False
+            assert summaries["native_api_v2"].group == "Package"
+            assert summaries["native_api_v2"].group_readonly is True
+
+        metadata = await routes.get_api_service_metadata("native_api_v1")
+        assert metadata.group == expected and metadata.group_readonly is False
+        assert metadata.name == "Native API" and metadata.version == "1"
+        assert api_service_schema._load_api_service_metadata_data("native_api_v1")["group"] == expected
+        assert (await routes.get_api_service_metadata("native_api_v2")).group == "Package"
+        assert path.read_bytes() == before
+        assert writer.get_api_service_raw("native_api_v1")["group"] == stored_group
+        no_toggle.assert_not_called()
+        no_status_write.assert_not_called()
+        if stored_group is not None and expected is None:
+            with pytest.raises(ValueError):
+                api_service_schema.normalize_api_service_group(stored_group)
+            with pytest.raises(ValueError):
+                routes.APIServiceUpdateRequest(group=stored_group)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("record", [None, {}, {"enabled": False}, {"group": ""}])
     async def test_shipped_definition_vs_empty_or_disabled_instance(self, native_services, monkeypatch, tmp_path, record):
         from flocks.config import api_versioning

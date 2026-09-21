@@ -12,6 +12,63 @@ from flocks.tool import tool_loader
 
 
 class TestNativeMcpGroup:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stored_group,expected", [
+        (["legacy"], None), ("x" * 33, None), ("a\x00b", None),
+        ("a\nb", None), ("a\x7fb", None), (None, None), ("", ""), (" Valid ", "Valid"),
+    ])
+    async def test_bad_stored_group_cannot_break_mixed_status_and_info_reads(
+        self, tmp_path, monkeypatch, stored_group, expected,
+    ):
+        import json
+        from types import SimpleNamespace
+        from flocks.config.config_writer import ConfigWriter
+        from flocks.mcp.types import normalize_mcp_group
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        configs = {
+            "legacy": {
+                "type": "remote", "url": "https://example.invalid/mcp", "enabled": False,
+                "headers": {"Authorization": "{secret:unchanged}"}, "group": stored_group,
+            },
+            "healthy": {"type": "remote", "url": "https://example.invalid/good", "group": " Operations "},
+            "inherited": {"type": "remote", "url": "https://example.invalid/default"},
+            "explicit-null": {"type": "remote", "url": "https://example.invalid/clear", "group": None},
+        }
+        path = ConfigWriter._get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Bypass current validation only to reproduce legacy stored data.
+        path.write_text(json.dumps({"mcp": configs}), encoding="utf-8")
+        before = path.read_bytes()
+        entry = SimpleNamespace(group="Canonical", group_readonly=True)
+        monkeypatch.setattr(mcp_routes.McpCatalog, "get", lambda: SimpleNamespace(get_entry=lambda name: entry))
+        monkeypatch.setattr(mcp_routes.MCP, "status", AsyncMock(return_value={
+            "healthy": McpStatusInfo(status=McpStatus.CONNECTED, tools_count=3),
+        }))
+        monkeypatch.setattr(mcp_routes.MCP, "get_server_info", AsyncMock(return_value=None))
+
+        statuses = await mcp_routes.get_mcp_status()
+        assert set(statuses) == set(configs)
+        assert statuses["legacy"]["group"] == expected
+        assert statuses["legacy"]["status"] == McpStatus.DISABLED
+        assert statuses["legacy"]["group_readonly"] is False
+        assert statuses["healthy"]["group"] == "Operations"
+        assert statuses["healthy"]["tools_count"] == 3
+        assert statuses["inherited"]["group"] == "Canonical"
+        assert statuses["explicit-null"]["group"] is None
+        info = await mcp_routes.get_mcp_server_info("legacy")
+        assert info["group"] == info["config"]["group"] == info["status"]["group"] == expected
+        assert info["config"]["url"] == configs["legacy"]["url"]
+        assert mcp_routes._to_frontend_mcp_config(configs["legacy"])["group"] == expected
+        assert entry.group == "Canonical" and entry.group_readonly is True
+        assert path.read_bytes() == before
+        assert ConfigWriter.get_mcp_server("legacy")["group"] == stored_group
+        if stored_group is not None and expected is None:
+            with pytest.raises(ValueError):
+                normalize_mcp_group(stored_group)
+            with pytest.raises(ValueError):
+                mcp_routes.McpUpdateRequest(config={"group": stored_group})
+
     @pytest.mark.parametrize("group", ["Instance", "", None])
     def test_native_writers_preserve_group_yml_metadata_and_replace_connection(self, tmp_path, monkeypatch, group):
         import yaml

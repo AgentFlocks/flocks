@@ -120,6 +120,29 @@ class TestAgentNativeGroup:
         assert next(item for item in listed if item["name"] == "test-agent")["group"] == ""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["agent", "mode"])
+    @pytest.mark.parametrize("source", ["yaml", "storage"])
+    async def test_generic_config_group_is_visible_without_manual_refresh(self, client, native_group_agents, section, source):
+        name = "yaml-demo"
+        if source == "storage":
+            name = f"config-cache-{section}"
+            created = await client.post("/api/agent", json={**_AGENT_PAYLOAD, "name": name, "group": "Package"})
+            assert created.status_code == 200, created.text
+        before = await client.get(f"/api/agent/{name}")
+        assert before.status_code == 200, before.text
+        assert before.json()["group"] == "Package"
+
+        for value, expected in (("修改后", "修改后"), (None, ""), ("New group", "New group"), ("", "")):
+            saved = await client.patch("/api/config/", json={section: {name: {"group": value}}})
+            assert saved.status_code == 200, saved.text
+            detail = await client.get(f"/api/agent/{name}")
+            assert detail.status_code == 200, detail.text
+            assert detail.json()["group"] == expected
+            listed = await client.get("/api/agent")
+            assert next(item for item in listed.json() if item["name"] == name)["group"] == expected
+            assert detail.json()["prompt"] == before.json()["prompt"]
+
+    @pytest.mark.asyncio
     async def test_native_group_yaml_preserves_prompt_and_unknown_fields(self, client, native_group_agents):
         import yaml
         from flocks.agent.agent_factory import load_agent, yaml_to_agent_info

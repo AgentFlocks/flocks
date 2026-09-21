@@ -34,6 +34,9 @@ const INSTALL_CONFIRM_BUTTON_CLASS = 'px-4 py-2 text-sm text-white bg-green-600 
 interface APITabContentProps {
   tools: Tool[];
   searchQuery?: string;
+  /** Complete source_name facet for the current query, not the loaded tool page. */
+  matchingToolServices?: Readonly<Record<string, number>>;
+  toolSearchPending?: boolean;
   onSelectTool: (tool: Tool) => void;
   onRefreshTools: () => Promise<void>;
   viewMode?: 'list' | 'cards';
@@ -47,6 +50,8 @@ interface APITabContentProps {
 export default function APITabContent({
   tools,
   searchQuery = '',
+  matchingToolServices,
+  toolSearchPending = false,
   onSelectTool,
   onRefreshTools,
   viewMode = 'list',
@@ -364,12 +369,14 @@ export default function APITabContent({
   };
   const query = searchQuery.trim().toLowerCase();
   const matchesQuery = (...values: (string | undefined)[]) => !query || values.some((value) => value?.toLowerCase().includes(query));
-  const visibleServices = services.filter((service) => matchesGroup(service.group, groupSelection));
+  const visibleServices = services.filter((service) => matchesGroup(service.group, groupSelection)
+    && (matchesQuery(service.id, service.name, service.description, service.description_cn)
+      || (!toolSearchPending && (matchingToolServices?.[service.id] ?? 0) > 0)));
   const visibleCatalog = filteredCatalog.filter((entry) => matchesGroup(entry.group, groupSelection)
     && matchesQuery(entry.id, entry.name, entry.description, entry.description_cn, ...entry.tags));
 
   return (
-    <div className="flex flex-col gap-4 md:flex-row">
+    <div className="flex flex-col gap-4 md:flex-row" aria-busy={!!query && toolSearchPending}>
       <GroupNav inventoryComplete={!servicesLoading && servicesError === null && !catalogLoading} preferenceKey="tools.api" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
       <div className="min-w-0 flex-1 space-y-4">
       {servicesError !== null && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -396,7 +403,8 @@ export default function APITabContent({
         )}
       </div>
 
-      {servicesLoading && services.length === 0 && filteredCatalog.length === 0 ? (
+      {(servicesLoading && services.length === 0 && filteredCatalog.length === 0)
+        || (query && toolSearchPending && visibleServices.length === 0 && visibleCatalog.length === 0) ? (
         <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
           <LoadingSpinner delayMs={180} />
         </div>

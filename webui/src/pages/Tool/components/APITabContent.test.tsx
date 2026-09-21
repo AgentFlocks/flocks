@@ -60,6 +60,94 @@ describe('APITabContent', () => {
     listAllToolPages.mockResolvedValue([]);
   });
 
+  it.each([' Alpha ', 'QA-ALPHA_V2', 'unique English', '独特描述'])('searches service metadata independently of child tools (%s)', async (searchQuery) => {
+    providerAPI.listApiServices.mockResolvedValue({ data: [
+      { id: 'qa-alpha_v2', name: 'QA Alpha', description: 'unique English description', description_cn: '独特描述', group: 'Ops', enabled: false, tool_count: 0 },
+      { id: 'qa-beta_v1', name: 'QA Beta', description: 'Other description', group: 'Ops', enabled: false, tool_count: 0 },
+    ] });
+    render(<APITabContent tools={[]} searchQuery={searchQuery} matchingToolServices={{}}
+      onSelectTool={vi.fn()} onRefreshTools={vi.fn()} catalogEntries={[]} catalogCategories={{}}
+      catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
+    expect(await screen.findByText('QA Alpha')).toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(listAllToolPages).not.toHaveBeenCalled();
+  });
+
+  it('composes search with group selection, shows no matches, and restores rows without closing details', async () => {
+    providerAPI.listApiServices.mockResolvedValue({ data: [
+      { id: 'qa-alpha', name: 'QA Alpha', group: 'Ops', enabled: false, tool_count: 0 },
+      { id: 'qa-beta', name: 'QA Beta', group: 'Ops', enabled: false, tool_count: 0 },
+      { id: 'other-alpha', name: 'Outside Alpha', group: 'Other', enabled: false, tool_count: 0 },
+    ] });
+    listAllToolPages.mockResolvedValue([{ name: 'complete-drawer-tool' }]);
+    const props = { tools: [], matchingToolServices: {}, onSelectTool: vi.fn(), onRefreshTools: vi.fn(),
+      catalogEntries: [], catalogCategories: {}, catalogLoading: false, configuredIds: new Set<string>(), onConfiguredChange: vi.fn() };
+    const { rerender } = render(<APITabContent {...props} />);
+    await screen.findByText('QA Alpha');
+    fireEvent.click(screen.getByRole('button', { name: 'Ops 2' }));
+    fireEvent.click(screen.getByText('QA Alpha', { selector: 'span' }).closest('button')!);
+    expect(await screen.findByText('complete-drawer-tool')).toBeInTheDocument();
+    rerender(<APITabContent {...props} searchQuery="Alpha" />);
+    expect(screen.getByText('QA Alpha', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(screen.queryByText('Outside Alpha')).not.toBeInTheDocument();
+    rerender(<APITabContent {...props} searchQuery="zz-no-match-765" />);
+    expect(screen.getByText('api.noTools')).toBeInTheDocument();
+    expect(screen.queryByText('QA Alpha', { selector: 'span' })).not.toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(screen.getByText('complete-drawer-tool')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Ops 2' })).toHaveAttribute('aria-pressed', 'true');
+    rerender(<APITabContent {...props} searchQuery="" />);
+    expect(screen.getByText('QA Alpha', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText('QA Beta')).toBeInTheDocument();
+    expect(screen.queryByText('Outside Alpha')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Ops 2' })).toHaveAttribute('aria-pressed', 'true');
+    expect(listAllToolPages).toHaveBeenCalledExactlyOnceWith({ source: 'api', sourceName: 'qa-alpha', sortBy: 'name', sortDir: 'asc' });
+  });
+
+  it('uses complete tool facets, not the current page, and waits for pending tool matches', async () => {
+    providerAPI.listApiServices.mockResolvedValue({ data: [
+      { id: 'alpha_v1', name: 'QA Alpha', enabled: true, tool_count: 25 },
+      { id: 'beta_v2', name: 'QA Beta', enabled: true, tool_count: 1 },
+      { id: 'beta_v1', name: 'Other Beta version', enabled: true, tool_count: 0 },
+    ] });
+    const tools = Array.from({ length: 25 }, (_, index) => ({ name: `needle_${index}`, description: 'needle',
+      source: 'api' as const, source_name: 'alpha_v1', category: 'custom', parameters: [], enabled: true, requires_confirmation: false }));
+    const props = { tools, searchQuery: 'needle', onSelectTool: vi.fn(), onRefreshTools: vi.fn(),
+      catalogEntries: [], catalogCategories: {}, catalogLoading: false, configuredIds: new Set<string>(), onConfiguredChange: vi.fn() };
+    const { rerender } = render(<APITabContent {...props} matchingToolServices={{ alpha_v1: 25, beta_v2: 1 }} toolSearchPending />);
+    await waitFor(() => expect(providerAPI.listApiServices).toHaveBeenCalledOnce());
+    expect(screen.queryByText('QA Alpha', { selector: 'span' })).not.toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(screen.queryByText('api.noTools')).not.toBeInTheDocument();
+    expect(screen.getByText('loading')).toBeInTheDocument();
+    rerender(<APITabContent {...props} matchingToolServices={{ alpha_v1: 25, beta_v2: 1 }} />);
+    expect(screen.getByText('QA Alpha', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText('QA Beta')).toBeInTheDocument();
+    expect(screen.queryByText('Other Beta version')).not.toBeInTheDocument();
+    // A failed/missing summary must not fall back to matching the 25-row sample.
+    rerender(<APITabContent {...props} />);
+    expect(screen.queryByText('QA Alpha', { selector: 'span' })).not.toBeInTheDocument();
+    expect(screen.getByText('api.noTools')).toBeInTheDocument();
+    expect(listAllToolPages).not.toHaveBeenCalled();
+  });
+
+  it('keeps catalog keyword search independent of service and child-tool matches', async () => {
+    providerAPI.listApiServices.mockResolvedValue({ data: [{ id: 'service', name: 'Native service', enabled: false, tool_count: 0 }] });
+    const props = { tools: [], onSelectTool: vi.fn(), onRefreshTools: vi.fn(),
+      catalogEntries: [{ id: 'catalog', name: 'Catalog API', description: 'Catalog description', category: 'intel', tool_type: 'api' as const,
+        github: '', language: 'python', license: 'MIT', stars: 1, transport: 'stdio', install: {}, env_vars: {},
+        system_deps: [], tags: ['catalog-keyword'], official: false, requires_auth: false }],
+      catalogCategories: {}, catalogLoading: false, configuredIds: new Set<string>(), onConfiguredChange: vi.fn() };
+    const { rerender } = render(<APITabContent {...props} searchQuery="catalog-keyword" matchingToolServices={{}} />);
+    expect(await screen.findByText('Catalog API')).toBeInTheDocument();
+    expect(screen.queryByText('Native service')).not.toBeInTheDocument();
+    rerender(<APITabContent {...props} searchQuery="no-catalog-match" matchingToolServices={{}} />);
+    expect(screen.queryByText('Catalog API')).not.toBeInTheDocument();
+    expect(screen.getByText('api.noTools')).toBeInTheDocument();
+    expect(mcpAPI.catalogInstall).not.toHaveBeenCalled();
+  });
+
   it('keeps versioned service identities, full group counts, card fields/actions and independent drawer tools', async () => {
     providerAPI.listApiServices.mockResolvedValue({ data: [
       { id: 'service-a__v9_2', name: 'Service A', version: '9.2', description: 'Service A description', enabled: true, status: 'connected', tool_count: 40, latency_ms: 12, verify_ssl: false, group: 'Alpha' },

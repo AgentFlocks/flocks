@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.audit import emit_audit_event
 from flocks.auth.context import AuthUser
@@ -63,6 +64,14 @@ router = APIRouter()
 log = Log.create(service="routes.mcp")
 
 
+def _read_stored_mcp_group(value: Any) -> Optional[str]:
+    """Ignore malformed legacy instance metadata in responses, never on writes."""
+    try:
+        return normalize_mcp_group(value)
+    except PydanticCustomError:
+        return None
+
+
 def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize backend transport names for the frontend form."""
     server_config = mask_sensitive_mcp_config_for_frontend(server_config)
@@ -97,7 +106,7 @@ def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
         args = args_value
     return {
         "type": transport,
-        "group": normalize_mcp_group(server_config.get("group")),
+        "group": _read_stored_mcp_group(server_config.get("group")),
         "url": server_config.get("url"),
         "command": command,
         "args": args,
@@ -155,7 +164,7 @@ def _load_raw_mcp_server_config(name: str) -> Optional[Dict[str, Any]]:
 
 def _effective_mcp_group(name: str, config: Dict[str, Any]) -> Optional[str]:
     if "group" in config:
-        return normalize_mcp_group(config["group"])
+        return _read_stored_mcp_group(config["group"])
     entry = McpCatalog.get().get_entry(name)
     return normalize_mcp_group(getattr(entry, "group", None))
 

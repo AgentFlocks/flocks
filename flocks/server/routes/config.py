@@ -70,6 +70,20 @@ def _normalize_slack_dm_policy(config_data: Dict[str, Any]) -> None:
 async def _validate_plugin_group_updates(config_data: Dict[str, Any]) -> None:
     """Check native definition locks before any config or secret side effects."""
     try:
+        for section in ("mcp", "api_services"):
+            entries = config_data.get(section)
+            if not isinstance(entries, dict):
+                continue
+            groups = [entry["group"] for entry in entries.values() if isinstance(entry, dict) and "group" in entry]
+            if not groups:
+                continue
+            if section == "mcp":
+                from flocks.mcp.types import normalize_mcp_group as normalize_group
+            else:
+                from flocks.tool.schema.api_service_schema import normalize_api_service_group as normalize_group
+            for group in groups:
+                normalize_group(group)
+
         for section in ("agent", "mode"):
             entries = config_data.get(section)
             if not isinstance(entries, dict):
@@ -713,6 +727,10 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Clear cache to reload
         Config.clear_cache()
+        if any(isinstance(config_data.get(section), dict) and config_data[section] for section in ("agent", "mode")):
+            from flocks.agent.registry import Agent
+
+            Agent.invalidate_cache()
         # Refresh only OSS-owned channel routing and Agent visibility config.
         from flocks.channel.inbound.dispatcher import (
             InboundDispatcher,

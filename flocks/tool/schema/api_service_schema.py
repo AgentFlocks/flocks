@@ -193,6 +193,14 @@ def project_api_service_group(
         merged["group_readonly"] = readonly
     if readonly:
         merged["group"] = definition.get("group")
+    elif isinstance(raw_service, dict) and "group" in raw_service:
+        # Legacy config may predate strict group validation. Keep one malformed
+        # instance from breaking every service response; never rewrite its raw
+        # record or substitute a fixed definition group for its explicit value.
+        try:
+            merged["group"] = normalize_api_service_group(raw_service["group"])
+        except PydanticCustomError:
+            merged["group"] = None
 
 
 def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:

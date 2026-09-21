@@ -657,6 +657,50 @@ class TestConfigRoutes:
         extract.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["mcp", "api_services"])
+    @pytest.mark.parametrize("group", [["invalid"], {"bad": True}, 1, True, "x" * 33, "line\nbreak", "nul\x00value"])
+    async def test_invalid_service_group_is_rejected_before_any_side_effect(self, monkeypatch, section, group):
+        from flocks.server.routes import config as config_routes
+        from flocks.security import channel_secrets
+
+        update = AsyncMock()
+        extract = Mock(side_effect=AssertionError("Group must be validated before secrets are extracted"))
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config({
+                section: {"configured-instance": {"group": group}},
+                "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
+            })
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        update.assert_not_awaited()
+        extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["mcp", "api_services"])
+    @pytest.mark.parametrize("group", [None, "", "  Operations  ", "安" * 32])
+    async def test_service_group_preflight_accepts_valid_instance_values(self, section, group):
+        from flocks.server.routes import config as config_routes
+
+        payload = {section: {"configured-instance": {"group": group}}}
+        await config_routes._validate_plugin_group_updates(payload)
+        assert payload[section]["configured-instance"]["group"] == group
+
+    @pytest.mark.asyncio
+    async def test_failed_agent_config_write_keeps_agent_cache(self, monkeypatch):
+        from flocks.agent.registry import Agent
+        from flocks.server.routes import config as config_routes
+
+        invalidate = Mock()
+        monkeypatch.setattr(Agent, "validate_group_settings", AsyncMock())
+        monkeypatch.setattr(Agent, "invalidate_cache", invalidate)
+        monkeypatch.setattr(config_routes.Config, "update", AsyncMock(side_effect=OSError("write failed")))
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config({"agent": {"custom": {"group": "After"}}})
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        invalidate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_config_has_expected_top_level_keys(self, client: AsyncClient):
         """Config response contains expected top-level keys."""
         resp = await client.get("/api/config")

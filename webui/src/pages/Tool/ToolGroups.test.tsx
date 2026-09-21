@@ -248,6 +248,80 @@ describe('Tools native group attributes and original view preservation', () => {
     expect(screen.queryByText(tab === 'api' ? 'Native service B' : 'native-b')).not.toBeInTheDocument();
   });
 
+  it('filters API service names with no child tools and keeps the business group when search is cleared', async () => {
+    mocks.listServices.mockResolvedValue({ data: [
+      { id: 'qa-alpha', name: 'QA Alpha', description: 'PR765 Alpha fixture', group: 'E2E', enabled: false, tool_count: 0 },
+      { id: 'qa-beta', name: 'QA Beta', description: 'PR765 Beta fixture', group: 'E2E', enabled: false, tool_count: 0 },
+      { id: 'other-alpha', name: 'Other Alpha', group: 'Other', enabled: false, tool_count: 0 },
+    ] });
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: /^API 集成/ }));
+    await screen.findByText('QA Beta');
+    fireEvent.click(screen.getByRole('button', { name: 'E2E 2' }));
+    const search = screen.getByPlaceholderText(zhTool.search.placeholder);
+    fireEvent.change(search, { target: { value: 'Alpha' } });
+    expect(screen.getByText('QA Alpha')).toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(screen.queryByText('Other Alpha')).not.toBeInTheDocument();
+    await waitFor(() => expect(mocks.listPage).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'api', q: 'Alpha' })));
+    fireEvent.change(search, { target: { value: 'zz-no-match-765' } });
+    expect(await screen.findByText(zhTool.api.noTools)).toBeInTheDocument();
+    expect(screen.queryByText('QA Alpha')).not.toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'E2E 2' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.change(search, { target: { value: '' } });
+    expect(screen.getByText('QA Alpha')).toBeInTheDocument();
+    expect(screen.getByText('QA Beta')).toBeInTheDocument();
+    expect(screen.queryByText('Other Alpha')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'E2E 2' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('matches API child keywords through complete service facets beyond the first 25 tools', async () => {
+    mocks.listServices.mockResolvedValue({ data: [
+      { id: 'alpha_v1', name: 'QA Alpha', group: 'Services', enabled: true, tool_count: 25 },
+      { id: 'beta_v2', name: 'QA Beta', group: 'Services', enabled: true, tool_count: 1 },
+      { id: 'gamma_v1', name: 'QA Gamma', group: 'Services', enabled: true, tool_count: 0 },
+    ] });
+    const toolRows = Array.from({ length: 26 }, (_, index) => ({ ...inventory[0],
+      name: `child_${index}`, description: 'needle keyword', source: 'api' as const,
+      source_name: index < 25 ? 'alpha_v1' : 'beta_v2' }));
+    const apiPage = (params: Record<string, any>) => {
+      const matches = toolRows.filter((tool) => !params.q || `${tool.name} ${tool.description} ${tool.source_name}`.toLowerCase().includes(params.q.toLowerCase()));
+      const sourceNames: Record<string, number> = {};
+      matches.forEach((tool) => { sourceNames[tool.source_name] = (sourceNames[tool.source_name] ?? 0) + 1; });
+      return { data: { items: matches.slice(0, 25), total: matches.length, offset: 0, limit: 25,
+        facets: { group: {}, category: {}, source: { api: matches.length }, source_groups: { api: Object.keys(sourceNames).length }, source_name: sourceNames, enabled: {} } } };
+    };
+    const originalPage = mocks.listPage.getMockImplementation()!;
+    let resolveSearch!: (result: ReturnType<typeof apiPage>) => void;
+    mocks.listPage.mockImplementation((params) => {
+      if (params.source !== 'api') return originalPage(params);
+      if (params.q === 'needle') return new Promise((resolve) => { resolveSearch = resolve; });
+      return Promise.resolve(apiPage(params));
+    });
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: /^API 集成/ }));
+    await screen.findByText('QA Beta');
+    const search = screen.getByPlaceholderText(zhTool.search.placeholder);
+    fireEvent.change(search, { target: { value: 'needle' } });
+    // The old unfiltered facets must not leak into the debounce/loading window.
+    expect(screen.queryByText('QA Alpha')).not.toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(screen.queryByText(zhTool.api.noTools)).not.toBeInTheDocument();
+    await waitFor(() => expect(resolveSearch).toBeDefined());
+    expect(screen.getByRole('complementary').parentElement).toHaveAttribute('aria-busy', 'true');
+    resolveSearch(apiPage({ q: 'needle' }));
+    expect(await screen.findByText('QA Alpha')).toBeInTheDocument();
+    expect(screen.getByText('QA Beta')).toBeInTheDocument();
+    expect(screen.queryByText('QA Gamma')).not.toBeInTheDocument();
+    expect(mocks.listPage).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'api', q: 'needle', offset: 0, limit: 25 }));
+    expect(mocks.get).not.toHaveBeenCalled();
+    fireEvent.change(search, { target: { value: 'zz-no-match-765' } });
+    expect(screen.queryByText('QA Alpha')).not.toBeInTheDocument();
+    expect(screen.queryByText('QA Beta')).not.toBeInTheDocument();
+    expect(await screen.findByText(zhTool.api.noTools)).toBeInTheDocument();
+  });
+
   it.each([
     ['all', 'list'], ['all', 'cards'], ['local', 'list'], ['local', 'cards'],
   ])('offers an explicit group action in the %s tab %s view without opening tool details', async (tab, viewMode) => {

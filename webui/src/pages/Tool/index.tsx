@@ -242,6 +242,9 @@ export default function ToolPage() {
     reload: reloadToolPage,
   } = useToolPage(toolPageParams);
   const [hasLoadedToolPage, setHasLoadedToolPage] = useState(false);
+  // Do not apply a previous query's service facets during the input debounce or load.
+  const apiToolSearchPending = searchQuery.trim().toLowerCase() !== debouncedSearchQuery.trim().toLowerCase()
+    || loading || !toolPageInitialized;
 
   // Catalog data (fetched once at top level, shared with MCP & API tabs)
   const [catalogEntries, setCatalogEntries] = useState<MCPCatalogEntry[]>([]);
@@ -724,6 +727,8 @@ export default function ToolPage() {
           <APITabContent
             tools={processedTools}
             searchQuery={searchQuery}
+            matchingToolServices={apiToolSearchPending || error ? undefined : toolFacets.source_name}
+            toolSearchPending={apiToolSearchPending}
             onSelectTool={openDetail}
             onRefreshTools={refreshToolDataAfterMutation}
             catalogEntries={apiCatalogEntries}
