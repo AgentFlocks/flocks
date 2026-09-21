@@ -1022,7 +1022,18 @@ class Message:
         )
         if end is None and start is not None:
             end = start
-        return {"start": int(start), "end": int(end) if end is not None else None}
+        normalized: Dict[str, Optional[int]] = {
+            "start": int(start),
+            "end": int(end) if end is not None else None,
+        }
+        # ``compacted`` is the only marker prune() leaves on a tool result (the
+        # output text stays in storage), so dropping it here would send the
+        # full output back to the LLM after the next cache load.  Only keep a
+        # real timestamp: tool-state ``time`` is ``Dict[str, int]``.
+        compacted = time_info.get("compacted")
+        if isinstance(compacted, int) and not isinstance(compacted, bool) and compacted > 0:
+            normalized["compacted"] = compacted
+        return normalized
 
     @classmethod
     def _normalize_tool_state(
