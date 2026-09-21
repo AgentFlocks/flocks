@@ -1,6 +1,7 @@
 import { Suspense } from 'react';
-import { Routes as RouterRoutes, Route, Navigate } from 'react-router-dom';
+import { Routes as RouterRoutes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { safeReturnTo } from '@/utils/sessionUrl';
 import Layout from '@/components/layout/Layout';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
@@ -16,6 +17,19 @@ import {
 export { LegacyWebUIContractPageRedirect } from './contentRoutes';
 
 installVitePreloadErrorRecovery();
+
+// After sign-in / setup, land on the page the user was heading to (validated
+// by safeReturnTo so a crafted returnTo cannot leave the app).
+export function LoginRedirect({ setup = false }: { setup?: boolean }) {
+  const location = useLocation();
+  const returnTo = safeReturnTo(`${location.pathname}${location.search}${location.hash}`);
+  return <Navigate to={`${setup ? '/setup-admin' : '/login'}?${new URLSearchParams({ returnTo })}`} replace />;
+}
+
+export function AuthReturnRedirect() {
+  const location = useLocation();
+  return <Navigate to={safeReturnTo(new URLSearchParams(location.search).get('returnTo'))} replace />;
+}
 
 export function Routes() {
   const { t } = useTranslation('auth');
@@ -51,7 +65,7 @@ export function Routes() {
         <Suspense fallback={<RoutePageSkeleton />}>
           <RouterRoutes>
             <Route path="/setup-admin" element={<SetupAdminPage />} />
-            <Route path="*" element={<Navigate to="/setup-admin" replace />} />
+            <Route path="*" element={<LoginRedirect setup />} />
           </RouterRoutes>
         </Suspense>
       </LazyLoadErrorBoundary>
@@ -64,7 +78,7 @@ export function Routes() {
         <Suspense fallback={<RoutePageSkeleton />}>
           <RouterRoutes>
             <Route path="/login" element={<LoginPage />} />
-            <Route path="*" element={<Navigate to="/login" replace />} />
+            <Route path="*" element={<LoginRedirect />} />
           </RouterRoutes>
         </Suspense>
       </LazyLoadErrorBoundary>
@@ -83,8 +97,8 @@ export function Routes() {
 
   return (
     <RouterRoutes>
-      <Route path="/login" element={<Navigate to="/" replace />} />
-      <Route path="/setup-admin" element={<Navigate to="/" replace />} />
+      <Route path="/login" element={<AuthReturnRedirect />} />
+      <Route path="/setup-admin" element={<AuthReturnRedirect />} />
       {/* Every in-app page renders inside the layout, which keeps one pane per
           open tab alive; see routes/contentRoutes.tsx for the page list. */}
       <Route path="/*" element={<Layout />} />

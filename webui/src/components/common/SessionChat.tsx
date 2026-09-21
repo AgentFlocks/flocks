@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, Plus, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree, BookOpen, Workflow as WorkflowIcon } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, Download, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, Plus, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree, BookOpen, Workflow as WorkflowIcon } from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -26,6 +26,8 @@ import { PermissionApprovalDialog, type PermissionDecision } from './PermissionA
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
+import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
+export { buildTodoSummary } from './TodoList';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
@@ -51,6 +53,7 @@ import {
   getFileExtension,
   isImageFile,
   readFileAsDataUrl,
+  type FilePartData,
   type ImagePartData,
 } from '@/utils/imageUpload';
 import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
@@ -171,6 +174,10 @@ export interface SessionChatProps {
   focusMessageId?: string | null;
   /** Called after focusMessageId is consumed. */
   onFocusMessageConsumed?: () => void;
+  /** Open one message file in the parent Session Context preview. */
+  onOpenContextFile?: (resourceId: string) => void;
+  /** Open the parent Session Context panel. */
+  onOpenContext?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
   /** Model override to include in prompt_async requests */
@@ -212,10 +219,12 @@ export interface SessionChatProps {
   /**
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and dispatch the prompt (with the
-   * provided text and any image attachments) to the new session.
+   * provided text and any file attachments) to the new session.
    *
-   * `imageParts` carries inline image data URLs — parents that don't yet
-   * support image input can ignore the second argument.
+   * `fileParts` carries inline image data URLs or staged document upload IDs.
+   * Completion must mean the prompt was accepted, not just the session created.
+   * Propagate explicit non-acceptance errors with their original response status;
+   * timeouts and server errors are treated as unknown acceptance for upload cleanup.
    *
    * The return value is intentionally typed as ``unknown`` so callers can
    * pass ``useSessionChat().createAndSend`` (which resolves to the new
@@ -224,7 +233,7 @@ export interface SessionChatProps {
    */
   onCreateAndSend?: (
     text: string,
-    imageParts?: ImagePartData[],
+    fileParts?: FilePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
@@ -240,27 +249,29 @@ export interface SessionChatProps {
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
+type UploadOwnership = 'draft' | 'submitting' | 'submitted' | 'unknown';
+
+interface UploadSubmission {
+  start: () => void;
+  accept: () => void;
+  reject: (error: unknown) => void;
+}
 
 interface ComposerAttachment {
   id: string;
   file: File;
   name: string;
   status: AttachmentStatus;
-  /** For document attachments: the workspace-relative path after upload */
-  workspacePath?: string;
+  /** For document attachments: the opaque staging ID returned by chat upload. */
+  uploadID?: string;
+  /** MIME type returned by the server for a staged document. */
+  mime?: string;
   /** For image attachments: the base64 data URL (no server upload needed) */
   dataUrl?: string;
   /** True if this attachment is an image file */
   isImage?: boolean;
   error?: string;
 }
-
-type UploadedDocumentAttachmentLike = {
-  id?: string;
-  status?: AttachmentStatus;
-  workspacePath?: string;
-  isImage?: boolean;
-};
 
 const APPROX_CHARS_PER_TOKEN = 4;
 
@@ -985,52 +996,6 @@ function ContextUsageRing({
       )}
     </div>
   );
-}
-
-function isSuccessfulUploadedDocumentAttachment(
-  attachment: UploadedDocumentAttachmentLike,
-): attachment is UploadedDocumentAttachmentLike & { status: 'success'; workspacePath: string; isImage?: false } {
-  return (
-    attachment.status === 'success'
-    && !attachment.isImage
-    && typeof attachment.workspacePath === 'string'
-    && attachment.workspacePath.length > 0
-  );
-}
-
-export function dedupeUploadedDocumentAttachments<T extends UploadedDocumentAttachmentLike>(items: T[]): T[] {
-  const latestIndexByPath = new Map<string, number>();
-
-  items.forEach((attachment, index) => {
-    if (isSuccessfulUploadedDocumentAttachment(attachment)) {
-      latestIndexByPath.set(attachment.workspacePath, index);
-    }
-  });
-
-  return items.filter((attachment, index) => {
-    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
-      return true;
-    }
-    return latestIndexByPath.get(attachment.workspacePath) === index;
-  });
-}
-
-export function listUploadedDocumentPaths(items: UploadedDocumentAttachmentLike[]): string[] {
-  const seen = new Set<string>();
-  const paths: string[] = [];
-
-  items.forEach((attachment) => {
-    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
-      return;
-    }
-    if (seen.has(attachment.workspacePath)) {
-      return;
-    }
-    seen.add(attachment.workspacePath);
-    paths.push(attachment.workspacePath);
-  });
-
-  return paths;
 }
 
 // Composer drafts are persisted to ``localStorage`` so navigating away from
@@ -1841,6 +1806,8 @@ export default function SessionChat({
   onInitialOptimisticMessageConsumed,
   focusMessageId,
   onFocusMessageConsumed,
+  onOpenContextFile,
+  onOpenContext,
   supportsVision,
   toolbarSlot,
   composerAddMenuSlot,
@@ -1904,7 +1871,53 @@ export default function SessionChat({
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const activeToolPartIdsRef = useRef<Set<string>>(new Set());
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachments, setAttachmentState] = useState<ComposerAttachment[]>([]);
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
+  const attachmentsMountedRef = useRef(true);
+  const attachmentScopeRef = useRef(0);
+  const uploadOwnershipRef = useRef(new Map<string, UploadOwnership>());
+  // Update the live draft synchronously, not on the next render. Upload responses,
+  // cancellation and unmount can all run before React commits the tray update.
+  const setAttachments = useCallback((next: ComposerAttachment[] | ((current: ComposerAttachment[]) => ComposerAttachment[])) => {
+    attachmentsRef.current = typeof next === 'function' ? next(attachmentsRef.current) : next;
+    if (attachmentsMountedRef.current) setAttachmentState(attachmentsRef.current);
+  }, []);
+  const disposeUpload = useCallback((uploadID: string) => {
+    if (uploadOwnershipRef.current.get(uploadID) !== 'draft') return;
+    uploadOwnershipRef.current.delete(uploadID);
+    void workspaceAPI.removeChatUpload(uploadID).catch(() => undefined);
+  }, []);
+  const discardAttachments = useCallback(() => {
+    setAttachments([]);
+    uploadOwnershipRef.current.forEach((_ownership, uploadID) => disposeUpload(uploadID));
+  }, [disposeUpload, setAttachments]);
+  const beginUploadSubmission = useCallback((documents: ComposerAttachment[]): UploadSubmission => {
+    const previous = documents.map(({ uploadID }) => [uploadID!, uploadOwnershipRef.current.get(uploadID!)] as const);
+    previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitting'));
+    let started = false;
+    let accepted = false;
+    return {
+      start: () => { started = true; },
+      accept: () => {
+        accepted = true;
+        previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitted'));
+      },
+      reject: (error) => {
+        if (accepted) return;
+        const status = (error as { response?: { status?: number } })?.response?.status;
+        // Timeouts (including gateway/client timeouts) and 5xx do not prove that
+        // the backend rejected the prompt. A later retry cannot undo that doubt.
+        const notAccepted = !started || (typeof status === 'number'
+          && status >= 400 && status < 500 && status !== 408 && status !== 499);
+        previous.forEach(([uploadID, ownership]) => {
+          uploadOwnershipRef.current.set(uploadID, notAccepted && ownership !== 'unknown' ? 'draft' : 'unknown');
+          if (!attachmentsMountedRef.current || !attachmentsRef.current.some((item) => item.uploadID === uploadID)) {
+            disposeUpload(uploadID);
+          }
+        });
+      },
+    };
+  }, [disposeUpload]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showComposerAddMenu, setShowComposerAddMenu] = useState(false);
   // Lightbox preview for composer thumbnails. Shares the same overlay
@@ -1917,6 +1930,14 @@ export default function SessionChat({
   const [dreamingMessage, setDreamingMessage] = useState('');
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
+  useEffect(() => {
+    attachmentsMountedRef.current = true;
+    return () => {
+      attachmentsMountedRef.current = false;
+      attachmentScopeRef.current += 1;
+      discardAttachments();
+    };
+  }, [discardAttachments]);
   const {
     items: queuedPrompts,
     expanded: queueExpanded,
@@ -1927,7 +1948,6 @@ export default function SessionChat({
     actionId: queueActionId,
     refresh: fetchPromptQueue,
     applyItems: applyPromptQueueItems,
-    enqueue: enqueuePrompt,
     startEdit: startQueuedEdit,
     cancelEdit: cancelQueuedEdit,
     saveEdit: saveQueuedEdit,
@@ -2165,7 +2185,7 @@ export default function SessionChat({
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const [pendingAgentName, setPendingAgentName] = useState(agentName || 'rex');
   const successfulDocAttachments = useMemo(
-    () => attachments.filter((a) => a.status === 'success' && a.workspacePath && !a.isImage),
+    () => attachments.filter((a) => a.status === 'success' && a.uploadID && !a.isImage),
     [attachments],
   );
   const successfulImageAttachments = useMemo(
@@ -2880,7 +2900,8 @@ export default function SessionChat({
   // Reset state on session change
   useEffect(() => {
     setIsStreaming(false);
-    setAttachments([]);
+    attachmentScopeRef.current += 1;
+    discardAttachments();
     setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
@@ -2908,7 +2929,7 @@ export default function SessionChat({
     setInput(readChatDraft(sessionId));
     setComposerReferences([]);
     setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
-  }, [sessionId, clearPendingQuestions]);
+  }, [sessionId, clearPendingQuestions, discardAttachments]);
 
   const handleProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
     setProcessGroupOpenState(prev => {
@@ -3046,32 +3067,18 @@ export default function SessionChat({
     }
   }, []);
 
-  const buildAttachmentBlock = useCallback((items: ComposerAttachment[]) => {
-    if (items.length === 0) return '';
-    const lines = listUploadedDocumentPaths(items).map((path) => `- ${path}`);
-    if (lines.length === 0) return '';
-    return `Attached files:\n${lines.join('\n')}`;
-  }, []);
-
-  const buildMessageText = useCallback((rawText: string, items: ComposerAttachment[]) => {
-    const attachmentBlock = buildAttachmentBlock(items);
-    const content = rawText
-      ? attachmentBlock
-        ? `${rawText}\n\n${attachmentBlock}`
-        : rawText
-      : attachmentBlock;
-
-    if (!content) return '';
+  const buildMessageText = useCallback((rawText: string) => {
+    if (!rawText) return '';
     return nodeRef
-      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${content}`
-      : content;
-  }, [buildAttachmentBlock, nodeRef]);
+      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${rawText}`
+      : rawText;
+  }, [nodeRef]);
 
   const updateAttachment = useCallback((id: string, updater: (attachment: ComposerAttachment) => ComposerAttachment) => {
     setAttachments((prev) => prev.map((attachment) => (
       attachment.id === id ? updater(attachment) : attachment
     )));
-  }, []);
+  }, [setAttachments]);
 
   const uploadSelectedFiles = useCallback(async (entries: Array<{ id: string; file: File }>) => {
     if (entries.length === 0) return;
@@ -3082,25 +3089,34 @@ export default function SessionChat({
         'chat',
       );
       const uploaded = response.data.uploaded ?? [];
-      setAttachments((prev) => dedupeUploadedDocumentAttachments(prev.map((attachment) => {
-        const entryIndex = entries.findIndex((entry) => entry.id === attachment.id);
-        if (entryIndex < 0) return attachment;
-        const result = uploaded[entryIndex];
-        if (!result || result.error || !result.path) {
-          return {
-            ...attachment,
-            status: 'error',
-            error: result?.error || t('chat.upload.errorGeneric'),
-          };
+      entries.forEach(({ id }, index) => {
+        const result = uploaded[index];
+        const attachment = attachmentsRef.current.find((item) => item.id === id);
+        // Register every returned ID, even if its chip was cancelled or the
+        // component unmounted while this batch was in flight. Dispose per item,
+        // outside React state updaters (which may be replayed or never run).
+        if (result?.uploadID) {
+          if (!uploadOwnershipRef.current.has(result.uploadID)) {
+            uploadOwnershipRef.current.set(result.uploadID, 'draft');
+          }
+          if (!attachmentsMountedRef.current || !attachment || result.error) disposeUpload(result.uploadID);
         }
-        return {
-          ...attachment,
-          name: result.name || attachment.name,
+        if (!attachmentsMountedRef.current || !attachment) return;
+        if (attachment.uploadID && attachment.uploadID !== result?.uploadID) disposeUpload(attachment.uploadID);
+        updateAttachment(id, (current) => !result || result.error || !result.uploadID ? {
+          ...current,
+          status: 'error',
+          uploadID: undefined,
+          error: result?.error || t('chat.upload.errorGeneric'),
+        } : {
+          ...current,
+          name: result.name || current.name,
           status: 'success',
-          workspacePath: result.abs_path ?? result.path,
+          uploadID: result.uploadID,
+          mime: result.mime || current.file.type || 'application/octet-stream',
           error: undefined,
-        };
-      })));
+        });
+      });
     } catch (err: any) {
       const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
       setAttachments((prev) => prev.map((attachment) => (
@@ -3109,7 +3125,7 @@ export default function SessionChat({
           : attachment
       )));
     }
-  }, [t]);
+  }, [disposeUpload, setAttachments, updateAttachment, t]);
 
   const queueFilesForUpload = useCallback((files: File[], { imageBlocked = false }: { imageBlocked?: boolean } = {}) => {
     if (files.length === 0) return;
@@ -3200,7 +3216,7 @@ export default function SessionChat({
           });
       });
     }
-  }, [t, toast, uploadSelectedFiles, supportsVision]);
+  }, [t, toast, uploadSelectedFiles, supportsVision, setAttachments]);
 
   const handleFileSelection = useCallback((fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -3208,8 +3224,8 @@ export default function SessionChat({
   }, [queueFilesForUpload]);
 
   const handleRetryAttachment = useCallback((attachmentId: string) => {
-    const attachment = attachments.find((item) => item.id === attachmentId);
-    if (!attachment) return;
+    const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
+    if (!attachment || attachment.status !== 'error') return;
     updateAttachment(attachmentId, (current) => ({
       ...current,
       status: 'uploading',
@@ -3235,11 +3251,13 @@ export default function SessionChat({
     } else {
       void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
     }
-  }, [attachments, updateAttachment, uploadSelectedFiles, t]);
+  }, [setAttachments, updateAttachment, uploadSelectedFiles, t]);
 
   const handleRemoveAttachment = useCallback((attachmentId: string) => {
-    setAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
-  }, []);
+    const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
+    setAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
+    if (attachment?.uploadID && !attachment.isImage) disposeUpload(attachment.uploadID);
+  }, [disposeUpload, setAttachments]);
 
   const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData?.files ?? []);
@@ -3328,9 +3346,10 @@ export default function SessionChat({
   /** Core send logic */
   const sendText = async (
     text: string,
-    imageParts: ImagePartData[] = [],
+    fileParts: FilePartData[] = [],
     agentOverride?: string,
     options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -3353,8 +3372,14 @@ export default function SessionChat({
       ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
     };
     if (text || options?.displayText) tempParts.push(optimisticTextPart);
-    imageParts.forEach((img, i) => {
-      tempParts.push({ id: `temp-${messageId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
+    fileParts.forEach((file, i) => {
+      tempParts.push({
+        id: file.id || `temp-${messageId}-file-${i}`,
+        type: 'file',
+        url: file.url,
+        mime: file.mime,
+        filename: file.filename,
+      });
     });
 
     const optimisticMessage = {
@@ -3374,7 +3399,7 @@ export default function SessionChat({
     try {
       await ensureAutoModelSession();
       const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
+        parts: buildPromptParts(text, fileParts),
         messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
@@ -3382,7 +3407,9 @@ export default function SessionChat({
       if (options?.displayText) payload.displayText = options.displayText;
       payload.executionMode = executionMode;
 
+      uploadSubmission?.start();
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
+      uploadSubmission?.accept();
       if (executionMode === 'goal' && text.trim()) {
         goalHydrationVersionRef.current += 1;
         writeDismissedGoalKey(sessionId, '');
@@ -3413,21 +3440,28 @@ export default function SessionChat({
 
   const enqueueText = async (
     text: string,
-    imageParts: ImagePartData[] = [],
+    fileParts: FilePartData[] = [],
     agentOverride?: string,
     options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
     try {
       await ensureAutoModelSession();
-      await enqueuePrompt({
-        parts: buildPromptParts(text, imageParts),
+      uploadSubmission?.start();
+      await sessionApi.enqueuePrompt(sessionId, {
+        parts: buildPromptParts(text, fileParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
         executionMode,
       });
+      // Acceptance transfers ownership before the queue refresh or a parent
+      // callback can switch/unmount this composer.
+      uploadSubmission?.accept();
+      await fetchPromptQueue();
+      setQueueExpanded(true);
       onExecutionModeAccepted?.(executionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
@@ -3447,7 +3481,7 @@ export default function SessionChat({
     setInput('');
     setShowCommandDropdown(false);
     setMentionRange(null);
-    setAttachments([]);
+    discardAttachments();
 
     if (sessionId && isStreaming) {
       try {
@@ -3497,28 +3531,54 @@ export default function SessionChat({
     const referencesToSend = [...composerReferences];
     const referenceText = referencesToSend.map(formatComposerReference).join(' ');
     const rawText = [referenceText, draftText].filter(Boolean).join(' ');
-    const docAttachmentsToSend = [...successfulDocAttachments];
-    const imageAttachmentsToSend = [...successfulImageAttachments];
-    const text = buildMessageText(rawText, docAttachmentsToSend);
+    const docAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.uploadID && !item.isImage);
+    const imageAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.isImage && item.dataUrl);
+    if (docAttachmentsToSend.some(({ uploadID }) => {
+      const ownership = uploadOwnershipRef.current.get(uploadID!);
+      return ownership === 'submitting' || ownership === 'submitted';
+    })) return;
+    const text = buildMessageText(rawText);
     const mentionedAgent = resolveReferencedAgentName(rawText, mentionAgents);
+    const scope = attachmentScopeRef.current;
     const restoreDraft = () => {
+      if (!attachmentsMountedRef.current || scope !== attachmentScopeRef.current) return;
       setInput(draftText);
       setComposerReferences(referencesToSend);
     };
 
-    // Need either text content or image attachments
-    if (!text && imageAttachmentsToSend.length === 0) return;
+    // Need either text content or at least one uploaded file.
+    if (!text && docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0) return;
+
+    // Reserve IDs synchronously, before create, model selection or enqueue can
+    // yield. Tray removal/unmount must never DELETE a possibly accepted upload.
+    const uploadSubmission = beginUploadSubmission(docAttachmentsToSend);
+    const sentAttachmentIds = new Set([...docAttachmentsToSend, ...imageAttachmentsToSend].map(({ id }) => id));
+    const clearSentAttachments = () => setAttachments((current) => current.filter(({ id }) => !sentAttachmentIds.has(id)));
+    const rejectSubmission = (error: unknown) => {
+      uploadSubmission.reject(error);
+      restoreDraft();
+      // The live tray still owns retryable attachments. Do not resurrect chips
+      // explicitly removed in flight or replace uploads added during the send.
+    };
 
     setInput('');
     setComposerReferences([]);
     setShowCommandDropdown(false);
     setMentionRange(null);
 
-    const imageParts: ImagePartData[] = imageAttachmentsToSend.map((a) => ({
-      url: a.dataUrl!,
-      mime: a.file.type,
-      filename: a.name,
+    const documentParts: FilePartData[] = docAttachmentsToSend.map((attachment) => ({
+      id: attachment.id,
+      uploadID: attachment.uploadID!,
+      mime: attachment.mime || attachment.file.type || 'application/octet-stream',
+      filename: attachment.name,
     }));
+    const imageParts: ImagePartData[] = imageAttachmentsToSend.map((attachment) => ({
+      id: attachment.id,
+      url: attachment.dataUrl!,
+      mime: attachment.file.type,
+      filename: attachment.name,
+    }));
+    const fileParts: FilePartData[] = [...documentParts, ...imageParts];
 
     // Keep client-side commands local even while Rex is streaming.
     const parsed = docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
@@ -3532,11 +3592,10 @@ export default function SessionChat({
 
     if (sessionId && isStreaming) {
       try {
-        await enqueueText(text, imageParts, mentionedAgent || undefined);
-        setAttachments([]);
-      } catch {
-        restoreDraft();
-        setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
+        await enqueueText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+        clearSentAttachments();
+      } catch (error) {
+        rejectSubmission(error);
       }
       return;
     }
@@ -3562,35 +3621,36 @@ export default function SessionChat({
         try {
           const effectiveAgent = mentionedAgent || agentName;
           setPendingAgentName(effectiveAgent || 'rex');
+          // The parent's opaque create-and-send promise must resolve only after
+          // acceptance and propagate explicit rejection errors unchanged.
+          uploadSubmission.start();
           await onCreateAndSend(
             text,
-            imageParts,
+            fileParts,
             effectiveAgent || undefined,
             model,
             undefined,
             executionMode,
           );
+          uploadSubmission.accept();
           onExecutionModeAccepted?.(executionMode);
-          setAttachments([]);
-        } catch {
-          // Restore both the text and the attachment list so the user can
-          // retry without re-uploading images. Image data URLs are already
-          // in memory, so restoring the array is safe and cheap.
-          restoreDraft();
-          setAttachments(imageAttachmentsToSend);
+          clearSentAttachments();
+        } catch (error) {
+          rejectSubmission(error);
         } finally {
           setSending(false);
         }
+      } else {
+        rejectSubmission(undefined);
       }
       return;
     }
 
     try {
-      await sendText(text, imageParts, mentionedAgent || undefined);
-      setAttachments([]);
-    } catch {
-      restoreDraft();
-      setAttachments(imageAttachmentsToSend);
+      await sendText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+      clearSentAttachments();
+    } catch (error) {
+      rejectSubmission(error);
     }
   };
 
@@ -4199,6 +4259,8 @@ export default function SessionChat({
               onEditSave={handleSaveEditedMessage}
               onEditSend={handleSendEditedUserMessage}
               onRegenerate={handleRegenerateMessage}
+              onOpenContextFile={onOpenContextFile}
+              onOpenContext={onOpenContext}
             />
             <ChatMessageTimeline
               items={tailItems}
@@ -4224,6 +4286,8 @@ export default function SessionChat({
               onEditSave={handleSaveEditedMessage}
               onEditSend={handleSendEditedUserMessage}
               onRegenerate={handleRegenerateMessage}
+              onOpenContextFile={onOpenContextFile}
+              onOpenContext={onOpenContext}
             />
 
             {/* Compacting indicator with live progress stages */}
@@ -4497,7 +4561,6 @@ export default function SessionChat({
                     {attachments.map((attachment) => {
                       const isUploading = attachment.status === 'uploading';
                       const isError = attachment.status === 'error';
-                      const attachmentPath = attachment.workspacePath ?? null;
 
                       // Image thumbnail display
                       if (attachment.isImage && attachment.dataUrl && !isError) {
@@ -4557,9 +4620,6 @@ export default function SessionChat({
                           )}
                           <div className="min-w-0">
                             <div className="truncate font-medium">{attachment.name}</div>
-                            {attachmentPath && (
-                              <div className="truncate text-[11px] opacity-70">{attachmentPath}</div>
-                            )}
                             {attachment.error && (
                               <div className="truncate text-[11px]">{attachment.error}</div>
                             )}
@@ -4905,6 +4965,68 @@ function AgentMentionDropdown({
 // ChatMessageBubble
 // ============================================================================
 
+function ContextFileCard({
+  sessionId,
+  resourceId,
+  filename,
+  mime,
+  onOpen,
+}: {
+  sessionId: string;
+  resourceId?: string | null;
+  filename: string;
+  mime?: string;
+  onOpen?: (resourceId: string) => void;
+}) {
+  const { t } = useTranslation('session');
+  const previewUrl = resourceId ? sessionApi.contextFilePreviewUrl(sessionId, resourceId) : null;
+  const downloadUrl = resourceId ? sessionApi.contextFileDownloadUrl(sessionId, resourceId) : null;
+  const label = mime?.split('/').pop()?.toUpperCase();
+  const content = (
+    <>
+      <FileText className="h-4 w-4 flex-shrink-0 text-slate-500" />
+      <span className="min-w-0 flex-1 truncate font-medium">{filename}</span>
+      {label && <span className="shrink-0 text-[10px] text-slate-400">{label}</span>}
+    </>
+  );
+  return (
+    <div className="flex min-w-0 max-w-full items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+      {onOpen && resourceId ? (
+        <button
+          type="button"
+          onClick={() => onOpen(resourceId)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-slate-900 dark:hover:text-white"
+          title={t('context.preview', 'Preview')}
+        >
+          {content}
+        </button>
+      ) : previewUrl ? (
+        <a
+          href={previewUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="flex min-w-0 flex-1 items-center gap-2 hover:text-slate-900 dark:hover:text-white"
+        >
+          {content}
+        </a>
+      ) : (
+        <span className="flex min-w-0 flex-1 items-center gap-2">{content}</span>
+      )}
+      {downloadUrl && (
+        <a
+          href={downloadUrl}
+          download={filename}
+          onClick={(event) => event.stopPropagation()}
+          className="rounded p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white"
+          title={t('context.download', 'Download')}
+        >
+          <Download className="h-3.5 w-3.5" />
+        </a>
+      )}
+    </div>
+  );
+}
+
 export interface ChatMessageBubbleProps {
   message: MergedMessage;
   isActive?: boolean;
@@ -4930,6 +5052,8 @@ export interface ChatMessageBubbleProps {
   onEditSave?: () => Promise<void>;
   onEditSend?: () => Promise<void>;
   onRegenerate?: (messageId: string) => Promise<void>;
+  onOpenContextFile?: (resourceId: string) => void;
+  onOpenContext?: () => void;
 }
 
 interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
@@ -4960,6 +5084,8 @@ function ChatMessageTimelineInner({
   onEditSave,
   onEditSend,
   onRegenerate,
+  onOpenContextFile,
+  onOpenContext,
 }: ChatMessageTimelineProps) {
   return (
     <>
@@ -4990,6 +5116,8 @@ function ChatMessageTimelineInner({
             onEditSave={onEditSave}
             onEditSend={onEditSend}
             onRegenerate={onRegenerate}
+            onOpenContextFile={onOpenContextFile}
+            onOpenContext={onOpenContext}
           />
         </div>
       ))}
@@ -5074,6 +5202,8 @@ function ChatMessageBubbleInner({
   onEditSave,
   onEditSend,
   onRegenerate,
+  onOpenContextFile,
+  onOpenContext,
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
@@ -5144,6 +5274,12 @@ function ChatMessageBubbleInner({
   const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
     parts.length === 0 || hasOnlyBlankTextParts
   );
+  const outputAttachments = isUser ? [] : parts.flatMap((part) => {
+    if (part.type !== 'tool' || part.tool !== 'write' || part.state?.status !== 'completed') return [];
+    return (part.state.attachments || []).filter(
+      (attachment) => attachment.origin === 'agent_output' && attachment.id,
+    );
+  });
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
@@ -5486,29 +5622,73 @@ function ChatMessageBubbleInner({
                     const isImage = (part.mime || '').startsWith('image/');
                     if (isImage && part.url) {
                       const imageUrl = getRenderableFileUrl(part.url);
+                      const messageSessionId = part.sessionID || message.sessionID;
+                      const resourceId = part.resourceID || null;
                       return (
-                        <img
-                          key={part.id || `file-${i}`}
-                          src={imageUrl}
-                          alt={part.filename || ''}
-                          className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
-                          onClick={() => setPreviewImage({ url: imageUrl, alt: part.filename })}
-                        />
+                        <div key={part.id || `file-${i}`} className="group/image relative h-24 w-24 flex-shrink-0">
+                          <img
+                            src={imageUrl}
+                            alt={part.filename || ''}
+                            className="h-24 w-24 rounded-lg border border-gray-200 bg-gray-50 object-cover cursor-zoom-in transition-transform hover:scale-[1.02]"
+                            onClick={() => (
+                              onOpenContextFile && resourceId
+                                ? onOpenContextFile(resourceId)
+                                : setPreviewImage({ url: imageUrl, alt: part.filename })
+                            )}
+                          />
+                          {messageSessionId && resourceId && (
+                            <a
+                              href={sessionApi.contextFileDownloadUrl(messageSessionId, resourceId)}
+                              download={part.filename || 'image'}
+                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100"
+                              title={t('context.download', 'Download')}
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                            </a>
+                          )}
+                        </div>
                       );
                     }
+                    const messageSessionId = part.sessionID || message.sessionID;
+                    const resourceId = part.resourceID || null;
+                    if (!messageSessionId || !resourceId) return null;
                     return (
-                      <div
+                      <ContextFileCard
                         key={part.id || `file-${i}`}
-                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
-                      >
-                        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
-                      </div>
+                        sessionId={messageSessionId}
+                        resourceId={resourceId}
+                        filename={part.filename || 'file'}
+                        mime={part.mime}
+                        onOpen={onOpenContextFile}
+                      />
                     );
                     })}
                   </div>
                 )}
                 {renderDisplayParts()}
+                {message.sessionID && outputAttachments.length > 0 && (
+                  <div className="mt-2 space-y-1.5" data-testid="chat-output-files">
+                    {outputAttachments.slice(0, 3).map((attachment) => (
+                      <ContextFileCard
+                        key={attachment.id}
+                        sessionId={message.sessionID}
+                        resourceId={attachment.resourceID}
+                        filename={attachment.filename || 'file'}
+                        mime={attachment.mime}
+                        onOpen={onOpenContextFile}
+                      />
+                    ))}
+                    {outputAttachments.length > 3 && onOpenContext && (
+                      <button
+                        type="button"
+                        onClick={onOpenContext}
+                        className="text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                      >
+                        {t('context.viewAll', 'View all in Context')}
+                      </button>
+                    )}
+                  </div>
+                )}
               </>
             );
         })()
@@ -5746,138 +5926,6 @@ function buildToolInputSummary(input: Record<string, unknown>): string {
     .join(', ');
 }
 
-type TodoSummaryEntry = {
-  id?: string;
-  content: string;
-  status?: string;
-  activeForm?: string;
-};
-type TodoTranslator = (key: string) => string;
-
-function isTodoSummaryEntry(value: unknown): value is TodoSummaryEntry {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Record<string, unknown>;
-  return typeof candidate.content === 'string';
-}
-
-function readTodoEntries(value: unknown): TodoSummaryEntry[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter(isTodoSummaryEntry)
-    .map((todo) => ({
-      id: typeof todo.id === 'string' ? todo.id : undefined,
-      content: todo.content.trim(),
-      status: typeof todo.status === 'string' ? todo.status : undefined,
-      activeForm: typeof todo.activeForm === 'string' ? todo.activeForm : undefined,
-    }))
-    .filter((todo) => todo.content.length > 0);
-}
-
-function pickTodoEntries(...candidates: unknown[]): TodoSummaryEntry[] {
-  for (const candidate of candidates) {
-    const todos = readTodoEntries(candidate);
-    if (todos.length > 0) return todos;
-  }
-  return [];
-}
-
-function getTodoActionLabel(action: unknown): string {
-  if (action === 'read') return 'Read todos';
-  if (action === 'write') return 'Update todos';
-  return 'Todos';
-}
-
-export function buildTodoSummary(state: Partial<ToolState>, t?: TodoTranslator): string {
-  const metadata = state.metadata ?? {};
-  const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
-  if (currentTodos.length === 0) return getTodoActionLabel(state.input?.action);
-  const totalCount = currentTodos.length;
-  const terminalCount = currentTodos.filter(
-    (todo) => todo.status === 'completed' || todo.status === 'cancelled',
-  ).length;
-  const inProgressCount = currentTodos.filter((todo) => todo.status === 'in_progress').length;
-  const hasCancelled = currentTodos.some((todo) => todo.status === 'cancelled');
-
-  let summary =
-    terminalCount === totalCount
-      ? hasCancelled
-        ? `${t?.('chat.tool.todoSummary.done') ?? 'Done'} ${terminalCount}/${totalCount}`
-        : `${t?.('chat.tool.todoSummary.completed') ?? 'Completed'} ${terminalCount}/${totalCount}`
-      : `${t?.('chat.tool.todoSummary.progress') ?? 'Progress'} ${terminalCount}/${totalCount}`;
-
-  if (inProgressCount > 0 && terminalCount < totalCount) {
-    summary += ` · ${t?.('chat.tool.todoSummary.inProgress') ?? 'In progress'} ${inProgressCount}`;
-  }
-
-  return summary;
-}
-
-function todoStatusLabel(status: string | undefined, t: TodoTranslator): string {
-  switch (status) {
-    case 'completed':
-      return t('chat.tool.todoStatus.completed');
-    case 'in_progress':
-      return t('chat.tool.todoStatus.inProgress');
-    case 'cancelled':
-      return t('chat.tool.todoStatus.cancelled');
-    case 'pending':
-      return t('chat.tool.todoStatus.pending');
-    default:
-      return status || 'pending';
-  }
-}
-
-function todoStatusIcon(status: string | undefined): React.ReactNode {
-  switch (status) {
-    case 'completed':
-      return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-white">
-          <Check className="h-3 w-3" strokeWidth={3} />
-        </span>
-      );
-    case 'in_progress':
-      return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-sky-400 bg-white">
-          <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
-        </span>
-      );
-    case 'cancelled':
-      return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-zinc-200 text-zinc-500">
-          <X className="h-2.5 w-2.5" strokeWidth={2.5} />
-        </span>
-      );
-    default:
-      return <span className="h-4 w-4 rounded-full border border-zinc-300 bg-white" />;
-  }
-}
-
-function todoTextClass(status: string | undefined): string {
-  switch (status) {
-    case 'completed':
-      return 'text-zinc-500';
-    case 'in_progress':
-      return 'font-medium text-zinc-800';
-    case 'cancelled':
-      return 'text-zinc-400 line-through decoration-zinc-300';
-    default:
-      return 'text-zinc-600';
-  }
-}
-
-function todoStatusLabelClass(status: string | undefined): string {
-  switch (status) {
-    case 'completed':
-      return 'text-emerald-600';
-    case 'in_progress':
-      return 'text-sky-600';
-    case 'cancelled':
-      return 'text-zinc-400';
-    default:
-      return 'text-zinc-400';
-  }
-}
-
 function isQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === 'question' || normalized === 'request_user_input' || normalized.includes('question');
@@ -5909,6 +5957,8 @@ function readQuestionItems(value: unknown): QuestionItem[] {
     .filter((item) => item.question.trim().length > 0);
 }
 
+type ToolTranslator = (key: string, options?: Record<string, unknown>) => string;
+
 function normalizeQuestionAnswer(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
@@ -5920,7 +5970,7 @@ function normalizeQuestionAnswer(value: unknown): string[] {
   return text ? [text] : [];
 }
 
-function formatQuestionAnswerValue(question: QuestionItem, value: string, t: TodoTranslator): string {
+function formatQuestionAnswerValue(question: QuestionItem, value: string, t: ToolTranslator): string {
   const normalized = value.trim().toLowerCase();
   if (question.type === 'confirm') {
     if (normalized === 'yes' || normalized === 'true') return t('chat.questionResult.yes');
@@ -5944,7 +5994,7 @@ function ChatQuestionResult({
   statusIcon: React.ReactNode;
   statusIconColor: string;
   processStep?: boolean;
-  t: TodoTranslator;
+  t: ToolTranslator;
 }) {
   const questions = readQuestionItems(state.input?.questions);
   if (questions.length === 0) return null;
@@ -6185,7 +6235,7 @@ function ChatBashPayload({
   t,
 }: {
   state: Partial<ToolState>;
-  t: TodoTranslator;
+  t: ToolTranslator;
 }) {
   const command = pickStringValue(state.input, 'command', 'cmd', 'shell') || state.title || '';
   const workdir = pickStringValue(state.input, 'workdir', 'cwd', 'directory');
@@ -6289,7 +6339,13 @@ export interface ChatToolPartProps {
   processStep?: boolean;
 }
 
-export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, processStep = false }: ChatToolPartProps) {
+export function ChatToolPart({
+  part,
+  pendingQuestion,
+  onAnswer,
+  onReject,
+  processStep = false,
+}: ChatToolPartProps) {
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
@@ -6301,7 +6357,6 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
 
   const state: Partial<ToolState> = part.state || {};
   const status = state.status || 'pending';
-
   // Pending question state is the source of truth. Tool status can briefly
   // arrive as completed after reconnects or transport races, but the user
   // still needs the answer UI while the question request exists.
@@ -6436,26 +6491,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
             <span>{t('chat.tool.todoStages')}</span>
             <span className="font-normal text-zinc-400">{todoEntries.length}</span>
           </div>
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {todoEntries.map((todo, index) => (
-              <div
-                key={todo.id || index}
-                className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
-              >
-                <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
-                  {todoStatusIcon(todo.status)}
-                </span>
-                <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
-                  {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
-                </span>
-                <span
-                  className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
-                >
-                  {todoStatusLabel(todo.status, t)}
-                </span>
-              </div>
-            ))}
-          </div>
+          <TodoList items={todoEntries} />
         </div>
       )}
 
@@ -6515,32 +6551,33 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
 
   if (processStep) {
     return (
-      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
-        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
-          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
-            {processStepIcon}
-          </span>
-          <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
-          {processStepDetail && (
-            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
-              {processStepDetail}
+      <>
+        <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+            <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
+              {processStepIcon}
             </span>
-          )}
-          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
-        </summary>
-        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
-          {toolDetails}
-        </div>
-      </details>
+            <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
+            {processStepDetail && (
+              <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+                {processStepDetail}
+              </span>
+            )}
+            <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+          </summary>
+          <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+            {toolDetails}
+          </div>
+        </details>
+      </>
     );
   }
 
   return (
-    // No top margin here — the part wrapper in SessionChat owns vertical
-    // spacing so every adjacent tool / thinking / text part is separated by a
-    // single, uniform 8px gap. See the comment on the wrapper in `parts.map`.
-    <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
-      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+    <>
+      {/* The part wrapper owns vertical spacing between process rows. */}
+      <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
@@ -6564,10 +6601,11 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
         </div>
       </summary>
 
-      <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
-        {toolDetails}
-      </div>
-    </details>
+        <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
+          {toolDetails}
+        </div>
+      </details>
+    </>
   );
 }
 
@@ -6592,6 +6630,8 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;
   if (prev.actionMessageId !== next.actionMessageId) return false;
+  if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
+  if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;

@@ -2,10 +2,31 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
 import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
+import type { SessionContextFile, SessionContextSnapshot } from '@/api/session';
+import type { SessionContextPanelProps } from './SessionContextPanel';
+import type { SSEChatEvent } from '@/features/session-chat/sseRouting';
+
+const sessionChatSSERef = vi.hoisted(() => ({ current: undefined as ((event: SSEChatEvent) => void) | undefined }));
+const contextPanelPropsRef = vi.hoisted(() => ({ current: null as SessionContextPanelProps | null }));
+vi.mock('./SessionContextPanel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./SessionContextPanel')>();
+  return {
+    default: (props: SessionContextPanelProps) => {
+      contextPanelPropsRef.current = props;
+      return <actual.default {...props} />;
+    },
+  };
+});
+vi.mock('@/components/common/FilePreview', () => ({
+  FilePreviewRenderer: ({ node, content }: any) => <div data-testid="file-preview">{node.name}:{content}</div>,
+  PreviewModal: () => null,
+}));
+
+const initialActionProbe = vi.hoisted(() => ({ enabled: false, delivered: vi.fn() }));
 
 const sessionStatusSSEOptionsRef = vi.hoisted(() => ({
   current: null as null | {
@@ -42,8 +63,19 @@ const {
     archive: vi.fn(),
     delete: vi.fn(),
     get: vi.fn(),
+    getContext: vi.fn(),
+    getContextFile: vi.fn(),
     getMessages: vi.fn(),
     moveToProject: vi.fn(),
+    readContextFile: vi.fn(),
+    contextFilePreviewUrl: vi.fn((sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/preview`),
+    contextFileDownloadUrl: vi.fn((sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/download`),
+    listContextRoot: vi.fn(),
+    readContextRootFile: vi.fn(),
+    contextRootPreviewUrl: vi.fn(),
+    contextRootDownloadUrl: vi.fn(),
+    addContextFolder: vi.fn(),
+    removeContextFolder: vi.fn(),
     update: vi.fn(),
   },
   updateSessionTitle: vi.fn(),
@@ -154,11 +186,14 @@ vi.mock('@/components/common/SessionChat', () => ({
     centerToolbarSlot,
     welcomeContent,
     initialMessage,
+    onInitialMessageConsumed,
     initialDisplayText,
     initialOptimisticMessage,
     focusMessageId,
     onCreateAndSend,
     onSSEEvent,
+    onOpenContextFile,
+    onSseStatusChange,
     agentName,
     model,
     executionMode,
@@ -168,6 +203,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     display,
     hideInput,
   }: {
+    onInitialMessageConsumed?: () => void;
     sessionId?: string | null;
     agentName?: string;
     mentionAgents?: Array<{ name: string }>;
@@ -215,8 +251,18 @@ vi.mock('@/components/common/SessionChat', () => ({
       executionModeOverride?: 'build' | 'plan' | 'goal',
     ) => Promise<unknown> | unknown;
     onSSEEvent?: (event: { type: string; properties?: Record<string, unknown> }) => void;
+    onOpenContextFile?: (resourceID: string) => void;
+    onSseStatusChange?: (status: 'connected' | 'disconnected') => void;
   }) {
+    sessionChatSSERef.current = onSSEEvent;
     const [input, setInput] = React.useState('');
+    const delivered = React.useRef(false);
+    React.useEffect(() => {
+      if (!initialActionProbe.enabled || !initialMessage || delivered.current) return;
+      delivered.current = true;
+      initialActionProbe.delivered(sessionId, initialMessage);
+      onInitialMessageConsumed?.();
+    }, [sessionId, initialMessage, onInitialMessageConsumed]);
     return (
       <div
         data-testid="session-chat"
@@ -238,6 +284,11 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-focus-message={focusMessageId ?? ''}
       >
         {sessionId ?? 'no-session'}
+        <button type="button" onClick={() => onOpenContextFile?.('requested-file')}>mock-open-context-file</button>
+        <button type="button" onClick={() => onSSEEvent?.({ type: 'session.context.updated', properties: { sessionID: sessionId } })}>mock-context-updated</button>
+        <button type="button" onClick={() => onSSEEvent?.({ type: 'session.context.updated', properties: { sessionID: 'unrelated-session' } })}>mock-other-context-updated</button>
+        <button type="button" onClick={() => onSseStatusChange?.('connected')}>mock-connected</button>
+        <button type="button" onClick={() => onSseStatusChange?.('disconnected')}>mock-disconnected</button>
         <button type="button" onClick={() => onComposerAddMenuOpenChange?.(true)}>
           mock-open-add-menu
         </button>
@@ -377,12 +428,33 @@ const modelDefinitions = [
   },
 ];
 
+function SessionRoutes() {
+  return <Routes>
+    <Route path="/sessions/:sessionId?" element={<SessionPage />} />
+    <Route path="*" element={<div />} />
+  </Routes>;
+}
+
+function NavigationProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return <>
+    <output data-testid="session-location">{location.pathname}{location.search}</output>
+    <button onClick={() => navigate(-1)}>history-back</button>
+    <button onClick={() => navigate(1)}>history-forward</button>
+    <button onClick={() => navigate('/sessions/session-2')}>open-second</button>
+    <button onClick={() => navigate('/agents')}>leave-session-page</button>
+    <button onClick={() => navigate('/sessions/session-1')}>return-to-first</button>
+  </>;
+}
+
 function renderSessionPage(
   initialEntry: string | { pathname: string; state?: unknown } = '/sessions',
 ) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
-      <SessionPage />
+      <NavigationProbe />
+      <SessionRoutes />
     </MemoryRouter>,
   );
 }
@@ -397,11 +469,55 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function contextFile(resourceID: string, overrides: Partial<SessionContextFile> = {}): SessionContextFile {
+  return {
+    resourceID, fileKey: resourceID, displayName: `${resourceID}.md`, logicalPath: `Outputs/${resourceID}.md`,
+    mimeType: 'text/markdown', status: 'ready', previewStatus: 'text', canPreview: true, isTextFile: true,
+    origin: 'agent_output', section: 'outputs', sourceMessageID: `msg-${resourceID}`, ...overrides,
+  };
+}
+
+function contextPage(overrides: Partial<SessionContextSnapshot> = {}): SessionContextSnapshot {
+  return {
+    sessionID: session.id, canManageFolders: true, hasMore: false, nextBefore: null,
+    outputs: [], contextFiles: [], progress: [], roots: [], skills: [],
+    counts: { total: 0, outputs: 0, contextFiles: 0, roots: 0, progress: 0 }, ...overrides,
+  };
+}
+
+function skillEvent(
+  tool: 'skill_load' | 'load_skill',
+  status: string,
+  {
+    sessionID = session.id, id = 'skill-part', messageID = 'skill-message',
+    input = { name: 'docx' }, error, output = '',
+  }: {
+    sessionID?: string; id?: string; messageID?: string;
+    input?: Record<string, string>; error?: string; output?: string;
+  } = {},
+): SSEChatEvent {
+  return {
+    type: 'message.part.updated',
+    properties: { part: { id, sessionID, messageID, type: 'tool', tool, state: { status, input, error, output } } },
+  };
+}
+
+function emitChatEvent(event: SSEChatEvent) {
+  act(() => sessionChatSSERef.current!(event));
+}
+
+async function advanceContextDebounce(ms = 250) {
+  await act(async () => { vi.advanceTimersByTime(ms); });
+}
+
 describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    initialActionProbe.enabled = false;
     __resetChatModelResourcesForTesting();
     sessionStatusSSEOptionsRef.current = null;
+    sessionChatSSERef.current = undefined;
+    contextPanelPropsRef.current = null;
     localStorage.clear();
     sessionStorage.clear();
 
@@ -459,6 +575,11 @@ describe('SessionPage session actions menu', () => {
     client.patch.mockResolvedValue({ data: { id: 'prj_project2', worktree: '/tmp/labs', name: 'Renamed Project' } });
     client.post.mockResolvedValue({ data: secondSession });
     sessionApi.get.mockResolvedValue(session);
+    sessionApi.getContext.mockReset().mockResolvedValue(contextPage());
+    sessionApi.getContextFile.mockReset().mockResolvedValue(contextFile('requested-file'));
+    sessionApi.readContextFile.mockReset().mockResolvedValue({ content: 'Requested content' });
+    sessionApi.addContextFolder.mockReset().mockResolvedValue({});
+    sessionApi.removeContextFolder.mockReset().mockResolvedValue({});
     sessionApi.getMessages.mockResolvedValue([
       {
         info: {
@@ -476,6 +597,217 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
+  it('consumes a legacy action once across StrictMode, back and remount', async () => {
+    initialActionProbe.enabled = true;
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    const user = userEvent.setup();
+    const view = render(<React.StrictMode><MemoryRouter initialEntries={['/sessions?session=session-1&message=once']}>
+      <NavigationProbe /><SessionRoutes />
+    </MemoryRouter></React.StrictMode>);
+    await waitFor(() => expect(initialActionProbe.delivered).toHaveBeenCalledTimes(1));
+    expect(initialActionProbe.delivered).toHaveBeenCalledWith('session-1', 'once');
+    await user.click(screen.getByText('open-second'));
+    await user.click(screen.getByText('history-back'));
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+    expect(initialActionProbe.delivered).toHaveBeenCalledTimes(1);
+    view.unmount();
+    renderSessionPage('/sessions/session-1');
+    expect(initialActionProbe.delivered).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a new session empty after restoring an earlier session', async () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
+    const user = userEvent.setup();
+    renderSessionPage();
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+    await user.click(screen.getByRole('button', { name: 'newSession' }));
+    expect(screen.getByTestId('session-location').textContent).toBe('/sessions');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+    await user.click(screen.getByText('history-back'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    await user.click(screen.getByText('history-forward'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('does not navigate away when an earlier create-and-send request finishes', async () => {
+    const request = deferred<{ data: typeof secondSession }>();
+    client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
+    const user = userEvent.setup();
+    renderSessionPage();
+    await user.click(screen.getByText('mock-create-and-send'));
+    await user.click(screen.getByText('Original Session'));
+    await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+    await waitFor(() => expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything()));
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+  });
+
+  describe.each(['create', 'create-and-send'] as const)('%s completion under StrictMode', (action) => {
+    it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
+      const request = deferred<{ data: typeof secondSession }>();
+      client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
+      const user = userEvent.setup();
+      render(<React.StrictMode><MemoryRouter initialEntries={['/sessions']}>
+        <NavigationProbe /><SessionRoutes />
+      </MemoryRouter></React.StrictMode>);
+      await user.click(action === 'create'
+        ? screen.getByRole('button', { name: 'createTaskSession' })
+        : screen.getByText('mock-create-and-send'));
+      expect(client.post).toHaveBeenCalledWith('/api/session', expect.anything());
+
+      if (destination !== 'stay') {
+        await user.click(screen.getByText('leave-session-page'));
+        expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+        if (destination === 'return') {
+          await user.click(screen.getByText('return-to-first'));
+          expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+        }
+      }
+      const savedSelection = localStorage.getItem('flocks:last-selected-session');
+      await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+      await waitFor(() => expect(addSession).toHaveBeenCalledWith(secondSession));
+      if (action === 'create-and-send') {
+        expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
+      }
+      expect(screen.getByTestId('session-location').textContent).toBe(
+        destination === 'stay' ? '/sessions/session-2'
+          : destination === 'leave' ? '/agents' : '/sessions/session-1',
+      );
+      if (destination !== 'stay') {
+        expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
+      }
+    });
+  });
+
+  describe.each(['archive', 'batch-archive'] as const)('%s completion under StrictMode', (action) => {
+    it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
+      useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+      const request = deferred<{ id: string; status: string }>();
+      sessionApi.archive.mockReturnValue(request.promise);
+      const user = userEvent.setup();
+      render(<React.StrictMode><MemoryRouter initialEntries={['/sessions/session-1']}>
+        <NavigationProbe /><SessionRoutes />
+      </MemoryRouter></React.StrictMode>);
+      if (action === 'archive') {
+        await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
+        await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+      } else {
+        await user.click(screen.getByRole('button', { name: 'selectMode' }));
+        await user.click(screen.getAllByText('Original Session')[0]);
+        await user.click(screen.getByRole('button', { name: 'archiveSelected' }));
+      }
+      expect(sessionApi.archive).toHaveBeenCalledWith(session.id);
+      if (destination !== 'stay') {
+        await user.click(screen.getByText('leave-session-page'));
+        expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+        if (destination === 'return') {
+          await user.click(screen.getByText('open-second'));
+          expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+        }
+      }
+      const savedSelection = localStorage.getItem('flocks:last-selected-session');
+      await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
+      expect(action === 'archive' ? removeSession : removeSessions).toHaveBeenCalledWith(
+        action === 'archive' ? session.id : [session.id],
+      );
+      expect(screen.getByTestId('session-location').textContent).toBe(
+        destination === 'stay' ? '/sessions'
+          : destination === 'leave' ? '/agents' : '/sessions/session-2',
+      );
+      if (destination !== 'stay') {
+        expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
+      }
+    });
+  });
+
+  it('does not leave the current session when another session finishes archiving', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    const request = deferred<{ id: string; status: string }>();
+    sessionApi.archive.mockReturnValue(request.promise);
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
+    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+    await user.click(screen.getByText('open-second'));
+    await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+  });
+
+  it('keeps a canonical URL through selection, back and forward without sending', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    renderSessionPage('/sessions/session-1');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    await user.click(screen.getByText('Second Session'));
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    await user.click(screen.getByText('history-back'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    await user.click(screen.getByText('history-forward'));
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('normalizes legacy links and retains only navigation parameters', async () => {
+    renderSessionPage('/sessions?session=session-1&focusMessage=msg-1&message=hello&display=label');
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1?focusMessage=msg-1');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', 'hello');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-focus-message', 'msg-1');
+  });
+
+  it('never sends a conflicting query action to the path session', async () => {
+    renderSessionPage('/sessions/session-1?session=session-2&message=wrong');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+    expect(toast.error).toHaveBeenCalledWith('linkTargetMismatch');
+  });
+
+  it('loads direct links independently of a slow sidebar and discards stale responses', async () => {
+    const request = deferred<typeof session>();
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [], loading: true });
+    sessionApi.get.mockImplementation((id: string) => id === session.id ? request.promise : Promise.resolve(secondSession));
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    expect(sessionApi.get).toHaveBeenCalledWith('session-1');
+    await user.click(screen.getByText('open-second'));
+    await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2'));
+    await act(async () => { request.resolve(session); await request.promise; });
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
+  });
+
+  it('revalidates a list-external session after navigating away and back', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [secondSession] });
+    sessionApi.get.mockResolvedValueOnce(session).mockRejectedValueOnce({ response: { status: 404 } });
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
+    await user.click(screen.getByText('open-second'));
+    await user.click(screen.getByText('history-back'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('sessionAccess.unavailable');
+    expect(sessionApi.get).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+  });
+
+  it('shows a retryable network error instead of a blank composer', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [] });
+    sessionApi.get.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(session);
+    const user = userEvent.setup();
+    renderSessionPage('/sessions/session-1');
+    expect(await screen.findByRole('alert')).toHaveTextContent('sessionAccess.failed');
+    expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+    await user.click(screen.getByText('sessionAccess.retry'));
+    await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
+  });
+
+  it('does not auto-send a legacy action to a read-only session', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [{ ...session, canWrite: false }] });
+    renderSessionPage('/sessions?session=session-1&message=do-not-send');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+  });
+
   it('renders Build by default and keeps Agent in the Add menu', async () => {
     renderSessionPage();
 
@@ -487,6 +819,683 @@ describe('SessionPage session actions menu', () => {
     expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
     expect(agentIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
     expect(agentIconContainer?.className).not.toContain('shadow-');
+  });
+
+  it('opens the Session Context panel from the header', async () => {
+    const user = userEvent.setup();
+    renderSessionPage('/sessions?session=session-1');
+
+    const button = await screen.findByRole('button', { name: 'context.title' });
+    expect(sessionApi.getContext).not.toHaveBeenCalled();
+    await user.click(button);
+
+    expect(sessionApi.getContext).toHaveBeenCalledWith('session-1', {}, expect.any(AbortSignal));
+    expect(screen.getAllByText('context.outputs').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('context.contextFiles').length).toBeGreaterThan(0);
+  });
+
+  it('opens requested metadata immediately when a closed panel has no snapshot yet', async () => {
+    const head = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockReturnValue(head.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'mock-open-context-file' }));
+    expect(await screen.findByTestId('file-preview')).toHaveTextContent('requested-file.md:Requested content');
+    expect(sessionApi.getContextFile).toHaveBeenCalledWith('session-1', 'requested-file', expect.any(AbortSignal));
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+    await act(async () => head.resolve(contextPage()));
+    expect(screen.getByTestId('file-preview')).toHaveTextContent('requested-file.md:Requested content');
+  });
+
+  it.each([
+    ['text/markdown', false], ['application/pdf', false],
+    ['text/markdown', true], ['application/pdf', true],
+  ] as const)('keeps a closed-panel card request alive through StrictMode mount replay (%s, cached=%s)', async (mimeType, cached) => {
+    const head = deferred<SessionContextSnapshot>();
+    const metadata = deferred<SessionContextFile>();
+    sessionApi.getContext.mockReturnValue(head.promise);
+    if (cached) sessionApi.getContext.mockResolvedValueOnce(contextPage());
+    sessionApi.getContextFile.mockImplementation((_sessionId: string, _id: string, signal: AbortSignal) => (
+      new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('Canceled')), { once: true });
+        metadata.promise.then(resolve, reject);
+      })
+    ));
+    render(
+      <React.StrictMode>
+        <MemoryRouter initialEntries={['/sessions?session=session-1']}>
+          <SessionRoutes />
+        </MemoryRouter>
+      </React.StrictMode>,
+    );
+    if (cached) {
+      fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+      await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+      fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+    }
+    fireEvent.click(await screen.findByRole('button', { name: 'mock-open-context-file' }));
+    await waitFor(() => expect(sessionApi.getContextFile).toHaveBeenCalled());
+    await act(async () => metadata.resolve(contextFile('requested-file', {
+      displayName: 'earlier-file', mimeType, isTextFile: mimeType.startsWith('text/'),
+    })));
+    expect(await screen.findByTestId('file-preview')).toHaveTextContent('earlier-file');
+    await act(async () => head.resolve(contextPage()));
+    expect(screen.getByTestId('file-preview')).toHaveTextContent('earlier-file');
+    expect(contextPanelPropsRef.current?.requestedResourceID).toBeNull();
+    const signals = sessionApi.getContextFile.mock.calls.map((call) => call[2] as AbortSignal);
+    expect(signals.some((signal) => !signal.aborted)).toBe(true);
+  });
+
+  it('coalesces refresh, SSE, and reconnect bursts into one single-flight trailing read', async () => {
+    const first = deferred<SessionContextSnapshot>();
+    const trailing = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockReturnValueOnce(first.promise).mockReturnValueOnce(trailing.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    const refresh = screen.getByTitle('context.refresh');
+    fireEvent.click(screen.getByRole('button', { name: 'mock-connected' }));
+    for (let i = 0; i < 5; i += 1) {
+      fireEvent.click(refresh);
+      fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
+    }
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+    expect((sessionApi.getContext.mock.calls[0][2] as AbortSignal).aborted).toBe(false);
+    await act(async () => first.resolve(contextPage({ outputs: [contextFile('initial')] })));
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    expect(contextPanelPropsRef.current?.loading).toBe(true);
+    expect(screen.getByText('initial.md')).toBeInTheDocument();
+    await act(async () => trailing.resolve(contextPage({ outputs: [contextFile('latest')] })));
+    expect(screen.getByText('latest.md')).toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.loading).toBe(false);
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+  });
+
+  it('debounces idle SSE bursts and ignores events for other sessions', async () => {
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'mock-other-context-updated' }));
+      await act(async () => { vi.advanceTimersByTime(300); });
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 5; i += 1) fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
+      await act(async () => { vi.advanceTimersByTime(249); });
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(1); });
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['skill_load', 'load_skill'] as const)('refreshes skill-only %s lifecycle events and clears retry errors', async (tool) => {
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      let requests = 1;
+      for (const status of ['pending', 'running', 'error', 'running', 'completed'] as const) {
+        const error = status === 'error' ? 'Skill dependency missing' : undefined;
+        const skill = {
+          name: 'docx', description: null,
+          status: status === 'completed' ? 'loaded' as const : status === 'error' ? 'error' as const : 'loading' as const,
+          ...(error ? { error } : {}),
+        };
+        sessionApi.getContext.mockResolvedValueOnce(contextPage({ skills: [skill] }));
+        emitChatEvent(skillEvent(tool, status, { input: tool === 'skill_load' ? { name: 'docx' } : { skill: 'docx' }, error }));
+        await advanceContextDebounce(249);
+        expect(sessionApi.getContext).toHaveBeenCalledTimes(requests);
+        await advanceContextDebounce(1);
+        requests += 1;
+        expect(sessionApi.getContext).toHaveBeenCalledTimes(requests);
+        expect(sessionApi.getContext).toHaveBeenLastCalledWith('session-1', {}, expect.any(AbortSignal));
+        expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([skill]);
+      }
+      // No write/todo/context-updated or streaming-done event is needed above.
+      for (let i = 0; i < 5; i += 1) emitChatEvent(skillEvent(tool, 'completed', { output: `chunk ${i}` }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(requests);
+      expect(contextPanelPropsRef.current?.snapshot?.skills[0]).not.toHaveProperty('error');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('deduplicates skill descriptors by part, including newly available names and changed errors', async () => {
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('skill_load', 'unknown'));
+      const unrelated = skillEvent('skill_load', 'running');
+      unrelated.properties!.part.tool = 'read';
+      emitChatEvent(unrelated);
+      emitChatEvent({ ...skillEvent('skill_load', 'running'), type: 'message.updated' });
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+
+      emitChatEvent(skillEvent('skill_load', 'running', { input: {} }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      emitChatEvent(skillEvent('skill_load', 'running', { input: {}, output: 'partial' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      emitChatEvent(skillEvent('skill_load', 'running', { input: { skill: 'docx' } }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      emitChatEvent(skillEvent('skill_load', 'running', { input: { name: 'docx' }, output: 'more' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'First reason' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'First reason', output: 'ignored output' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'Full reason' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(5);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'Full reason', id: 'another-part' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(6);
+      emitChatEvent(skillEvent('skill_load', 'error', { error: 'Full reason', messageID: 'another-message' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(7);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces skill bursts into one debounced request and one dirty trailing read', async () => {
+    const refresh = deferred<SessionContextSnapshot>();
+    const trailing = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockResolvedValueOnce(contextPage()).mockReturnValueOnce(refresh.promise).mockReturnValueOnce(trailing.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('skill_load', 'pending'));
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      emitChatEvent(skillEvent('load_skill', 'pending', { id: 'second-part' }));
+      await advanceContextDebounce(249);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+      await advanceContextDebounce(1);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      for (const status of ['error', 'running', 'completed']) {
+        emitChatEvent(skillEvent('skill_load', status));
+      }
+      emitChatEvent(skillEvent('load_skill', 'completed', { id: 'second-part' }));
+      await advanceContextDebounce(500);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      await act(async () => refresh.resolve(contextPage({ skills: [{ name: 'docx', status: 'loading' }] })));
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      expect(contextPanelPropsRef.current?.loading).toBe(true);
+      // Repeated output-only updates during the trailing flight must not dirty it again.
+      for (let i = 0; i < 5; i += 1) emitChatEvent(skillEvent('skill_load', 'completed', { output: `chunk ${i}` }));
+      await act(async () => trailing.resolve(contextPage({ skills: [{ name: 'docx', status: 'loaded' }] })));
+      await advanceContextDebounce(500);
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      expect(contextPanelPropsRef.current?.loading).toBe(false);
+      expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([{ name: 'docx', status: 'loaded' }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets skill deduplication on close/reopen and A -> B -> A without caching foreign or stale events', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    sessionApi.getContext.mockImplementation((sessionId: string) => Promise.resolve(contextPage({ sessionID: sessionId })));
+    renderSessionPage('/sessions?session=session-1');
+    await screen.findByRole('button', { name: 'context.title' });
+    const closedHandler = sessionChatSSERef.current!;
+    emitChatEvent(skillEvent('skill_load', 'running'));
+    expect(sessionApi.getContext).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    const firstAHandler = sessionChatSSERef.current!;
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('skill_load', 'running', { sessionID: 'session-2' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+      fireEvent.click(screen.getByRole('button', { name: 'context.title' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      act(() => { closedHandler(skillEvent('skill_load', 'running')); firstAHandler(skillEvent('skill_load', 'running')); });
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+
+      // A scheduled descriptor change is discarded on switch, not carried into B.
+      emitChatEvent(skillEvent('skill_load', 'completed'));
+      fireEvent.click(screen.getByText('Second Session'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(5);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(5);
+      emitChatEvent(skillEvent('skill_load', 'running', { sessionID: 'session-2' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(6);
+      fireEvent.click(screen.getByText('Original Session'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(7);
+      act(() => firstAHandler(skillEvent('skill_load', 'running')));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(7);
+      emitChatEvent(skillEvent('skill_load', 'running'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(8);
+      emitChatEvent(skillEvent('skill_load', 'completed'));
+      fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext.mock.calls.map((call) => call[0])).toEqual([
+        'session-1', 'session-1', 'session-1', 'session-1', 'session-2', 'session-2', 'session-1', 'session-1',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps newer failed skill attempts above older loaded pages and refreshes retries from skill SSE alone', async () => {
+    const older = deferred<SessionContextSnapshot>();
+    const refresh = deferred<SessionContextSnapshot>();
+    const failed = { name: 'docx', status: 'error' as const, error: 'Latest attempt failed' };
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({ hasMore: true, nextBefore: 'old-cursor', messageIDs: ['head'], skills: [failed] }))
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(refresh.promise)
+      .mockResolvedValueOnce(contextPage({ skills: [{ name: 'docx', status: 'loaded' }] }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    emitChatEvent(skillEvent('load_skill', 'running'));
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    await act(async () => older.resolve(contextPage({ skills: [
+      { name: 'docx', status: 'loaded' }, { name: 'older-skill', status: 'loaded' },
+    ] })));
+    expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([failed, { name: 'older-skill', status: 'loaded' }]);
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+    expect(sessionApi.getContext.mock.calls[2][1]).toEqual({});
+    await act(async () => refresh.resolve(contextPage({ skills: [{ name: 'docx', status: 'loading' }] })));
+    expect(contextPanelPropsRef.current?.snapshot?.skills[0]).toEqual({ name: 'docx', status: 'loading' });
+    vi.useFakeTimers();
+    try {
+      emitChatEvent(skillEvent('load_skill', 'completed'));
+      await advanceContextDebounce();
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(4);
+      expect(contextPanelPropsRef.current?.snapshot?.skills).toEqual([
+        { name: 'docx', status: 'loaded' }, { name: 'older-skill', status: 'loaded' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels scheduled SSE refreshes on session switch and close', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    sessionApi.getContext.mockImplementation((sessionId: string) => Promise.resolve(contextPage({ sessionID: sessionId })));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
+      fireEvent.click(screen.getByText('Second Session'));
+      await act(async () => { vi.advanceTimersByTime(300); });
+      expect(sessionApi.getContext.mock.calls.map((call) => call[0])).toEqual(['session-1', 'session-2']);
+      fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
+      fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+      fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
+      await act(async () => { vi.advanceTimersByTime(300); });
+      expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a dirty failed flight once and renders validation errors as strings', async () => {
+    const first = deferred<SessionContextSnapshot>();
+    const retry = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockReturnValueOnce(first.promise).mockReturnValueOnce(retry.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    await act(async () => first.reject({ response: { data: { detail: [{ msg: 'Invalid cursor' }] } } }));
+    expect(screen.getByText('Invalid cursor')).toBeInTheDocument();
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    await act(async () => retry.resolve(contextPage({ outputs: [contextFile('recovered')] })));
+    expect(screen.getByText('recovered.md')).toBeInTheDocument();
+    expect(screen.queryByText('Invalid cursor')).not.toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.loading).toBe(false);
+  });
+
+  it('isolates A -> B -> A requests and rejects stale refresh callbacks without invalidating B', async () => {
+    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+    const firstA = deferred<SessionContextSnapshot>();
+    const b = deferred<SessionContextSnapshot>();
+    const latestA = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockReturnValueOnce(firstA.promise).mockReturnValueOnce(b.promise).mockReturnValueOnce(latestA.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    const staleRefresh = contextPanelPropsRef.current!.onRefresh;
+    const firstSignal = sessionApi.getContext.mock.calls[0][2] as AbortSignal;
+    fireEvent.click(screen.getByText('Second Session'));
+    await waitFor(() => expect(sessionApi.getContext).toHaveBeenCalledTimes(2));
+    const bSignal = sessionApi.getContext.mock.calls[1][2] as AbortSignal;
+    expect(firstSignal.aborted).toBe(true);
+    await act(async () => { await staleRefresh(); });
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    expect(bSignal.aborted).toBe(false);
+    await act(async () => b.resolve(contextPage({ sessionID: 'session-2', outputs: [contextFile('B')] })));
+    expect(screen.getByText('B.md')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Original Session'));
+    await waitFor(() => expect(sessionApi.getContext).toHaveBeenCalledTimes(3));
+    await act(async () => { await staleRefresh(); });
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+    await act(async () => latestA.resolve(contextPage({ outputs: [contextFile('latest-A')] })));
+    await act(async () => firstA.resolve(contextPage({ outputs: [contextFile('stale-A')] })));
+    expect(screen.getByText('latest-A.md')).toBeInTheDocument();
+    expect(screen.queryByText('stale-A.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('B.md')).not.toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.loading).toBe(false);
+  });
+
+  it('aborts a dirty request on close and ignores stale callbacks after reopening', async () => {
+    const old = deferred<SessionContextSnapshot>();
+    const reopened = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockReturnValueOnce(old.promise).mockReturnValueOnce(reopened.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    const staleRefresh = contextPanelPropsRef.current!.onRefresh;
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+    expect((sessionApi.getContext.mock.calls[0][2] as AbortSignal).aborted).toBe(true);
+    await act(async () => { await staleRefresh(); });
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(sessionApi.getContext).toHaveBeenCalledTimes(2));
+    await act(async () => { await staleRefresh(); old.reject(new Error('Stale close error')); });
+    expect((sessionApi.getContext.mock.calls[1][2] as AbortSignal).aborted).toBe(false);
+    expect(contextPanelPropsRef.current?.loading).toBe(true);
+    expect(screen.queryByText('Stale close error')).not.toBeInTheDocument();
+    await act(async () => reopened.resolve(contextPage({ outputs: [contextFile('reopened')] })));
+    expect(screen.getByText('reopened.md')).toBeInTheDocument();
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels context requests on unmount and does not let retained callbacks restart them', async () => {
+    const pending = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockReturnValue(pending.promise);
+    const view = renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    const staleRefresh = contextPanelPropsRef.current!.onRefresh;
+    const signal = sessionApi.getContext.mock.calls[0][2] as AbortSignal;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => { await staleRefresh(); pending.resolve(contextPage()); });
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes older pages with refresh and retains history, stable identities, and latest state', async () => {
+    const older = deferred<SessionContextSnapshot>();
+    const refresh = deferred<SessionContextSnapshot>();
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({
+        hasMore: true, nextBefore: 'cursor-1', messageIDs: ['msg-head'],
+        outputs: [contextFile('new', { fileKey: 'same-file' }), contextFile('legacy', { fileKey: '' })],
+        progress: [{ id: 'todo', content: 'Latest progress', status: 'in_progress' }],
+        skills: [{ name: 'docx', status: 'loaded', description: 'Latest skill' }],
+      }))
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(refresh.promise)
+      .mockResolvedValueOnce(contextPage({ outputs: [contextFile('oldest')], hasMore: false, nextBefore: null }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    expect(sessionApi.getContext.mock.calls[1][1]).toEqual({ before: 'cursor-1' });
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    await act(async () => older.resolve(contextPage({
+      hasMore: true, nextBefore: 'cursor-2',
+      outputs: [contextFile('historic'), contextFile('legacy', { fileKey: '', displayName: 'stale-legacy.md' })],
+      contextFiles: [contextFile('stale', { fileKey: 'same-file', section: 'context' })],
+      progress: [{ id: 'todo', content: 'Old progress', status: 'pending' }],
+      skills: [{ name: 'docx', status: 'loading', description: 'Old skill' }, { name: 'older-skill', status: 'loaded' }],
+    })));
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+    expect(sessionApi.getContext.mock.calls[2][1]).toEqual({});
+    expect(screen.getByText('new.md')).toBeInTheDocument();
+    expect(screen.getByText('historic.md')).toBeInTheDocument();
+    expect(screen.queryByText('stale.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('stale-legacy.md')).not.toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.snapshot?.progress[0].content).toBe('Latest progress');
+    expect(contextPanelPropsRef.current?.snapshot?.skills.find((skill) => skill.name === 'docx')?.description).toBe('Latest skill');
+    await act(async () => refresh.resolve(contextPage({
+      hasMore: true, nextBefore: 'new-head-cursor', messageIDs: ['msg-head', 'msg-fresh'],
+      outputs: [contextFile('updated', { fileKey: 'same-file' }), contextFile('fresh')],
+      progress: [{ id: 'todo', content: 'Refreshed progress', status: 'completed' }],
+      skills: [{ name: 'docx', status: 'loaded', description: 'Refreshed skill' }],
+    })));
+    expect(screen.getByText('updated.md')).toBeInTheDocument();
+    expect(screen.getByText('historic.md')).toBeInTheDocument();
+    expect(screen.getByText('legacy.md')).toBeInTheDocument();
+    expect(screen.queryByText('new.md')).not.toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.snapshot?.nextBefore).toBe('cursor-2');
+    expect(contextPanelPropsRef.current?.snapshot?.skills).toHaveLength(2);
+    expect(contextPanelPropsRef.current?.snapshot?.progress[0].content).toBe('Refreshed progress');
+    fireEvent.click(screen.getByRole('button', { name: 'context.loadEarlier' }));
+    await screen.findByText('oldest.md');
+    expect(sessionApi.getContext.mock.calls[3][1]).toEqual({ before: 'cursor-2' });
+    expect(screen.getByText('historic.md')).toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.snapshot?.hasMore).toBe(false);
+    expect(screen.queryByRole('button', { name: 'context.loadEarlier' })).not.toBeInTheDocument();
+  });
+
+  it('reconciles deleted and replaced files in a refreshed message while preserving older history', async () => {
+    const renamed = contextFile('renamed', { fileKey: 'old-path', displayName: 'old-name.md', sourceMessageID: 'msg-head' });
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-head'], hasMore: true, nextBefore: 'msg-head',
+        outputs: [contextFile('deleted-output', { sourceMessageID: 'msg-head' }), renamed],
+        contextFiles: [contextFile('deleted-upload', { section: 'context', origin: 'user_upload', sourceMessageID: 'msg-head' })],
+      }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-old'], outputs: [contextFile('historical', { sourceMessageID: 'msg-old' })],
+      }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-head'], hasMore: true, nextBefore: 'msg-head',
+        outputs: [{ ...renamed, fileKey: 'new-path', displayName: 'new-name.md' }],
+      }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    await screen.findByText('historical.md');
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    await screen.findByText('new-name.md');
+    expect(screen.queryByText('deleted-output.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('deleted-upload.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('old-name.md')).not.toBeInTheDocument();
+    expect(screen.getByText('historical.md')).toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.snapshot?.counts).toEqual({
+      total: 2, outputs: 2, contextFiles: 0, roots: 0, progress: 0,
+    });
+  });
+
+  it('reconciles a reloaded historical interval without dropping newer files', async () => {
+    const newer = contextFile('newer', { sourceMessageID: 'msg-new' });
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({ messageIDs: ['msg-new'], hasMore: true, nextBefore: 'msg-new', outputs: [newer] }))
+      .mockResolvedValueOnce(contextPage({ messageIDs: ['msg-old'], outputs: [contextFile('removed-old', { sourceMessageID: 'msg-old' })] }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-latest'], hasMore: true, nextBefore: 'msg-latest',
+        outputs: [contextFile('latest', { sourceMessageID: 'msg-latest' })],
+      }))
+      .mockResolvedValueOnce(contextPage({ messageIDs: ['msg-new', 'msg-old'], outputs: [newer] }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    await screen.findByText('removed-old.md');
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    await screen.findByText('latest.md');
+    fireEvent.click(screen.getByRole('button', { name: 'context.loadEarlier' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    expect(screen.queryByText('removed-old.md')).not.toBeInTheDocument();
+    expect(screen.getByText('newer.md')).toBeInTheDocument();
+    expect(screen.getByText('latest.md')).toBeInTheDocument();
+  });
+
+  it.each([false, true])('replaces cached files and pagination when a refreshed head covers all remaining messages (empty=%s)', async (empty) => {
+    const retained = contextFile('retained', { sourceMessageID: 'msg-retained' });
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-deleted', 'msg-retained'], hasMore: true, nextBefore: 'msg-deleted',
+        outputs: [contextFile('deleted-message', { sourceMessageID: 'msg-deleted' }), retained],
+      }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: empty ? [] : ['msg-retained'], outputs: empty ? [] : [retained],
+      }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await screen.findByText('deleted-message.md');
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    expect(contextPanelPropsRef.current?.snapshot?.outputs).toEqual(empty ? [] : [retained]);
+    expect(contextPanelPropsRef.current?.snapshot?.hasMore).toBe(false);
+    expect(contextPanelPropsRef.current?.snapshot?.nextBefore).toBeNull();
+    expect(screen.queryByRole('button', { name: 'context.loadEarlier' })).not.toBeInTheDocument();
+  });
+
+  it.each([0, 1, 3])('counts %s Todo items as at most one Progress resource', async (count) => {
+    sessionApi.getContext.mockResolvedValue(contextPage({
+      outputs: [contextFile('output')],
+      contextFiles: [contextFile('upload', { section: 'context', origin: 'user_upload' })],
+      roots: [{ id: 'project', kind: 'project', displayName: 'Project', status: 'available' }],
+      progressKnown: true,
+      progress: Array.from({ length: count }, (_, index) => ({ id: `todo-${index}`, content: `Task ${index}`, status: 'pending' as const })),
+    }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await screen.findByText('output.md');
+    expect(contextPanelPropsRef.current?.snapshot?.counts).toEqual({
+      total: 3 + Number(count > 0), outputs: 1, contextFiles: 1, roots: 1, progress: Number(count > 0),
+    });
+    expect(contextPanelPropsRef.current?.snapshot?.progress).toHaveLength(count);
+  });
+
+  it.each([null, 'previous-cursor'])('reopens pagination across disjoint head pages after the previous boundary %s', async (previousCursor) => {
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-1'], hasMore: previousCursor !== null, nextBefore: previousCursor,
+        outputs: [contextFile('first')],
+      }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: Array.from({ length: 100 }, (_, index) => `msg-${index + 3}`),
+        hasMore: true, nextBefore: 'msg-3', outputs: [contextFile('latest')],
+      }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-1', 'msg-2'], outputs: [contextFile('gap'), contextFile('first')],
+      }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await screen.findByText('first.md');
+    fireEvent.click(screen.getByRole('button', { name: 'context.close' }));
+    fireEvent.click(screen.getByRole('button', { name: 'context.title' }));
+    await screen.findByText('latest.md');
+    expect(screen.getByText('first.md')).toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.snapshot?.nextBefore).toBe('msg-3');
+    fireEvent.click(screen.getByRole('button', { name: 'context.loadEarlier' }));
+    await screen.findByText('gap.md');
+    expect(sessionApi.getContext.mock.calls[2][1]).toEqual({ before: 'msg-3' });
+    expect(contextPanelPropsRef.current?.snapshot?.outputs).toHaveLength(3);
+    expect(screen.queryByRole('button', { name: 'context.loadEarlier' })).not.toBeInTheDocument();
+  });
+
+  it('replaces a retained old file with a newer revision loaded from a previously missed interval', async () => {
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-1'], outputs: [contextFile('old-revision', { fileKey: 'report', createdAt: 1 })],
+      }))
+      .mockResolvedValueOnce(contextPage({ messageIDs: ['msg-102'], hasMore: true, nextBefore: 'msg-3' }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-1', 'msg-2'],
+        outputs: [contextFile('new-revision', { fileKey: 'report', createdAt: 2 })],
+      }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await screen.findByText('old-revision.md');
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    await screen.findByText('new-revision.md');
+    expect(screen.queryByText('old-revision.md')).not.toBeInTheDocument();
+    expect(contextPanelPropsRef.current?.snapshot?.outputs).toHaveLength(1);
+  });
+
+  it('honors an explicitly cleared Progress on refresh and does not revive it from older pages', async () => {
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-2'], hasMore: true, nextBefore: 'msg-2', progressKnown: true,
+        progress: [{ id: 'todo', content: 'Previous task', status: 'in_progress' }],
+      }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-2', 'msg-3'], hasMore: true, nextBefore: 'msg-2', progressKnown: true, progress: [],
+      }))
+      .mockResolvedValueOnce(contextPage({
+        messageIDs: ['msg-1'], progressKnown: true,
+        progress: [{ id: 'todo', content: 'Previous task', status: 'pending' }],
+      }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.snapshot?.progress).toHaveLength(1));
+    fireEvent.click(screen.getByTitle('context.refresh'));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    expect(contextPanelPropsRef.current?.snapshot?.progress).toEqual([]);
+    expect(contextPanelPropsRef.current?.snapshot?.progressKnown).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'context.loadEarlier' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.loading).toBe(false));
+    expect(contextPanelPropsRef.current?.snapshot?.progress).toEqual([]);
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
+  });
+
+  it('fills Progress from history only when the newer page has no known Todo state', async () => {
+    sessionApi.getContext
+      .mockResolvedValueOnce(contextPage({ hasMore: true, nextBefore: 'msg-2', progressKnown: false }))
+      .mockResolvedValueOnce(contextPage({
+        progressKnown: true, progress: [{ id: 'todo', content: 'Historical task', status: 'pending' }],
+      }));
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    await waitFor(() => expect(contextPanelPropsRef.current?.snapshot?.progress).toHaveLength(1));
+    expect(contextPanelPropsRef.current?.snapshot?.progressKnown).toBe(true);
+  });
+
+  it('keeps an empty history page pageable and prevents duplicate load-more requests', async () => {
+    const older = deferred<SessionContextSnapshot>();
+    sessionApi.getContext.mockResolvedValueOnce(contextPage({ hasMore: true, nextBefore: 'empty-cursor' })).mockReturnValueOnce(older.promise);
+    renderSessionPage('/sessions?session=session-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'context.loadEarlier' }));
+    act(() => { void contextPanelPropsRef.current?.onLoadMore?.(); });
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
+    await act(async () => older.resolve(contextPage({ hasMore: true, nextBefore: 'next-empty-cursor' })));
+    expect(screen.getByRole('button', { name: 'context.loadEarlier' })).toBeEnabled();
+    expect(contextPanelPropsRef.current?.snapshot?.nextBefore).toBe('next-empty-cursor');
+    expect(sessionApi.getContext).toHaveBeenCalledTimes(2);
   });
 
   it('shows full execution-mode titles in a portaled menu and preserves dismissal', async () => {
@@ -599,7 +1608,7 @@ describe('SessionPage session actions menu', () => {
     }
     render(
       <MemoryRouter initialEntries={['/sessions']}>
-        <SessionPage />
+        <SessionRoutes />
         <LocationProbe />
       </MemoryRouter>,
     );
@@ -2440,7 +3449,7 @@ describe('SessionPage session actions menu', () => {
     render(
       <MemoryRouter initialEntries={['/sessions']}>
         <NavigateButton />
-        <SessionPage />
+        <SessionRoutes />
       </MemoryRouter>,
     );
 
@@ -2493,7 +3502,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('clears the selected session after confirming it no longer exists', async () => {
+  it('keeps the target URL and shows an error when the session no longer exists', async () => {
     useSessions.mockReturnValue({
       sessions: [],
       loading: false,
@@ -2510,7 +3519,9 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
-      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+      expect(screen.getByRole('alert')).toHaveTextContent('sessionAccess.unavailable');
+      expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-deleted');
     });
   });
 
@@ -2523,8 +3534,9 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
-      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+      expect(screen.getByRole('alert')).toHaveTextContent('sessionAccess.unavailable');
+      expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-deleted');
     });
 
     await user.click(screen.getByText('Original Session'));

@@ -805,6 +805,43 @@ class Session:
         return updated_session
 
     @classmethod
+    async def mutate_metadata(
+        cls,
+        project_id: str,
+        session_id: str,
+        mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Optional[SessionInfo]:
+        """Atomically update Session metadata under the lifecycle lock."""
+
+        async with cls.lifecycle_lock(session_id):
+            if cls.is_lifecycle_transitioning(session_id):
+                return None
+            session = await cls.get(project_id, session_id)
+            if not session or session.status != "active":
+                return None
+
+            metadata = mutator(dict(session.metadata or {}))
+            update_data = session.model_dump(by_alias=True)
+            update_data["metadata"] = metadata
+            update_data.setdefault("time", {})["updated"] = int(
+                datetime.now().timestamp() * 1000
+            )
+            updated_session = SessionInfo(**update_data)
+            await Storage.set(
+                f"session:{project_id}:{session_id}",
+                updated_session,
+                "session",
+            )
+            cls._id_index[session_id] = f"session:{project_id}:{session_id}"
+            cls._sync_list_cache(updated_session)
+
+        log.info("session.metadata.updated", {
+            "id": session_id,
+            "project_id": project_id,
+        })
+        return updated_session
+
+    @classmethod
     async def move_to_project(
         cls,
         source_project_id: str,

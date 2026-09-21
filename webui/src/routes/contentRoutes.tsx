@@ -97,7 +97,7 @@ export const contentRoutes: RouteObject[] = [
   { path: 'user-defined-pages/:pageId/*', element: <LegacyWebUIContractPageRedirect /> },
 
   // AI 工作台
-  { path: 'sessions', element: <LazyRoute><SessionPage /></LazyRoute> },
+  { path: 'sessions/:sessionId?', element: <LazyRoute><SessionPage /></LazyRoute> },
   { path: 'agents', element: <LazyRoute><AgentPage /></LazyRoute> },
   { path: 'workflows', element: <LazyRoute><WorkflowListPage /></LazyRoute> },
   { path: 'workflows/new', element: <LazyRoute><WorkflowCreate /></LazyRoute> },
@@ -146,7 +146,7 @@ export const FULL_SCREEN_PATH_PATTERNS = [
   '/workflows/create',
   '/workflows/:id/edit',
   '/workflows/:id',
-  '/sessions',
+  '/sessions/:sessionId?',
   '/devices',
   '/contracts/webui/*',
 ];

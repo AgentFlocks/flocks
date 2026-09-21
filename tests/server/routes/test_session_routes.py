@@ -29,10 +29,12 @@ from flocks.server.routes import session as session_routes
 from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.message import (
     Message,
+    FilePart,
     MessageRole,
     PartTime,
     ReasoningPart,
     ToolPart,
+    ToolStateCompleted,
     ToolStateError,
     ToolStateRunning,
 )
@@ -87,35 +89,29 @@ async def test_missing_session_directory_uses_cwd_and_publishes_notice(
 
 @pytest.mark.asyncio
 async def test_shell_route_maps_extension_stop_to_forbidden(
+    client: AsyncClient,
+    session_id: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Pro policy stop must not surface as an unhandled server error."""
+    """An extension stop maps to 403 after real session/access checks pass."""
 
-    monkeypatch.setattr(session_routes, "require_user", lambda _request: object())
-    monkeypatch.setattr(
-        session_routes,
-        "_get_session_by_id_unfiltered",
-        AsyncMock(return_value=object()),
-    )
-    monkeypatch.setattr(
-        session_routes,
-        "_require_session_write_access",
-        lambda _session, _user: None,
-    )
-    monkeypatch.setattr(
-        "flocks.session.runner.SessionRunner.shell",
-        AsyncMock(side_effect=ExecutionStopped("hard_deny_system_delete")),
+    shell = AsyncMock(side_effect=ExecutionStopped("policy_test_deny"))
+    monkeypatch.setattr("flocks.session.runner.SessionRunner.shell", shell)
+
+    response = await client.post(
+        f"/api/session/{session_id}/shell",
+        json={"agent": "build", "command": "echo policy-check"},
     )
 
-    with pytest.raises(HTTPException) as error:
-        await session_routes.run_shell_command(
-            "ses_1",
-            session_routes.ShellRequest(agent="build", command="rm -rf /etc"),
-            SimpleNamespace(),
-        )
-
-    assert error.value.status_code == status.HTTP_403_FORBIDDEN
-    assert error.value.detail == "execution stopped by extension"
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert response.json() == {
+        "error": "HTTPException",
+        "message": "execution stopped by extension",
+    }
+    shell.assert_awaited_once()
+    assert shell.await_args.kwargs["session_id"] == session_id
+    assert shell.await_args.kwargs["command"] == "echo policy-check"
+    assert not Session.has_active_operations(session_id)
 
 
 @pytest.mark.asyncio
@@ -152,9 +148,11 @@ class TestSessionCRUD:
 
         profile = await get_session_execution_profile(data["id"])
         assert profile is not None
-        assert profile["entry"] == "interactive"
+        assert profile["entry"] == "webui"
         assert profile["source"] == "webui.session.create"
-        assert "permission_mode" not in profile
+        assert profile["permission_mode"] == "require-confirm"
+        assert profile["runtime_mode"] == "dev-mode"
+        assert profile["network_mode"] == "require-confirm"
 
     @pytest.mark.asyncio
     async def test_create_session_emits_canonical_created_event(
@@ -2755,3 +2753,947 @@ class TestSessionPermissions:
             status.HTTP_200_OK,
             status.HTTP_404_NOT_FOUND,
         )
+
+
+class TestSessionContext:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("payload", [{}, {"projectID": "default"}, {"projectID": "tasks"}])
+    async def test_unbound_session_context_does_not_expose_server_cwd(
+        self, client: AsyncClient, tmp_path, monkeypatch, payload,
+    ):
+        source = tmp_path / "server-source"
+        source.mkdir()
+        (source / "README.md").write_text("Server source, not an attached project", encoding="utf-8")
+        monkeypatch.chdir(source)
+        monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
+
+        created = await client.post("/api/session", json=payload)
+        assert created.status_code == 200
+        session_id = created.json()["id"]
+        assert created.json()["projectID"] == "default"
+        assert created.json()["directory"] == str(source)
+        context = await client.get(f"/api/session/{session_id}/context")
+        assert context.status_code == 200
+        assert context.json()["roots"] == []
+        for endpoint in ("list", "content", "preview", "download"):
+            response = await client.get(
+                f"/api/session/{session_id}/context/roots/project/{endpoint}",
+                params={"path": "" if endpoint == "list" else "README.md"},
+            )
+            assert response.status_code == 404
+
+        attached = await client.post(
+            f"/api/session/{session_id}/context/folders", json={"path": str(source)},
+        )
+        assert attached.status_code == 200
+        root_id = attached.json()["id"]
+        context = await client.get(f"/api/session/{session_id}/context")
+        assert [root["id"] for root in context.json()["roots"]] == [root_id]
+        content = await client.get(
+            f"/api/session/{session_id}/context/roots/{root_id}/content", params={"path": "README.md"},
+        )
+        assert content.status_code == 200
+        assert content.json()["content"] == "Server source, not an attached project"
+
+    @pytest.mark.asyncio
+    async def test_explicit_project_context_is_inherited_by_child_sessions(
+        self, client: AsyncClient, tmp_path, monkeypatch,
+    ):
+        source = tmp_path / "server-source"
+        source.mkdir()
+        monkeypatch.chdir(source)
+        monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
+        worktree = tmp_path / "chosen-project"
+        worktree.mkdir()
+        (worktree / "README.md").write_text("Explicit project", encoding="utf-8")
+        registered = await client.post("/api/project", json={"name": "Chosen project", "worktree": str(worktree)})
+        assert registered.status_code == 200
+        parent = await client.post("/api/session", json={"projectID": registered.json()["id"]})
+        assert parent.status_code == 200
+        child = await client.post("/api/session", json={"parentID": parent.json()["id"]})
+        assert child.status_code == 200
+        for session in (parent.json(), child.json()):
+            assert session["projectID"] == registered.json()["id"]
+            context = await client.get(f"/api/session/{session['id']}/context")
+            assert context.status_code == 200
+            assert context.json()["roots"] == [{
+                "id": "project", "kind": "project", "displayName": "chosen-project", "status": "available",
+            }]
+            content = await client.get(
+                f"/api/session/{session['id']}/context/roots/project/content", params={"path": "README.md"},
+            )
+            assert content.status_code == 200
+            assert content.json()["content"] == "Explicit project"
+
+    @pytest.mark.asyncio
+    async def test_context_lists_message_files_and_outputs(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        from flocks.session.files import session_outputs_root, session_uploads_dir
+
+        session = await Session.get_by_id_unfiltered(session_id)
+        assert session is not None
+
+        upload_root = session_uploads_dir(session_id)
+        upload_root.mkdir(parents=True, exist_ok=True)
+        upload = upload_root / "prt_upload.txt"
+        upload.write_text("uploaded", encoding="utf-8")
+        user_message = await Message.create(session_id, MessageRole.USER, "Review this file")
+        upload_part = FilePart(
+            id="prt_context_upload",
+            sessionID=session_id,
+            messageID=user_message.id,
+            mime="text/plain",
+            filename="notes.txt",
+            url=upload.as_uri(),
+        )
+        await Message.add_part(session_id, user_message.id, upload_part)
+
+        output_root = session_outputs_root(session)
+        output = output_root / "2026-09-14" / "report.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("# Report", encoding="utf-8")
+        assistant_message = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        output_part = ToolPart(
+            id="prt_context_write",
+            sessionID=session_id,
+            messageID=assistant_message.id,
+            callID="call_context_write",
+            tool="write",
+            state=ToolStateCompleted(
+                input={"filePath": "report.md"},
+                output="Wrote file successfully.",
+                title="report.md",
+                metadata={},
+                time={"start": 1, "end": 2},
+                attachments=[{
+                    "id": "prt_context_output",
+                    "type": "file",
+                    "mime": "text/markdown",
+                    "filename": "report.md",
+                    "origin": "agent_output",
+                    "source": {"root": "workspace-output", "path": "2026-09-14/report.md"},
+                }],
+            ),
+        )
+        await Message.store_part(session_id, assistant_message.id, output_part)
+
+        response = await client.get(f"/api/session/{session_id}/context")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert [item["displayName"] for item in data["contextFiles"]] == ["notes.txt"]
+        assert [item["displayName"] for item in data["outputs"]] == ["report.md"]
+        assert all("/private/" not in str(item) for item in data["outputs"] + data["contextFiles"])
+
+        content = await client.get(
+            f"/api/session/{session_id}/context/files/{data['outputs'][0]['resourceID']}/content"
+        )
+        assert content.status_code == status.HTTP_200_OK
+        assert content.json()["content"] == "# Report"
+
+        download = await client.get(
+            f"/api/session/{session_id}/context/files/{data['contextFiles'][0]['resourceID']}/download"
+        )
+        assert download.status_code == status.HTTP_200_OK
+        assert download.content == b"uploaded"
+        assert 'filename="notes.txt"' in download.headers["content-disposition"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("username, role", [("admin", "admin"), ("member", "member")])
+    @pytest.mark.parametrize("scope", ["global", "user"])
+    @pytest.mark.parametrize("relative", ["report.md", "2026-09-17/report.md"])
+    @pytest.mark.parametrize("legacy", [False, True])
+    async def test_written_outputs_are_listed_previewable_and_downloadable(
+        self, client: AsyncClient, tmp_path, monkeypatch, username, role, scope, relative, legacy,
+    ):
+        from flocks.auth.context import reset_current_auth_user, set_current_auth_user
+        from flocks.tool.registry import ToolContext, ToolRegistry
+        from flocks.workspace.manager import WorkspaceManager
+
+        monkeypatch.setattr(WorkspaceManager, "_instance", None)
+        user = AuthUser(id=f"usr_{username}", username=username, role=role, status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: user)
+        session = await Session.create(
+            project_id="default", directory=str(tmp_path), title="Output registration",
+            owner_user_id=user.id, owner_username=username,
+        )
+        message = await Message.create(session.id, MessageRole.ASSISTANT, "")
+        manager = WorkspaceManager.get_instance()
+        output_username = username if scope == "user" else None
+        target = manager.get_default_outputs_dir(username=output_username, include_today=False) / relative
+        other_username = None if scope == "user" else username
+        decoy = manager.get_default_outputs_dir(username=other_username, include_today=False) / relative
+        decoy.parent.mkdir(parents=True, exist_ok=True)
+        decoy.write_text("Unrelated same-name file", encoding="utf-8")
+        content = f"# {username} {scope}\n已生成的说明文件\n"
+
+        ctx = ToolContext(
+            session_id=session.id, message_id=message.id, agent="test", call_id="call_output",
+            permission_callback=AsyncMock(),
+        )
+        token = set_current_auth_user(user)
+        try:
+            result = await ToolRegistry.execute("write", ctx, filePath=str(target), content=content)
+        finally:
+            reset_current_auth_user(token)
+        assert result.success, result.error
+        assert target.read_bytes() == content.encode("utf-8")
+        assert result.attachments and len(result.attachments) == 1
+        assert result.attachments[0]["source"] == {
+            "root": "workspace-output", "path": relative, "username": output_username,
+        }
+        assert result.attachments[0]["sessionID"] == session.id
+        assert result.attachments[0]["messageID"] == message.id
+        part = ToolPart(
+            id="prt_registered_write", sessionID=session.id, messageID=message.id,
+            callID="call_output", tool="write",
+            state=ToolStateCompleted(
+                input={"filePath": str(target)}, output=result.output, title=result.title,
+                metadata=result.metadata, time={"start": 1, "end": 2},
+                attachments=None if legacy else result.attachments,
+            ),
+        )
+        await Message.store_part(session.id, message.id, part)
+        response = await client.get(f"/api/session/{session.id}/context")
+        assert response.status_code == 200
+        snapshot = response.json()
+        assert snapshot["counts"]["outputs"] == 1
+        descriptor = snapshot["outputs"][0]
+        prefix = f"users/{username}/outputs" if scope == "user" else "outputs"
+        assert descriptor["logicalPath"] == f"{prefix}/{relative}"
+        assert descriptor["status"] == "ready"
+        assert str(tmp_path) not in str(descriptor)
+        resource_url = f"/api/session/{session.id}/context/files/{descriptor['resourceID']}"
+        preview = await client.get(f"{resource_url}/content")
+        assert preview.status_code == 200
+        assert preview.json()["content"] == content
+        download = await client.get(f"{resource_url}/download")
+        assert download.status_code == 200
+        assert download.content == content.encode("utf-8")
+        assert 'filename="report.md"' in download.headers["content-disposition"]
+        assert decoy.read_text(encoding="utf-8") == "Unrelated same-name file"
+
+        other_session = await Session.create(
+            project_id="default", directory=str(tmp_path), owner_user_id=user.id, owner_username=username,
+        )
+        foreign = await client.get(
+            f"/api/session/{other_session.id}/context/files/{descriptor['resourceID']}/download",
+        )
+        assert foreign.status_code == 404
+        stranger = AuthUser(id="usr_stranger", username="stranger", role="member", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: stranger)
+        assert (await client.get(f"/api/session/{session.id}/context")).status_code == 403
+        for endpoint in ("metadata", "content", "preview", "download"):
+            assert (await client.get(f"{resource_url}/{endpoint}")).status_code == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool", ["skill_load", "load_skill"])
+    async def test_context_api_preserves_skill_failure_and_successful_retry(
+        self, client: AsyncClient, session_id: str, tool,
+    ):
+        from flocks.session.message import ToolStatePending
+
+        name = "missing-then-loaded"
+        message = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        states = [
+            ToolStatePending(input={"name": name}, raw="{}"),
+            ToolStateRunning(input={"name": name}, time={"start": 1}),
+            ToolStateError(input={"name": name}, error="Skill not found", time={"start": 1, "end": 2}),
+            ToolStateRunning(input={"name": name}, time={"start": 3}),
+            ToolStateCompleted(input={"name": name}, output="Loaded", title=name, metadata={}, time={"start": 3, "end": 4}),
+        ]
+        for index, (state, expected_status) in enumerate(zip(states, ["loading", "loading", "error", "loading", "loaded"])):
+            part = ToolPart(
+                id=f"prt_skill_{index}", sessionID=session_id, messageID=message.id,
+                callID=f"call_skill_{index}", tool=tool, state=state,
+            )
+            await Message.store_part(session_id, message.id, part)
+            response = await client.get(f"/api/session/{session_id}/context")
+            assert response.status_code == 200
+            skills = response.json()["skills"]
+            assert len(skills) == 1
+            assert skills[0]["name"] == name
+            assert skills[0]["status"] == expected_status
+            if expected_status == "error":
+                assert skills[0]["error"] == "Skill not found"
+            else:
+                assert "error" not in skills[0]
+
+    @pytest.mark.asyncio
+    async def test_chat_upload_binds_as_file_part_without_exposing_host_path(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        upload = await client.post(
+            "/api/workspace/upload?purpose=chat",
+            files={"files": ("paper.md", b"# Paper", "text/markdown")},
+        )
+        assert upload.status_code == status.HTTP_200_OK
+        staged = upload.json()["uploaded"][0]
+        assert staged.get("uploadID")
+        assert "abs_path" not in staged
+
+        message = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [
+                    {"type": "text", "text": "Review this"},
+                    {
+                        "type": "file",
+                        "id": "prt_bound_upload",
+                        "uploadID": staged["uploadID"],
+                        "mime": staged["mime"],
+                        "filename": staged["name"],
+                    },
+                ],
+                "noReply": True,
+            },
+        )
+        assert message.status_code == status.HTTP_200_OK
+
+        history = await client.get(f"/api/session/{session_id}/message")
+        file_part = next(
+            part
+            for item in history.json()
+            for part in item["parts"]
+            if part["id"] == "prt_bound_upload"
+        )
+        assert file_part["resourceID"].startswith("res_")
+        assert file_part["url"] == (
+            f"/api/session/{session_id}/context/files/{file_part['resourceID']}/preview"
+        )
+        assert "file:" not in str(file_part)
+
+        context = await client.get(f"/api/session/{session_id}/context")
+        assert context.status_code == status.HTTP_200_OK
+        assert context.json()["contextFiles"][0]["displayName"] == "paper.md"
+        download = await client.get(
+            f"/api/session/{session_id}/context/files/{file_part['resourceID']}/download"
+        )
+        assert download.status_code == status.HTTP_200_OK
+        assert download.content == b"# Paper"
+
+    @pytest.mark.asyncio
+    async def test_prompt_async_preserves_upload_owner_for_background_binding(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        upload = await client.post(
+            "/api/workspace/upload?purpose=chat",
+            files={"files": ("async.md", b"async", "text/markdown")},
+        )
+        staged = upload.json()["uploaded"][0]
+        before = set(getattr(session_routes.router, "_pending_tasks", set()))
+
+        response = await client.post(
+            f"/api/session/{session_id}/prompt_async",
+            json={
+                "parts": [
+                    {"type": "text", "text": "Review async"},
+                    {
+                        "type": "file",
+                        "id": "prt_async_upload",
+                        "uploadID": staged["uploadID"],
+                        "mime": staged["mime"],
+                        "filename": staged["name"],
+                    },
+                ],
+                "noReply": True,
+            },
+        )
+        assert response.status_code == status.HTTP_202_ACCEPTED
+        pending = list(getattr(session_routes.router, "_pending_tasks", set()) - before)
+        assert pending
+        await asyncio.gather(*pending)
+
+        history = await client.get(f"/api/session/{session_id}/message")
+        assert any(
+            part.get("id") == "prt_async_upload"
+            for item in history.json()
+            for part in item["parts"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_resource_ids_support_client_message_and_part_characters(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        upload = await client.post(
+            "/api/workspace/upload?purpose=chat",
+            files={"files": ("client.md", b"client", "text/markdown")},
+        )
+        staged = upload.json()["uploaded"][0]
+
+        response = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "messageID": "client.message",
+                "parts": [
+                    {"type": "text", "text": "Review"},
+                    {
+                        "type": "file",
+                        "id": "file.1",
+                        "uploadID": staged["uploadID"],
+                        "mime": staged["mime"],
+                        "filename": staged["name"],
+                    },
+                ],
+                "noReply": True,
+            },
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+        history = await client.get(f"/api/session/{session_id}/message")
+        file_part = next(
+            part
+            for item in history.json()
+            for part in item["parts"]
+            if part["id"] == "file.1"
+        )
+        assert file_part["resourceID"].startswith("res_")
+        download = await client.get(
+            f"/api/session/{session_id}/context/files/{file_part['resourceID']}/download"
+        )
+        assert download.status_code == status.HTTP_200_OK
+        assert download.content == b"client"
+
+    @pytest.mark.asyncio
+    async def test_invalid_chat_upload_does_not_persist_user_message(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        response = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [
+                    {"type": "text", "text": "This must not persist"},
+                    {
+                        "type": "file",
+                        "id": "prt_missing_upload",
+                        "uploadID": "prt_missing_upload_1234",
+                        "mime": "text/markdown",
+                        "filename": "missing.md",
+                    },
+                ],
+                "noReply": True,
+            },
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+        history = await client.get(f"/api/session/{session_id}/message")
+        assert history.status_code == status.HTTP_200_OK
+        assert history.json() == []
+
+    @pytest.mark.asyncio
+    async def test_legacy_username_owner_binds_upload_from_authenticated_user(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.files import create_chat_upload_target
+
+        owner = AuthUser(id="usr_legacy_owner", username="legacy", role="member", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        session = await Session.create(
+            project_id="default",
+            directory=str(tmp_path),
+            title="legacy-owner",
+            owner_user_id=None,
+            owner_username=owner.username,
+        )
+        upload_id = "prt_legacy_upload_1234"
+        staged = create_chat_upload_target(owner.id, upload_id, "legacy.md")
+        staged.write_text("legacy", encoding="utf-8")
+
+        response = await client.post(
+            f"/api/session/{session.id}/message",
+            json={
+                "parts": [
+                    {"type": "text", "text": "Review"},
+                    {
+                        "type": "file",
+                        "id": "prt_legacy_bound",
+                        "uploadID": upload_id,
+                        "mime": "text/markdown",
+                        "filename": "legacy.md",
+                    },
+                ],
+                "noReply": True,
+            },
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    @pytest.mark.asyncio
+    async def test_shared_reader_cannot_mutate_or_run_prompt_queue(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        queued = await client.post(
+            f"/api/session/{session_id}/prompt_queue",
+            json={"parts": [{"type": "text", "text": "queued"}]},
+        )
+        assert queued.status_code == status.HTTP_202_ACCEPTED
+        queue_id = queued.json()["queueID"]
+        shared = await client.post(f"/api/session/{session_id}/share-local")
+        assert shared.status_code == status.HTTP_200_OK
+
+        viewer = AuthUser(id="usr_viewer", username="viewer", role="member", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+        listed = await client.get(f"/api/session/{session_id}/prompt_queue")
+        assert listed.status_code == status.HTTP_200_OK
+        assert listed.json()["items"][0]["id"] == queue_id
+        updated = await client.patch(
+            f"/api/session/{session_id}/prompt_queue/{queue_id}",
+            json={"text": "changed"},
+        )
+        removed = await client.delete(
+            f"/api/session/{session_id}/prompt_queue/{queue_id}"
+        )
+        run_now = await client.post(
+            f"/api/session/{session_id}/prompt_queue/{queue_id}/run_now"
+        )
+        assert updated.status_code == status.HTTP_403_FORBIDDEN
+        assert removed.status_code == status.HTTP_403_FORBIDDEN
+        assert run_now.status_code == status.HTTP_403_FORBIDDEN
+
+    @pytest.mark.asyncio
+    async def test_concurrent_context_folder_adds_do_not_lose_updates(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        tmp_path,
+    ):
+        first = tmp_path / "references-a"
+        second = tmp_path / "references-b"
+        first.mkdir()
+        second.mkdir()
+
+        responses = await asyncio.gather(
+            client.post(
+                f"/api/session/{session_id}/context/folders",
+                json={"path": str(first)},
+            ),
+            client.post(
+                f"/api/session/{session_id}/context/folders",
+                json={"path": str(second)},
+            ),
+        )
+        assert [response.status_code for response in responses] == [200, 200]
+
+        context = await client.get(f"/api/session/{session_id}/context")
+        folder_names = {
+            item["displayName"]
+            for item in context.json()["roots"]
+            if item["kind"] == "folder"
+        }
+        assert folder_names == {"references-a", "references-b"}
+
+    @pytest.mark.asyncio
+    async def test_context_folder_is_owner_only_and_rejects_escape(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        tmp_path,
+    ):
+        folder = tmp_path / "references"
+        folder.mkdir()
+        (folder / "paper.md").write_text("paper", encoding="utf-8")
+
+        created = await client.post(
+            f"/api/session/{session_id}/context/folders",
+            json={"path": str(folder), "displayName": "References"},
+        )
+        assert created.status_code == status.HTTP_200_OK
+        root_id = created.json()["id"]
+
+        listing = await client.get(
+            f"/api/session/{session_id}/context/roots/{root_id}/list"
+        )
+        assert listing.status_code == status.HTTP_200_OK
+        assert listing.json()["items"][0]["name"] == "paper.md"
+
+        escaped = await client.get(
+            f"/api/session/{session_id}/context/roots/{root_id}/content",
+            params={"path": "../outside.txt"},
+        )
+        assert escaped.status_code == status.HTTP_400_BAD_REQUEST
+
+        removed = await client.delete(
+            f"/api/session/{session_id}/context/folders/{root_id}"
+        )
+        assert removed.status_code == status.HTTP_200_OK
+        missing = await client.get(
+            f"/api/session/{session_id}/context/roots/{root_id}/list"
+        )
+        assert missing.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestSessionContextRegressions:
+    @pytest.mark.asyncio
+    async def test_context_pages_and_direct_old_file_metadata(self, client: AsyncClient, session_id: str):
+        from flocks.session.files import public_resource_id, session_uploads_dir
+
+        root = session_uploads_dir(session_id)
+        root.mkdir(parents=True, exist_ok=True)
+        old_file = root / "old.txt"
+        old_file.write_text("older file", encoding="utf-8")
+        old = await Message.create(session_id, MessageRole.USER, "old")
+        await Message.add_part(session_id, old.id, FilePart(
+            id="prt_old_context", sessionID=session_id, messageID=old.id,
+            url=old_file.as_uri(), mime="text/plain", filename="old.txt",
+        ))
+        newest = await Message.create(session_id, MessageRole.USER, "newest")
+
+        first = await client.get(f"/api/session/{session_id}/context", params={"limit": 1})
+        assert first.status_code == 200
+        assert first.json()["contextFiles"] == []
+        assert first.json()["hasMore"] is True
+        assert first.json()["nextBefore"] == newest.id
+        second = await client.get(f"/api/session/{session_id}/context", params={
+            "limit": 1, "before": first.json()["nextBefore"],
+        })
+        assert second.status_code == 200
+        assert second.json()["hasMore"] is False
+        assert second.json()["contextFiles"][0]["displayName"] == "old.txt"
+
+        resource_id = public_resource_id(old.id, "prt_old_context")
+        metadata = await client.get(f"/api/session/{session_id}/context/files/{resource_id}/metadata")
+        assert metadata.status_code == 200
+        assert metadata.json()["isTextFile"] is True
+        assert metadata.json()["displayName"] == "old.txt"
+        assert metadata.json()["resourceID"] == resource_id
+        invalid_cursor = await client.get(f"/api/session/{session_id}/context", params={"before": "msg_absent"})
+        assert invalid_cursor.status_code == 400
+        too_large = await client.get(f"/api/session/{session_id}/context", params={"limit": 201})
+        assert too_large.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_folder_route_exposes_paged_items(self, client: AsyncClient, session_id: str, tmp_path):
+        folder = tmp_path / "paged-directory"
+        folder.mkdir()
+        for index in range(5):
+            (folder / f"file-{index}.txt").write_text(str(index), encoding="utf-8")
+        created = await client.post(f"/api/session/{session_id}/context/folders", json={"path": str(folder)})
+        assert created.status_code == 200
+        url = f"/api/session/{session_id}/context/roots/{created.json()['id']}/list"
+        seen = set()
+        offset = 0
+        for expected_length in (2, 2, 1):
+            response = await client.get(url, params={"offset": offset, "limit": 2})
+            assert response.status_code == 200
+            page = response.json()
+            assert isinstance(page["items"], list)
+            assert len(page["items"]) == expected_length
+            seen.update(item["name"] for item in page["items"])
+            offset = page["nextOffset"]
+        assert offset is None
+        assert len(seen) == 5
+        assert (await client.get(url, params={"offset": -1})).status_code == 422
+        assert (await client.get(url, params={"limit": 201})).status_code == 422
+
+    @pytest.mark.parametrize("tool", ["read", "write"])
+    def test_history_serializer_filters_large_attachments(self, tool):
+        large = "data:application/pdf;base64," + "A" * 100_000
+        attachment = {
+            "id": "prt_safe_output", "type": "file", "filename": "output.pdf", "mime": "application/pdf",
+            "origin": "agent_output", "source": {"root": "workspace-output", "path": "output.pdf"},
+            "url": large, "extra": {"raw": large},
+        }
+        part = ToolPart(
+            id="prt_history_tool", sessionID="ses_history", messageID="msg_history", callID="call_history",
+            tool=tool, state=ToolStateCompleted(
+                input={}, output="done", title="done", metadata={}, time={"start": 1, "end": 2},
+                attachments=[attachment],
+            ),
+        )
+        serialized = session_routes._part_to_response_info(part, session_id="ses_history", message_id="msg_history")
+        assert "data:application" not in serialized.model_dump_json()
+        if tool == "write":
+            assert serialized.state["attachments"][0]["resourceID"].startswith("res_")
+        else:
+            assert serialized.state["attachments"] is None
+        assert part.state.attachments[0]["url"] == large
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mutation", ["source", "remove", "metadata", "tool", "type"])
+    async def test_patch_cannot_change_write_provenance(self, client: AsyncClient, session_id: str, mutation):
+        message = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="prt_immutable_write", sessionID=session_id, messageID=message.id, callID="call_immutable",
+            tool="write", state=ToolStateCompleted(
+                input={}, output="done", title="done", metadata={"filepath": "/original/output.md"},
+                time={"start": 1, "end": 2}, attachments=[{
+                    "id": "prt_immutable_output", "type": "file", "filename": "output.md", "mime": "text/markdown",
+                    "origin": "agent_output", "sessionID": session_id, "messageID": message.id,
+                    "source": {"root": "workspace-output", "path": "output.md", "username": None},
+                }],
+            ),
+        )
+        await Message.store_part(session_id, message.id, part)
+        body = session_routes._part_to_response_info(part, session_id=session_id, message_id=message.id).model_dump()
+        if mutation == "source":
+            body["state"]["attachments"][0]["source"]["username"] = "another-user"
+        elif mutation == "remove":
+            body["state"].pop("attachments")
+        elif mutation == "metadata":
+            body["state"]["metadata"]["filepath"] = "/different/output.md"
+        elif mutation == "tool":
+            body["tool"] = "read"
+        else:
+            body["type"] = "text"
+            body["state"] = None
+        response = await client.patch(f"/api/session/{session_id}/message/{message.id}/part/{part.id}", json=body)
+        assert response.status_code == 400
+        stored = await Message.get_with_parts_lazy(session_id, message.id)
+        assert next(item for item in stored.parts if item.id == part.id).model_dump() == part.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_patch_cannot_convert_text_to_output(self, client: AsyncClient, session_id: str):
+        message = await Message.create(session_id, MessageRole.USER, "editable")
+        stored = await Message.get_with_parts_lazy(session_id, message.id)
+        part = stored.parts[0]
+        url = f"/api/session/{session_id}/message/{message.id}/part/{part.id}"
+        basic = {"id": part.id, "sessionID": session_id, "messageID": message.id, "type": "text"}
+        edited = await client.patch(url, json={**basic, "text": "still editable"})
+        assert edited.status_code == 200
+        assert edited.json()["text"] == "still editable"
+        forged = await client.patch(url, json={**basic, "type": "tool", "tool": "write", "state": {
+            "status": "completed", "attachments": [{"source": {"username": "victim"}}],
+        }})
+        assert forged.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_bound_upload_can_be_retried_but_not_in_another_session(self, client: AsyncClient, session_id: str):
+        from flocks.session.files import resolve_chat_upload
+
+        uploaded = await client.post("/api/workspace/upload?purpose=chat", files={
+            "files": ("retry.md", b"retry bytes", "text/markdown"),
+        })
+        upload = uploaded.json()["uploaded"][0]
+        payload = {"parts": [{"type": "file", "uploadID": upload["uploadID"], "mime": upload["mime"],
+                              "filename": upload["name"]}], "noReply": True}
+        first = await client.post(f"/api/session/{session_id}/message", json=payload)
+        assert first.status_code == 200
+        bound = resolve_chat_upload(session_id, API_TOKEN_SERVICE_USER_ID, upload["uploadID"])
+        second = await client.post(f"/api/session/{session_id}/message", json=payload)
+        assert second.status_code == 200
+        queued = await client.post(f"/api/session/{session_id}/prompt_queue", json=payload)
+        assert queued.status_code == 202
+        assert bound.read_bytes() == b"retry bytes"
+        other = (await client.post("/api/session", json={})).json()["id"]
+        foreign = await client.post(f"/api/session/{other}/message", json=payload)
+        assert foreign.status_code == 400
+        assert bound.read_bytes() == b"retry bytes"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("padded_id", [False, True])
+    async def test_queue_discard_and_remove_preserve_other_references(self, client: AsyncClient, session_id: str, padded_id):
+        from flocks.session.files import resolve_staged_chat_upload
+        from flocks.session.interaction_queue import InteractionQueue
+
+        uploaded = await client.post("/api/workspace/upload?purpose=chat", files={
+            "files": ("queue.md", b"queue bytes", "text/markdown"),
+        })
+        upload = uploaded.json()["uploaded"][0]
+        payload = {"parts": [{"type": "file", "uploadID": upload["uploadID"], "mime": upload["mime"],
+                              "filename": upload["name"]}], "noReply": True}
+        first = await client.post(f"/api/session/{session_id}/prompt_queue", json=payload)
+        if padded_id:
+            payload["parts"][0]["uploadID"] = f" {upload['uploadID']} "
+        second = await client.post(f"/api/session/{session_id}/prompt_queue", json=payload)
+        assert first.status_code == second.status_code == 202
+        staged = resolve_staged_chat_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"])
+        discarded = await client.delete(f"/api/workspace/upload/chat/{upload['uploadID']}")
+        assert discarded.status_code == 200
+        assert discarded.json()["removed"] is False
+        removed = await client.delete(f"/api/session/{session_id}/prompt_queue/{first.json()['queueID']}")
+        assert removed.status_code == 200
+        assert staged.read_bytes() == b"queue bytes"
+        discarded_remaining = await client.delete(f"/api/workspace/upload/chat/{upload['uploadID']}")
+        assert discarded_remaining.json()["removed"] is False
+        await InteractionQueue.clear(session_id)
+        assert not staged.exists()
+        assert not InteractionQueue.references_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"])
+
+    @pytest.mark.asyncio
+    async def test_queue_pop_remains_protected_through_dispatch(self, client: AsyncClient, session_id: str, monkeypatch):
+        from flocks.session.files import remove_staged_chat_upload, resolve_staged_chat_upload
+        from flocks.session.interaction_queue import InteractionQueue
+        from flocks.project.instance import Instance
+
+        uploaded = await client.post("/api/workspace/upload?purpose=chat", files={
+            "files": ("dispatch.md", b"dispatch bytes", "text/markdown"),
+        })
+        upload = uploaded.json()["uploaded"][0]
+        payload = {"parts": [{"type": "file", "uploadID": upload["uploadID"], "mime": upload["mime"],
+                              "filename": upload["name"]}], "noReply": True}
+        await client.post(f"/api/session/{session_id}/prompt_queue", json=payload)
+        staged = resolve_staged_chat_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"])
+        observed = []
+
+        async def at_publish(_session_id):
+            await InteractionQueue.clear(session_id)
+            observed.append(remove_staged_chat_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"]))
+
+        async def dispatch(*_args):
+            assert staged.exists()
+            assert not remove_staged_chat_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"])
+            raise RuntimeError("dispatch failure")
+
+        async def provide(**kwargs):
+            return await kwargs["fn"]()
+
+        monkeypatch.setattr(session_routes, "_publish_prompt_queue", at_publish)
+        monkeypatch.setattr(session_routes, "_dispatch_sse_input", dispatch)
+        monkeypatch.setattr(Instance, "provide", provide)
+        with pytest.raises(RuntimeError, match="dispatch failure"):
+            await session_routes._drain_prompt_queue_locked(session_id, str(staged.parent))
+        assert observed == [False]
+        assert not InteractionQueue.references_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"])
+        assert remove_staged_chat_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"]) is True
+
+    @pytest.mark.asyncio
+    async def test_async_accepted_upload_is_protected_before_dispatch(self, client: AsyncClient, session_id: str, monkeypatch):
+        from flocks.session.files import resolve_staged_chat_upload
+        from flocks.session.interaction_queue import InteractionQueue
+
+        uploaded = await client.post("/api/workspace/upload?purpose=chat", files={
+            "files": ("accepted.md", b"accepted bytes", "text/markdown"),
+        })
+        upload = uploaded.json()["uploaded"][0]
+        proceed = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def defer_dispatch(*args):
+            entered.set()
+            await proceed.wait()
+
+        monkeypatch.setattr(session_routes, "_dispatch_sse_input", defer_dispatch)
+        before = set(getattr(session_routes.router, "_pending_tasks", set()))
+        response = await client.post(f"/api/session/{session_id}/prompt_async", json={
+            "parts": [{"type": "file", "uploadID": upload["uploadID"], "mime": upload["mime"],
+                       "filename": upload["name"]}], "noReply": True,
+        })
+        assert response.status_code == 202
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        discarded = await client.delete(f"/api/workspace/upload/chat/{upload['uploadID']}")
+        assert discarded.json()["removed"] is False
+        assert resolve_staged_chat_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"]).read_bytes() == b"accepted bytes"
+        proceed.set()
+        pending = list(getattr(session_routes.router, "_pending_tasks", set()) - before)
+        await asyncio.gather(*pending)
+        await asyncio.sleep(0)
+        assert not InteractionQueue.references_upload(API_TOKEN_SERVICE_USER_ID, upload["uploadID"])
+
+    @pytest.mark.asyncio
+    async def test_failed_file_part_restores_only_new_unpersisted_move(self, client: AsyncClient, session_id: str, monkeypatch):
+        from flocks.session.files import resolve_chat_upload, resolve_staged_chat_upload
+
+        uploads = []
+        for filename in ("existing.md", "persisted.md", "failed.md"):
+            response = await client.post("/api/workspace/upload?purpose=chat", files={
+                "files": (filename, filename.encode(), "text/markdown"),
+            })
+            uploads.append(response.json()["uploaded"][0])
+        parts = [{"type": "file", "uploadID": item["uploadID"], "mime": item["mime"],
+                  "filename": item["name"]} for item in uploads]
+        first = await client.post(f"/api/session/{session_id}/message", json={"parts": parts[:1], "noReply": True})
+        assert first.status_code == 200
+        add_part = Message.add_part
+
+        async def fail_last(sid, mid, part):
+            if part.filename == "failed.md":
+                raise OSError("test storage unavailable")
+            return await add_part(sid, mid, part)
+
+        monkeypatch.setattr(Message, "add_part", fail_last)
+        response = await client.post(f"/api/session/{session_id}/message", json={"parts": parts, "noReply": True})
+        assert response.status_code == 400
+        assert resolve_chat_upload(session_id, API_TOKEN_SERVICE_USER_ID, uploads[0]["uploadID"]).read_bytes() == b"existing.md"
+        assert resolve_chat_upload(session_id, API_TOKEN_SERVICE_USER_ID, uploads[1]["uploadID"]).read_bytes() == b"persisted.md"
+        assert resolve_staged_chat_upload(API_TOKEN_SERVICE_USER_ID, uploads[2]["uploadID"]).read_bytes() == b"failed.md"
+
+    @pytest.mark.asyncio
+    async def test_queue_upload_claim_is_set_before_validation_await_and_released_on_failure(
+        self, client: AsyncClient, session_id: str, monkeypatch,
+    ):
+        from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload
+        from flocks.session.interaction_queue import InteractionQueue
+
+        upload_id = "prt_acceptance_claim"
+        owner_id = "usr_acceptance"
+        staged = create_chat_upload_target(owner_id, upload_id, "claim.md")
+        staged.write_text("claim", encoding="utf-8")
+
+        async def reject_agent(_agent):
+            await asyncio.sleep(0)
+            assert not remove_staged_chat_upload(owner_id, upload_id)
+            raise HTTPException(status_code=400, detail="agent unavailable")
+
+        monkeypatch.setattr(session_routes, "_require_agent_usable_for_chat", reject_agent)
+        with pytest.raises(HTTPException, match="agent unavailable"):
+            await session_routes._enqueue_prompt_request(
+                session_id,
+                session_routes.PromptRequest(parts=[{"type": "file", "uploadID": upload_id, "mime": "text/markdown"}]),
+                uploader_user_id=owner_id,
+            )
+        assert not InteractionQueue.references_upload(owner_id, upload_id)
+        assert remove_staged_chat_upload(owner_id, upload_id)
+
+    @pytest.mark.asyncio
+    async def test_queue_reference_checks_include_uploader_identity(self, client: AsyncClient):
+        from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload
+        from flocks.session.interaction_queue import InteractionQueue
+
+        upload_id = "prt_shared_identifier"
+        first = create_chat_upload_target("usr_first", upload_id, "first.md")
+        second = create_chat_upload_target("usr_second", upload_id, "second.md")
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+        await InteractionQueue.enqueue("ses_claim_first", parts=[{"type": "file", "uploadID": upload_id}],
+                                       execution_context={"_uploaderUserID": "usr_first"})
+        assert not remove_staged_chat_upload("usr_first", upload_id)
+        assert remove_staged_chat_upload("usr_second", upload_id)
+        assert first.read_text(encoding="utf-8") == "first"
+        await InteractionQueue.clear("ses_claim_first")
+        assert not first.exists()
+
+    @pytest.mark.asyncio
+    async def test_admin_queue_dispatch_binds_using_submitter_not_session_owner(
+        self, client: AsyncClient, session_id: str, monkeypatch, tmp_path,
+    ):
+        from flocks.session.files import create_chat_upload_target, resolve_chat_upload
+        from flocks.session.interaction_queue import InteractionQueue
+
+        require_user = session_routes.require_user
+        operator = _use_webui_admin(monkeypatch)
+        session = await Session.get_by_id_unfiltered(session_id)
+        assert session.owner_user_id != operator.id
+        upload_id = "prt_operator_queue"
+        staged = create_chat_upload_target(operator.id, upload_id, "operator.md")
+        staged.write_text("operator upload", encoding="utf-8")
+        queued = await client.post(f"/api/session/{session_id}/prompt_queue", json={
+            "parts": [{"type": "file", "uploadID": upload_id, "mime": "text/markdown", "filename": "operator.md"}],
+            "noReply": True,
+        })
+        assert queued.status_code == 202
+        item = (await InteractionQueue.list(session_id))[0]
+        assert item.execution_context["_uploaderUserID"] == operator.id
+        # The eventual worker can have a different authenticated user; the
+        # captured uploader is what controls the per-user staging lookup.
+        monkeypatch.setattr(session_routes, "require_user", require_user)
+        await session_routes._drain_prompt_queue_locked(session_id, str(tmp_path))
+        bound = resolve_chat_upload(session_id, operator.id, upload_id)
+        assert bound.read_text(encoding="utf-8") == "operator upload"
+        assert not staged.exists()
+        assert not InteractionQueue.references_upload(operator.id, upload_id)
