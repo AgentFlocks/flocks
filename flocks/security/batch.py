@@ -640,14 +640,6 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
         for task_id in ordered:
             queue.put_nowait(task_id)
 
-        quota_exhausted = False
-
-        def observe_quota(result: dict) -> None:
-            nonlocal quota_exhausted
-            if result.get("failure_code") == MODEL_QUOTA_EXHAUSTED and not quota_exhausted:
-                quota_exhausted = True
-                progress("Model provider quota exhausted; new tasks remain pending. Restore quota before resuming.")
-
         def save(task_id: str, item: dict) -> None:
             state["tasks"][task_id] = item
             atomic_json(root / "state.json", state)
@@ -659,14 +651,12 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
         async def run_one(task_id: str) -> None:
             task_dir = resolve_task(root, task_id, config=config)
             cancel_file = task_dir / "cancel.json"
-            adopted = state["tasks"].get(task_id, {}).get("status") == "running"
             adopted_timeout = None
             last_control = None
             while True:
                 # A child can survive a killed scheduler. Never launch a duplicate.
                 try:
                     while task_running(task_dir):
-                        adopted = True
                         if budgets is not None:
                             if last_control is None:
                                 last_control = read_json(task_dir / "current.json")
@@ -725,12 +715,7 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                             }
                             if adopted_timeout:
                                 apply_termination(result, adopted_timeout)
-                            if adopted:
-                                observe_quota(result)
-                            previous_failure_code = result.get("failure_code")
                             await cleanup_child_work(task_dir, result)
-                            if adopted or result.get("failure_code") != previous_failure_code:
-                                observe_quota(result)
                             if (
                                 result.get("cleanup_status") == "failed"
                                 or result.get("source_cleanup_status") == "failed"
@@ -746,10 +731,6 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                             or (result["status"] in {"failed", "timed_out", "cancelled"} and not retry_failed)
                         ):
                             save(task_id, result)
-                            return
-                        if quota_exhausted:
-                            if result:
-                                save(task_id, result)
                             return
                         with file_lock(task_dir / "cleanup.lock"):
                             attempt = uuid4().hex
@@ -829,7 +810,6 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                         phase_termination if phase_termination and termination_reason != "cancelled"
                         else {"status": termination_reason}
                     ))
-                observe_quota(result)
                 await cleanup_child_work(task_dir, result)
             except asyncio.CancelledError:
                 if process:
@@ -847,7 +827,6 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
                     await stop_process(process)
                 result = {"status": "failed", "attempt": attempt, "error": str(exc)}
                 await cleanup_child_work(task_dir, result)
-            observe_quota(result)
             save(task_id, result)
 
         async def worker() -> None:

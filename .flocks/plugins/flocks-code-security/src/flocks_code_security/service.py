@@ -160,7 +160,6 @@ class StartScanRequest:
     dynamic_enabled: bool = False
     poc_enabled: bool = False
     coverage_policy: str = "evidence_backed_partial"
-    verification_votes: int = 1
     idempotency_key: str | None = None
     knowledge_base: KnowledgeBaseInput | None = None
 
@@ -660,7 +659,6 @@ class AuditService:
             dynamic_enabled=bool(request.dynamic_enabled),
             poc_enabled=bool(request.poc_enabled),
             coverage_policy=str(request.coverage_policy or "").strip(),
-            verification_votes=request.verification_votes,
             idempotency_key=(request.idempotency_key or "").strip() or None,
             knowledge_base=self._validate_knowledge_base(request.knowledge_base),
         )
@@ -727,15 +725,6 @@ class AuditService:
             "exhaustive",
         }:
             raise AuditServiceError("invalid_parameter", "Unsupported coverage_policy")
-        if (
-            not isinstance(normalized.verification_votes, int)
-            or isinstance(normalized.verification_votes, bool)
-            or not 1 <= normalized.verification_votes <= 5
-        ):
-            raise AuditServiceError(
-                "invalid_parameter",
-                "verification_votes must be between 1 and 5",
-            )
         if normalized.idempotency_key and len(normalized.idempotency_key) > 256:
             raise AuditServiceError("invalid_parameter", "idempotency_key may contain at most 256 characters")
         digest = self._request_digest(normalized)
@@ -763,7 +752,6 @@ class AuditService:
                 dynamic_enabled=normalized.dynamic_enabled,
                 poc_enabled=normalized.poc_enabled,
                 coverage_policy=normalized.coverage_policy,
-                verification_votes=normalized.verification_votes,
                 cybergym_manifest=normalized.cybergym_manifest,
             )
             try:
@@ -998,7 +986,6 @@ class AuditService:
             "dynamic_validator": dynamic_validator,
             "poc_enabled": bool(scan.get("poc_enabled", 0)),
             "coverage_policy": scan["coverage_policy"],
-            "verification_votes": scan["verification_vote_count"],
             "cleanup_intermediates": bool(scan.get("cleanup_intermediates", 0)),
             "cleanup": json.loads(scan.get("cleanup_summary_json", "{}")),
             "created_at": scan["created_at"],
@@ -1857,7 +1844,6 @@ class AuditService:
             "dynamic_enabled": request.dynamic_enabled,
             "poc_enabled": request.poc_enabled,
             "coverage_policy": request.coverage_policy,
-            "verification_votes": request.verification_votes,
             "knowledge_base": (
                 {
                     "display_name": knowledge_base["display_name"],

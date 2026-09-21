@@ -229,17 +229,12 @@ def test_all_audit_tools_register() -> None:
         "cybergym_solving",
     ]
     prepare = ToolRegistry.get("audit_prepare").info
-    verification_votes = next(
-        parameter
-        for parameter in prepare.parameters
-        if parameter.name == "verification_votes"
-    )
+    assert all(parameter.name != "verification_votes" for parameter in prepare.parameters)
     copy_source = next(
         parameter
         for parameter in prepare.parameters
         if parameter.name == "copy_source"
     )
-    assert verification_votes.default == 1
     assert copy_source.default is True
 
     threat_model_tool = ToolRegistry.get("audit_submit_threat_model").info
@@ -343,7 +338,6 @@ def test_worker_prompts_do_not_interpolate_hostile_source_metadata() -> None:
     verifier = verification_prompt(
         snapshot_id="snap_safe",
         candidate_id="cand_safe",
-        vote_index=1,
     )
     rescan = targeted_rescan_prompt(snapshot_id="snap_safe")
 
@@ -389,7 +383,6 @@ def test_guided_worker_prompts_require_the_bound_knowledge_base() -> None:
     verifier = verification_prompt(
         snapshot_id="snap_safe",
         candidate_id="cand_safe",
-        vote_index=1,
     )
 
     for prompt in (threat_modeler, baseline, investigator):

@@ -57,13 +57,12 @@ def test_resolve_target_rejects_paths_and_symlinks_outside_workspace(tmp_path) -
     assert symlink_escape.value.status_code == 400
 
 
-def test_create_scan_request_accepts_bounded_verification_votes() -> None:
+def test_create_scan_request_has_no_vote_configuration() -> None:
     payload = code_security.CreateScanRequest(
         workspaceId="workspace-1",
-        verificationVotes=3,
     )
 
-    assert payload.verification_votes == 3
+    assert "verification_votes" not in type(payload).model_fields
     assert payload.copy_source is True
     assert payload.max_file_bytes is None
     assert code_security.CreateScanRequest(
@@ -79,11 +78,8 @@ def test_create_scan_request_accepts_bounded_verification_votes() -> None:
     assert large_file_request.max_total_bytes == 8 * 1024**3
     with pytest.raises(ValueError):
         code_security.CreateScanRequest(workspaceId="workspace-1", maxTotalBytes=0)
-    with pytest.raises(ValueError):
-        code_security.CreateScanRequest(
-            workspaceId="workspace-1",
-            verificationVotes=6,
-        )
+    legacy = code_security.CreateScanRequest(workspaceId="workspace-1", verificationVotes=6)
+    assert "verificationVotes" not in legacy.model_dump(by_alias=True)
 
 
 @pytest.mark.asyncio

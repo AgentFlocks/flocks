@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -18,7 +19,6 @@ from flocks_code_security.coverage import normalize_open_questions
 from flocks_code_security.execution import ExecutionCapsuleError
 from flocks_code_security.orchestration import (
     plan_baseline_units,
-    plan_verification_units,
 )
 from flocks_code_security.runtime import build_runtime
 from flocks_code_security.service import AuditService
@@ -3329,7 +3329,9 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
                 "rejected",
                 "conflicting retry",
             )
-            assert duplicate_verdict.success is False
+            assert duplicate_verdict.success is True
+            assert duplicate_verdict.output["verdict"] == "confirmed"
+            assert duplicate_verdict.output["duplicate"] is True
         runtime.store.update_work_unit_status(unit["work_unit_id"], "completed")
     runtime.store.update_worker_batch_status(
         verification_batch["batch_id"],
@@ -3348,138 +3350,11 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
 
 
 @pytest.mark.asyncio
-async def test_three_independent_votes_produce_one_majority_verdict(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text(
-        "def handler(user):\n    return eval(user)\n",
-        encoding="utf-8",
-    )
-    runtime = build_runtime(tmp_path / "plugin-data")
-    monkeypatch.setattr(runtime_module, "_runtime", runtime)
-
-    coordinator = _agent_context("coordinator", "message-1", "code-security")
-    prepared = await audit_prepare(
-        coordinator,
-        str(target),
-        verification_votes=3,
-    )
-    scan_id = prepared.output["scan_id"]
-    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
-    await _complete_threat_model(
-        runtime,
-        scan_id=scan_id,
-        snapshot_id=snapshot_id,
-    )
-
-    baseline_unit = runtime.store.create_work_unit(
-        scan_id=scan_id,
-        phase="baseline",
-        role="baseline",
-        paths=["."],
-    )
-    runtime.store.bind_session(
-        session_id="baseline",
-        scan_id=scan_id,
-        snapshot_id=snapshot_id,
-        role="baseline",
-        work_unit_id=baseline_unit,
-    )
-    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
-    assert (await audit_threat_model_context(baseline)).success
-    assert (await inventory_source(baseline)).success
-    source = await read_source(baseline, "app.py", start_line=1, end_line=2)
-    candidate = await audit_submit_candidate(
-        baseline,
-        _candidate_payload(
-            [
-                {
-                    "relative_path": "app.py",
-                    "blob_digest": source.output["blob_digest"],
-                    "start_line": 1,
-                    "end_line": 2,
-                }
-            ]
-        ),
-    )
-    assert candidate.success
-    assert (
-        await audit_submit_coverage(
-            baseline,
-            dispositions=[{"path": "app.py", "claim": "analyzed"}],
-        )
-    ).success
-    runtime.store.update_work_unit_status(baseline_unit, "completed")
-
-    pending = runtime.store.list_unverified_candidates(scan_id)
-    assert pending[0]["pending_vote_indices"] == [1, 2, 3]
-    batch = runtime.store.create_worker_batch(
-        scan_id=scan_id,
-        phase="verification",
-        units=plan_verification_units(pending),
-    )
-    runtime.store.update_worker_batch_status(batch["batch_id"], "running")
-
-    submitted_verdicts = ["confirmed", "rejected", "confirmed"]
-    subjects = []
-    for index, (unit, submitted_verdict) in enumerate(
-        zip(batch["units"], submitted_verdicts, strict=True),
-        start=1,
-    ):
-        session_id = f"verifier-{index}"
-        runtime.store.bind_session(
-            session_id=session_id,
-            scan_id=scan_id,
-            snapshot_id=snapshot_id,
-            role="verifier",
-            work_unit_id=unit["work_unit_id"],
-        )
-        verifier = _agent_context(
-            session_id,
-            f"verifier-message-{index}",
-            "code-security-verifier",
-        )
-        subject = await audit_verification_subject(verifier)
-        assert subject.success
-        assert set(subject.output) == {
-            "candidate_id",
-            "vote_index",
-            "trust",
-            "claim",
-            "evidence",
-            "threat_context",
-        }
-        assert subject.output["vote_index"] == index
-        assert subject.output["trust"] == "untrusted_candidate_claim"
-        subjects.append(subject.output["claim"])
-        assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
-        vote = await audit_submit_verdict(
-            verifier,
-            candidate.output["candidate_id"],
-            submitted_verdict,
-            f"Independent vote {index} after reading the source.",
-        )
-        assert vote.success
-        assert vote.output["vote_index"] == index
-        if index < 3:
-            assert vote.output["consensus_verdict"] is None
-            assert runtime.store.report_data(scan_id)["verifications"] == []
-        runtime.store.update_work_unit_status(unit["work_unit_id"], "completed")
-
-    runtime.store.update_worker_batch_status(batch["batch_id"], "completed")
-    assert subjects[0] == subjects[1] == subjects[2]
-    report_data = runtime.store.report_data(scan_id)
-    assert len(report_data["verification_votes"]) == 3
-    assert [item["verdict"] for item in report_data["verifications"]] == [
-        "confirmed"
-    ]
-
-
-@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", [
+    "missing_session", "omitted_verdict", "no_progress", "resume_failed", "cancelled", "concurrent_refresh",
+])
 async def test_background_worker_orchestration_retries_failed_verification(
+    recovery: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3654,6 +3529,17 @@ async def test_background_worker_orchestration_retries_failed_verification(
         ),
     )
     assert candidate.success is True
+    extra_candidates = []
+    if recovery != "missing_session":
+        for index in range(2):
+            payload = _candidate_payload([{
+                "relative_path": "app.py", "blob_digest": source.output["blob_digest"],
+                "start_line": 1, "end_line": 2,
+            }])
+            payload["identity_anchor"] = f"additional-path-{index}"
+            extra = await audit_submit_candidate(baseline, payload)
+            assert extra.success
+            extra_candidates.append(extra.output["candidate_id"])
     assert (
         await audit_submit_coverage(
             baseline,
@@ -3675,22 +3561,118 @@ async def test_background_worker_orchestration_retries_failed_verification(
     )
     assert verification_batch.success is True
     verification_observability = children[2].creation_kwargs["metadata"]["langfuse"]
-    assert verification_observability["metadata"]["candidate_id"] == candidate.output["candidate_id"]
-    manager.tasks["task-3"].status = "error"
-    manager.tasks["task-3"].error = "Session worker-3 not found"
-    failed_verification = await audit_wait_workers(
-        coordinator,
-        verification_batch.output["batch_id"],
-        timeout_seconds=0,
-    )
+    assert "candidate_id" not in verification_observability["metadata"]
+    if recovery == "missing_session":
+        manager.tasks["task-3"].status = "error"
+        manager.tasks["task-3"].error = "Session worker-3 not found"
+    else:
+        manager.tasks["task-3"].status = "completed"
+        monkeypatch.setattr(Session, "get_by_id", AsyncMock(return_value=children[2]))
+        verifier = _agent_context(children[2].id, "verifier-message", "code-security-verifier")
+        verifier.extra.update(
+            model={"providerID": "provider", "modelID": "model"},
+            turn_callable_tool_names=sorted(get_callable_tools.return_value),
+        )
+        assert (await audit_verification_subject(verifier, extra_candidates[0])).success
+        assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
+        assert (await audit_submit_verdict(
+            verifier, extra_candidates[0], "rejected", "The suspected path is guarded.",
+        )).success
+        if recovery in {"resume_failed", "cancelled"}:
+            error = RuntimeError("Cannot start session") if recovery == "resume_failed" else asyncio.CancelledError()
+            monkeypatch.setattr(manager, "run_existing_session", AsyncMock(side_effect=error))
+    if recovery == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await audit_wait_workers(coordinator, verification_batch.output["batch_id"], timeout_seconds=0)
+    elif recovery == "resume_failed":
+        failed = await audit_wait_workers(coordinator, verification_batch.output["batch_id"], timeout_seconds=0)
+        assert failed.success
+        assert failed.output["status"] == "failed"
+    if recovery in {"resume_failed", "cancelled"}:
+        batch = runtime.store.get_worker_batch(verification_batch.output["batch_id"])
+        unit = batch["units"][0]
+        attempt = runtime.store.get_work_attempt(unit["attempt_id"])
+        assert attempt["status"] == ("failed" if recovery == "resume_failed" else "cancelled")
+        assert unit["status"] == attempt["status"]
+        manager.run_existing_session.assert_awaited_once()
+        assert attempt["failure_class"] == ("verification_resume_failed" if recovery == "resume_failed" else None)
+        assert runtime.store.scan_status(scan_id)["counts"]["unverified_candidates"] == 2
+        assert len(children) == 3
+        return
+    if recovery == "concurrent_refresh":
+        resume_started = asyncio.Event()
+        release_resume = asyncio.Event()
+        second_refresh_started = asyncio.Event()
+        original_run = manager.run_existing_session
+        original_refresh = tools_module._refresh_worker_batch
+        batch_id = verification_batch.output["batch_id"]
+
+        async def paused_run(**kwargs):
+            resume_started.set()
+            await release_resume.wait()
+            return await original_run(**kwargs)
+
+        async def observed_refresh(current_batch_id, *, ctx=None):
+            if current_batch_id == batch_id:
+                second_refresh_started.set()
+            return await original_refresh(current_batch_id, ctx=ctx)
+
+        monkeypatch.setattr(manager, "run_existing_session", paused_run)
+        first = asyncio.create_task(audit_wait_workers(coordinator, batch_id, timeout_seconds=0))
+        await asyncio.wait_for(resume_started.wait(), timeout=3)
+        monkeypatch.setattr(tools_module, "_refresh_worker_batch", observed_refresh)
+        second = asyncio.create_task(tools_module.audit_status(coordinator, scan_id))
+        try:
+            await asyncio.wait_for(second_refresh_started.wait(), timeout=3)
+            assert not second.done()
+        finally:
+            release_resume.set()
+            failed_verification, status = await asyncio.gather(first, second)
+        assert status.success
+        assert len(manager.calls) == 4
+        assert batch_id not in tools_module._BATCH_REFRESH_LOCKS
+    else:
+        failed_verification = await audit_wait_workers(
+            coordinator,
+            verification_batch.output["batch_id"],
+            timeout_seconds=0,
+        )
     assert failed_verification.output["status"] == "running"
-    assert failed_verification.output["workers"][0]["attempt_ordinal"] == 2
+    assert failed_verification.output["workers"][0]["attempt_ordinal"] == (2 if recovery == "missing_session" else 1)
     attempts = runtime.store.list_work_attempts(
         failed_verification.output["workers"][0]["work_unit_id"]
     )
-    assert [attempt["status"] for attempt in attempts] == ["failed", "running"]
+    if recovery == "missing_session":
+        assert [attempt["status"] for attempt in attempts] == ["failed", "running"]
+    else:
+        assert len(children) == 3
+        assert attempts[0]["resume_count"] == 0
+        assert manager.calls[-1]["session_id"] == children[2].id
+        assert "Verification is incomplete" in Message.create.await_args.kwargs["content"]
+        if recovery != "no_progress":
+            assert (await audit_verification_subject(verifier, extra_candidates[1])).success
+            assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
+            assert (await audit_submit_verdict(
+                verifier, extra_candidates[1], "rejected", "The suspected path is guarded.",
+            )).success
+        manager.tasks["task-4"].status = "completed"
+        continued = await audit_wait_workers(
+            coordinator, verification_batch.output["batch_id"], timeout_seconds=0,
+        )
+        attempt = runtime.store.get_work_attempt(attempts[0]["attempt_id"])
+        assert attempt["resume_count"] == 0
+        assert len(children) == 3
+        if recovery == "no_progress":
+            assert continued.output["status"] == "failed"
+            assert attempt["failure_class"] == "verification_no_progress"
+            assert runtime.store.scan_status(scan_id)["counts"]["unverified_candidates"] == 2
+            assert len(manager.calls) == 4
+            return
+        assert continued.output["status"] == "running"
+        assert attempt["verification_count"] == 2
+        assert manager.calls[-1]["session_id"] == children[2].id
     verifier = _agent_context(
-        children[3].id,
+        children[-1].id,
         "verifier-message",
         "code-security-verifier",
     )
@@ -3708,7 +3690,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
             "The input reaches eval without a guard.",
         )
     ).success
-    manager.tasks["task-4"].status = "completed"
+    manager.tasks["task-4" if recovery == "missing_session" else "task-5"].status = "completed"
     verification_wait = await audit_wait_workers(
         coordinator,
         verification_batch.output["batch_id"],
@@ -3840,3 +3822,84 @@ async def test_worker_launch_cancels_task_when_runtime_binding_fails(
     assert batch is not None
     assert batch["units"][0]["background_task_id"] is None
     assert batch["units"][0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_vote_count", [1, 3])
+async def test_single_verifier_handles_all_candidates_and_keeps_partial_results(tmp_path, monkeypatch, legacy_vote_count):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("def handler(user):\n    return eval(user)\n")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    with runtime.store._connect() as connection:
+        connection.execute("UPDATE scans SET verification_vote_count = ? WHERE scan_id = ?", (legacy_vote_count, scan_id))
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(runtime, scan_id=scan_id, snapshot_id=snapshot_id)
+    baseline_unit = runtime.store.create_work_unit(
+        scan_id=scan_id, phase="baseline", role="baseline", paths=["."],
+    )
+    runtime.store.bind_session(session_id="baseline", scan_id=scan_id, snapshot_id=snapshot_id,
+                               role="baseline", work_unit_id=baseline_unit)
+    baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
+    assert (await inventory_source(baseline)).success
+    source = await read_source(baseline, "app.py", start_line=1, end_line=2)
+    ids = []
+    for index in range(33):
+        payload = _candidate_payload([{"relative_path": "app.py", "blob_digest": source.output["blob_digest"],
+                                       "start_line": 1, "end_line": 2}], title=f"Candidate {index}")
+        payload["identity_anchor"] = f"candidate-{index}"
+        result = await audit_submit_candidate(baseline, payload)
+        assert result.success, result.error
+        ids.append(result.output["candidate_id"])
+    assert len(set(ids)) == 33
+    assert (await audit_submit_coverage(baseline, dispositions=[{"path": "app.py", "claim": "analyzed"}])).success
+    runtime.store.update_work_unit_status(baseline_unit, "completed")
+    launch = AsyncMock()
+    monkeypatch.setattr(tools_module, "_launch_worker", launch)
+    monkeypatch.setattr(tools_module, "_refresh_worker_batch", AsyncMock())
+    launched = await audit_run_workers(coordinator, scan_id, "verification")
+    assert launched.success, launched.error
+    launch.assert_awaited_once()
+    unit = launch.await_args.args[4]
+    assert unit["subject_id"] is None
+    unit_id = unit["work_unit_id"]
+    runtime.store.bind_session(session_id="verifier", scan_id=scan_id, snapshot_id=snapshot_id,
+                               role="verifier", work_unit_id=unit_id)
+    verifier = _agent_context("verifier", "message-3", "code-security-verifier")
+    assert not (await audit_verification_subject(verifier, "missing")).success
+    first = await audit_verification_subject(verifier)
+    assert len(first.output["pending_candidate_ids"]) == 33
+    assert (await read_source(verifier, "app.py", start_line=1, end_line=2)).success
+    assert not runtime.store.work_unit_has_required_facts(unit_id, role="verifier")
+    for index in range(33):
+        subject = await audit_verification_subject(verifier)
+        assert subject.success, subject.error
+        candidate_id = subject.output["candidate_id"]
+        saved = await audit_submit_verdict(verifier, candidate_id, "confirmed", "Source confirms attacker input reaches eval.")
+        assert saved.success, saved.error
+        assert "verification_id" in saved.output
+        if index == 0:
+            data = runtime.store.report_data(scan_id)
+            assert len(data["verifications"]) == 1
+            assert data["verifications"][0]["rationale"] == "Source confirms attacker input reaches eval."
+            assert data["verification_votes"] == []
+            duplicate = await audit_submit_verdict(verifier, candidate_id, "rejected", "Duplicate must not replace original.")
+            assert duplicate.success and duplicate.output["duplicate"]
+            assert duplicate.output["verdict"] == "confirmed"
+            assert not runtime.store.work_unit_has_required_facts(unit_id, role="verifier")
+            # Durable results survive opening a new store connection/runtime.
+            with runtime.store._connect() as connection:
+                connection.execute("ALTER TABLE verification_subject_access RENAME TO access_copy")
+                connection.execute("CREATE TABLE verification_subject_access (attempt_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL, accessed_at TEXT NOT NULL)")
+                connection.execute("INSERT INTO verification_subject_access SELECT * FROM access_copy")
+                connection.execute("DROP TABLE access_copy")
+                connection.execute("PRAGMA user_version = 16")
+            reopened = build_runtime(tmp_path / "plugin-data")
+            assert len(reopened.store.list_unverified_candidates(scan_id)) == 32
+    assert (await audit_verification_subject(verifier)).output["complete"]
+    assert runtime.store.work_unit_has_required_facts(unit_id, role="verifier")

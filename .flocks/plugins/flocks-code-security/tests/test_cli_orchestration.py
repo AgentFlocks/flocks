@@ -1410,3 +1410,20 @@ async def test_phase_control_precedes_dispatch_and_bypasses_telemetry(monkeypatc
     control.assert_called_once_with("baseline")
     dispatch.assert_not_awaited()
     progress.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_status", ["failed", "partial", "completed"])
+async def test_verification_does_not_redispatch_incomplete_batch(monkeypatch, batch_status) -> None:
+    phase = AsyncMock(return_value=(
+        {"status": batch_status}, {"counts": {"unverified_candidates": 1}},
+    ))
+    monkeypatch.setattr(audit_cli, "_run_phase", phase)
+    orchestrator = audit_cli.AuditOrchestrator(
+        ToolContext("session", "message", agent="code-security"), Path("/target"), None,
+    )
+    with pytest.raises(RuntimeError, match="incomplete"):
+        await orchestrator._verify_remaining(
+            "scan", {"counts": {"unverified_candidates": 3}}, None,
+        )
+    phase.assert_awaited_once()

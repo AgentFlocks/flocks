@@ -91,7 +91,6 @@ async def code_security_audit(
     cleanup_intermediates: bool = False,
     dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
-    verification_votes: int = 1,
     idempotency_key: str | None = None,
     after_event_seq: int = 0,
     timeout_seconds: int = 30,
@@ -137,7 +136,6 @@ async def code_security_audit(
                     cleanup_intermediates=cleanup_intermediates,
                     dynamic_enabled=dynamic_enabled,
                     coverage_policy=coverage_policy,
-                    verification_votes=verification_votes,
                     idempotency_key=idempotency_key,
                 ),
                 caller,
@@ -306,12 +304,6 @@ def register_public_tool() -> None:
                     "Allow trusted partial coverage or require exhaustive terminal dispositions.",
                     default="evidence_backed_partial",
                     enum=["evidence_backed_partial", "exhaustive"],
-                ),
-                _parameter(
-                    "verification_votes",
-                    ParameterType.INTEGER,
-                    "Independent verifier votes required per candidate (1 to 5).",
-                    default=1,
                 ),
                 _parameter("idempotency_key", ParameterType.STRING, "Caller-scoped start idempotency key."),
                 _parameter(

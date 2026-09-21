@@ -492,9 +492,6 @@ const englishMessages: Record<string, string> = {
   穷尽覆盖: "Exhaustive coverage",
   "穷尽覆盖会阻止仍有未检查文件或阻塞问题的工作单元完成。":
     "Exhaustive coverage prevents work units with unexamined files or blocking questions from completing.",
-  独立复核票数: "Independent verification votes",
-  "每个候选漏洞独立复核；多票时按严格多数决裁定。":
-    "Each candidate is reviewed independently; multiple votes use a strict majority.",
   模型: "Model",
   固定模型: "Fixed model",
   留空使用系统默认模型: "Leave blank to use the system default",

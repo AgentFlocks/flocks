@@ -123,7 +123,6 @@ export function createAuditApi(base = BASE) {
       dynamicEnabled: values.dynamicEnabled,
       dynamicConfirmed: values.dynamicConfirmed,
       coveragePolicy: values.coveragePolicy,
-      verificationVotes: values.verificationVotes,
       idempotencyKey,
     });
     return response.data;

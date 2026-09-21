@@ -1683,3 +1683,18 @@ async def test_session_delete_clears_auto_failover_cooldown(monkeypatch):
 
     assert await Session.delete("project", session.id) is True
     assert session.id not in SessionLoop._auto_failover_cooldowns
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("code", ["insufficient_quota", "Throttling.AllocationQuota"])
+def test_alibaba_quota_is_throttling(wrapped, code):
+    inner = type("SdkError", (RuntimeError,), {
+        "status_code": 429, "body": {"error": {"code": code}},
+    })("Provider request failed")
+    outer = RuntimeError("Wrapped provider failure")
+    outer.__cause__ = inner
+    runner = SessionRunner(session=_session(), provider_id="alibaba", model_id="test")
+    error = runner._exception_to_error_dict(outer if wrapped else inner)
+    assert "error_code" not in error["data"]
+    assert SessionRetry.retryable(error) is not None
+    assert SessionRunner.classify_failover_error(error).reason == "rate_limit"

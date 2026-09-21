@@ -102,7 +102,7 @@ def _cybergym_poc_input_limit(manifest: dict[str, Any]) -> int:
 
 # Bump this whenever initialize() adds or changes schema migrations.
 # Version 9 was also used by databases with executable_mode but no conversation tables.
-STORE_SCHEMA_VERSION = 16
+STORE_SCHEMA_VERSION = 18
 SQLITE_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -518,6 +518,7 @@ class ScanStore:
                     status TEXT NOT NULL,
                     failure_class TEXT,
                     resume_count INTEGER NOT NULL DEFAULT 0,
+                    verification_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     started_at TEXT,
@@ -636,6 +637,7 @@ class ScanStore:
                     counter_evidence_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                -- Legacy votes are retained for historical reports; new verdicts go to verifications.
                 CREATE TABLE IF NOT EXISTS verification_votes (
                     vote_id TEXT PRIMARY KEY,
                     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE CASCADE,
@@ -651,9 +653,10 @@ class ScanStore:
                     UNIQUE(candidate_id, vote_index)
                 );
                 CREATE TABLE IF NOT EXISTS verification_subject_access (
-                    attempt_id TEXT PRIMARY KEY REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
+                    attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id) ON DELETE CASCADE,
                     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE CASCADE,
-                    accessed_at TEXT NOT NULL
+                    accessed_at TEXT NOT NULL,
+                    PRIMARY KEY (attempt_id, candidate_id)
                 );
                 CREATE TABLE IF NOT EXISTS verification_conflicts (
                     candidate_id TEXT PRIMARY KEY REFERENCES candidates(candidate_id) ON DELETE CASCADE,
@@ -925,6 +928,17 @@ class ScanStore:
                 connection.execute(
                     "ALTER TABLE session_bindings ADD COLUMN attempt_id TEXT"
                 )
+            subject_columns = connection.execute("PRAGMA table_info(verification_subject_access)").fetchall()
+            if not any(row["name"] == "candidate_id" and row["pk"] for row in subject_columns):
+                connection.execute("ALTER TABLE verification_subject_access RENAME TO verification_subject_access_old")
+                connection.execute(
+                    "CREATE TABLE verification_subject_access ("
+                    "attempt_id TEXT NOT NULL REFERENCES work_attempts(attempt_id) ON DELETE CASCADE, "
+                    "candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE CASCADE, "
+                    "accessed_at TEXT NOT NULL, PRIMARY KEY (attempt_id, candidate_id))"
+                )
+                connection.execute("INSERT INTO verification_subject_access SELECT * FROM verification_subject_access_old")
+                connection.execute("DROP TABLE verification_subject_access_old")
             worker_batch_unit_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -1271,6 +1285,12 @@ class ScanStore:
                 connection.execute("CREATE TABLE audit_chat_sessions (scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE, subject TEXT NOT NULL, session_id TEXT NOT NULL PRIMARY KEY)")
                 connection.execute("INSERT INTO audit_chat_sessions SELECT scan_id, subject, session_id FROM audit_chat_sessions_old")
                 connection.execute("DROP TABLE audit_chat_sessions_old")
+            if "verification_count" not in {
+                row[1] for row in connection.execute("PRAGMA table_info(work_attempts)")
+            }:
+                connection.execute(
+                    "ALTER TABLE work_attempts ADD COLUMN verification_count INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
             self._restrict_database_files()
 
@@ -1551,7 +1571,6 @@ class ScanStore:
         dynamic_enabled: bool = False,
         poc_enabled: bool = False,
         coverage_policy: str = "evidence_backed_partial",
-        verification_vote_count: int = 1,
         owner_subject: str | None = None,
         request_source: str = "cli",
         workspace_ref: str | None = None,
@@ -1565,12 +1584,6 @@ class ScanStore:
             raise ValueError("cleanup_intermediates must be a boolean")
         if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:
             raise ValueError("Unsupported coverage policy")
-        if (
-            not isinstance(verification_vote_count, int)
-            or isinstance(verification_vote_count, bool)
-            or not 1 <= verification_vote_count <= 5
-        ):
-            raise ValueError("verification_vote_count must be between 1 and 5")
         scan_id = f"scan_{uuid.uuid4().hex}"
         now = _now()
         with self._lock, self._connect() as connection:
@@ -1591,7 +1604,7 @@ class ScanStore:
                     int(bool(dynamic_enabled)),
                     int(bool(poc_enabled)),
                     coverage_policy,
-                    verification_vote_count,
+                    1,
                     "running",
                     ruleset_digest,
                     now,
@@ -1816,20 +1829,12 @@ class ScanStore:
                     or not all(isinstance(path, str) and path for path in paths)
                 ):
                     raise ValueError("Work units require between 1 and 2000 paths")
-                if phase in {"verification", "probing", "poc_generation"} and not subject_id:
+                if phase in {"probing", "poc_generation"} and not subject_id:
                     raise ValueError(f"{phase.title()} work units require a candidate subject")
                 if phase not in {"verification", "probing", "poc_generation"} and subject_id is not None:
                     raise ValueError("Only verification, probing, and PoC-generation work units may have a subject")
-                if phase == "verification":
-                    required_votes = int(scan["verification_vote_count"])
-                    if (
-                        not isinstance(vote_index, int)
-                        or isinstance(vote_index, bool)
-                        or not 1 <= vote_index <= required_votes
-                    ):
-                        raise ValueError("Verification work units require a valid vote_index")
-                elif vote_index is not None:
-                    raise ValueError("Only verification work units accept vote_index")
+                if vote_index is not None and (phase != "verification" or vote_index != 1):
+                    raise ValueError("Only a single verification verdict is supported")
                 if phase == "baseline" and (
                     not isinstance(assignment_digest, str)
                     or len(assignment_digest) != 64
@@ -2142,6 +2147,12 @@ class ScanStore:
                 ),
             )
             connection.execute(
+                "UPDATE work_attempts SET verification_count = "
+                "(SELECT COUNT(*) FROM verifications WHERE work_unit_id = ?) "
+                "WHERE attempt_id = ?",
+                (work_unit_id, attempt_id),
+            )
+            connection.execute(
                 """
                 INSERT INTO session_bindings (
                     session_id, scan_id, work_unit_id, attempt_id,
@@ -2340,6 +2351,34 @@ class ScanStore:
             raise ValueError("Work attempt not found")
         return attempt
 
+    def prepare_verification_continuation(self, attempt_id: str) -> dict[str, Any] | None:
+        """Continue only after new verdicts, without consuming error recovery retries."""
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT wa.*, wu.role, wbu.subject_id FROM work_attempts wa "
+                "JOIN work_units wu ON wu.work_unit_id = wa.work_unit_id "
+                "JOIN worker_batch_units wbu ON wbu.work_unit_id = wu.work_unit_id "
+                "WHERE wa.attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None or row["status"] != "running":
+                raise ValueError("Work attempt is not running")
+            if row["role"] != "verifier" or row["subject_id"] is not None:
+                raise ValueError("Continuation requires a scan-wide verifier")
+            count = connection.execute(
+                "SELECT COUNT(*) FROM verifications WHERE work_unit_id = ?",
+                (row["work_unit_id"],),
+            ).fetchone()[0]
+            if count <= row["verification_count"]:
+                return None
+            connection.execute(
+                "UPDATE work_attempts SET status = 'recovering', "
+                "verification_count = ?, updated_at = ? WHERE attempt_id = ?",
+                (count, _now(), attempt_id),
+            )
+        return self.get_work_attempt(attempt_id)
+
     def finish_work_attempt(
         self,
         attempt_id: str | None,
@@ -2451,20 +2490,21 @@ class ScanStore:
                 ).fetchone()
             elif role == "verifier":
                 assignment = connection.execute(
-                    "SELECT subject_id, vote_index FROM worker_batch_units "
-                    "WHERE work_unit_id = ?",
+                    "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
                     (work_unit_id,),
                 ).fetchone()
-                if assignment is None or assignment["subject_id"] is None:
+                if assignment is None:
                     return False
+                if assignment["subject_id"] is None:
+                    return connection.execute(
+                        "SELECT 1 FROM candidates c JOIN work_units wu ON wu.scan_id = c.scan_id "
+                        "WHERE wu.work_unit_id = ? AND NOT EXISTS ("
+                        "SELECT 1 FROM verifications v WHERE v.candidate_id = c.candidate_id) LIMIT 1",
+                        (work_unit_id,),
+                    ).fetchone() is None
                 row = connection.execute(
-                    "SELECT 1 FROM verification_votes WHERE work_unit_id = ? "
-                    "AND candidate_id = ? AND vote_index = ?",
-                    (
-                        work_unit_id,
-                        assignment["subject_id"],
-                        assignment["vote_index"],
-                    ),
+                    "SELECT 1 FROM verifications WHERE candidate_id = ?",
+                    (assignment["subject_id"],),
                 ).fetchone()
             elif role == "prober":
                 assignment = connection.execute(
@@ -2532,67 +2572,26 @@ class ScanStore:
         return source_access is not None or candidate is not None
 
     def list_unverified_candidates(
-        self,
-        scan_id: str,
-        *,
-        limit: int = 32,
+        self, scan_id: str, *, limit: int = 32,
     ) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            scan = self._require_scan_status(connection, scan_id, {"running"})
-            vote_count = int(scan["verification_vote_count"])
+            self._require_scan_status(connection, scan_id, {"running"})
             rows = connection.execute(
-                """
-                SELECT c.* FROM candidates c
-                LEFT JOIN verifications v ON v.candidate_id = c.candidate_id
-                WHERE c.scan_id = ? AND v.candidate_id IS NULL
-                ORDER BY c.created_at, c.candidate_id
-                """,
-                (scan_id,),
+                "SELECT c.* FROM candidates c LEFT JOIN verifications v ON v.candidate_id = c.candidate_id "
+                "WHERE c.scan_id = ? AND v.candidate_id IS NULL ORDER BY c.created_at, c.candidate_id LIMIT ?",
+                (scan_id, max(1, min(int(limit), 32))),
             ).fetchall()
-            remaining = max(1, min(int(limit), 32))
-            output: list[dict[str, Any]] = []
+            output = []
             for row in rows:
-                used_indices = {
-                    int(item["vote_index"])
-                    for item in connection.execute(
-                        "SELECT vote_index FROM verification_votes "
-                        "WHERE candidate_id = ?",
-                        (row["candidate_id"],),
-                    ).fetchall()
-                }
-                active_indices = {
-                    int(item["vote_index"])
-                    for item in connection.execute(
-                        "SELECT assigned.vote_index FROM worker_batch_units assigned "
-                        "JOIN work_units wu ON wu.work_unit_id = assigned.work_unit_id "
-                        "WHERE assigned.subject_id = ? "
-                        "AND assigned.vote_index IS NOT NULL "
-                        "AND wu.status IN ('pending', 'running')",
-                        (row["candidate_id"],),
-                    ).fetchall()
-                }
-                pending_indices = [
-                    index
-                    for index in range(1, vote_count + 1)
-                    if index not in used_indices and index not in active_indices
-                ][:remaining]
-                if not pending_indices:
-                    continue
                 item = dict(row)
                 item["payload"] = json.loads(item.pop("payload_json"))
-                item["pending_vote_indices"] = pending_indices
                 evidence = connection.execute(
-                    "SELECT relative_path, blob_digest, start_line, end_line, "
-                    "excerpt_hash, ordinal "
-                    "FROM evidence WHERE candidate_id = ? "
-                    "ORDER BY ordinal, rowid",
+                    "SELECT relative_path, blob_digest, start_line, end_line, excerpt_hash, ordinal "
+                    "FROM evidence WHERE candidate_id = ? ORDER BY ordinal, rowid",
                     (item["candidate_id"],),
                 ).fetchall()
                 item["evidence"] = [dict(record) for record in evidence]
                 output.append(item)
-                remaining -= len(pending_indices)
-                if remaining == 0:
-                    break
         return output
 
     def list_confirmed_without_dynamic_record(
@@ -6372,7 +6371,7 @@ class ScanStore:
         data["payload"] = json.loads(data.pop("payload_json"))
         return data
 
-    def get_verification_subject(self, binding: SessionBinding) -> dict[str, Any]:
+    def get_verification_subject(self, binding: SessionBinding, candidate_id: str | None = None) -> dict[str, Any]:
         if binding.role != "verifier" or binding.work_unit_id is None:
             raise ValueError("Verification subject requires a verifier work unit")
         if binding.attempt_id is None:
@@ -6381,15 +6380,32 @@ class ScanStore:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
             assignment = connection.execute(
-                "SELECT subject_id, vote_index FROM worker_batch_units "
+                "SELECT subject_id FROM worker_batch_units "
                 "WHERE work_unit_id = ?",
                 (binding.work_unit_id,),
             ).fetchone()
-            if assignment is None or not assignment["subject_id"]:
-                raise ValueError("Verifier work unit has no assigned candidate")
+            if assignment is None:
+                raise ValueError("Verifier work unit has no assignment")
+            pending = None
+            if assignment["subject_id"] is None:
+                pending = connection.execute(
+                    "SELECT c.candidate_id FROM candidates c WHERE c.scan_id = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM verifications v "
+                    "WHERE v.candidate_id = c.candidate_id) "
+                    "ORDER BY c.created_at, c.candidate_id",
+                    (binding.scan_id,),
+                ).fetchall()
+                if candidate_id is None:
+                    if not pending:
+                        return {"candidate_id": None, "pending_candidate_ids": [], "complete": True}
+                    candidate_id = pending[0]["candidate_id"]
+            else:
+                if candidate_id is not None and candidate_id != assignment["subject_id"]:
+                    raise ValueError("Candidate is not assigned to this verifier")
+                candidate_id = assignment["subject_id"]
             candidate = connection.execute(
                 "SELECT * FROM candidates WHERE candidate_id = ? AND scan_id = ?",
-                (assignment["subject_id"], binding.scan_id),
+                (candidate_id, binding.scan_id),
             ).fetchone()
             if candidate is None:
                 raise ValueError("Assigned verification candidate was not found")
@@ -6397,7 +6413,7 @@ class ScanStore:
                 "SELECT relative_path, blob_digest, start_line, end_line, "
                 "excerpt_hash, ordinal FROM evidence WHERE candidate_id = ? "
                 "ORDER BY ordinal, rowid",
-                (assignment["subject_id"],),
+                (candidate_id,),
             ).fetchall()
             threat_model = connection.execute(
                 "SELECT payload_json FROM threat_models WHERE scan_id = ?",
@@ -6408,7 +6424,6 @@ class ScanStore:
             threat_payload = json.loads(threat_model["payload_json"])
             output = {
                 "candidate_id": candidate["candidate_id"],
-                "vote_index": assignment["vote_index"],
                 "trust": "untrusted_candidate_claim",
                 "claim": json.loads(candidate["payload_json"]),
                 "evidence": [dict(item) for item in evidence],
@@ -6423,14 +6438,16 @@ class ScanStore:
                     )
                 },
             }
+            if pending is not None:
+                output["pending_candidate_ids"] = [row["candidate_id"] for row in pending]
             connection.execute(
                 "INSERT INTO verification_subject_access VALUES (?, ?, ?) "
-                "ON CONFLICT(attempt_id) DO NOTHING",
+                "ON CONFLICT(attempt_id, candidate_id) DO NOTHING",
                 (binding.attempt_id, candidate["candidate_id"], _now()),
             )
         return output
 
-    def save_verification_vote(
+    def save_verification(
         self,
         binding: SessionBinding,
         *,
@@ -6439,9 +6456,9 @@ class ScanStore:
         rationale: str,
         counter_evidence: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        vote_id = f"vote_{uuid.uuid4().hex}"
+        verification_id = f"verify_{uuid.uuid4().hex}"
         with self._lock, self._connect() as connection:
-            scan = self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
             candidate = connection.execute(
                 "SELECT scan_id FROM candidates WHERE candidate_id = ?",
@@ -6450,20 +6467,20 @@ class ScanStore:
             if candidate is None or candidate["scan_id"] != binding.scan_id:
                 raise ValueError("Candidate does not belong to this scan")
             assignment = connection.execute(
-                "SELECT subject_id, vote_index FROM worker_batch_units "
+                "SELECT subject_id FROM worker_batch_units "
                 "WHERE work_unit_id = ?",
                 (binding.work_unit_id,),
             ).fetchone()
-            if assignment is None or not assignment["subject_id"]:
+            if assignment is None:
                 raise ValueError("Verifier work unit has no assigned candidate")
-            if assignment["subject_id"] != candidate_id:
+            if assignment["subject_id"] is not None and assignment["subject_id"] != candidate_id:
                 raise ValueError("Candidate is not assigned to this verifier work unit")
-            required_votes = int(scan["verification_vote_count"])
-            if assignment["vote_index"] is None:
-                raise ValueError("Verifier work unit has no assigned vote index")
-            vote_index = int(assignment["vote_index"])
-            if not 1 <= vote_index <= required_votes:
-                raise ValueError("Verifier vote index is outside the scan policy")
+            existing = connection.execute(
+                "SELECT verification_id, verdict FROM verifications WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if existing is not None:
+                return {**dict(existing), "duplicate": True}
             subject_access = connection.execute(
                 "SELECT 1 FROM verification_subject_access "
                 "WHERE attempt_id = ? AND candidate_id = ?",
@@ -6475,71 +6492,13 @@ class ScanStore:
                 )
             self.require_verifier_source_access(connection, binding, candidate_id)
             connection.execute(
-                "INSERT INTO verification_votes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    vote_id,
-                    candidate_id,
-                    binding.scan_id,
-                    binding.work_unit_id,
-                    vote_index,
-                    verdict,
-                    rationale,
-                    json.dumps(counter_evidence, ensure_ascii=False, sort_keys=True),
-                    _now(),
+                    verification_id, candidate_id, binding.scan_id, binding.work_unit_id,
+                    verdict, rationale, json.dumps(counter_evidence, ensure_ascii=False, sort_keys=True), _now(),
                 ),
             )
-            votes = connection.execute(
-                "SELECT verdict, counter_evidence_json FROM verification_votes "
-                "WHERE candidate_id = ? ORDER BY vote_index",
-                (candidate_id,),
-            ).fetchall()
-            verification_id: str | None = None
-            consensus: str | None = None
-            if len(votes) == required_votes:
-                counts = Counter(row["verdict"] for row in votes)
-                majority = required_votes // 2 + 1
-                if counts["confirmed"] >= majority:
-                    consensus = "confirmed"
-                elif counts["rejected"] >= majority:
-                    consensus = "rejected"
-                else:
-                    consensus = "insufficient_evidence"
-                combined_counter_evidence = {
-                    json.dumps(item, ensure_ascii=False, sort_keys=True): item
-                    for row in votes
-                    for item in json.loads(row["counter_evidence_json"])
-                }
-                verification_id = f"verify_{uuid.uuid4().hex}"
-                consensus_rationale = (
-                    f"Host consensus from {required_votes} independent votes: "
-                    f"confirmed={counts['confirmed']}, rejected={counts['rejected']}, "
-                    "insufficient_evidence="
-                    f"{counts['insufficient_evidence']}."
-                )
-                connection.execute(
-                    "INSERT INTO verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        verification_id,
-                        candidate_id,
-                        binding.scan_id,
-                        binding.work_unit_id,
-                        consensus,
-                        consensus_rationale,
-                        json.dumps(
-                            list(combined_counter_evidence.values()),
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
-                        _now(),
-                    ),
-                )
-        return {
-            "vote_id": vote_id,
-            "vote_index": vote_index,
-            "votes_required": required_votes,
-            "consensus_verification_id": verification_id,
-            "consensus_verdict": consensus,
-        }
+        return {"verification_id": verification_id, "verdict": verdict}
 
     def save_coverage_attestation(
         self,

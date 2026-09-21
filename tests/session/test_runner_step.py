@@ -3192,11 +3192,13 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["transport", "throttle", "quota", "quota_deferred"])
+@pytest.mark.parametrize("failure", ["transport", "throttle", "quota", "quota_deferred", "alibaba", "alibaba_exhausted"])
 async def test_process_step_retries_only_transient_provider_errors(monkeypatch, failure):
     runner = _make_runner("ses_runner_transport_retry")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
     runner._defer_step_errors = failure == "quota_deferred"
+    if failure.startswith("alibaba"):
+        runner.provider_id = "alibaba"
 
     last_user = UserMessageInfo(
         id="msg_user_transport_retry",
@@ -3213,12 +3215,19 @@ async def test_process_step_retries_only_transient_provider_errors(monkeypatch, 
     error = httpcore.ReadError() if failure == "transport" else RuntimeError(
         "429 insufficient_quota" if failure.startswith("quota") else "429 rate limit exceeded"
     )
+    if failure.startswith("alibaba"):
+        error = type("SdkError", (RuntimeError,), {
+            "status_code": 429,
+            "response": SimpleNamespace(headers={"Retry-After": "90"}),
+        })("429 insufficient_quota")
     call_llm_mock = AsyncMock(
         side_effect=[
             error,
             StepResult(action="stop", content="recovered"),
         ]
     )
+    if failure == "alibaba_exhausted":
+        call_llm_mock.side_effect = [error] * 6
     sleep_mock = AsyncMock(return_value=None)
 
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
@@ -3241,6 +3250,14 @@ async def test_process_step_retries_only_transient_provider_errors(monkeypatch, 
 
     result = await runner._process_step([last_user], last_user)
 
+    if failure == "alibaba_exhausted":
+        assert result.error is not None
+        assert result.error_code != "model_quota_exhausted"
+        assert call_llm_mock.await_count == 6
+        assert sleep_mock.await_count == 5
+        return
+    if failure == "alibaba":
+        assert sleep_mock.await_args.args[0] == 90_000
     if failure.startswith("quota"):
         assert result.action == "stop"
         assert result.error_code == "model_quota_exhausted"

@@ -2392,8 +2392,7 @@ describe("code security workspace contract page", () => {
 
     await openCreateAudit();
     screen.getByText("高级设置").closest("details")!.open = true;
-    const voteCount = screen.getByLabelText("独立复核票数");
-    await user.selectOptions(voteCount, "3");
+    expect(screen.queryByLabelText("独立复核票数")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "启动静态审计" }));
     expect(await screen.findByText(/连接暂时不可用/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "启动静态审计" }));
@@ -2403,7 +2402,7 @@ describe("code security workspace contract page", () => {
     expect(apiPost.mock.calls[0][1].coveragePolicy).toBe(
       "evidence_backed_partial",
     );
-    expect(apiPost.mock.calls[0][1].verificationVotes).toBe(3);
+    expect(apiPost.mock.calls[0][1]).not.toHaveProperty("verificationVotes");
     expect(apiPost.mock.calls[0][1].copySource).toBe(true);
     expect(apiPost.mock.calls[1][1].idempotencyKey).toBe(
       apiPost.mock.calls[0][1].idempotencyKey,

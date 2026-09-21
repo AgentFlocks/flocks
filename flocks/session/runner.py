@@ -1424,6 +1424,9 @@ class SessionRunner:
         if error_name in {"CancelledError", "MessageAbortedError", "AbortedError"}:
             return FailoverDecision(False, "cancelled")
 
+        if SessionRetry.is_alibaba_rate_limit(error):
+            return FailoverDecision(True, "rate_limit")
+
         if SessionRetry.is_quota_exhausted(error):
             return FailoverDecision(True, "billing")
 
@@ -2073,12 +2076,7 @@ class SessionRunner:
 
                 if will_retry:
                     # Error is retryable and we have budget left
-                    delay_ms = SessionRetry.delay(error_attempt, error_dict)
-                    # Always cap the sleep to RETRY_MAX_DELAY_NO_HEADERS so a
-                    # headers-present but retry-after-absent 500 response cannot
-                    # cause multi-minute sleeps that block the loop.
-                    from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
-                    delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
+                    delay_ms = SessionRetry.delay(error_attempt, error_dict, jitter=True)
                     next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
 
                     log.warn("runner.step.retry", {
@@ -2748,6 +2746,7 @@ class SessionRunner:
             "message": str(exception),
             "data": {
                 "message": str(exception),
+                "providerID": self.provider_id,
                 "exceptionType": type(exception).__name__,
                 "exceptionModule": type(exception).__module__,
             }
@@ -2853,9 +2852,19 @@ class SessionRunner:
             body = getattr(current, "body", None)
             details = body.get("error", body) if isinstance(body, dict) else {}
             code = (
-                details.get("code") if isinstance(details, dict) else None
+                (details.get("code") or details.get("type")) if isinstance(details, dict) else None
             ) or getattr(current, "code", None)
-            candidate = {"data": {"providerCode": code, "message": str(current)}}
+            candidate = {"data": {
+                "providerID": self.provider_id, "statusCode": status_code,
+                "providerCode": code if isinstance(code, str) else None,
+                "message": str(current),
+            }}
+            if SessionRetry.is_alibaba_rate_limit(candidate):
+                error_dict["data"].update(
+                    providerCode=candidate["data"]["providerCode"] or "insufficient_quota",
+                    isRetryable=True,
+                )
+                break
             if SessionRetry.is_quota_exhausted(candidate):
                 from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED
 

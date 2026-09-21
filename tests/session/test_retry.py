@@ -223,7 +223,7 @@ class TestDelay:
             }
         }
         result = SessionRetry.delay(1, error)
-        # Falls back to backoff with headers (uncapped)
+        # Falls back to bounded exponential backoff
         assert result == RETRY_INITIAL_DELAY
 
     def test_empty_headers_uses_backoff(self):
@@ -275,3 +275,26 @@ class TestSleep:
         asyncio.create_task(set_abort_soon())
         with pytest.raises(asyncio.CancelledError):
             await SessionRetry.sleep(10000, abort)
+
+
+@pytest.mark.parametrize("provider,status,code,quota", [
+    ("alibaba", 429, "insufficient_quota", False),
+    ("alibaba", 429, "Throttling.AllocationQuota", False),
+    ("alibaba", 429, "billing_hard_limit_reached", True),
+    ("alibaba", 403, "insufficient_quota", True),
+    ("openai", 429, "insufficient_quota", True),
+])
+def test_quota_classification_is_provider_specific(provider, status, code, quota):
+    error = {"name": "APIError", "data": {
+        "providerID": provider, "statusCode": status, "providerCode": code,
+        "message": "provider error", "isRetryable": True,
+    }}
+    assert SessionRetry.is_quota_exhausted(error) is quota
+    assert (SessionRetry.retryable(error) is None) is quota
+
+
+def test_jitter_preserves_server_delay_and_bounds_backoff():
+    error = {"data": {"responseHeaders": {"Retry-After": "90"}}}
+    assert SessionRetry.delay(1, error, jitter=True) == 90_000
+    error["data"]["responseHeaders"] = {"retry-after": "invalid"}
+    assert 15_000 <= SessionRetry.delay(20, error, jitter=True) <= 30_000

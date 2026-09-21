@@ -9,15 +9,15 @@ import time
 PHASE_ALIASES = {"probing": "dynamic_validation", "cybergym_solving": "dynamic_validation"}
 # Cumulative seconds per phase, copied into each new batch's saved config.
 DEFAULT_PHASE_TIMEOUTS = {
-    "source_extraction": 1800,
-    "snapshot": 1800,
+    "source_extraction": 3600,
+    "snapshot": 3600,
     "threat_modeling": 7200,
-    "baseline": 3600,
+    "baseline": 7200,
     "investigation": 3600,
-    "verification": 3600,
+    "verification": 7200,
     "adjudication": 3600,
     "targeted_rescan": 3600,
-    "poc_generation": 3600,
+    "poc_generation": 7200,
     "dynamic_validation": 3600,
     "finalization": 1200,
     "cleanup": 1200,

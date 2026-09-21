@@ -214,7 +214,6 @@ describe("audit conversation", () => {
           copySource: true,
           dynamicEnabled: false,
           coveragePolicy: "evidence_backed_partial",
-          verificationVotes: 1,
         },
       },
     });

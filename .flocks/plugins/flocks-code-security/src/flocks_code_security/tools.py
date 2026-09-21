@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from weakref import WeakValueDictionary
 
 from flocks.session.callable_state import get_session_callable_tools
 from flocks.session.lifecycle.retry import (
@@ -133,6 +134,7 @@ EVIDENCE_ROLES = {
 STORE_ERRORS = (OSError, ValueError, sqlite3.Error)
 WORKER_TERMINAL_STATUSES = {"completed", "partial", "failed", "cancelled"}
 LAUNCHING_BATCH_IDS: set[str] = set()
+_BATCH_REFRESH_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 REGISTERED_AUDIT_TOOLS: dict[
     str,
     tuple[Tool, Callable[..., Awaitable[ToolResult]]],
@@ -328,7 +330,6 @@ async def audit_prepare(
     dynamic_enabled: bool = False,
     poc_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
-    verification_votes: int = 1,
     cybergym_manifest: dict[str, Any] | None = None,
     max_files: int = 50_000,
 ) -> ToolResult:
@@ -369,7 +370,6 @@ async def audit_prepare(
             # CyberGym consumes the independent generic PoC by definition.
             poc_enabled=bool(poc_enabled or mode == "cybergym_level1"),
             coverage_policy=coverage_policy,
-            verification_vote_count=verification_votes,
             cleanup_intermediates=cleanup_intermediates,
         )
         cybergym_task = None
@@ -400,7 +400,6 @@ async def audit_prepare(
                 ),
                 "poc_enabled": bool(poc_enabled or mode == "cybergym_level1"),
                 "coverage_policy": coverage_policy,
-                "verification_votes": verification_votes,
                 "snapshot": snapshot.public_dict(),
                 "cybergym_task": cybergym_task,
             },
@@ -788,7 +787,9 @@ async def audit_submit_threat_model(
         )
 
 
-async def audit_verification_subject(ctx: ToolContext) -> ToolResult:
+async def audit_verification_subject(
+    ctx: ToolContext, candidate_id: str | None = None,
+) -> ToolResult:
     try:
         _require_agent_execution(ctx, VERIFIER_ROLE)
         runtime = get_runtime()
@@ -796,6 +797,7 @@ async def audit_verification_subject(ctx: ToolContext) -> ToolResult:
         output = await asyncio.to_thread(
             runtime.store.get_verification_subject,
             binding,
+            candidate_id,
         )
         return ToolResult(
             success=True,
@@ -1052,8 +1054,8 @@ async def audit_submit_verdict(
                 binding,
                 counter_evidence,
             )
-        vote = await asyncio.to_thread(
-            runtime.store.save_verification_vote,
+        verification = await asyncio.to_thread(
+            runtime.store.save_verification,
             binding,
             candidate_id=candidate_id,
             verdict=normalized_verdict,
@@ -1062,8 +1064,8 @@ async def audit_submit_verdict(
         )
         return ToolResult(
             success=True,
-            output={**vote, "verdict": normalized_verdict},
-            title=f"Submitted verdict {normalized_verdict}",
+            output={"verdict": normalized_verdict, **verification},
+            title=f"Saved verdict {verification.get('verdict', normalized_verdict)}",
         )
     except STORE_ERRORS as exc:
         return _error(exc, title="Verdict submission failed")
@@ -1763,8 +1765,6 @@ async def _launch_worker(
         correlation_metadata["assignment_digest"] = unit["assignment_digest"]
     if candidate is not None:
         correlation_metadata["candidate_id"] = candidate["candidate_id"]
-    if unit.get("vote_index") is not None:
-        correlation_metadata["vote_index"] = unit["vote_index"]
     trace_context = ctx.extra.get("langfuse_trace_context")
     trace_context = trace_context if isinstance(trace_context, dict) else None
     langfuse_metadata = {
@@ -1811,11 +1811,10 @@ async def _launch_worker(
             snapshot_id=snapshot_id,
             knowledge_base_present=knowledge_base_present,
         )
-    elif phase == "verification" and candidate is not None:
+    elif phase == "verification":
         prompt = verification_prompt(
             snapshot_id=snapshot_id,
-            candidate_id=candidate["candidate_id"],
-            vote_index=unit["vote_index"],
+            candidate_id=unit.get("subject_id"),
         )
     elif phase == "probing" and candidate is not None:
         prompt = probe_prompt(
@@ -1979,8 +1978,9 @@ async def _resume_worker_attempt(
     unit: dict[str, Any],
     *,
     coverage_only: bool = False,
+    verification_continuation: bool = False,
     batch: dict[str, Any],
-) -> None:
+) -> bool:
     from flocks.session.message import Message, MessageRole
     from flocks.session.session import Session
 
@@ -2008,6 +2008,24 @@ async def _resume_worker_attempt(
         model_id=unit.get("model_id"),
         toolset_digest_value=unit.get("toolset_digest"),
     )
+    attempt = await asyncio.to_thread(
+        runtime.store.prepare_verification_continuation
+        if verification_continuation else runtime.store.prepare_work_attempt_resume,
+        attempt_id,
+    )
+    if attempt is None:
+        return False
+    if unit["role"] == "verifier" and unit.get("subject_id") is None:
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content=(
+                "Verification is incomplete. Call audit_verification_subject for remaining candidates. "
+                "Verify and submit each missing verdict; preserve completed results. "
+                "Do not start another worker."
+            ),
+            agent=unit["agent_name"],
+        )
     if coverage_only:
         await Message.create(
             session_id=session_id,
@@ -2022,10 +2040,6 @@ async def _resume_worker_attempt(
             ),
             agent=unit["agent_name"],
         )
-    attempt = await asyncio.to_thread(
-        runtime.store.prepare_work_attempt_resume,
-        attempt_id,
-    )
     manager = _background_manager()
     start_gate = asyncio.Event()
     quota_error = _worker_batch_quota_error(batch)
@@ -2073,6 +2087,8 @@ async def _resume_worker_attempt(
     except BaseException:
         manager.cancel(task_id=task.id)
         raise
+
+    return True
 
 
 async def _start_fresh_worker_attempt(
@@ -2248,19 +2264,23 @@ async def _refresh_worker_batch(
     *,
     ctx: ToolContext | None = None,
 ) -> dict[str, Any]:
-    runtime = get_runtime()
-    batch = await asyncio.to_thread(runtime.store.get_worker_batch, batch_id)
-    if batch is None:
-        raise ValueError("Worker batch not found")
-    quota_error = _worker_batch_quota_error(batch)
-    try:
-        return await _reconcile_worker_batch(batch, ctx=ctx)
-    except STORE_ERRORS as exc:
-        # Persistence must not hide a provider failure already visible in memory.
-        quota_error = quota_error or _worker_batch_quota_error(batch)
-        if quota_error:
-            raise ModelQuotaExhaustedError(quota_error) from exc
-        raise
+    # Read and reconcile under one lock so concurrent observers cannot resume
+    # or terminate the same attempt using a stale background-task snapshot.
+    lock = _BATCH_REFRESH_LOCKS.setdefault(batch_id, asyncio.Lock())
+    async with lock:
+        runtime = get_runtime()
+        batch = await asyncio.to_thread(runtime.store.get_worker_batch, batch_id)
+        if batch is None:
+            raise ValueError("Worker batch not found")
+        quota_error = _worker_batch_quota_error(batch)
+        try:
+            return await _reconcile_worker_batch(batch, ctx=ctx)
+        except STORE_ERRORS as exc:
+            # Persistence must not hide a provider failure already visible in memory.
+            quota_error = quota_error or _worker_batch_quota_error(batch)
+            if quota_error:
+                raise ModelQuotaExhaustedError(quota_error) from exc
+            raise
 
 
 async def _reconcile_worker_batch(
@@ -2450,6 +2470,46 @@ async def _reconcile_worker_batch(
             )
             continue
         if quota_error:
+            continue
+        if (
+            task.status == "completed" and unit["role"] == "verifier"
+            and unit.get("subject_id") is None and ctx is not None
+        ):
+            continuation_failure = "verification_no_progress"
+            continuation_error = None
+            try:
+                if await _resume_worker_attempt(
+                    ctx, unit, verification_continuation=True, batch=batch,
+                ):
+                    continue
+            except asyncio.CancelledError:
+                await asyncio.to_thread(
+                    runtime.store.finish_work_attempt, unit.get("attempt_id"),
+                    status="cancelled",
+                )
+                raise
+            except ModelQuotaExhaustedError as exc:
+                quota_error = str(exc)
+                continuation_failure = "model_quota_exhausted"
+            except ExecutionCapsuleError:
+                await _ensure_capsule_mismatch_terminal(
+                    batch_id, unit["work_unit_id"], source="verification_continuation",
+                )
+                continue
+            except Exception as exc:
+                continuation_failure = "verification_resume_failed"
+                continuation_error = str(exc)
+            await asyncio.to_thread(
+                runtime.store.finish_work_attempt, unit.get("attempt_id"),
+                status="failed", failure_class=continuation_failure, work_unit_status="failed",
+            )
+            if continuation_error is not None:
+                await asyncio.to_thread(
+                    runtime.store.append_scan_event,
+                    unit["scan_id"], "worker.resume_failed",
+                    "Verification continuation failed to start",
+                    {"attempt_id": unit.get("attempt_id"), "error": continuation_error},
+                )
             continue
         if unit["role"] in {"baseline", "investigator"} and isinstance(unit.get("session_id"), str):
             try:
@@ -3188,13 +3248,6 @@ def register_tools() -> None:
                 default="evidence_backed_partial",
                 enum=["evidence_backed_partial", "exhaustive"],
             ),
-            _parameter(
-                "verification_votes",
-                ParameterType.INTEGER,
-                "Independent verifier votes required per candidate (1 to 5).",
-                required=False,
-                default=1,
-            ),
         ],
     )
     gdb_intent_schema = {
@@ -3387,7 +3440,13 @@ def register_tools() -> None:
         "audit_verification_subject",
         "Return the candidate and digest-bound evidence assigned to this verifier work unit.",
         audit_verification_subject,
-        [],
+        [
+            _parameter(
+                "candidate_id", ParameterType.STRING,
+                "Optional candidate ID; omit to fetch the next pending candidate.",
+                required=False,
+            ),
+        ],
     )
     _register(
         "audit_probe_subject",

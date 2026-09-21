@@ -146,7 +146,6 @@ class CreateScanRequest(BaseModel):
         alias="coveragePolicy",
         pattern="^(evidence_backed_partial|exhaustive)$",
     )
-    verification_votes: int = Field(1, alias="verificationVotes", ge=1, le=5)
     idempotency_key: str | None = Field(None, alias="idempotencyKey", max_length=256)
 
 
@@ -312,7 +311,6 @@ async def _create_scan(request: Request, payload: CreateScanRequest):
                 dynamic_enabled=payload.dynamic_enabled,
                 poc_enabled=payload.poc_enabled,
                 coverage_policy=payload.coverage_policy,
-                verification_votes=payload.verification_votes,
                 idempotency_key=payload.idempotency_key,
             ),
             _caller(user, workspace_ref=project.id, authorized_root=root, caller_type=_AuditCaller),
@@ -566,7 +564,6 @@ class AuditConfigurationValues(BaseModel):
     copySource: bool = True
     dynamicEnabled: bool = False
     coveragePolicy: str = Field("evidence_backed_partial", pattern="^(evidence_backed_partial|exhaustive)$")
-    verificationVotes: int = Field(1, ge=1, le=5)
 
 
 class ConfigurationMessage(BaseModel):

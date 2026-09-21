@@ -154,7 +154,6 @@ export interface ScanDetail {
     integrity_errors?: string[];
     coverage_status: string;
     coverage_policy?: string;
-    verification_votes?: number;
     dynamic_enabled: boolean;
     created_at: string;
     started_at: string;
@@ -228,5 +227,4 @@ export interface NewAuditValues {
   dynamicEnabled: boolean;
   dynamicConfirmed: boolean;
   coveragePolicy: "evidence_backed_partial" | "exhaustive";
-  verificationVotes: 1 | 2 | 3 | 4 | 5;
 }

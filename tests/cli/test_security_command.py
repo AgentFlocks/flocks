@@ -316,32 +316,13 @@ def test_security_audit_coverage_blocked_exits_nonzero(monkeypatch, tmp_path) ->
     ]
 
 
-def test_security_audit_forwards_verification_votes(monkeypatch, tmp_path) -> None:
-    observed: dict[str, object] = {}
-
-    async def run_audit(target, *, model, progress, verification_votes):
-        observed.update(
-            target=target,
-            model=model,
-            progress=progress,
-            verification_votes=verification_votes,
-        )
-        return {"scan_id": "scan_consensus"}
-
-    monkeypatch.setattr(
-        security_cmd,
-        "_load_plugin_cli",
-        lambda: (run_audit, lambda _scan_id: {}),
-    )
-    monkeypatch.setattr(security_cmd, "shutdown_langfuse", lambda: None)
-
+def test_security_audit_rejects_removed_verification_votes(tmp_path) -> None:
     result = runner.invoke(
         security_cmd.security_app,
         ["audit", str(tmp_path), "--verification-votes", "3", "--json"],
     )
+    assert result.exit_code != 0
 
-    assert result.exit_code == 0
-    assert observed["verification_votes"] == 3
 
 
 def test_security_audit_forwards_captured_knowledge_base(monkeypatch, tmp_path) -> None:

@@ -360,19 +360,7 @@ def test_follow_up_rejects_non_snapshot_and_oversized_scopes() -> None:
     assert oversized.value.code == "follow_up_scope_too_large"
 
 
-def test_verification_plan_expands_only_pending_votes() -> None:
-    units = plan_verification_units(
-        [
-            {"candidate_id": "candidate_a", "pending_vote_indices": [1, 3]},
-            {"candidate_id": "candidate_b", "pending_vote_indices": [2]},
-        ]
-    )
-
-    assert [
-        (unit["subject_id"], unit["vote_index"])
-        for unit in units
-    ] == [
-        ("candidate_a", 1),
-        ("candidate_a", 3),
-        ("candidate_b", 2),
-    ]
+def test_verification_plan_uses_one_worker() -> None:
+    assert plan_verification_units([]) == []
+    units = plan_verification_units([{"candidate_id": str(index)} for index in range(40)])
+    assert units == [{"role": "verifier", "paths": ["."], "subject_id": None}]

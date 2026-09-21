@@ -125,7 +125,7 @@ def test_lock_is_process_owned_and_released_on_exit(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("quota", [False, True])
-async def test_provider_quota_stops_dispatch_but_allows_explicit_resume(tmp_path, monkeypatch, quota):
+async def test_provider_failure_does_not_stop_dispatch(tmp_path, monkeypatch, quota):
     root = make_batch(tmp_path, monkeypatch, count=4, concurrency=1)
     batch.request_cancel(batch.resolve_task(root, "3"))
     script = tmp_path / "quota_worker.py"
@@ -146,19 +146,14 @@ atomic_json(directory / "result.json", {
     ])
     progress = []
     result = await batch.run_batch(root, progress=progress.append)
-    assert result["counts"] == {"failed": 1, "pending" if quota else "completed": 2, "cancelled": 1}
-    assert any("quota exhausted" in item for item in progress) == quota
-    if quota:
-        assert not (root / "tasks/1/current.json").exists()
-        quota = False
-        result = await batch.run_batch(root, retry_failed=True, progress=lambda _: None)
-        assert result["counts"] == {"failed": 1, "completed": 3}
+    assert result["counts"] == {"failed": 1, "completed": 2, "cancelled": 1}
+    assert not any("quota exhausted" in item for item in progress)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("quota", [False, True])
 async def test_resume_adopts_live_child_without_duplicate(tmp_path, monkeypatch, quota):
-    root = make_batch(tmp_path, monkeypatch, count=2 if quota else 1, concurrency=1)
+    root = make_batch(tmp_path, monkeypatch, count=1, concurrency=1)
     task_dir = batch.resolve_task(root, "0")
     batch.atomic_json(task_dir / "current.json", {"attempt": "old"})
     script = """
@@ -178,13 +173,13 @@ with file_lock(root / "task.lock"):
         assert child.stdout.readline().strip() == "ready"
         monkeypatch.setattr(batch, "_worker_command", lambda *_: pytest.fail("Must not relaunch a live task"))
         result = await batch.run_batch(root, progress=lambda _: None)
-        assert result["counts"] == ({"failed": 1, "pending": 1} if quota else {"completed": 1})
+        assert result["counts"] == ({"failed": 1} if quota else {"completed": 1})
     finally:
         child.wait(timeout=5)
 
 
 @pytest.mark.asyncio
-async def test_quota_stop_keeps_inflight_worker_and_cleanup(tmp_path, monkeypatch):
+async def test_quota_failure_keeps_inflight_and_pending_workers(tmp_path, monkeypatch):
     root = make_batch(tmp_path, monkeypatch, count=4, concurrency=2)
     script = tmp_path / "inflight_worker.py"
     script.write_text('''
@@ -194,8 +189,7 @@ from flocks.security.batch import atomic_json
 root, key, attempt = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 if key == "0":
     while not (root / "second-started").exists(): time.sleep(.01)
-else:
-    assert key == "1", "Pending worker must not start after quota stop"
+elif key == "1":
     (root / "second-started").touch()
     while not (root / "quota-observed").exists(): time.sleep(.01)
 atomic_json(root / "tasks" / key / "result.json", {
@@ -209,12 +203,12 @@ atomic_json(root / "tasks" / key / "result.json", {
     ])
 
     def progress(message):
-        if "quota exhausted" in message:
+        if message == "0: failed":
             (root / "quota-observed").touch()
 
     result = await asyncio.wait_for(batch.run_batch(root, progress=progress), 10)
-    assert result["counts"] == {"failed": 1, "completed": 1, "pending": 2}
-    for key in ("0", "1"):
+    assert result["counts"] == {"failed": 1, "completed": 3}
+    for key in ("0", "1", "2", "3"):
         saved = batch.task_result(batch.resolve_task(root, key))
         assert saved["cleanup_status"] == "completed"
         assert saved["source_cleanup_status"] == "completed"
@@ -222,7 +216,7 @@ atomic_json(root / "tasks" / key / "result.json", {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["fresh", "adopted", "recovered", "launch_error"])
-async def test_quota_reconciled_during_cleanup_stops_dispatch(tmp_path, monkeypatch, source):
+async def test_quota_reconciled_during_cleanup_does_not_stop_dispatch(tmp_path, monkeypatch, source):
     from unittest.mock import AsyncMock
 
     root = make_batch(tmp_path, monkeypatch, count=2, concurrency=1)
@@ -251,9 +245,9 @@ async def test_quota_reconciled_during_cleanup_stops_dispatch(tmp_path, monkeypa
     elif source == "launch_error":
         monkeypatch.setattr(batch.asyncio, "create_subprocess_exec", AsyncMock(side_effect=OSError("spawn failed")))
     result = await batch.run_batch(root, progress=lambda _: None)
-    assert result["counts"] == {"failed": 1, "pending": 1}
-    assert launched == ([] if source in {"adopted", "recovered"} else ["0"])
-    assert not (root / "tasks/1/current.json").exists()
+    assert result["counts"] == {"failed": 2}
+    assert launched == (["1"] if source in {"adopted", "recovered"} else ["0", "1"])
+    assert (root / "tasks/1/current.json").exists()
 
 
 def test_registration_rejects_task_traversal_and_symlinks(tmp_path, monkeypatch):

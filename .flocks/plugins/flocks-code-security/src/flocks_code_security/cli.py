@@ -309,18 +309,16 @@ class AuditOrchestrator:
         scan_observation: Any,
     ) -> dict[str, Any]:
         unverified = int(status.get("counts", {}).get("unverified_candidates", 0))
-        while unverified > 0:
-            _verification_batch, status = await _run_phase(
-                self.ctx,
-                scan_id,
-                "verification",
-                self.progress,
-                scan_observation,
-            )
-            remaining = int(status.get("counts", {}).get("unverified_candidates", 0))
-            if remaining >= unverified:
-                raise RuntimeError("Verification phase made no progress")
-            unverified = remaining
+        if unverified == 0:
+            return status
+        batch, status = await _run_phase(
+            self.ctx, scan_id, "verification", self.progress, scan_observation,
+        )
+        remaining = int(status.get("counts", {}).get("unverified_candidates", 0))
+        if remaining >= unverified:
+            raise RuntimeError("Verification phase made no progress")
+        if remaining or batch.get("status") != "completed":
+            raise RuntimeError("Verification phase incomplete; completed verdicts are preserved")
         return status
 
     async def _run_optional_investigation(
@@ -1015,7 +1013,6 @@ async def run_standard_audit(
     dynamic_enabled: bool = False,
     poc_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
-    verification_votes: int = 1,
     knowledge_base: dict[str, str] | None = None,
     scan_mode: str = "standard",
     cybergym_manifest: dict[str, Any] | None = None,
@@ -1052,7 +1049,6 @@ async def run_standard_audit(
             dynamic_enabled=dynamic_enabled,
             poc_enabled=poc_enabled,
             coverage_policy=coverage_policy,
-            verification_votes=verification_votes,
             knowledge_base=knowledge_base_input,
         ),
         AuditCaller(

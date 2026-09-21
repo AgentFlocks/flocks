@@ -187,25 +187,14 @@ def test_request_metadata_enforces_caller_scoped_idempotency(tmp_path: Path) -> 
         )
 
 
-def test_scan_persists_bounded_verification_vote_count(tmp_path: Path) -> None:
+def test_scan_rejects_removed_vote_configuration(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    scan_id = store.create_scan(
-        parent_session_id="session-1",
-        snapshot_id="snapshot_test",
-        mode="standard",
-        ruleset_digest="rules",
-        verification_vote_count=3,
-    )
-
-    assert store.get_scan(scan_id)["verification_vote_count"] == 3
-    with pytest.raises(ValueError, match="between 1 and 5"):
+    with pytest.raises(TypeError, match="verification_vote_count"):
         store.create_scan(
-            parent_session_id="session-2",
-            snapshot_id="snapshot_test",
-            mode="standard",
-            ruleset_digest="rules",
-            verification_vote_count=6,
+            parent_session_id="session-1", snapshot_id="snapshot_test",
+            mode="standard", ruleset_digest="rules", verification_vote_count=3,
         )
+
 
 
 def test_report_data_includes_public_work_attempt_model_identity(
@@ -446,9 +435,6 @@ def test_knowledge_base_changes_the_request_digest_and_is_validated() -> None:
         )
     )
     assert first_digest != renamed_digest
-    assert first_digest != AuditService._request_digest(
-        StartScanRequest(target_path=Path("/tmp/target"), verification_votes=3)
-    )
     assert first_digest != AuditService._request_digest(
         StartScanRequest(target_path=Path("/tmp/target"), knowledge_base=first, copy_source=False)
     )
@@ -2143,3 +2129,50 @@ async def test_project_purge_deletes_database_rows_and_keeps_other_projects(tmp_
     assert store.get_snapshot('snapshot_test') is not None
     with store._connect() as connection:
         assert connection.execute('SELECT COUNT(*) FROM audit_chat_turns WHERE scan_id=?', (ids[0],)).fetchone()[0] == 0
+
+
+def test_schema_17_migrates_verification_progress_without_resetting_retries(tmp_path) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="parent", snapshot_id="snapshot_test", mode="standard", ruleset_digest="rules",
+    )
+    unit_id = store.create_work_unit(
+        scan_id=scan_id, phase="verification", role="verifier", paths=["."],
+    )
+    attempt = store.create_work_attempt(
+        work_unit_id=unit_id, session_id="verifier", agent_name="code-security-verifier",
+    )
+    with store._connect() as connection:
+        connection.execute("ALTER TABLE work_attempts DROP COLUMN verification_count")
+        connection.execute("UPDATE work_attempts SET resume_count = 1")
+        connection.execute("PRAGMA user_version = 17")
+    reopened = ScanStore(store.database_path)
+    reopened.initialize()
+    migrated = reopened.get_work_attempt(attempt["attempt_id"])
+    assert migrated["verification_count"] == 0
+    assert migrated["resume_count"] == 1
+    assert migrated["status"] == "running"
+
+
+@pytest.mark.parametrize("role", ["baseline", "investigator"])
+def test_analysis_progress_does_not_require_batch_membership(tmp_path, role) -> None:
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="parent", snapshot_id="snapshot_test", mode="standard", ruleset_digest="rules",
+    )
+    unit_id = store.create_work_unit(
+        scan_id=scan_id, phase="baseline" if role == "baseline" else "investigation",
+        role=role, paths=["."],
+    )
+    attempt = store.create_work_attempt(
+        work_unit_id=unit_id, session_id="worker", agent_name=f"code-security-{role}",
+    )
+    assert not store.work_attempt_has_analysis_progress(attempt["attempt_id"])
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO source_access (access_id, attempt_id, session_id, scan_id, "
+            "work_unit_id, operation, relative_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("receipt", attempt["attempt_id"], "worker", scan_id, unit_id,
+             "read", "app.py", attempt["created_at"]),
+        )
+    assert store.work_attempt_has_analysis_progress(attempt["attempt_id"])

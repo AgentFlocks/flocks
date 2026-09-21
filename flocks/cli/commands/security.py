@@ -385,13 +385,6 @@ def security_audit(
     exclude: Optional[list[str]] = typer.Option(
         None, "--exclude", help="Repository-relative glob to exclude; repeatable",
     ),
-    verification_votes: int = typer.Option(
-        1,
-        "--verification-votes",
-        min=1,
-        max=5,
-        help="Independent verifier votes required per candidate",
-    ),
     knowledge_base: Optional[Path] = typer.Option(
         None,
         "--knowledge-base",
@@ -433,8 +426,6 @@ def security_audit(
             raise ValueError("Unsupported coverage policy")
         if coverage_policy != "evidence_backed_partial":
             audit_kwargs["coverage_policy"] = coverage_policy
-        if verification_votes != 1:
-            audit_kwargs["verification_votes"] = verification_votes
         if knowledge_base is not None:
             audit_kwargs["knowledge_base"] = _read_knowledge_base(
                 knowledge_base,
