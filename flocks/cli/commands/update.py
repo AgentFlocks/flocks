@@ -15,7 +15,7 @@ console = Console()
 
 
 def update_command(
-    check: bool = typer.Option(False, "--check", help="仅检查是否有新版本，不执行升级"),
+    check: bool = typer.Option(False, "--check", help="仅检查是否有新版本，不执行升级（与 --pro-bundle 连用时只显示将安装的 Pro bundle，不安装）"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认直接升级"),
     force: bool = typer.Option(False, "--force", "-f", help="即使已是最新版本也强制重新安装"),
     region: str | None = typer.Option(
@@ -42,9 +42,45 @@ def update_command(
     re-syncs dependencies, then restarts the service automatically.
     """
     if pro_bundle:
-        asyncio.run(_install_pro_bundle(restart=not no_restart))
+        if check:
+            asyncio.run(_check_pro_bundle())
+        else:
+            asyncio.run(_install_pro_bundle(restart=not no_restart))
         return
     asyncio.run(_update(check=check, yes=yes, force=force, region=region))
+
+
+async def _check_pro_bundle() -> None:
+    """Show what --pro-bundle would install; never installs or restarts."""
+    from flocks.updater import describe_pro_bundle
+
+    try:
+        info = await describe_pro_bundle()
+    except Exception as exc:
+        console.print(f"[red]检查失败：{exc}[/red]")
+        raise typer.Exit(1)
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="dim")
+    table.add_column()
+    table.add_row("来源", ("本地离线包 " if info["source"] == "local" else "Console ") + str(info["location"]))
+    table.add_row("Pro bundle 版本", str(info["bundle_version"]))
+    if info.get("component_version"):
+        table.add_row("Pro 组件版本", str(info["component_version"]))
+    if info.get("core_version"):
+        table.add_row("对应核心版本", f"{info['core_version']}（当前 v{info['current_core_version']}）")
+    if info.get("release_id"):
+        table.add_row("release id", str(info["release_id"]))
+    if info["installed"]:
+        installed = info.get("installed_component_version") or info.get("installed_bundle_version") or "版本未知"
+        table.add_row("当前 Pro 组件", f"已安装（{installed}）")
+    else:
+        table.add_row("当前 Pro 组件", "未安装")
+    console.print(table)
+    if info["installed"] and info.get("installed_component_version") and info.get("component_version") == info.get("installed_component_version"):
+        console.print("[green]✓ 已安装同一版本的 Pro 组件；flocks update --pro-bundle 会原样重装[/green]")
+    else:
+        console.print("[yellow]运行 [bold]flocks update --pro-bundle[/bold] 安装（只检查，本次未安装任何东西）[/yellow]")
 
 
 async def _install_pro_bundle(*, restart: bool) -> None:

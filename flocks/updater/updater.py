@@ -1066,7 +1066,7 @@ def _read_local_pro_license_id() -> str:
     return str(payload.get("license_id") or "").strip()
 
 
-async def _load_console_session_token() -> str | None:
+async def _load_console_session_token(*, use_storage: bool = True) -> str | None:
     def _token_from_payload(payload: Any) -> str | None:
         if not isinstance(payload, dict):
             return None
@@ -1094,6 +1094,10 @@ async def _load_console_session_token() -> str | None:
     token = _token_from_payload(shared_session)
     if token:
         return token
+    if not use_storage:
+        # read-only callers (`flocks update --check --pro-bundle`): opening Storage would
+        # create / migrate the SQLite database from a CLI process
+        return None
 
     try:
         from flocks.storage.storage import Storage
@@ -1108,7 +1112,11 @@ async def _load_console_session_token() -> str | None:
     return None
 
 
-async def _fetch_console_manifest_release_info(console_session_token: str | None = None) -> ConsoleManifestRelease:
+async def _fetch_console_manifest_release_info(
+    console_session_token: str | None = None,
+    *,
+    use_storage_token: bool = True,
+) -> ConsoleManifestRelease:
     """
     Fetch latest Pro bundle manifest from console.
     """
@@ -1125,7 +1133,9 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
     headers: dict[str, str] = {}
     if license_id:
         headers["x-license-id"] = license_id
-    token = str(console_session_token or "").strip() or await _load_console_session_token()
+    token = str(console_session_token or "").strip() or await _load_console_session_token(  # secret-guard: allow (expression)
+        use_storage=use_storage_token
+    )
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
@@ -2631,6 +2641,52 @@ def _console_identity_for_local_bundle(
         if value:
             identity[key] = value
     return identity or None
+
+
+async def describe_pro_bundle(*, console_session_token: str | None = None) -> dict[str, Any]:
+    """What ``perform_pro_bundle_install`` would install, without touching anything.
+
+    Reads the local bundle (``FLOCKS_PRO_BUNDLE_DIR``) or, failing that, the Console
+    manifest, and pairs it with the Pro state of this installation. Used by
+    ``flocks update --check --pro-bundle``.
+    """
+    configured = os.getenv(_LOCAL_PRO_BUNDLE_DIR_ENV, "").strip()
+    local_dir = _local_pro_bundle_dir()
+    if configured and local_dir is None:
+        # a configured but broken local bundle is the answer, not a reason to ask Console
+        raise ValueError(f"本地 Pro bundle 无效：{Path(configured).expanduser()} 缺少 manifest.json")
+    if local_dir is not None:
+        manifest_path = local_dir / "manifest.json"
+        try:
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"本地 Pro bundle 无效（{manifest_path}）: {exc}") from exc
+        try:
+            release = _load_local_pro_bundle_release(local_dir)
+        except Exception as exc:
+            raise ValueError(f"本地 Pro bundle 无效（{local_dir}）: {exc}") from exc
+        source = "local"
+        location = str(local_dir)
+    else:
+        # read-only: the session token comes from the shared session file only, never from Storage
+        release = await _fetch_console_manifest_release_info(console_session_token, use_storage_token=False)
+        source = "console"
+        location = release.bundle_url
+    manifest = release.manifest or {}
+    marker = _read_pro_bundle_install_marker()
+    return {
+        "source": source,
+        "location": location,
+        "bundle_version": release.version,
+        "core_version": manifest.get("core_version"),
+        "component_version": manifest.get("flockspro_component_version"),
+        "release_id": release.release_id,
+        "prebuilt": _is_prebuilt_pro_bundle_manifest(manifest),
+        "current_core_version": get_current_version(),
+        "installed": _is_pro_component_installed(),
+        "installed_bundle_version": marker.get("bundle_version"),
+        "installed_component_version": marker.get("flockspro_component_version"),
+    }
 
 
 async def perform_pro_bundle_install(

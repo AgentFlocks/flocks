@@ -114,10 +114,14 @@ build_one() {
   if [[ -e "$src_export" ]]; then
     mv "$src_export" "$arch_cache/source.previous-$(date +%s)"
   fi
-  # earlier exports are kept (never deleted here), but they add up: say so once it matters
-  local previous_count
-  previous_count="$(ls -d "$arch_cache"/source.previous-* 2>/dev/null | wc -l | tr -d ' ')"
-  if [[ "${previous_count:-0}" -ge 3 ]]; then
+  # earlier exports are kept (never deleted here), but they add up: say so once it matters.
+  # (a glob loop, not `ls | wc -l`: with nothing to list `ls` exits 2 and pipefail would end
+  #  the whole build here — on every fresh machine, before it even started)
+  local previous_count=0 previous
+  for previous in "$arch_cache"/source.previous-*; do
+    if [[ -d "$previous" ]]; then previous_count=$((previous_count + 1)); fi
+  done
+  if [[ "$previous_count" -ge 3 ]]; then
     info "[$arch] $previous_count earlier source exports kept in $arch_cache/source.previous-* (~64 MB each); remove the ones you no longer need"
   fi
   local export_flags=()

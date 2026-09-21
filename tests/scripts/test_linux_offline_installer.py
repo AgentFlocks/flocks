@@ -384,7 +384,7 @@ def test_installer_refuses_to_drop_activated_pro_without_a_compatible_bundle(tmp
     data_home = _fake_activated_install(tmp_path, old_bundle_core=None)
     result = _dry_run(payload, data_home)
     assert result.returncode == 1
-    assert "已激活 Flocks Pro" in result.stdout and "本次未做任何改动" in result.stdout
+    assert "已激活 Flocks Pro" in result.stderr and "本次未做任何改动" in result.stderr
 
     # previous bundle built for another core → refuse
     shutil.rmtree(tmp_path / "opt-flocks")
@@ -392,7 +392,7 @@ def test_installer_refuses_to_drop_activated_pro_without_a_compatible_bundle(tmp
     data_home = _fake_activated_install(tmp_path, old_bundle_core="v2026.8.17")
     result = _dry_run(payload, data_home)
     assert result.returncode == 1
-    assert "与新版本不匹配" in result.stdout
+    assert "与新版本不匹配" in result.stderr
 
     # previous bundle whose wheel no longer matches its manifest sha256 → refuse
     shutil.rmtree(tmp_path / "opt-flocks")
@@ -488,7 +488,7 @@ def test_installer_refuses_foreign_architecture_package(tmp_path: Path) -> None:
         cwd=payload,
     )
     assert completed.returncode == 1
-    assert "riscv64" in completed.stdout
+    assert "riscv64" in completed.stderr
 
 
 # --------------------------------------------------------------------------- #
@@ -553,7 +553,7 @@ def test_installer_rerun_keeps_the_port_of_the_existing_install(tmp_path: Path) 
         capture_output=True, text=True, env={**base, "FLOCKS_OFFLINE_PORT": "http"}, cwd=payload,
     )
     assert bad.returncode == 1
-    assert "FLOCKS_OFFLINE_PORT 无效" in bad.stdout
+    assert "FLOCKS_OFFLINE_PORT 无效" in bad.stderr
 
     # a broken value left in the env file falls back to the default instead of aborting the upgrade
     env_file.write_text("FLOCKS_PORT=notaport\n", encoding="utf-8")
@@ -692,7 +692,7 @@ def test_installer_refuses_to_run_from_its_retained_copy(tmp_path: Path) -> None
         env={**os.environ, "FLOCKS_OFFLINE_DRY_RUN": "1", "FLOCKS_OFFLINE_DATA_HOME": str(tmp_path / "data-home")},
     )
     assert completed.returncode == 1
-    assert "不能直接执行" in completed.stdout
+    assert "不能直接执行" in completed.stderr
     assert (install_root / "versions.json").exists() and (install_root / "installer" / "install.sh").exists()
 
 
@@ -720,7 +720,7 @@ def test_installer_rejects_a_bundle_dir_without_wheels(tmp_path: Path) -> None:
     (payload / "bundle" / "manifest.json").write_text("{}", encoding="utf-8")
     completed = _dry_run(payload)
     assert completed.returncode == 1
-    assert "bundle/ 目录里没有 wheels/" in completed.stdout
+    assert "bundle/ 目录里没有 wheels/" in completed.stderr
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
@@ -785,7 +785,7 @@ def test_failed_install_parks_only_its_own_payload(tmp_path: Path) -> None:
         env={**os.environ, "FLOCKS_OFFLINE_DRY_RUN": "0", "FLOCKS_OFFLINE_DATA_HOME": str(tmp_path / "data-home")},
     )
     assert completed.returncode == 1
-    assert "riscv64" in completed.stdout and "已解包的安装文件移到" in completed.stdout
+    assert "riscv64" in completed.stderr and "已解包的安装文件移到" in completed.stderr
     assert payload.is_dir(), "the extraction directory itself must never be renamed"
     assert (payload / "unrelated-other-service" / "important.txt").read_text(encoding="utf-8") == "keep me\n"
     parked = [d for d in payload.iterdir() if d.name.startswith("flocks-offline-failed-")]
@@ -801,7 +801,7 @@ def test_unexpected_command_failure_is_reported_through_fail(tmp_path: Path) -> 
     (payload / "versions.json").write_text("{not json", encoding="utf-8")
     completed = _dry_run(payload)
     assert completed.returncode == 1
-    assert "错误: 命令失败:" in completed.stdout and "安装未完成" in completed.stdout
+    assert "错误: 命令失败:" in completed.stderr and "安装未完成" in completed.stderr
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
@@ -821,5 +821,56 @@ def test_installer_direct_run_guard_ignores_a_trailing_slash(tmp_path: Path) -> 
         [BASH, str(install_root / "installer" / "install.sh")], capture_output=True, text=True,
         env={**os.environ, "FLOCKS_OFFLINE_DRY_RUN": "1", "FLOCKS_OFFLINE_DATA_HOME": str(tmp_path / "data-home")},
     )
-    assert completed.returncode == 1 and "不能直接执行" in completed.stdout
+    assert completed.returncode == 1 and "不能直接执行" in completed.stderr
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_failure_inside_a_command_substitution_never_parks_the_live_install(tmp_path: Path) -> None:
+    """Retained copy + broken versions.json: json_get fails inside $(...). The subshell must only
+    exit; the parent reports the outer command and, with INSTALL_ROOT unset, moves nothing —
+    the live instance under /opt/flocks stays exactly as it was."""
+    install_root = tmp_path / "opt-flocks"
+    (install_root / "installer").mkdir(parents=True)
+    for name in ("install.sh", "flocks.service", "flocks.env.template", "flocks-cli-wrapper.sh"):
+        shutil.copy(INSTALLER_DIR / name, install_root / "installer" / name)
+    python_dir = install_root / "tools" / "python" / "bin"
+    python_dir.mkdir(parents=True)
+    os.symlink(sys.executable, python_dir / "python3")
+    (install_root / "flocks").mkdir()
+    (install_root / "flocks" / "pyproject.toml").write_text('[project]\nname = "flocks"\n', encoding="utf-8")
+    (install_root / "versions.json").write_text("{broken json", encoding="utf-8")
+    before = sorted(x.name for x in install_root.iterdir())
+    completed = subprocess.run(
+        [BASH, str(install_root / "installer" / "install.sh")], capture_output=True, text=True,
+        env={**os.environ, "FLOCKS_OFFLINE_DRY_RUN": "0", "FLOCKS_OFFLINE_DATA_HOME": str(tmp_path / "data-home")},
+    )
+    assert completed.returncode == 1
+    assert "命令失败" in completed.stderr and "json_get" in completed.stderr
+    assert completed.stdout == "", "fail() output must not leak into stdout / command substitutions"
+    assert sorted(x.name for x in install_root.iterdir()) == before
+    assert not any(x.name.startswith("flocks-offline-failed-") for x in install_root.iterdir())
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_foreign_architecture_is_reported_before_the_bundled_python_is_needed(tmp_path: Path) -> None:
+    """On the wrong architecture the bundled python cannot start; the arch message must still be the first thing said."""
+    payload = _fake_payload(tmp_path)
+    broken_python = payload / "tools" / "python" / "bin" / "python3"
+    broken_python.unlink()
+    broken_python.write_text("#!/bin/sh\necho 'Exec format error' >&2\nexit 126\n", encoding="utf-8")
+    broken_python.chmod(0o755)
+    (payload / "versions.json").write_text(
+        json.dumps({"core_version": "v2026.9.14", "arch": "riscv64", "install_root": str(tmp_path / "opt-flocks")}, indent=2),
+        encoding="utf-8",
+    )
+    (payload / "leave-me").write_text("x", encoding="utf-8")
+    completed = subprocess.run(
+        [BASH, str(payload / "installer" / "install.sh")], capture_output=True, text=True,
+        env={**os.environ, "FLOCKS_OFFLINE_DRY_RUN": "0", "FLOCKS_OFFLINE_DATA_HOME": str(tmp_path / "data-home")},
+    )
+    assert completed.returncode == 1
+    assert "安装包是 riscv64 版本" in completed.stderr and "命令失败" not in completed.stderr
+    # the payload is still parked (install_root read as text), unrelated files untouched
+    assert (payload / "leave-me").exists() and not (payload / "versions.json").exists()
+    assert any(x.name.startswith("flocks-offline-failed-") for x in payload.iterdir())
 

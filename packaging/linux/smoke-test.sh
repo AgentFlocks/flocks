@@ -102,6 +102,10 @@ check "edition reported as oss" in_ctr_q "curl -fsS -b /tmp/cookie http://127.0.
 check "update check reports offline deploy mode, upgrade not allowed" in_ctr_q "curl -fsS -b /tmp/cookie 'http://127.0.0.1:$PORT/api/update/check?edition=flocks&force=true' | grep -q '\"deploy_mode\": *\"offline\"' && curl -fsS -b /tmp/cookie 'http://127.0.0.1:$PORT/api/update/check?edition=flocks' | grep -q '\"update_allowed\": *false'"
 check "network upgrade refused before touching files" in_ctr_q "curl -sS -N --max-time 20 -b /tmp/cookie -X POST 'http://127.0.0.1:$PORT/api/update/apply?edition=flocks' | grep -q 'flocks-offline.run' && test -f /opt/flocks/flocks/pyproject.toml"
 
+# ---------------------------------------------------------------- local Pro bundle: --check first (must not install), then the real install
+check "flocks update --check --pro-bundle describes the local bundle" in_ctr_q "flocks update --check --pro-bundle | grep -q '/opt/flocks/bundle'"
+check "--check --pro-bundle installed nothing" in_ctr_q "! /opt/flocks/flocks/.venv/bin/python -c 'import flockspro' 2>/dev/null && test ! -f /var/lib/flocks/.flocks/run/pro-bundle-installed.json"
+
 # ---------------------------------------------------------------- local Pro bundle install (what "开始升级" does, without Console)
 if in_ctr "flocks update --pro-bundle --no-restart" > /tmp/smoke-pro.log 2>&1; then
   record PASS "flocks update --pro-bundle installs from /opt/flocks/bundle offline"

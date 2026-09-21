@@ -923,3 +923,133 @@ def test_console_identity_for_local_bundle_is_ids_only() -> None:
     assert updater._console_identity_for_local_bundle(
         {**local, "build_id": "b1"}, {"release_id": "r1", "build_id": "b2"}
     ) is None
+
+
+# --------------------------------------------------------------------------- #
+# `flocks update --check --pro-bundle`: describe, never install
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_describe_pro_bundle_reads_the_local_bundle_and_installs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "opt-bundle"
+    _write_local_bundle(bundle_dir, extra_manifest={"release_id": "rel_offline_1"})
+    install_root = _prepare_install_root(tmp_path)
+    captured = _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(bundle_dir))
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _no_console)
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: False)
+
+    info = await updater.describe_pro_bundle()
+
+    assert info["source"] == "local" and info["location"] == str(bundle_dir)
+    assert info["bundle_version"] == "v2026.9.14" and info["component_version"] == "2026.9.14"
+    assert info["release_id"] == "rel_offline_1" and info["prebuilt"] is True
+    assert info["installed"] is False and info["installed_component_version"] is None
+    assert captured == [], "describe must not run uv / pip / anything"
+    assert not (tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_describe_pro_bundle_falls_back_to_console_and_reports_installed_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
+    monkeypatch.delenv("FLOCKS_PRO_BUNDLE_DIR", raising=False)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.9.14")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
+    marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"bundle_version": "v2026.9.10", "flockspro_component_version": "2026.8.10"}), encoding="utf-8")
+
+    async def _console(*_args, **_kwargs):
+        return _console_release(
+            {"release_id": "rel_console_9", "bundle_version": "v2026.9.14", "core_version": "v2026.9.14",
+             "flockspro_component_version": "2026.9.14"}
+        )
+
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _console)
+    info = await updater.describe_pro_bundle()
+    assert info["source"] == "console" and info["location"] == "https://portal.example/bundle.tar.gz"
+    assert info["installed"] is True and info["installed_component_version"] == "2026.8.10"
+    assert info["component_version"] == "2026.9.14" and info["prebuilt"] is False
+
+
+@pytest.mark.asyncio
+async def test_describe_pro_bundle_names_a_broken_local_bundle_instead_of_asking_console(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _no_console)
+
+    empty = tmp_path / "no-manifest"
+    empty.mkdir()
+    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(empty))
+    with pytest.raises(ValueError, match="缺少 manifest.json") as excinfo:
+        await updater.describe_pro_bundle()
+    assert str(empty) in str(excinfo.value)
+
+    bad = tmp_path / "bad-json"
+    bad.mkdir()
+    (bad / "manifest.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(bad))
+    with pytest.raises(ValueError, match="manifest.json") as excinfo:
+        await updater.describe_pro_bundle()
+    assert "Expecting" in str(excinfo.value)  # the JSON parser's own reason, not "missing bundle_version"
+
+    no_wheel = tmp_path / "no-wheel"
+    no_wheel.mkdir()
+    (no_wheel / "manifest.json").write_text(
+        json.dumps({"bundle_version": "v2026.9.14", "core_version": "v2026.9.14", "flockspro_component_version": "2026.9.14"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(no_wheel))
+    with pytest.raises(ValueError) as excinfo:
+        await updater.describe_pro_bundle()
+    assert str(no_wheel) in str(excinfo.value)
+    assert not (tmp_path / "flocks-root" / "data").exists(), "describe must not open Storage"
+
+
+@pytest.mark.asyncio
+async def test_describe_pro_bundle_console_path_does_not_open_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
+    monkeypatch.delenv("FLOCKS_PRO_BUNDLE_DIR", raising=False)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.9.14")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: False)
+    seen: dict[str, object] = {}
+
+    async def _console(token=None, *, use_storage_token=True):
+        seen["token"] = token
+        seen["use_storage_token"] = use_storage_token
+        return _console_release({"bundle_version": "v2026.9.14", "core_version": "v2026.9.14"})
+
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _console)
+    info = await updater.describe_pro_bundle()
+    assert info["source"] == "console"
+    assert seen == {"token": None, "use_storage_token": False}
+
+
+@pytest.mark.asyncio
+async def test_load_console_session_token_can_skip_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
+
+    class _Boom:
+        @staticmethod
+        async def get(_key):
+            raise AssertionError("Storage must not be touched")
+
+    monkeypatch.setattr("flocks.storage.storage.Storage", _Boom)
+    assert await updater._load_console_session_token(use_storage=False) is None
+    run_dir = tmp_path / "flocks-root" / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "console-session.json").write_text(json.dumps({"console_session_token": "tok_file"}), encoding="utf-8")
+    assert await updater._load_console_session_token(use_storage=False) == "tok_file"
+

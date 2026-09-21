@@ -38,7 +38,8 @@ log() {
   line="[flocks] $*"
   printf '%s\n' "$line"
   if [[ "$DRY_RUN" != "1" ]]; then
-    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line" >> "$LOG_FILE" 2>/dev/null || true
+    # 2>/dev/null comes first so a refused >> (non-root dry runs, read-only /var/log) stays silent
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line" 2>/dev/null >> "$LOG_FILE" || true
   fi
 }
 PAYLOAD_ENTRIES="versions.json installer tools flocks bundle cache"
@@ -46,34 +47,51 @@ FAILED_DIR_PREFIX="flocks-offline-failed-"
 same_dir() { [[ "$(cd "$1" 2>/dev/null && pwd -P)" == "$(cd "$2" 2>/dev/null && pwd -P)" ]]; }
 fail() {
   trap - ERR
-  log "错误: $*"
-  # makeself keeps the --target directory when the installer fails; a later package would untar
-  # on top of it and carry files of two versions into the install. Park what is ours — the
-  # payload entries only, moved into a subdirectory of the same place. The directory itself
-  # is never renamed: with `--target /var/tmp` it is a shared system directory.
-  if [[ "$DRY_RUN" != "1" && -n "${INSTALL_ROOT:-}" && -d "$SRC_ROOT" ]] && ! same_dir "$SRC_ROOT" "$INSTALL_ROOT"; then
-    local parked="$SRC_ROOT/$FAILED_DIR_PREFIX$STAMP" entry moved=0
-    for entry in $PAYLOAD_ENTRIES; do
-      if [[ -e "$SRC_ROOT/$entry" ]]; then
-        mkdir -p "$parked" 2>/dev/null || break
-        mv "$SRC_ROOT/$entry" "$parked/" 2>/dev/null && moved=1
+  # Everything fail() prints goes to stderr. Under `set -E` the ERR trap also fires inside a
+  # $(...) substitution; if these lines went to stdout they would become the value of the
+  # variable being assigned (and a later fail() would act on that garbage as INSTALL_ROOT).
+  {
+    log "错误: $*"
+    # makeself keeps the --target directory when the installer fails; a later package would
+    # untar on top of it and carry files of two versions into the install. Park what is ours —
+    # the payload entries only, moved into a subdirectory of the same place. The directory
+    # itself is never renamed: with `--target /var/tmp` it is a shared system directory.
+    if [[ "$DRY_RUN" != "1" && "${INSTALL_ROOT:-}" == /* && -d "$SRC_ROOT" ]] && ! same_dir "$SRC_ROOT" "$INSTALL_ROOT"; then
+      local parked="$SRC_ROOT/$FAILED_DIR_PREFIX$STAMP" entry moved=0
+      for entry in $PAYLOAD_ENTRIES; do
+        if [[ -e "$SRC_ROOT/$entry" ]]; then
+          mkdir -p "$parked" 2>/dev/null || break
+          mv "$SRC_ROOT/$entry" "$parked/" 2>/dev/null && moved=1
+        fi
+      done
+      if [[ "$moved" -eq 1 ]]; then
+        log "已解包的安装文件移到 ${parked}（可自行清理；下次安装不会与它混在一起）"
       fi
-    done
-    if [[ "$moved" -eq 1 ]]; then
-      log "已解包的安装文件移到 ${parked}（可自行清理；下次安装不会与它混在一起）"
     fi
-  fi
-  log "安装未完成。完整日志: $LOG_FILE"
+    log "安装未完成。完整日志: $LOG_FILE"
+  } >&2
   exit 1
 }
-# any command that would make `set -e` bail out goes through fail() instead: the log gets a
-# line saying what died, and the extracted payload is parked like on every other failure
-trap 'fail "命令失败: ${BASH_COMMAND}（第 ${LINENO} 行）"' ERR
+# Any command that would make `set -e` bail out goes through fail() instead: the log gets a
+# line saying what died, and the extracted payload is parked like on every other failure.
+# Inside a $(...) subshell only that subshell exits; the parent then reports the outer command.
+# (BASH_COMMAND / LINENO are read first: anything the trap runs would overwrite them)
+trap 'failed_cmd=$BASH_COMMAND; failed_line=$LINENO; if (( BASH_SUBSHELL > 0 )); then exit 1; fi; fail "命令失败: ${failed_cmd}（第 ${failed_line} 行）"' ERR
 
 # ---------------------------------------------------------------------------
 # payload facts
 # ---------------------------------------------------------------------------
 [[ -f "$SRC_ROOT/versions.json" ]] || fail "安装包不完整：缺少 versions.json（${SRC_ROOT}）"
+# The architecture check must not depend on the bundled python: on the wrong architecture it
+# cannot even start ("Exec format error") and the operator would never see the real reason.
+# versions.json is small and flat, so a text read is enough here; python re-reads it below.
+json_text_get() { sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -n 1; }
+HOST_ARCH="$(uname -m)"
+PKG_ARCH="$(json_text_get "$SRC_ROOT/versions.json" arch)"
+if [[ -n "$PKG_ARCH" && "$PKG_ARCH" != "$HOST_ARCH" ]]; then
+  INSTALL_ROOT="$(json_text_get "$SRC_ROOT/versions.json" install_root)"   # lets fail() park the payload
+  fail "安装包是 $PKG_ARCH 版本，这台机器是 $HOST_ARCH"
+fi
 BUNDLED_PY="$SRC_ROOT/tools/python/bin/python3"
 [[ -x "$BUNDLED_PY" ]] || fail "安装包不完整：缺少 tools/python"
 
@@ -123,7 +141,6 @@ else
   [[ -n "$PORT" ]] || PORT=5173
 fi
 
-HOST_ARCH="$(uname -m)"
 [[ "$HOST_ARCH" == "$PKG_ARCH" ]] || fail "安装包是 $PKG_ARCH 版本，这台机器是 $HOST_ARCH"
 
 if [[ "$DRY_RUN" != "1" && "$(id -u)" -ne 0 ]]; then
