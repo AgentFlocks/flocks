@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import KeepAlivePanes from '@/components/layout/KeepAlivePanes';
+import { findActiveTabHref } from '@/utils/layoutTabs';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
 import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
@@ -448,6 +450,40 @@ function NavigationProbe() {
   </>;
 }
 
+// The layout keeps one pane per tab alive: leaving the sessions tab hides
+// the page instead of unmounting it. These routes mirror contentRoutes.
+const KEEP_ALIVE_TAB_HREFS = ['/sessions', '/agents'];
+const keepAliveRoutes = [
+  { path: 'sessions/:sessionId?', element: <SessionPage /> },
+  { path: 'agents', element: <div data-testid="agents-page" /> },
+  { path: '*', element: <div /> },
+];
+
+function KeepAliveTabs() {
+  const location = useLocation();
+  return (
+    <KeepAlivePanes
+      panes={KEEP_ALIVE_TAB_HREFS.map((href) => ({ href }))}
+      activeHref={findActiveTabHref(KEEP_ALIVE_TAB_HREFS, location.pathname)}
+      location={location}
+      routes={keepAliveRoutes}
+    />
+  );
+}
+
+function renderSessionPageInKeepAliveTabs(initialEntry = '/sessions') {
+  return render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <NavigationProbe />
+      <KeepAliveTabs />
+    </MemoryRouter>,
+  );
+}
+
+function sessionsPaneState() {
+  return screen.getByTestId('session-chat').closest('[data-keep-alive-pane]')?.getAttribute('data-keep-alive-pane');
+}
+
 function renderSessionPage(
   initialEntry: string | { pathname: string; state?: unknown } = '/sessions',
 ) {
@@ -718,6 +754,80 @@ describe('SessionPage session actions menu', () => {
       if (destination !== 'stay') {
         expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
       }
+    });
+  });
+
+  describe('inside a hidden keep-alive pane', () => {
+    it('does not navigate when a create-and-send request finishes after the user switched tabs', async () => {
+      const request = deferred<{ data: typeof secondSession }>();
+      client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
+      const user = userEvent.setup();
+      renderSessionPageInKeepAliveTabs();
+      await user.click(screen.getByText('mock-create-and-send'));
+      expect(client.post).toHaveBeenCalledWith('/api/session', expect.anything());
+
+      await user.click(screen.getByText('leave-session-page'));
+      expect(screen.getByTestId('agents-page')).toBeInTheDocument();
+      // The page is still mounted, only hidden.
+      expect(sessionsPaneState()).toBe('inactive');
+
+      await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+      await waitFor(() => expect(addSession).toHaveBeenCalledWith(secondSession));
+      expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
+      expect(screen.getByTestId('session-location').textContent).toBe('/agents');
+
+      // Coming back lands on the tab as it was left, not on the new session.
+      await user.click(screen.getByText('history-back'));
+      expect(sessionsPaneState()).toBe('active');
+      expect(screen.getByTestId('session-location').textContent).toBe('/sessions');
+    });
+
+    it('does not replace the current history entry when an archive finishes after the user switched tabs', async () => {
+      useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
+      const request = deferred<{ id: string; status: string }>();
+      sessionApi.archive.mockReturnValue(request.promise);
+      const user = userEvent.setup();
+      renderSessionPageInKeepAliveTabs('/sessions/session-1');
+      await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
+      await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+      expect(sessionApi.archive).toHaveBeenCalledWith(session.id);
+
+      await user.click(screen.getByText('leave-session-page'));
+      expect(sessionsPaneState()).toBe('inactive');
+
+      await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
+      expect(removeSession).toHaveBeenCalledWith(session.id);
+      expect(screen.getByTestId('session-location').textContent).toBe('/agents');
+
+      // `/agents` was not replaced by `/sessions`: back returns to where the tab was.
+      await user.click(screen.getByText('history-back'));
+      expect(screen.getByTestId('session-location').textContent).toBe('/sessions/session-1');
+    });
+
+    it('defers the last-session restore until the tab is back on screen', async () => {
+      localStorage.setItem('flocks:last-selected-session', 'session-1');
+      sessionStorage.setItem('flocks:sessions:visited', 'true');
+      useSessions.mockReturnValue({ ...useSessions(), loading: true });
+      const user = userEvent.setup();
+      const view = renderSessionPageInKeepAliveTabs();
+      expect(screen.getByTestId('session-location').textContent).toBe('/sessions');
+
+      await user.click(screen.getByText('leave-session-page'));
+      expect(sessionsPaneState()).toBe('inactive');
+
+      // The session list arrives while the tab is hidden.
+      useSessions.mockReturnValue({ ...useSessions(), loading: false });
+      view.rerender(
+        <MemoryRouter initialEntries={['/sessions']}>
+          <NavigationProbe />
+          <KeepAliveTabs />
+        </MemoryRouter>,
+      );
+      expect(screen.getByTestId('session-location').textContent).toBe('/agents');
+
+      await user.click(screen.getByText('history-back'));
+      await waitFor(() => expect(screen.getByTestId('session-location').textContent).toBe('/sessions/session-1'));
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
     });
   });
 

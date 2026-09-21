@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
+import { memo, useContext, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   Plus, Trash2, Archive,
   ChevronDown, ChevronLeft, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams, useParams } from 'react-router-dom';
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import { sessionPath } from '@/utils/sessionUrl';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ChannelIcon from '@/components/common/ChannelIcon';
@@ -740,6 +741,14 @@ export default function SessionPage() {
       mountedRef.current = false;
     };
   }, []);
+  // Inside the layout this page lives in a keep-alive pane: switching tabs
+  // hides it instead of unmounting it, and its location stays pinned, so the
+  // unmount / location-key guards above never fire. A hidden pane must not
+  // navigate either, or a finishing create/archive would drag the whole app
+  // back to the session it belongs to.
+  const paneActive = useContext(PaneActiveContext);
+  const paneActiveRef = useRef(paneActive);
+  paneActiveRef.current = paneActive;
   const restoreAttemptRef = useRef<string | null>(null);
   const legacyNavigationRef = useRef<string | null>(null);
   const previousActionSessionRef = useRef(selectedSessionId);
@@ -747,7 +756,7 @@ export default function SessionPage() {
   const [sessionLoadAttempt, setSessionLoadAttempt] = useState(0);
   const [pendingInitialSessionId, setPendingInitialSessionId] = useState<string | null>(null);
   const selectSession = useCallback((id: string | null, replace = false) => {
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || !paneActiveRef.current) return;
     if (!id) writeLastSelectedSessionId(null);
     if (id && navigationRef.current.sessionId === id) return;
     navigate(id ? sessionPath(id) : '/sessions', {
@@ -1586,14 +1595,15 @@ export default function SessionPage() {
   }, [selectedSessionId, searchParams]);
 
   useEffect(() => {
-    if (loadingSessions || restoreAttemptRef.current === location.key) return;
+    // A hidden pane waits: the restore runs once the tab is back on screen.
+    if (!paneActive || loadingSessions || restoreAttemptRef.current === location.key) return;
     restoreAttemptRef.current = location.key;
     const alreadyVisited = hasVisitedSessionPage();
     markSessionPageVisited();
     if (selectedSessionId || !alreadyVisited || shouldSkipLastSelectedSessionRestore(location.state)) return;
     const lastSelectedSessionId = readLastSelectedSessionId();
     if (lastSelectedSessionId) selectSession(lastSelectedSessionId, true);
-  }, [loadingSessions, location.key, location.state, selectedSessionId, selectSession]);
+  }, [loadingSessions, location.key, location.state, paneActive, selectedSessionId, selectSession]);
 
   useEffect(() => {
     if (!selectedSessionId || selectedSession?.id !== selectedSessionId) return;
