@@ -21,6 +21,10 @@ from flocks.utils.log import Log
 log = Log.create(service="provider.anthropic")
 
 
+class AnthropicRefusalError(RuntimeError):
+    """The upstream Messages API explicitly refused to answer."""
+
+
 class AnthropicProvider(BaseProvider):
     """Anthropic (Claude) provider with tool support."""
 
@@ -642,6 +646,10 @@ class AnthropicProvider(BaseProvider):
                             current_redacted_thinking_data = None
 
                     elif event.type == "message_delta":
+                        if getattr(getattr(event, "delta", None), "stop_reason", None) == "refusal":
+                            raise AnthropicRefusalError(
+                                "Upstream model refused the request (stop_reason=refusal)"
+                            )
                         # Capture output token count (accumulates during streaming)
                         usage = getattr(event, 'usage', None)
                         if usage:

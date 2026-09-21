@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from flocks.provider.provider import ChatMessage
-from flocks.provider.sdk.anthropic import AnthropicProvider
+from flocks.provider.sdk.anthropic import AnthropicProvider, AnthropicRefusalError
 
 
 class _FakeAsyncStream:
@@ -26,6 +26,27 @@ class _FakeAsyncStream:
             return next(self._iter)
         except StopIteration as exc:
             raise StopAsyncIteration from exc
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_surfaces_upstream_refusal_instead_of_stop():
+    provider = AnthropicProvider()
+    stream = MagicMock()
+    stream.stream.return_value = _FakeAsyncStream([
+        SimpleNamespace(type="message_start", message=SimpleNamespace(usage=SimpleNamespace(
+            input_tokens=100, output_tokens=0,
+            cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        ))),
+        SimpleNamespace(type="message_delta", delta=SimpleNamespace(stop_reason="refusal"),
+                        usage=SimpleNamespace(output_tokens=0)),
+        SimpleNamespace(type="message_stop"),
+    ])
+    provider._client = SimpleNamespace(messages=stream)
+    with pytest.raises(AnthropicRefusalError, match="stop_reason=refusal"):
+        _ = [chunk async for chunk in provider.chat_stream(
+            "claude-fable-5", [ChatMessage(role="user", content="synthetic")],
+            thinking={"type": "adaptive"}, max_tokens=4096,
+        )]
 
 
 def test_anthropic_formatter_includes_preserved_thinking_blocks():
