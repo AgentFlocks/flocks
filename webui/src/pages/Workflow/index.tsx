@@ -14,6 +14,8 @@ import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { useWorkflows } from '@/hooks/useWorkflow';
 import {
   WorkflowCapabilityState,
@@ -96,7 +98,8 @@ export default function WorkflowPage() {
     readOnlyReason: workflow.group_readonly ? t('pluginGroups:readOnly.system') : undefined,
   });
   const groupItems = workflows.map(asGroupItem);
-  const groupDrag = useGroupDrag(groupItems);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
   const saveGroup = (id: string, group: string | null) => workflowAPI.update(id, { group });
   const reloadGroups = () => refetch({ silent: true, rejectOnError: true });
   const loadGroupItems = async () => (await workflowAPI.listSummaries()).data.map(asGroupItem);
@@ -355,7 +358,7 @@ function WorkflowSection({
         <div className={viewMode === 'cards' ? 'grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
           {displayed.map(workflow => (
             <div key={workflow.id} className="min-w-0 [&>div]:h-full" {...groupDrag.dragProps(workflow.id)}>
-              <WorkflowCard workflow={workflow} layout={viewMode} />
+              <WorkflowCard workflow={workflow} layout={viewMode} grouping={groupDrag} />
             </div>
           ))}
         </div>
@@ -400,7 +403,7 @@ function WorkflowSection({
 // WorkflowCard
 // ---------------------------------------------------------------------------
 
-function WorkflowCard({ workflow, layout = 'cards' }: { workflow: WorkflowSummary; layout?: PluginViewMode }) {
+function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: WorkflowSummary; grouping: GroupDrag; layout?: PluginViewMode }) {
   const { t, i18n } = useTranslation('workflow');
   const navigate = useNavigate();
   const builtin = isBuiltin(workflow);
@@ -460,7 +463,10 @@ function WorkflowCard({ workflow, layout = 'cards' }: { workflow: WorkflowSummar
             </div>
           </div>
 
-          <ChevronRight className="w-4 h-4 text-gray-300 shrink-0 mt-1 group-hover:text-gray-500 transition-colors" />
+          <div className="flex shrink-0 items-center gap-1">
+            <PluginGroupButton grouping={grouping} itemKey={workflow.id} />
+            <ChevronRight className="w-4 h-4 text-gray-300 shrink-0 mt-1 group-hover:text-gray-500 transition-colors" />
+          </div>
         </div>
 
         {/* Description */}

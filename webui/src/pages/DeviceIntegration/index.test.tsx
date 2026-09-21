@@ -417,7 +417,11 @@ describe('DeviceIntegrationPage', () => {
     const cardText = screen.getByText('Device One').closest('button')!.textContent;
     fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
     expect(screen.getByText('Device One').closest('button')!.textContent).toBe(cardText);
-    fireEvent.keyDown(screen.getByText('Device One').closest('button')!.parentElement!, { key: 'm', altKey: true });
+    const primaryAction = screen.getByText('Device One').closest('button')!;
+    const groupAction = within(primaryAction.parentElement!).getByRole('button', { name: 'editGroup' });
+    expect(primaryAction).not.toContainElement(groupAction);
+    expect(primaryAction.querySelector('button')).toBeNull();
+    fireEvent.click(groupAction);
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(mocks.updateDevice).toHaveBeenCalledExactlyOnceWith('d0', { group: null }));

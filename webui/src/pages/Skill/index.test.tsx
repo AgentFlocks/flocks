@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SkillPage from './index';
 import zhSkill from '@/locales/zh-CN/skill.json';
 
-const { statusMock, listMock, refreshMock, updateGroupMock, getMock, toggleMock, installDepsMock, toastErrorMock, toastSuccessMock, tMock } = vi.hoisted(() => ({
+const { statusMock, listMock, refreshMock, updateGroupMock, getMock, toggleMock, installDepsMock, toastErrorMock, toastSuccessMock, toastWarningMock, tMock } = vi.hoisted(() => ({
+  toastWarningMock: vi.fn(),
   updateGroupMock: vi.fn(), getMock: vi.fn(), toggleMock: vi.fn(), installDepsMock: vi.fn(),
   statusMock: vi.fn(),
   listMock: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock('@/components/common/Toast', () => ({
   useToast: () => ({
     error: toastErrorMock,
     success: toastSuccessMock,
+    warning: toastWarningMock,
   }),
 }));
 
@@ -118,22 +120,36 @@ describe('SkillPage', () => {
     expect(screen.queryByText('Hidden')).not.toBeInTheDocument();
     const builtin = screen.getByText('builtin').closest('tr')!;
     const custom = screen.getByText('custom').closest('tr')!;
-    expect(builtin).toHaveAttribute('draggable', 'false');
-    expect(builtin).toHaveAttribute('title', 'pluginGroups:readOnly.builtinSkill');
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(builtin, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(builtin).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarningMock).toHaveBeenCalledTimes(2);
+    expect(toastWarningMock).toHaveBeenLastCalledWith('pluginGroups:readOnly.builtinSkill');
+    expect(updateGroupMock).not.toHaveBeenCalled();
+    expect(listMock).not.toHaveBeenCalled();
     expect(within(builtin).getByText('table.builtin')).toBeInTheDocument();
     expect(within(custom).getByText('table.custom')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
     fireEvent.keyDown(builtin, { key: 'm', altKey: true });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    fireEvent.keyDown(custom, { key: 'm', altKey: true });
+    fireEvent.click(within(custom).getByRole('button', { name: 'editGroup' }));
+    expect(getMock).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(updateGroupMock).toHaveBeenCalledExactlyOnceWith('custom', null));
     expect(refreshMock).not.toHaveBeenCalled();
     expect(screen.getAllByRole('switch')).toHaveLength(2);
     fireEvent.click(screen.getByRole('button', { name: 'view.cards' }));
-    expect(screen.getByText('builtin').closest('article')).toHaveAttribute('draggable', 'false');
+    const builtinCard = screen.getByText('builtin').closest('article')!;
+    expect(fireEvent.dragStart(builtinCard, { dataTransfer })).toBe(false);
+    fireEvent.click(within(builtinCard).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarningMock).toHaveBeenLastCalledWith('pluginGroups:readOnly.builtinSkill');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.click(within(screen.getByText('custom').closest('article')!).getByRole('button', { name: 'editGroup' }));
+    expect(screen.getByRole('combobox')).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
     expect(screen.getByText('custom description')).toBeInTheDocument();
     expect(screen.getAllByRole('switch')).toHaveLength(2);
   });
@@ -143,8 +159,12 @@ describe('SkillPage', () => {
     render(<SkillPage />);
     await screen.findByText('shipped');
     const row = screen.getByText('shipped').closest('tr')!;
-    expect(row).toHaveAttribute('draggable', 'false');
-    expect(row).toHaveAttribute('title', 'pluginGroups:readOnly.system');
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(row, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarningMock).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
+    expect(updateGroupMock).not.toHaveBeenCalled();
     fireEvent.keyDown(row, { key: 'm', altKey: true });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'create' })).toBeDisabled();

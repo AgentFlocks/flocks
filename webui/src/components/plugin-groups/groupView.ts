@@ -54,7 +54,7 @@ export function assertGroupItemsEditable(items: readonly GroupNavItem[], t: TFun
   const readOnly = items.filter((item) => item.readOnlyReason);
   if (readOnly.length) {
     throw new Error(t('pluginGroups:errors.readOnlyMembers', {
-      items: readOnly.map((item) => `${groupItemLabel(item)}: ${item.readOnlyReason}`).join('; '),
+      items: readOnly.map(groupItemLabel).join(', '),
     }));
   }
 }

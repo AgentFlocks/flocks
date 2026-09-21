@@ -8,6 +8,8 @@ import { providerAPI } from '@/api/provider';
 import { listAllToolPages, type Tool } from '@/api/tool';
 import type { APIServiceSummary, MCPCatalogCategory, MCPCatalogEntry } from '@/types';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { APIServiceDetailPanel } from './ServiceDetailPanel';
@@ -337,7 +339,8 @@ export default function APITabContent({
     ...catalogEntries.filter((entry) => !nativeServices.some((service) => service.id === entry.id)).map(asCatalogGroupItem),
   ];
   const groupItems = groupInventory(services);
-  const groupDrag = useGroupDrag(groupItems);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
   const reloadGroupData = () => fetchServices(true);
   const saveGroup = (id: string, group: string | null) => providerAPI.updateApiService(id, { group });
   const loadGroupItems = async () => {
@@ -457,7 +460,8 @@ export default function APITabContent({
                 </div>
 
                 {/* Actions column */}
-                <div className="flex items-center justify-end gap-1.5">
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <PluginGroupButton grouping={groupDrag} itemKey={service.id} />
                   {service.enabled ? (
                     <>
                       <button
@@ -546,7 +550,8 @@ export default function APITabContent({
               </div>
 
               {/* Actions column */}
-              <div className="flex items-center justify-end gap-1.5">
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                <PluginGroupButton grouping={groupDrag} itemKey={`catalog:${entry.id}`} />
                 <button
                   onClick={() => {
                     if (entry.requires_auth && !isConfigured(entry.id)) {

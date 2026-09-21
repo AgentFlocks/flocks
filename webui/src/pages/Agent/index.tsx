@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { useAgents } from '@/hooks/useAgents';
 import { agentAPI, Agent } from '@/api/agent';
 import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
@@ -34,7 +36,8 @@ export default function AgentPage() {
   });
   const visibleAgents = (inventory: Agent[]) => inventory.filter((agent) => agent.mode === 'primary' || !(agent.tags ?? []).includes('system'));
   const groupItems = visibleAgents(agents).map(asGroupItem);
-  const groupDrag = useGroupDrag(groupItems);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
   const saveGroup = (name: string, group: string | null) => agentAPI.update(name, { group });
   const reloadGroups = () => refetch(false, true);
   const loadGroupItems = async () => visibleAgents((await agentAPI.list()).data).map(asGroupItem);
@@ -465,6 +468,7 @@ function AgentSection({
               <div key={agent.name} className="min-w-0 [&>div]:h-full" {...groupDrag.dragProps(agent.name)}>
                 <AgentCard
                   agent={agent}
+                  grouping={groupDrag}
                   displayLang={displayLang}
                   isSelected={selectedAgent?.name === agent.name}
                   onClick={() => onSelect(agent)}
@@ -497,6 +501,7 @@ function AgentSection({
 // ============================================================================
 
 interface AgentCardProps {
+  grouping: GroupDrag;
   layout?: PluginViewMode;
   agent: Agent;
   displayLang: string;
@@ -508,6 +513,7 @@ interface AgentCardProps {
 }
 
 function AgentCard({
+  grouping,
   layout = 'cards',
   agent,
   displayLang,
@@ -590,7 +596,7 @@ function AgentCard({
 
       {/* Footer — delete / enable / edit */}
       <div
-        className={`border-t border-gray-100 px-4 py-2 flex items-center justify-between ${layout === 'list' ? 'lg:border-t-0 lg:border-l lg:gap-4 lg:shrink-0' : ''}`}
+        className={`border-t border-gray-100 px-3 py-2 flex items-center justify-between ${layout === 'list' ? 'lg:border-t-0 lg:border-l lg:gap-4 lg:shrink-0' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Delete — disabled for built-in agents */}
@@ -599,7 +605,7 @@ function AgentCard({
             type="button"
             disabled
             title={t('badge.nativeDeleteDisabled')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium
                        text-gray-300 cursor-not-allowed select-none"
           >
             <Trash2 className="w-3 h-3" />
@@ -610,7 +616,7 @@ function AgentCard({
             type="button"
             onClick={(e) => { e.stopPropagation(); onDelete(agent.name); }}
             title={t('badge.delete')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium
                        text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
           >
             <Trash2 className="w-3 h-3" />
@@ -618,7 +624,8 @@ function AgentCard({
           </button>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 flex-nowrap items-center justify-end gap-1 whitespace-nowrap">
+          <PluginGroupButton grouping={grouping} itemKey={agent.name} />
           {showDelegatableToggle && (
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-medium text-gray-400">
@@ -641,7 +648,7 @@ function AgentCard({
             onClick={onClick}
             title={t('badge.edit')}
             aria-label={t('badge.edit')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-gray-400
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium text-gray-400
                        hover:text-slate-700 hover:bg-gray-50 transition-colors"
           >
             <Pencil className="w-3 h-3" />

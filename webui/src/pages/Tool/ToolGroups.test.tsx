@@ -12,7 +12,7 @@ import enGroups from '@/locales/en-US/pluginGroups.json';
 
 const mocks = vi.hoisted(() => ({
   listPage: vi.fn(), get: vi.fn(), patch: vi.fn(), refresh: vi.fn(), listServices: vi.fn(),
-  auth: { role: 'admin' },
+  auth: { role: 'admin' }, toastWarning: vi.fn(),
 }));
 vi.mock('@/api/client', () => ({ default: {
   get: (url: string, config?: { params?: Record<string, unknown> }) => {
@@ -26,7 +26,7 @@ vi.mock('@/api/client', () => ({ default: {
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: mocks.auth }) }));
 vi.mock('@/api/provider', () => ({ providerAPI: { listApiServices: mocks.listServices } }));
 vi.mock('@/components/common/Toast', () => ({
-  useToast: () => ({ error: vi.fn(), warning: vi.fn(), success: vi.fn() }),
+  useToast: () => ({ error: vi.fn(), warning: mocks.toastWarning, success: vi.fn() }),
 }));
 
 let inventory: Tool[];
@@ -248,6 +248,27 @@ describe('Tools native group attributes and original view preservation', () => {
     expect(screen.queryByText(tab === 'api' ? 'Native service B' : 'native-b')).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['all', 'list'], ['all', 'cards'], ['local', 'list'], ['local', 'cards'],
+  ])('offers an explicit group action in the %s tab %s view without opening tool details', async (tab, viewMode) => {
+    await mount();
+    if (tab === 'local') {
+      fireEvent.click(screen.getByRole('button', { name: /^本地工具/ }));
+      await screen.findByRole('button', { name: /^tool_00 / });
+    }
+    if (viewMode === 'cards') fireEvent.click(screen.getByRole('button', { name: '卡片视图' }));
+    const action = within(nativeRow('tool_00')).getByRole('button', { name: zhGroups.editGroup });
+    expect(action).toBeEnabled();
+    fireEvent.click(action);
+    expect(screen.getByRole('combobox')).toHaveValue('Alpha');
+    expect(mocks.get).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Beta' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(mocks.patch).toHaveBeenCalledExactlyOnceWith('/api/tools/tool_00', { group: 'Beta' }));
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+    expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
   it('moves one native row with the keyboard equivalent and only reloads metadata', async () => {
     await mount();
     fireEvent.keyDown(nativeRow('tool_00'), { key: 'm', altKey: true });
@@ -278,8 +299,14 @@ describe('Tools native group attributes and original view preservation', () => {
     inventory[0].group_readonly = true;
     inventory[1].group_readonly = false;
     await mount();
-    expect(nativeRow('tool_00')).toHaveAttribute('draggable', 'false');
-    expect(nativeRow('tool_00')).toHaveAttribute('title', zhGroups.readOnly.system);
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(nativeRow('tool_00'), { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(nativeRow('tool_00')).getByRole('button', { name: zhGroups.editGroup }));
+    expect(mocks.toastWarning).toHaveBeenCalledTimes(2);
+    expect(mocks.toastWarning).toHaveBeenLastCalledWith(zhGroups.readOnly.system);
+    expect(mocks.get).not.toHaveBeenCalled();
+    expect(mocks.patch).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: '重命名分组 Alpha' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '删除分组 Alpha' })).toBeDisabled();
     fireEvent.keyDown(nativeRow('tool_00'), { key: 'm', altKey: true });
@@ -303,7 +330,7 @@ describe('Tools native group attributes and original view preservation', () => {
       fireEvent.change(screen.getByRole('combobox'), { target: { value: 'tool_00' } });
     }
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(zhGroups.readOnly.system));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(zhGroups.errors.readOnlyMembers.replace('{{items}}', 'tool_00')));
     expect(mocks.patch).not.toHaveBeenCalled();
   });
 
@@ -403,7 +430,12 @@ describe('Tools native group attributes and original view preservation', () => {
   it('permits filtering but gates native settings writes for non-admins', async () => {
     mocks.auth.role = 'member';
     await mount();
-    expect(nativeRow('tool_00')).toHaveAttribute('draggable', 'false');
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(nativeRow('tool_00'), { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(nativeRow('tool_00')).getByRole('button', { name: zhGroups.editGroup }));
+    expect(mocks.toastWarning).toHaveBeenLastCalledWith(zhGroups.readOnly.admin);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '新建分组' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '重命名分组 Alpha' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Beta 30' }));

@@ -9,6 +9,7 @@ import { CATEGORY_LABEL_KEY } from '../constants';
 import { getLocalizedToolDescription } from '../toolDisplay';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 import type { GroupDrag } from '@/components/plugin-groups/GroupNav';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 
 interface LocalTabContentProps {
   tools: Tool[];
@@ -164,7 +165,8 @@ export default function LocalTabContent({
                 </div>
 
                 {/* Actions column */}
-                <div className="flex items-center justify-end gap-1.5">
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {groupDrag && <PluginGroupButton grouping={groupDrag} itemKey={tool.name} />}
                   {tool.enabled ? (
                     <>
                       <button

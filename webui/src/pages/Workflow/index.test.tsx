@@ -5,7 +5,8 @@ import userEvent from '@testing-library/user-event';
 import type { WorkflowSummary } from '@/api/workflow';
 import WorkflowPage from './index';
 
-const { mockNavigate, mockUseWorkflows, mockLanguage, nativeWorkflowAPI } = vi.hoisted(() => ({
+const { mockNavigate, mockUseWorkflows, mockLanguage, nativeWorkflowAPI, toastWarning } = vi.hoisted(() => ({
+  toastWarning: vi.fn(),
   nativeWorkflowAPI: { update: vi.fn(), listSummaries: vi.fn() },
   mockNavigate: vi.fn(),
   mockUseWorkflows: vi.fn(),
@@ -18,6 +19,7 @@ beforeEach(() => {
 });
 
 vi.mock('@/api/workflow', () => ({ workflowAPI: nativeWorkflowAPI }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
@@ -131,7 +133,9 @@ describe('WorkflowPage', () => {
     expect(list).toHaveClass('sm:flex-row');
     fireEvent.click(list);
     expect(mockNavigate).toHaveBeenCalledWith('/workflows/draft');
-    fireEvent.keyDown(list.parentElement!, { key: 'm', altKey: true });
+    mockNavigate.mockClear();
+    fireEvent.click(within(list as HTMLElement).getByRole('button', { name: 'editGroup' }));
+    expect(mockNavigate).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(nativeWorkflowAPI.update).toHaveBeenCalledExactlyOnceWith('draft', { group: null }));
@@ -149,12 +153,20 @@ describe('WorkflowPage', () => {
     nativeWorkflowAPI.listSummaries.mockResolvedValue({ data: workflows });
     render(<WorkflowPage />);
     const locked = screen.getByText('Shipped workflow').closest('div.group')!.parentElement!;
-    expect(locked).toHaveAttribute('draggable', 'false');
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(locked, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(locked).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarning).toHaveBeenCalledTimes(2);
+    expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
+    expect(nativeWorkflowAPI.update).not.toHaveBeenCalled();
+    expect(nativeWorkflowAPI.listSummaries).not.toHaveBeenCalled();
     fireEvent.keyDown(locked, { key: 'm', altKey: true });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
-    fireEvent.keyDown(screen.getByText('User project workflow').closest('div.group')!.parentElement!, { key: 'm', altKey: true });
+    fireEvent.click(within(screen.getByText('User project workflow').closest('div.group') as HTMLElement).getByRole('button', { name: 'editGroup' }));
+    expect(mockNavigate).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
     await waitFor(() => expect(nativeWorkflowAPI.update).toHaveBeenCalledExactlyOnceWith('project-custom', { group: null }));

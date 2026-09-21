@@ -6,7 +6,8 @@ import APITabContent from './APITabContent';
 
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: { role: 'admin' } }) }));
 
-const { apiDetailProps, listAllToolPages, mcpAPI, providerAPI } = vi.hoisted(() => ({
+const { apiDetailProps, listAllToolPages, mcpAPI, providerAPI, toastWarning } = vi.hoisted(() => ({
+  toastWarning: vi.fn(),
   apiDetailProps: vi.fn(),
   listAllToolPages: vi.fn(),
   mcpAPI: {
@@ -21,6 +22,7 @@ const { apiDetailProps, listAllToolPages, mcpAPI, providerAPI } = vi.hoisted(() 
 }));
 
 vi.mock('@/api/provider', () => ({ providerAPI }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
 vi.mock('@/api/mcp', () => ({ mcpAPI }));
 vi.mock('@/api/tool', () => ({ listAllToolPages }));
 
@@ -92,7 +94,8 @@ describe('APITabContent', () => {
     expect(screen.getByText('ungrouped-child-tool')).toBeInTheDocument();
 
     const ungroupedRow = screen.getByText('Service B').closest('[draggable]') as HTMLElement;
-    fireEvent.keyDown(ungroupedRow, { key: 'm', altKey: true });
+    fireEvent.click(within(ungroupedRow).getByRole('button', { name: 'editGroup' }));
+    expect(screen.getByText('ungrouped-child-tool')).toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Alpha' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(providerAPI.updateApiService).toHaveBeenCalledWith('service-b', { group: 'Alpha' }));
@@ -110,8 +113,14 @@ describe('APITabContent', () => {
       catalogEntries={[]} catalogCategories={{}} catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
     await screen.findByText('System API definition');
     const definition = screen.getByText('System API definition').closest('[draggable]')!;
-    expect(definition).toHaveAttribute('draggable', 'false');
-    expect(definition).toHaveAttribute('title', 'pluginGroups:readOnly.system');
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(definition, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(definition as HTMLElement).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarning).toHaveBeenCalledTimes(2);
+    expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
+    expect(providerAPI.updateApiService).not.toHaveBeenCalled();
+    expect(providerAPI.listApiServices).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
     fireEvent.keyDown(definition, { key: 'm', altKey: true });
@@ -119,7 +128,8 @@ describe('APITabContent', () => {
     fireEvent.click(screen.getByRole('button', { name: 'create' }));
     expect(within(screen.getByRole('combobox')).queryByRole('option', { name: /System API definition/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
-    fireEvent.keyDown(screen.getByText('Configured API').closest('[draggable]')!, { key: 'm', altKey: true });
+    fireEvent.click(within(screen.getByText('Configured API').closest('[draggable]') as HTMLElement).getByRole('button', { name: 'editGroup' }));
+    expect(apiDetailProps).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
     await waitFor(() => expect(providerAPI.updateApiService).toHaveBeenCalledExactlyOnceWith('configured', { group: null }));
@@ -155,8 +165,11 @@ describe('APITabContent', () => {
     />);
     await screen.findByText('Catalog API');
     const row = screen.getByText('Catalog API').closest('[draggable]') as HTMLElement;
-    expect(row).toHaveAttribute('draggable', 'false');
-    expect(row).toHaveAttribute('title', 'pluginGroups:readOnly.system');
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(row, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
     fireEvent.keyDown(row, { key: 'm', altKey: true });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();

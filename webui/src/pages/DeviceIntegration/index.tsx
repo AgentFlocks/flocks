@@ -20,7 +20,8 @@ import type { APIServiceCredentialField, Message, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
 import { buildCustomDeviceModeRoutingPrompt } from './customDevice';
-import GroupNav, { useGroupDrag, type GroupNavProps } from '@/components/plugin-groups/GroupNav';
+import GroupNav, { useGroupDrag, type GroupDrag, type GroupNavProps } from '@/components/plugin-groups/GroupNav';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
@@ -160,8 +161,9 @@ function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) 
 // Active device card
 // ============================================================================
 
-function ActiveCard({ device, vendorKey, selected, onClick, viewMode = 'cards' }: {
+function ActiveCard({ device, grouping, vendorKey, selected, onClick, viewMode = 'cards' }: {
   device: DeviceIntegration;
+  grouping: GroupDrag;
   vendorKey?: string;
   selected: boolean;
   onClick: () => void;
@@ -171,7 +173,7 @@ function ActiveCard({ device, vendorKey, selected, onClick, viewMode = 'cards' }
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
   const vendorLabel = vendor ? (i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn) : undefined;
   return (
-    <button
+    <div
       onClick={onClick}
       className={`${viewMode === 'cards' ? 'w-full text-left rounded-xl border p-4 transition-all duration-150 group' : 'w-full text-left rounded-lg border px-4 py-3 transition-all duration-150 group'} ${
         selected
@@ -179,6 +181,7 @@ function ActiveCard({ device, vendorKey, selected, onClick, viewMode = 'cards' }
           : 'border-zinc-200 bg-white hover:border-zinc-300 hover:shadow-sm'
       }`}
     >
+      <button type="button" className="w-full text-left">
       <div className="flex items-start gap-3">
         <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
           selected ? 'bg-blue-100' : 'bg-zinc-50 group-hover:bg-zinc-100'
@@ -205,7 +208,11 @@ function ActiveCard({ device, vendorKey, selected, onClick, viewMode = 'cards' }
           </div>
         </div>
       </div>
-    </button>
+      </button>
+      <div className="mt-2 flex justify-end">
+        <PluginGroupButton grouping={grouping} itemKey={device.id} />
+      </div>
+    </div>
   );
 }
 
@@ -2049,7 +2056,7 @@ export default function DeviceIntegrationPage() {
     key: device.id, name: device.name, group: device.group,
   });
   const businessItems = devices.map(asBusinessItem);
-  const businessDrag = useGroupDrag(businessItems);
+  const businessDrag = useGroupDrag(businessItems, toast.warning);
   const reloadBusinessDevices = useCallback(async () => {
     // Metadata updates never provision devices, rescan templates or change rooms.
     const response = await deviceAPI.list();
@@ -2567,7 +2574,7 @@ export default function DeviceIntegrationPage() {
                             <div className={viewMode === 'cards' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
                               {gDevices.map((d) => (
                                 <div key={d.id} {...businessDrag.dragProps(d.id, { allowPrimaryButton: true })}>
-                                  <ActiveCard
+                                  <ActiveCard grouping={businessDrag}
                                     device={d}
                                     vendorKey={vendorOf(d)}
                                     selected={panelDeviceId === d.id}
@@ -2602,7 +2609,7 @@ export default function DeviceIntegrationPage() {
                           <div className={viewMode === 'cards' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
                             {orphans.map((d) => (
                               <div key={d.id} {...businessDrag.dragProps(d.id, { allowPrimaryButton: true })}>
-                                <ActiveCard
+                                <ActiveCard grouping={businessDrag}
                                   device={d}
                                   vendorKey={vendorOf(d)}
                                   selected={panelDeviceId === d.id}
@@ -2650,7 +2657,7 @@ export default function DeviceIntegrationPage() {
                     <div className={viewMode === 'cards' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
                       {filteredDevices.map((d) => (
                         <div key={d.id} {...businessDrag.dragProps(d.id, { allowPrimaryButton: true })}>
-                          <ActiveCard
+                          <ActiveCard grouping={businessDrag}
                             device={d}
                             vendorKey={vendorOf(d)}
                             selected={panelDeviceId === d.id}

@@ -1,10 +1,12 @@
 {
   "title": "Business groups",
   "navigation": "Filter by business group",
-  "countsDescription": "Derived from visible plugins. Drag plugins here, or press Alt+M on a plugin. Group order is personal.",
+  "countsDescription": "Drag a plugin onto a group to move it.",
   "all": "All",
   "ungrouped": "Ungrouped",
   "create": "New group",
+  "groupAction": "Group",
+  "editGroup": "Edit group",
   "rename": "Rename",
   "delete": "Delete group",
   "renameNamed": "Rename group {{name}}",
@@ -14,44 +16,43 @@
   "saved": "Group changes saved.",
   "cancel": "Cancel",
   "close": "Close",
-  "confirmScope": "Change {{count}} visible plugins to “{{group}}”?\nScope: {{items}}\nOnly these plugins are affected. Saves are individual, not atomic. No plugins will be deleted.",
+  "confirmScope": "Move these {{count}} plugins to “{{group}}”?\n{{items}}\nNo plugins will be deleted.",
   "dialog": {
     "createTitle": "New business group",
     "renameTitle": "Rename business group",
-    "moveTitle": "Move {{name}}",
-    "sharedDescription": "This changes each plugin’s native group attribute. A new group requires its first plugin; empty groups are not saved.",
+    "moveTitle": "Edit group for {{name}}",
     "name": "Group name",
     "firstPlugin": "First editable plugin",
-    "choosePlugin": "Choose a visible plugin",
+    "choosePlugin": "Choose a plugin",
     "destination": "Destination group"
   },
   "validation": {
     "length": "Use 1–32 characters, excluding leading/trailing spaces and control characters.",
     "duplicate": "A group with this name already exists. Choose another name.",
-    "firstPlugin": "Choose the first editable plugin. Empty groups cannot be saved."
+    "firstPlugin": "Choose an editable plugin."
   },
   "readOnly": {
-    "system": "System-shipped definitions have a fixed business group, even for administrators.",
-    "builtinSkill": "Built-in Skill definitions, including their group, are read-only even for administrators.",
-    "admin": "Only administrators can edit these native settings.",
-    "catalog": "Unconfigured catalog entries are read-only. Install/configure the service before changing its group.",
-    "noEditable": "No editable plugins are visible."
+    "system": "The group of a built-in plugin cannot be changed.",
+    "builtinSkill": "The group of a built-in skill cannot be changed.",
+    "admin": "You do not have permission to change groups.",
+    "catalog": "Install or configure this service first.",
+    "noEditable": "No plugins are available for grouping."
   },
   "errors": {
-    "missing": "The plugin or group is no longer visible. Refresh the list before trying again.",
-    "readOnlyMembers": "This whole-group operation is blocked by read-only members: {{items}}",
+    "missing": "This plugin or group is unavailable. Refresh and try again.",
+    "readOnlyMembers": "Groups cannot be changed for these plugins: {{items}}",
     "write": "Could not save this plugin’s group.",
-    "partial": "Saved {{succeeded}}; failed {{failed}}. Successful changes are not rolled back.",
+    "partial": "Saved {{succeeded}}; failed {{failed}}.",
     "succeededItems": "Saved plugins:",
     "failedItems": "Failed plugins:",
-    "refresh": "The native list could not be refreshed. It may be stale; refresh before another change."
+    "refresh": "Could not refresh the list. Refresh and try again."
   },
   "drag": {
     "sourceLabel": "{{name}}. Press Alt+M to move to a business group.",
     "reorderLabel": "Reorder group {{name}}",
-    "reorderHint": "Drag, or use Up/Down to change your personal group order.",
-    "orderPlaced": "Personal group order updated. No plugin attributes changed.",
-    "cancelled": "Cancelled. No plugin attributes changed."
+    "reorderHint": "Drag or use Up/Down to reorder groups.",
+    "orderPlaced": "Group order updated.",
+    "cancelled": "Cancelled."
   },
   "view": {
     "label": "View layout",

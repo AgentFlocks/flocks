@@ -11,7 +11,7 @@ function readOrder(key: string): unknown {
 }
 
 /** Only transient drag/keyboard state; no plugin membership or backend state. */
-export function useGroupDrag(items: readonly GroupNavItem[]) {
+export function useGroupDrag(items: readonly GroupNavItem[], onReadOnly: (message: string) => void) {
   const { t } = useTranslation('pluginGroups');
   const [movingKey, setMovingKey] = useState<string | null>(null);
   const gestureScope = useId();
@@ -26,13 +26,26 @@ export function useGroupDrag(items: readonly GroupNavItem[]) {
     const item = items.find((row) => row.key === gesture.key);
     return item?.readOnlyReason ? undefined : item;
   };
+  const requestMove = (key: string) => {
+    const item = items.find((row) => row.key === key);
+    if (!item) return;
+    activeDrag.current = null;
+    if (item.readOnlyReason) {
+      setMovingKey(null);
+      onReadOnly(item.readOnlyReason);
+      return;
+    }
+    setMovingKey(key);
+  };
   const dragProps = (key: string, options?: { allowPrimaryButton?: boolean }): HTMLAttributes<HTMLElement> => {
     const item = items.find((row) => row.key === key);
     if (!item) return {};
-    if (item.readOnlyReason) return { draggable: false, title: item.readOnlyReason, 'aria-description': item.readOnlyReason };
     return {
+      // Receive the attempted gesture so readonly items can explain why it is blocked.
       draggable: true,
       tabIndex: 0,
+      title: item.readOnlyReason,
+      'aria-description': item.readOnlyReason,
       'aria-label': t('drag.sourceLabel', { name: item.name }),
       'aria-keyshortcuts': 'Alt+m',
       onDragStart: (event) => {
@@ -40,6 +53,12 @@ export function useGroupDrag(items: readonly GroupNavItem[]) {
         // Do not turn text selection or native form controls into a plugin drag.
         if ((event.target as HTMLElement).closest(options?.allowPrimaryButton ? 'input, textarea, select, a' : 'button, input, textarea, select, a')) {
           event.preventDefault();
+          return;
+        }
+        if (item.readOnlyReason) {
+          event.preventDefault();
+          event.stopPropagation();
+          requestMove(key);
           return;
         }
         const token = `${gestureScope}-${++gestureSequence.current}`;
@@ -54,12 +73,12 @@ export function useGroupDrag(items: readonly GroupNavItem[]) {
           if ((event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return;
           event.preventDefault();
           event.stopPropagation();
-          setMovingKey(key);
+          requestMove(key);
         }
       },
     };
   };
-  return { dragProps, movingItem, clearMovingItem: () => setMovingKey(null), consumeResourceDrag };
+  return { dragProps, requestMove, movingItem, clearMovingItem: () => setMovingKey(null), consumeResourceDrag };
 }
 export type GroupDrag = ReturnType<typeof useGroupDrag>;
 
@@ -282,7 +301,6 @@ export default function GroupNav({
           </div>;
         })}
       </nav>
-      {items.some((item) => item.readOnlyReason) && <p className="mt-3 px-2 text-[11px] text-gray-500">{[...new Set(items.map((item) => item.readOnlyReason).filter(Boolean))].join(' ')}</p>}
       {message && <p role="status" className="mt-3 px-2 text-xs text-gray-500">{message}</p>}
       {error && !modalOpen && <p role="alert" className="mt-3 whitespace-pre-wrap px-2 text-xs text-red-600">{error}</p>}
       {modalOpen && <GroupDialog key={dialog?.kind ?? 'move'} titleId={dialogTitleId} onClose={closeModal} busy={busy}>
@@ -302,7 +320,6 @@ export default function GroupNav({
                 {editableItems.map((item) => <option key={item.key} value={item.key}>{groupItemLabel(item)}</option>)}
               </select>
             </label>}
-            <p className="mt-3 text-xs text-gray-500">{t('dialog.sharedDescription')}</p>
           </> : <label className="block text-xs text-gray-600">{t('dialog.destination')}
             <select value={destination} onChange={(event) => setDestination(event.target.value)} disabled={busy}
               className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm">

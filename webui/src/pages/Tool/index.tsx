@@ -46,6 +46,7 @@ import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
 import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { assertGroupItemsEditable, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePluginViewMode } from '@/hooks/usePluginViewMode';
@@ -335,7 +336,7 @@ export default function ToolPage() {
     readOnlyReason: tool.group_readonly ? t('pluginGroups:readOnly.system') : readOnlyReason,
   });
   const toolGroupItems = tools.map(asGroupItem);
-  const toolGroupDrag = useGroupDrag(toolGroupItems);
+  const toolGroupDrag = useGroupDrag(toolGroupItems, toast.warning);
   const groupFacets = toolFacets.group ?? {};
   const hasToolInventoryFilters = !!(toolPageParams.q || toolPageParams.source || toolPageParams.category || toolPageParams.sourceName || toolPageParams.enabled);
   const nativeGroupNav = {
@@ -3507,8 +3508,9 @@ function ToolTable({
                 <EnabledBadge enabled={tool.enabled} />
               </div>
 
-              {/* Actions column — manage button */}
-              <div className="w-full flex items-center justify-center">
+              {/* Actions column */}
+              <div className="w-full flex flex-wrap items-center justify-center gap-1">
+                <PluginGroupButton grouping={groupDrag} itemKey={tool.name} />
                 <button
                   onClick={() => onSelect(tool)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-100 hover:text-gray-800 transition-colors"

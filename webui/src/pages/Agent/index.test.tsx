@@ -4,13 +4,15 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import type { Agent } from '@/api/agent';
 import AgentPage from './index';
 
-const { mockUseAgents, nativeAPI, sheetSpy } = vi.hoisted(() => ({
+const { mockUseAgents, nativeAPI, sheetSpy, toastWarning } = vi.hoisted(() => ({
+  toastWarning: vi.fn(),
   mockUseAgents: vi.fn(),
   nativeAPI: { list: vi.fn(), update: vi.fn(), delete: vi.fn(), setDelegatable: vi.fn(), refresh: vi.fn() },
   sheetSpy: vi.fn(),
 }));
 
 vi.mock('@/api/agent', () => ({ agentAPI: nativeAPI }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -158,13 +160,14 @@ describe('AgentPage business groups and native layouts', () => {
     expect(nativeAPI.update).not.toHaveBeenCalled();
   });
 
-  it('moves a user-defined native primary with a missing group and no rescan', async () => {
+  it.each(['cards', 'list'])('offers an explicit group action for a user-defined primary in %s view', async (viewMode) => {
     const custom = makeAgent({ name: 'user-primary', mode: 'primary', native: true, group_readonly: false });
     const refetch = useInventory([custom, makeAgent({ name: 'other', group: 'Engineering' })]);
     render(<AgentPage />);
+    if (viewMode === 'list') fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
     const source = screen.getByText('user-primary').closest('div.group')?.parentElement as HTMLElement;
-    expect(source).toHaveAttribute('draggable', 'true');
-    fireEvent.keyDown(source, { key: 'm', altKey: true });
+    fireEvent.click(within(source).getByRole('button', { name: 'editGroup' }));
+    expect(screen.queryByTestId('agent-sheet')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Engineering' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(nativeAPI.update).toHaveBeenCalledWith('user-primary', { group: 'Engineering' }));
@@ -181,9 +184,15 @@ describe('AgentPage business groups and native layouts', () => {
     ]);
     render(<AgentPage />);
     const locked = screen.getByText('rex').closest('div.group')!.parentElement!;
-    expect(locked).toHaveAttribute('draggable', 'false');
-    expect(locked).toHaveAttribute('title', 'pluginGroups:readOnly.system');
-    expect(screen.getByText('core-sub').closest('div.group')!.parentElement!).toHaveAttribute('draggable', 'false');
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(locked, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
+    expect(fireEvent.dragStart(screen.getByText('core-sub').closest('div.group')!.parentElement!, { dataTransfer })).toBe(false);
+    fireEvent.click(within(locked).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarning).toHaveBeenCalledTimes(3);
+    expect(nativeAPI.update).not.toHaveBeenCalled();
+    expect(nativeAPI.list).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
     fireEvent.keyDown(locked, { key: 'm', altKey: true });

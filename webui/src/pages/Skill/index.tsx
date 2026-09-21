@@ -27,6 +27,7 @@ import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-grou
 import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
 import { usePluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 
 const PAGE_SIZE = 25;
 
@@ -37,7 +38,7 @@ export default function SkillPage() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [installingDeps, setInstallingDeps] = useState<Record<string, boolean>>({});
-  const { error: showErrorToast, success: showSuccessToast } = useToast();
+  const { error: showErrorToast, success: showSuccessToast, warning: showWarningToast } = useToast();
 
   const [sheetSkill, setSheetSkill] = useState<Skill | null>(null);
   const [showCreateSheet, setShowCreateSheet] = useState(false);
@@ -115,7 +116,7 @@ export default function SkillPage() {
       : isSkillDefinitionReadOnly(skill) ? t('pluginGroups:readOnly.builtinSkill') : undefined,
   });
   const groupItems = visibleSkills.map(asGroupItem);
-  const groupDrag = useGroupDrag(groupItems);
+  const groupDrag = useGroupDrag(groupItems, showWarningToast);
   const refreshGroupingInventory = useCallback(async () => {
     if (!await fetchSkills({ silent: true })) throw new Error('Skill inventory refresh failed');
   }, [fetchSkills]);
@@ -752,7 +753,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       </td>
 
       {/* 启用开关列：控制 skill 是否注入 Agent System Prompt */}
-      <td className="px-4 py-3">
+      <td className="whitespace-nowrap px-4 py-3">
         <SkillEnabledControl
           enabled={enabled}
           loading={toggling}
@@ -764,6 +765,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       {/* 操作列：编辑（+ 缺依赖时的安装按钮）；删除操作在编辑面板内 */}
       <td className="px-4 py-3 text-right">
         <div className="flex items-center justify-end gap-1">
+          {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
           {hasMissingDeps && (
             <button
               onClick={(e) => onInstallDeps(skill, e)}
@@ -831,7 +833,8 @@ function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onIn
         <span className="shrink-0">{t('table.source')}</span>
         <span className="truncate font-mono" title={skill.location}>{skill.source ?? '-'}</span>
       </div>
-      <div className="mt-auto flex items-center justify-end gap-1 border-t border-gray-100 pt-3">
+      <div className="mt-auto flex flex-wrap items-center justify-end gap-1 border-t border-gray-100 pt-3">
+        {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
         {hasMissingDeps && <button onClick={(event) => onInstallDeps(skill, event)} disabled={installingDeps}
           title={t('eligibility.installDeps')}
           className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">

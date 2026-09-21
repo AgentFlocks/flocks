@@ -56,7 +56,8 @@ describe('native group view helpers', () => {
     await expect(result).rejects.toThrow('Failed plugins:\nBeta (b): disk full');
     await expect(result).rejects.toThrow('Saved plugins: Alpha (a), Gamma (c)');
     await expect(result).rejects.toThrow('Saved 2; failed 1');
-    expect(confirm.mock.lastCall?.[0]).toContain('3 visible plugins');
+    expect(confirm.mock.lastCall?.[0]).toContain('3 plugins');
+    expect(confirm.mock.lastCall?.[0]).not.toContain('atomic');
     expect(confirm.mock.lastCall?.[0]).toContain('Alpha (a), Beta (b), Gamma (c)');
     expect(calls).toEqual(['a', 'b', 'c', 'reload']);
     expect(save.mock.calls.map((call) => call[0])).toEqual(['a', 'b', 'c']);

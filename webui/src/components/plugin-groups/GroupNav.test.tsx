@@ -4,22 +4,29 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import GroupNav, { useGroupDrag } from './GroupNav';
+import PluginGroupButton from './PluginGroupButton';
+import { ToastProvider, useToast } from '@/components/common/Toast';
 import { deriveGroupNav, type GroupNavItem, type GroupSelection } from './groupView';
 import messages from '@/locales/en-US/pluginGroups.json';
 
 const move = vi.fn();
 const rename = vi.fn();
 const remove = vi.fn();
-function Example({ inventory, showItems = true, onCreate }: { inventory: GroupNavItem[]; showItems?: boolean; onCreate?: (key: string, group: string) => Promise<void> }) {
+const notify = vi.fn();
+const originalClick = vi.fn();
+function Example({ inventory, showItems = true, onCreate, onReadOnly = notify }: { inventory: GroupNavItem[]; showItems?: boolean; onCreate?: (key: string, group: string) => Promise<void>; onReadOnly?: (message: string) => void }) {
   const [items, setItems] = useState(inventory);
   const [selection, setSelection] = useState<GroupSelection>(null);
-  const drag = useGroupDrag(items);
+  const drag = useGroupDrag(items, onReadOnly);
   return <>
     <GroupNav inventoryComplete preferenceKey="test" {...deriveGroupNav(items)} items={items} selection={selection} onSelect={setSelection}
       onMove={async (key, group) => { await move(key, group); setItems((current) => current.map((item) => item.key === key ? { ...item, group } : item)); }}
       onCreate={onCreate} onRename={rename} onDelete={remove} {...drag} />
     <output data-testid="selection">{JSON.stringify(selection)}</output>
-    {showItems && items.map((item) => <article key={item.key} data-testid={item.key} {...drag.dragProps(item.key)}>{item.name}<button>Original action {item.name}</button></article>)}
+    {showItems && items.map((item) => <article key={item.key} data-testid={item.key} onClick={originalClick} {...drag.dragProps(item.key)}>
+      {item.name}<button>Original action {item.name}</button>
+      <PluginGroupButton grouping={drag} itemKey={item.key} />
+    </article>)}
   </>;
 }
 async function mount(items: GroupNavItem[], onCreate?: (key: string, group: string) => Promise<void>) {
@@ -46,6 +53,56 @@ beforeEach(() => {
 });
 
 describe('pure native GroupNav', () => {
+  it('only shows a short drag hint, without permanent readonly or implementation explanations', async () => {
+    await mount([{ key: 'builtin', name: 'Built-in', group: 'Fixed', readOnlyReason: messages.readOnly.system }]);
+    const sidebar = screen.getByRole('complementary');
+    expect(within(sidebar).getByText(messages.countsDescription)).toBeInTheDocument();
+    expect(sidebar).not.toHaveTextContent(messages.readOnly.system);
+    expect(sidebar).not.toHaveTextContent(/derived|administrators|personal|native group/i);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('opens the existing group picker from the item button without triggering the original card action', async () => {
+    await mount([{ key: 'a', name: 'Alpha', group: 'First' }, { key: 'b', name: 'Beta', group: 'Second' }]);
+    fireEvent.click(within(screen.getByTestId('a')).getByRole('button', { name: 'Edit group' }));
+    expect(screen.getByRole('dialog', { name: 'Edit group for Alpha' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Destination group' })).toHaveValue('First');
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Second' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(move).toHaveBeenCalledExactlyOnceWith('a', 'Second'));
+    expect(originalClick).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('warns on the readonly item button without opening a picker or saving', async () => {
+    await mount([{ key: 'builtin', name: 'Built-in', group: 'Fixed', readOnlyReason: messages.readOnly.system }]);
+    const button = within(screen.getByTestId('builtin')).getByRole('button', { name: 'Edit group' });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(messages.readOnly.system);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(move).not.toHaveBeenCalled();
+    expect(originalClick).not.toHaveBeenCalled();
+  });
+
+  it('uses the existing warning toast for an attempted builtin drag and never creates a drag payload', async () => {
+    const i18n = createInstance();
+    await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: messages } } });
+    function ToastExample() {
+      const { warning } = useToast();
+      return <Example inventory={[{ key: 'builtin', name: 'Built-in', group: 'Fixed', readOnlyReason: messages.readOnly.system }]} onReadOnly={warning} />;
+    }
+    render(<I18nextProvider i18n={i18n}><ToastProvider><ToastExample /></ToastProvider></I18nextProvider>);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    const dataTransfer = transfer();
+    expect(fireEvent.dragStart(screen.getByTestId('builtin'), { dataTransfer })).toBe(false);
+    expect(dataTransfer.types).toEqual([]);
+    expect(screen.getByRole('alert')).toHaveTextContent(messages.readOnly.system);
+    fireEvent.drop(screen.getByRole('button', { name: 'Ungrouped 0' }).parentElement!, { dataTransfer });
+    expect(move).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('only clears a missing selection for an authoritative unfiltered inventory', async () => {
     const i18n = createInstance();
     await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: messages } } });
@@ -242,8 +299,12 @@ describe('pure native GroupNav', () => {
     await mount([{ key: 'builtin', name: 'Built-in', group: 'Mixed', readOnlyReason: 'Built-in even for admin' }, { key: 'custom', name: 'Custom', group: 'Mixed' }]);
     expect(screen.getByRole('button', { name: 'Rename group Mixed' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Delete group Mixed' })).toBeDisabled();
-    expect(screen.getByTestId('builtin')).toHaveAttribute('draggable', 'false');
+    const dataTransfer = transfer();
+    expect(fireEvent.dragStart(screen.getByTestId('builtin'), { dataTransfer })).toBe(false);
+    expect(dataTransfer.types).toEqual([]);
+    expect(notify).toHaveBeenCalledWith('Built-in even for admin');
     fireEvent.keyDown(screen.getByTestId('builtin'), { key: 'm', altKey: true });
+    expect(notify).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     fireEvent.keyDown(screen.getByTestId('custom'), { key: 'm', altKey: true });
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });

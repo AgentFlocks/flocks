@@ -6,7 +6,8 @@ import MCPTabContent from './MCPTabContent';
 
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: { role: 'admin' } }) }));
 
-const { listAllToolPages, mcpAPI, mcpDetailProps } = vi.hoisted(() => ({
+const { listAllToolPages, mcpAPI, mcpDetailProps, toastWarning } = vi.hoisted(() => ({
+  toastWarning: vi.fn(),
   listAllToolPages: vi.fn(),
   mcpAPI: {
     list: vi.fn(),
@@ -20,6 +21,7 @@ const { listAllToolPages, mcpAPI, mcpDetailProps } = vi.hoisted(() => ({
 vi.mock('@/api/mcp', () => ({
   mcpAPI,
 }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
 
 vi.mock('@/api/tool', () => ({
   listAllToolPages,
@@ -215,10 +217,19 @@ describe('MCPTabContent', () => {
       catalogEntries={entries} catalogCategories={{}} catalogLoading={false} configuredIds={new Set(['server-a'])} onConfiguredChange={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'ungrouped 1' })).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Package 1' })).toBeInTheDocument();
-    expect(screen.getByText('catalog-only').closest('[draggable]')).toHaveAttribute('draggable', 'false');
-    expect(screen.getByText('catalog-only').closest('[draggable]')).toHaveAttribute('title', 'pluginGroups:readOnly.system');
+    const catalogRow = screen.getByText('catalog-only').closest('[draggable]') as HTMLElement;
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(catalogRow, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(catalogRow).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarning).toHaveBeenCalledTimes(2);
+    expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mcpAPI.update).not.toHaveBeenCalled();
+    expect(mcpAPI.list).toHaveBeenCalledTimes(1);
     const row = screen.getByText('server-a').closest('[draggable]')!;
-    fireEvent.keyDown(row, { key: 'm', altKey: true });
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'editGroup' }));
+    expect(mcpDetailProps).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Package' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(mcpAPI.update).toHaveBeenCalledExactlyOnceWith('server-a', { group: 'Package' }));

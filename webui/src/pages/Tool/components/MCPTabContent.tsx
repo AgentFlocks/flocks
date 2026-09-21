@@ -10,6 +10,8 @@ import type { Tool } from '@/api/tool';
 import type { MCPCatalogCategory, MCPCatalogEntry, MCPServer } from '@/types';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { MCPServerDetailPanel } from './ServiceDetailPanel';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
@@ -462,7 +464,8 @@ export default function MCPTabContent({
     ...catalogEntries.filter((entry) => !nativeServers.some((server) => server.name === entry.id)).map(asCatalogGroupItem),
   ];
   const groupItems = groupInventory(servers);
-  const groupDrag = useGroupDrag(groupItems);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
   const reloadGroupData = () => fetchServers(true);
   const saveGroup = (name: string, group: string | null) => mcpAPI.update(name, { group });
   const loadGroupItems = async () => groupInventory(serverRows((await mcpAPI.list()).data));
@@ -599,7 +602,8 @@ export default function MCPTabContent({
                 </div>
 
                 {/* Actions column */}
-                <div className="flex items-center justify-end gap-1.5">
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <PluginGroupButton grouping={groupDrag} itemKey={id} />
                   {isActive ? (
                     <>
                       <button
