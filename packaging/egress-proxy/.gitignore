@@ -1,0 +1,6 @@
+vendor/mihomo-linux-*
+vendor/*.gz
+dist/
+__pycache__/
+# 测试记录要留着，仓库根 .gitignore 忽略了 *.log
+!tests/results/*.log

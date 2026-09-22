@@ -1,0 +1,12 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.14, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/worker/Documents/project/webook_dev/flocks/.claude/worktrees/flocks-proxy-config-b5f4f0
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.3.0, anyio-4.13.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collected 37 items
+
+packaging/egress-proxy/tests/test_setup_a.py ........................... [ 72%]
+..........                                                               [100%]
+
+============================== 37 passed in 0.10s ==============================

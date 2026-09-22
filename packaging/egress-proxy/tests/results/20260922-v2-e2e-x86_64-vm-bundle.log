@@ -1,0 +1,398 @@
+== 0. 准备环境 (arch=amd64 platform=linux/amd64 镜像=flocks-egress-test:c9-amd64-3412bdfbe21a) ==
+使用交付包: dist/flocks-egress-proxy-2.0.0-linux-x86_64.tar.gz
+内网 DNS 就绪
+使用自解压包: dist/flocks-egress-proxy-2.0.0-linux-x86_64.run
+
+== 1. 机器 B：客户已有的代理（squid 不认证 / squid 认证 / https 自签 / 认证 HTTP+SOCKS5） ==
+  PASS  B01 squid 起来了（3128 不认证、3129 认证） 
+  PASS  B02 https 代理（socat TLS → squid）起来了   3443，自签证书 CN=proxy.corp.local
+  PASS  B03 B 上的 SOCKS5 代理起来了（3130 认证） 
+  PASS  B04 A 用 curl -x 经 B 上网（不认证 squid）  http=200
+  PASS  B04 A 用 curl -x 经 B 上网（认证 squid）     http=200
+  PASS  B04 A 用 curl -x 经 B 上网（socks5）           http=200
+  PASS  B04 A 用 curl -x 经 B 上网（http 3130）        http=200
+  PASS  B04 A 用 curl -x 经 B 上网（https 自签）     http=200
+
+== 2. 机器 A：参数校验 / dry-run / 代理探测 ==
+  PASS  T01 非法代理协议一行报错                   ftp://
+  PASS  T02 SCOPE=user 且用户不存在被拒绝           
+  PASS  T03 FLOCKS_USER=引擎用户 被拒绝               
+  PASS  T04 dry-run：探测 auto→redir-host、代理可用、渲染成功、不落盘、无临时残留 占位 uid 65534
+  PASS  T05 渲染头里的版本号                         v2.0.0
+  PASS  T05a 代理主机名解析后自动进直连集合   
+  PASS  T05b dry-run 输出隐藏密码（含代理地址回显） 
+  PASS  T05c fake-ip：resolv.conf 的 search 域自动成为内网后缀，DNS 表有 redirect corp.local
+  PASS  T05d 参数文件里的未知键只警告不生效   
+  PASS  T05e fake-ip + host 范围拒绝本机回环 DNS（会回环） 
+  PASS  T05e2 redir-host 不碰 DNS，本机 DNS 转发器可以接受 
+  PASS  T05h --config 与 --proxy 不能同时给            
+  PASS  T05i 代理地址可以直接当位置参数给（不写 --proxy） 
+  PASS  T05j 不给地址、机器上也没有代理设置、不是终端 → 明确报错（不卡在提问上） 
+  PASS  T05k 只写 主机:端口 按 HTTP 代理算         
+  PASS  T05l 终端里不带参数 → 问地址（答错重问）、账号回车不问密码 → 装 
+  PASS  T05m 终端里答账号密码 → 认证代理可用，密码不回显、不出现在输出里 
+  PASS  T05n setup-a.sh help 等于 --help                   
+  PASS  T05g DNS_MODE=auto：内网 DNS 解析不了公网 → fake-ip 
+  PASS  P01 代理端口不通 → 安装前报错           
+  PASS  P02 squid 认证失败（407）→ 安装前报错，不回显密码 
+  PASS  P03 该认证却没给账号 → 提示加 --proxy-user 
+  PASS  P04 https 自签证书未信任 → 报错并给出两种解法 
+  PASS  P05 socks5 认证失败 → 安装前报错          
+  PASS  P06 --skip-proxy-test 跳过探测                   
+
+== 3. 机器 A：安装（host 范围，auto→redir-host，客户 squid 不认证） ==
+    | [flocks-egress] 已创建系统用户 flocks-egress（uid 997）
+    | [flocks-egress] 引擎二进制校验和正确（mihomo-linux-amd64）
+    | [flocks-egress] 用引擎自检配置...
+    | [flocks-egress] 用 nft 自检规则...
+    | [flocks-egress] 引擎二进制已安装到 /opt/flocks-egress/bin/mihomo
+    | [flocks-egress] 服务已启动。接管范围: 整台机器（除引擎用户 flocks-egress），含容器网桥流量；代理: http://proxy.corp.local:3128；DNS 模式: redir-host；引擎不在时: 直连兜底
+    | [flocks-egress] 运行验收: flocks-egress check
+    | 
+    | flocks-egress 验收  2026-09-22 08:50:26  接管范围=整台机器（除 flocks-egress）+容器  代理=http://proxy.corp.local:3128  DNS模式=redir-host（auto 探测）  引擎不在时=直连兜底
+    | 
+    |   PASS  规则服务                     flocks-egress-rules.service active 自 Tue 2026-09-22 08:50:25 UTC
+    |   PASS  引擎服务                     flocks-egress.service active 自 Tue 2026-09-22 08:50:25 UTC
+    |   PASS  监听端口                     透明代理口 tcp/7892 在所有接口（只放本机与容器网桥），HTTP 代理口 tcp/7890 只在 127.0.0.1
+    |   PASS  nft 分流规则                 表 inet flocks_egress_engine 存在，范围: 整台机器（除 flocks-egress）（ENGINE_DOWN=direct，随引擎启停）
+    |   PASS  容器流量接管                 网桥来的公网 TCP 同样转引擎；当前网桥接口: 暂无（Docker 起来后自动覆盖）
+    |   PASS  代理可用                     http://proxy.corp.local:3128：CONNECT www.baidu.com:443 → 200
+    |   PASS  DNS 不接管(redir-host)       www.baidu.com → 28.0.0.125（真实 IP，来自系统解析器）
+    |   PASS  内网域名真实解析             web.corp.local → 172.30.0.30
+    |   PASS  公网走代理                   https://www.baidu.com/ http=200，引擎日志: www.baidu.com:443 → corp-proxy
+    |   PASS  公网走代理                   http://www.baidu.com/ http=200，引擎日志: www.baidu.com:80 → corp-proxy
+    |   PASS  内网直连                     http://web.corp.local:8080/ http=200，未进引擎，直连计数 4 → 6
+    |   PASS  例外用户不被接管             引擎用户 flocks-egress 访问 www.baidu.com 未进引擎
+    |   PASS  引擎近 10 分钟无 error       
+    | 
+    | PASS 13 / FAIL 0 / WARN 0
+    | [flocks-egress] 安装完成：这台机器访问公网已经走 http://proxy.corp.local:3128，内网照常直连；flocks 照常使用，不用改任何配置。
+    | [flocks-egress] 以后有问题先跑 sudo flocks-egress check，把输出发给技术支持；要撤掉就 sudo flocks-egress rollback
+    | rc=0
+  PASS  I01 install 成功                                   
+  PASS  I02 两个服务 active + enabled                    
+  PASS  I03 文件权限                                     /etc/flocks-egress 750 root:flocks-egress、egress.conf/settings.json 600、config.yaml 640、状态目录属引擎用户
+  PASS  I03b settings.json 不含密码                      
+  PASS  I04 引擎以非 root 运行，仅 CAP_NET_ADMIN     CapEff:	0000000000001000
+  PASS  I05 引擎不联网下载 geo 数据                 
+  PASS  I06 安装末尾自动验收 13 项全过（含容器流量接管项） 
+  PASS  I07 验收记录 last-check.json（fail=0, redir-host） 
+  PASS  I08 flocks-egress status（/usr/sbin 软链）       
+  PASS  I09 默认 ENGINE_DOWN=direct：分流在随引擎启停的表里，常驻表不 redirect；redir-host 不接管 DNS 
+  PASS  I10 nftables.service drop-in 已装                  
+  PASS  I11 运行中 reconfigure --dry-run：探测不被自己接管、无临时残留 
+
+== 4. host 范围 / redir-host 场景（被接管方 root，例外 flocks-egress） ==
+  PASS  H HTTPS 经 B 转发                                 root http=200，B 日志 baidu:443 19 → 20
+  PASS  H 明文 HTTP(80) 也经 B（CONNECT :80）          http=200，B 日志 baidu:80 1 → 2
+  PASS  H DNS 不接管，被接管方拿真实 IP           root: www.baidu.com → 28.0.0.125
+  PASS  H 例外用户 DNS 真实                            flocks-egress: www.baidu.com → 28.0.0.125
+  PASS  H 例外用户 HTTPS 不进引擎                    flocks-egress 直连 http=200，引擎无新连接
+  PASS  H 内网域名直连                                 http=200，B 日志无 web.corp.local
+  PASS  H 内网 IP 直连                                   http=200
+  PASS  H 被接管方公网 UDP 被拒绝                   
+  PASS  H 例外用户公网 UDP 不受影响                
+  PASS  H 纯 IP 目标经 SNI 嗅探以域名交给 B       连 28.0.0.125:443 → 识别为 www.baidu.com:443
+  PASS  H aiohttp / httpx 两库都进引擎（pip 安装本身也经 B） 均 200，引擎日志新增 2 条
+  PASS  H 别的机器连 A 的监听端口不受影响      http=200
+
+== 4b. 容器流量：网桥 + 网络命名空间模拟 Docker bridge 网络（host 范围默认连容器一起接管） ==
+  PASS  C01 容器 HTTPS 经 B（prerouting 接管，引擎日志源地址是容器 IP） http=200
+  PASS  C02 redir-host 下容器 DNS 不接管、拿真实 IP（经转发到内网 DNS） 28.0.0.125
+  PASS  C03 容器访问内网 IP 直连（转发出去，不进引擎） http=200
+  PASS  C04 容器公网 UDP 被拒（forward 链，reject 计数 0 → 1） 
+  PASS  C05 HTTP 代理口 7890 只在回环（局域网、容器都用不了）；透明口 7892 在所有接口但局域网来的被 input 链丢掉 LAN 7890: curl: (7) Failed to connect to 172.30.0. / 容器 7890: curl: (7) Failed to connect to 172.31.0. / LAN 7892: 超时
+
+== 5a. 默认 ENGINE_DOWN=direct：引擎不在时直连兜底（redir-host） ==
+  PASS  E01 停引擎：分流表随之卸掉，本机公网直连兜底（B 日志无新增），常驻表还在 http=200 直连，DNS → 28.0.0.125
+  PASS  E02 停引擎：容器也直连兜底                http=200
+  PASS  E03 停引擎：公网 UDP 不再被拒              timeout
+  PASS  E04 停引擎：内网照常                         http=200
+  PASS  E05 引擎回来后重新经 B                       http=200
+  PASS  E06 引擎被 kill -9 后自动拉起、分流表回来、重新经 B pid 1315 → 1355
+
+== 5. ENGINE_DOWN=reject：引擎不在时 fail-closed（规则常驻） ==
+  PASS  F00 切到 reject：分流规则回到常驻表      
+  PASS  C06 reject 下停引擎：容器公网也立刻被拒（fail-closed 同样覆盖容器） rc=7 用时 0s
+  PASS  F01 停引擎后常驻规则表还在                
+  PASS  F02 停引擎后 DNS 表随之移除                 
+  PASS  F03 停引擎后公网 TCP 立刻被拒（不漏成直连） curl rc=7 用时 0s
+  PASS  F04 停引擎后内网照常                         http=200
+  PASS  F05 停引擎后 DNS 照常                          web.corp.local → 172.30.0.30
+  PASS  F06 引擎重新启动后恢复                      http=200
+  PASS  F07 引擎被 kill -9 后自动拉起                pid 1563 → 1602，http=200
+  PASS  F08 停规则服务 = 引擎一起停、两张表都删（整机恢复直连） 
+  PASS  F09 重新启动两个服务后恢复                
+
+== 6. 切 fake-ip（命令行改参数 = 重写 egress.conf） ==
+  PASS  K01 install --dns-mode fake-ip：沿用其余参数改写 egress.conf，留 .prev 
+  PASS  K02 fake-ip 模式自动验收 15 项全过（多了 DNS 接管表、例外用户 DNS 两项） 
+  PASS  K03 DNS 表有 53 → 1053 的 redirect              
+  PASS  K HTTPS 经 B 转发                                 root http=200，B 日志 baidu:443 34 → 35
+  PASS  K 明文 HTTP(80) 也经 B（CONNECT :80）          http=200，B 日志 baidu:80 4 → 5
+  PASS  K 被接管方 DNS 得到 fake-ip                    root: www.baidu.com → 198.18.0.4
+  PASS  K 例外用户 DNS 真实                            flocks-egress: www.baidu.com → 28.0.0.125
+  PASS  K 例外用户 HTTPS 不进引擎                    flocks-egress 直连 http=200，引擎无新连接
+  PASS  K 内网域名直连                                 http=200，B 日志无 web.corp.local
+  PASS  K 内网 IP 直连                                   http=200
+  PASS  K 被接管方公网 UDP 被拒绝                   
+  PASS  K 例外用户公网 UDP 不受影响                
+  PASS  K 纯 IP 目标经 SNI 嗅探以域名交给 B       连 28.0.0.125:443 → 识别为 www.baidu.com:443
+  PASS  C07 fake-ip 下容器 DNS 也被接管（dns_prerouting） www.baidu.com → 198.18.0.4
+  PASS  C08 fake-ip 下容器 HTTPS 经 B                    http=200
+  PASS  K04 fake-ip 模式停引擎：DNS 表移除，内网 / 公网域名解析恢复直连 web → 172.30.0.30, baidu → 28.0.0.125
+  PASS  K05 fake-ip 模式停引擎：公网 TCP 仍被拒   
+
+== 6b. 严格环境：内网 DNS 解析不了公网域名（auto → fake-ip，公网域名由代理解析） ==
+  PASS  S01 内网 DNS 只认内网名：auto 选 fake-ip，安装 + 自动验收全过 PASS 15 / FAIL 0 / WARN 0
+  PASS  S02 例外用户直问内网 DNS：真实 DNS 的 rcode 应答，不是 fake-ip，判 PASS 
+  PASS  S03 公网域名本机解析不了也能经 B 访问（fake-ip 占位，代理解析） http=200
+  PASS  S04 内网域名仍由内网 DNS 真实解析        web.corp.local → 172.30.0.30
+  PASS  S05 切回能解析公网的内网 DNS（后续场景用） 
+
+== 7. 代理的四种写法（客户现成 squid 认证 / socks5 / https 自签 / https 导入 CA） ==
+  PASS  V01 squid basic 认证（--proxy-user/--proxy-password） http=200，squid 日志出现用户 corpuser
+  PASS  V01b 认证 squid 下自动验收全过              
+  PASS  V02 账号错误的重装在探测阶段被拒，原配置和服务不受影响 
+  PASS  V03 socks5 代理（账号写在 URL 里）          http=200，B 上 socks5 日志 4 → 5
+  PASS  V04 https 代理 + --proxy-tls-insecure（自签证书） http=200
+  PASS  V05 https 不带 insecure、CA 未信任 → 探测拒绝，原配置不动 
+  PASS  V06 把代理证书导入系统 CA 后，https 代理正常校验（探测与引擎都认系统 CA） http=200
+  PASS  V07 换回不认证 squid：旧账号 / TLS 开关清掉，DNS_MODE 等沿用 
+
+== 7b. ENGINE_LOG_LEVEL=warning：引擎不再逐条记连接，验收改看 nft redirect 计数 ==
+  PASS  W01 warning 级别下自动验收仍全过：公网走代理凭 redirect 计数，例外用户项降为 WARN PASS 14 / FAIL 0 / WARN 1
+  PASS  W02 改回 info 后验收重新用引擎日志作证据 
+
+== 8. nftables.service 清空 ruleset 后自愈（drop-in） ==
+  PASS  N01 systemctl start nftables（flush ruleset）后两张表自动恢复 http=200
+  PASS  N02 systemctl reload nftables 后恢复              http=200
+  PASS  N03 systemctl restart nftables 后恢复             http=200
+  PASS  N04 之后 check --quick 通过                      PASS 10 / FAIL 0 / WARN 0
+
+== 8b. 整机重启（容器重启 = systemd 重新走一遍开机） ==
+  PASS  R01 重启后两个服务自启、两张表都在    
+  PASS  R01b 开机时规则表先于 network-pre.target 和引擎就位 rules=478083338us network-pre=482944152us engine=479290350us
+  PASS  R02 重启后公网仍经 B                          http=200
+  PASS  R03 重启后 check --quick 通过                   PASS 10 / FAIL 0 / WARN 0
+
+== 8c. 上联口本身是网桥（虚机宿主常见）：不能把局域网当容器 ==
+    | eth0 已挂进 br-up，IP 与默认路由搬到网桥上
+  PASS  B-UP1 reconfigure 识别出上联网桥（默认路由在它上面）并在四条容器链里排除 
+  PASS  B-UP2 自动验收仍全过，「容器流量接管」项列出上联网桥 
+  PASS  B-UP3 本机自己的公网访问照常经 B         http=200
+  PASS  B-UP4 局域网主机从上联网桥进来连 7892 仍被丢（没被当成容器） 
+  PASS  B-UP5 真正的容器网桥（br-test）不受影响，容器仍经 B http=200
+  PASS  B-UP6 网桥拆掉后 reconfigure 不再排除任何网桥 
+
+== 8d. ENGINE_DOWN=direct：引擎不在时直连兜底 ==
+  PASS  D01 切到 direct：分流规则（含容器链）搬进随引擎启停的表，常驻表不再 redirect，验收全过 PASS 15 / FAIL 0 / WARN 0
+  PASS  D02 direct 模式引擎在跑时照常经 B          http=200
+  PASS  D03 停引擎：分流表随之卸掉，本机公网直连兜底（B 日志无新增），DNS 真实 http=200 直连，DNS → 28.0.0.125
+  PASS  D03b 停引擎：程序手里缓存的 fake-ip 占位地址立刻被拒，不挂到超时 rc=7 用时 0s
+  PASS  D04 停引擎：容器也直连兜底                http=200
+  PASS  D05 停引擎：公网 UDP 也不再被拒（没有可达的目标就是超时） timeout
+  PASS  D06 引擎回来后重新经 B                       http=200
+  PASS  D07 direct 模式 check --quick 通过               PASS 10 / FAIL 0 / WARN 0
+  PASS  D08 切回 reject（默认 fail-closed）            
+
+== 9. 切到 user 范围（只接管 flocks 用户） ==
+  PASS  U01 切到 user 范围，两张表的范围规则都改为 uid 1000 
+  PASS  U02 user 范围自动验收全过                    PASS 14 / FAIL 0 / WARN 0
+  PASS  U HTTPS 经 B 转发                                 flocks http=200，B 日志 baidu:443 94 → 95
+  PASS  U 明文 HTTP(80) 也经 B（CONNECT :80）          http=200，B 日志 baidu:80 19 → 20
+  PASS  U 被接管方 DNS 得到 fake-ip                    flocks: www.baidu.com → 198.18.0.4
+  PASS  U 例外用户 DNS 真实                            root: www.baidu.com → 28.0.0.125
+  PASS  U 例外用户 HTTPS 不进引擎                    root 直连 http=200，引擎无新连接
+  PASS  U 内网域名直连                                 http=200，B 日志无 web.corp.local
+  PASS  U 内网 IP 直连                                   http=200
+  PASS  U 被接管方公网 UDP 被拒绝                   
+  PASS  U 例外用户公网 UDP 不受影响                
+  PASS  U 纯 IP 目标经 SNI 嗅探以域名交给 B       连 28.0.0.125:443 → 识别为 www.baidu.com:443
+  PASS  C09 user 范围默认不接管容器：容器流量直连，B 日志无新增 http=200 直连
+
+== 10. firewalld 共存 / systemd 单元 ==
+  PASS  FW firewalld 运行 + reload 后规则仍在、访问正常 http=200
+  PASS  S systemd-analyze verify（两个单元）           
+  PASS  S systemd-analyze security（信息）               → Overall exposure level for flocks-egress.service: 3.6 OK 🙂
+  PASS  S 渲染出的 config.yaml 是合法 YAML            
+
+== 11. rollback / 残留拒绝 / 重装 ==
+    | [flocks-egress] nft 表已删除，出网流量恢复安装前的走法
+    | [flocks-egress] 配置目录已改名保留为 /etc/flocks-egress.retired-20260922085804（含 egress.conf，确认不需要后可自行删除）
+    | [flocks-egress] 系统用户 flocks-egress 已删除
+    | [flocks-egress] 已恢复机器原来的出网方式。flocks 本身未受影响；若客户网络封了直连出口，公网请求会开始失败，这是预期行为
+    | rc=0
+  PASS  X01 rollback 干净、配置目录改名保留       /etc/flocks-egress.retired-20260922085804
+  PASS  X02 rollback 后流量恢复直连                   DNS → 28.0.0.125，直连 http=200
+  PASS  X03 有残留表却没有 settings.json → 拒绝安装并指向 rollback 
+  PASS  X04 rollback 后零参数安装（自解压包不带参数，代理地址取自 dnf.conf）：PASS 10 / FAIL 0 / WARN 1 
+  PASS  X04b 自解压包跑完不留临时文件            
+  PASS  X05 uninstall（rollback 别名，经自解压包透传） 
+  PASS  X04c 自解压包直接跟 IP:端口 → 当 install（dry-run 不落盘） 
+  PASS  X04d 自解压包不带参数、机器无代理设置 → 终端提问三句 → 认证代理可用（dry-run 不落盘、不留临时目录） 
+  PASS  X04e 自解压包 help 打用法（不解压、不装） 
+
+================ 结果 (arch=amd64) ================
+PASS | B01 squid 起来了（3128 不认证、3129 认证） | 
+PASS | B02 https 代理（socat TLS → squid）起来了 | 3443，自签证书 CN=proxy.corp.local
+PASS | B03 B 上的 SOCKS5 代理起来了（3130 认证） | 
+PASS | B04 A 用 curl -x 经 B 上网（不认证 squid） | http=200
+PASS | B04 A 用 curl -x 经 B 上网（认证 squid） | http=200
+PASS | B04 A 用 curl -x 经 B 上网（socks5） | http=200
+PASS | B04 A 用 curl -x 经 B 上网（http 3130） | http=200
+PASS | B04 A 用 curl -x 经 B 上网（https 自签） | http=200
+PASS | T01 非法代理协议一行报错 | ftp://
+PASS | T02 SCOPE=user 且用户不存在被拒绝 | 
+PASS | T03 FLOCKS_USER=引擎用户 被拒绝 | 
+PASS | T04 dry-run：探测 auto→redir-host、代理可用、渲染成功、不落盘、无临时残留 | 占位 uid 65534
+PASS | T05 渲染头里的版本号 | v2.0.0
+PASS | T05a 代理主机名解析后自动进直连集合 | 
+PASS | T05b dry-run 输出隐藏密码（含代理地址回显） | 
+PASS | T05c fake-ip：resolv.conf 的 search 域自动成为内网后缀，DNS 表有 redirect | corp.local
+PASS | T05d 参数文件里的未知键只警告不生效 | 
+PASS | T05e fake-ip + host 范围拒绝本机回环 DNS（会回环） | 
+PASS | T05e2 redir-host 不碰 DNS，本机 DNS 转发器可以接受 | 
+PASS | T05h --config 与 --proxy 不能同时给 | 
+PASS | T05i 代理地址可以直接当位置参数给（不写 --proxy） | 
+PASS | T05j 不给地址、机器上也没有代理设置、不是终端 → 明确报错（不卡在提问上） | 
+PASS | T05k 只写 主机:端口 按 HTTP 代理算 | 
+PASS | T05l 终端里不带参数 → 问地址（答错重问）、账号回车不问密码 → 装 | 
+PASS | T05m 终端里答账号密码 → 认证代理可用，密码不回显、不出现在输出里 | 
+PASS | T05n setup-a.sh help 等于 --help | 
+PASS | T05g DNS_MODE=auto：内网 DNS 解析不了公网 → fake-ip | 
+PASS | P01 代理端口不通 → 安装前报错 | 
+PASS | P02 squid 认证失败（407）→ 安装前报错，不回显密码 | 
+PASS | P03 该认证却没给账号 → 提示加 --proxy-user | 
+PASS | P04 https 自签证书未信任 → 报错并给出两种解法 | 
+PASS | P05 socks5 认证失败 → 安装前报错 | 
+PASS | P06 --skip-proxy-test 跳过探测 | 
+PASS | I01 install 成功 | 
+PASS | I02 两个服务 active + enabled | 
+PASS | I03 文件权限 | /etc/flocks-egress 750 root:flocks-egress、egress.conf/settings.json 600、config.yaml 640、状态目录属引擎用户
+PASS | I03b settings.json 不含密码 | 
+PASS | I04 引擎以非 root 运行，仅 CAP_NET_ADMIN | CapEff:	0000000000001000
+PASS | I05 引擎不联网下载 geo 数据 | 
+PASS | I06 安装末尾自动验收 13 项全过（含容器流量接管项） | 
+PASS | I07 验收记录 last-check.json（fail=0, redir-host） | 
+PASS | I08 flocks-egress status（/usr/sbin 软链） | 
+PASS | I09 默认 ENGINE_DOWN=direct：分流在随引擎启停的表里，常驻表不 redirect；redir-host 不接管 DNS | 
+PASS | I10 nftables.service drop-in 已装 | 
+PASS | I11 运行中 reconfigure --dry-run：探测不被自己接管、无临时残留 | 
+PASS | H HTTPS 经 B 转发 | root http=200，B 日志 baidu:443 19 → 20
+PASS | H 明文 HTTP(80) 也经 B（CONNECT :80） | http=200，B 日志 baidu:80 1 → 2
+PASS | H DNS 不接管，被接管方拿真实 IP | root: www.baidu.com → 28.0.0.125
+PASS | H 例外用户 DNS 真实 | flocks-egress: www.baidu.com → 28.0.0.125
+PASS | H 例外用户 HTTPS 不进引擎 | flocks-egress 直连 http=200，引擎无新连接
+PASS | H 内网域名直连 | http=200，B 日志无 web.corp.local
+PASS | H 内网 IP 直连 | http=200
+PASS | H 被接管方公网 UDP 被拒绝 | 
+PASS | H 例外用户公网 UDP 不受影响 | 
+PASS | H 纯 IP 目标经 SNI 嗅探以域名交给 B | 连 28.0.0.125:443 → 识别为 www.baidu.com:443
+PASS | H aiohttp / httpx 两库都进引擎（pip 安装本身也经 B） | 均 200，引擎日志新增 2 条
+PASS | H 别的机器连 A 的监听端口不受影响 | http=200
+PASS | C01 容器 HTTPS 经 B（prerouting 接管，引擎日志源地址是容器 IP） | http=200
+PASS | C02 redir-host 下容器 DNS 不接管、拿真实 IP（经转发到内网 DNS） | 28.0.0.125
+PASS | C03 容器访问内网 IP 直连（转发出去，不进引擎） | http=200
+PASS | C04 容器公网 UDP 被拒（forward 链，reject 计数 0 → 1） | 
+PASS | C05 HTTP 代理口 7890 只在回环（局域网、容器都用不了）；透明口 7892 在所有接口但局域网来的被 input 链丢掉 | LAN 7890: curl: (7) Failed to connect to 172.30.0. / 容器 7890: curl: (7) Failed to connect to 172.31.0. / LAN 7892: 超时
+PASS | E01 停引擎：分流表随之卸掉，本机公网直连兜底（B 日志无新增），常驻表还在 | http=200 直连，DNS → 28.0.0.125
+PASS | E02 停引擎：容器也直连兜底 | http=200
+PASS | E03 停引擎：公网 UDP 不再被拒 | timeout
+PASS | E04 停引擎：内网照常 | http=200
+PASS | E05 引擎回来后重新经 B | http=200
+PASS | E06 引擎被 kill -9 后自动拉起、分流表回来、重新经 B | pid 1315 → 1355
+PASS | F00 切到 reject：分流规则回到常驻表 | 
+PASS | C06 reject 下停引擎：容器公网也立刻被拒（fail-closed 同样覆盖容器） | rc=7 用时 0s
+PASS | F01 停引擎后常驻规则表还在 | 
+PASS | F02 停引擎后 DNS 表随之移除 | 
+PASS | F03 停引擎后公网 TCP 立刻被拒（不漏成直连） | curl rc=7 用时 0s
+PASS | F04 停引擎后内网照常 | http=200
+PASS | F05 停引擎后 DNS 照常 | web.corp.local → 172.30.0.30
+PASS | F06 引擎重新启动后恢复 | http=200
+PASS | F07 引擎被 kill -9 后自动拉起 | pid 1563 → 1602，http=200
+PASS | F08 停规则服务 = 引擎一起停、两张表都删（整机恢复直连） | 
+PASS | F09 重新启动两个服务后恢复 | 
+PASS | K01 install --dns-mode fake-ip：沿用其余参数改写 egress.conf，留 .prev | 
+PASS | K02 fake-ip 模式自动验收 15 项全过（多了 DNS 接管表、例外用户 DNS 两项） | 
+PASS | K03 DNS 表有 53 → 1053 的 redirect | 
+PASS | K HTTPS 经 B 转发 | root http=200，B 日志 baidu:443 34 → 35
+PASS | K 明文 HTTP(80) 也经 B（CONNECT :80） | http=200，B 日志 baidu:80 4 → 5
+PASS | K 被接管方 DNS 得到 fake-ip | root: www.baidu.com → 198.18.0.4
+PASS | K 例外用户 DNS 真实 | flocks-egress: www.baidu.com → 28.0.0.125
+PASS | K 例外用户 HTTPS 不进引擎 | flocks-egress 直连 http=200，引擎无新连接
+PASS | K 内网域名直连 | http=200，B 日志无 web.corp.local
+PASS | K 内网 IP 直连 | http=200
+PASS | K 被接管方公网 UDP 被拒绝 | 
+PASS | K 例外用户公网 UDP 不受影响 | 
+PASS | K 纯 IP 目标经 SNI 嗅探以域名交给 B | 连 28.0.0.125:443 → 识别为 www.baidu.com:443
+PASS | C07 fake-ip 下容器 DNS 也被接管（dns_prerouting） | www.baidu.com → 198.18.0.4
+PASS | C08 fake-ip 下容器 HTTPS 经 B | http=200
+PASS | K04 fake-ip 模式停引擎：DNS 表移除，内网 / 公网域名解析恢复直连 | web → 172.30.0.30, baidu → 28.0.0.125
+PASS | K05 fake-ip 模式停引擎：公网 TCP 仍被拒 | 
+PASS | S01 内网 DNS 只认内网名：auto 选 fake-ip，安装 + 自动验收全过 | PASS 15 / FAIL 0 / WARN 0
+PASS | S02 例外用户直问内网 DNS：真实 DNS 的 rcode 应答，不是 fake-ip，判 PASS | 
+PASS | S03 公网域名本机解析不了也能经 B 访问（fake-ip 占位，代理解析） | http=200
+PASS | S04 内网域名仍由内网 DNS 真实解析 | web.corp.local → 172.30.0.30
+PASS | S05 切回能解析公网的内网 DNS（后续场景用） | 
+PASS | V01 squid basic 认证（--proxy-user/--proxy-password） | http=200，squid 日志出现用户 corpuser
+PASS | V01b 认证 squid 下自动验收全过 | 
+PASS | V02 账号错误的重装在探测阶段被拒，原配置和服务不受影响 | 
+PASS | V03 socks5 代理（账号写在 URL 里） | http=200，B 上 socks5 日志 4 → 5
+PASS | V04 https 代理 + --proxy-tls-insecure（自签证书） | http=200
+PASS | V05 https 不带 insecure、CA 未信任 → 探测拒绝，原配置不动 | 
+PASS | V06 把代理证书导入系统 CA 后，https 代理正常校验（探测与引擎都认系统 CA） | http=200
+PASS | V07 换回不认证 squid：旧账号 / TLS 开关清掉，DNS_MODE 等沿用 | 
+PASS | W01 warning 级别下自动验收仍全过：公网走代理凭 redirect 计数，例外用户项降为 WARN | PASS 14 / FAIL 0 / WARN 1
+PASS | W02 改回 info 后验收重新用引擎日志作证据 | 
+PASS | N01 systemctl start nftables（flush ruleset）后两张表自动恢复 | http=200
+PASS | N02 systemctl reload nftables 后恢复 | http=200
+PASS | N03 systemctl restart nftables 后恢复 | http=200
+PASS | N04 之后 check --quick 通过 | PASS 10 / FAIL 0 / WARN 0
+PASS | R01 重启后两个服务自启、两张表都在 | 
+PASS | R01b 开机时规则表先于 network-pre.target 和引擎就位 | rules=478083338us network-pre=482944152us engine=479290350us
+PASS | R02 重启后公网仍经 B | http=200
+PASS | R03 重启后 check --quick 通过 | PASS 10 / FAIL 0 / WARN 0
+PASS | B-UP1 reconfigure 识别出上联网桥（默认路由在它上面）并在四条容器链里排除 | 
+PASS | B-UP2 自动验收仍全过，「容器流量接管」项列出上联网桥 | 
+PASS | B-UP3 本机自己的公网访问照常经 B | http=200
+PASS | B-UP4 局域网主机从上联网桥进来连 7892 仍被丢（没被当成容器） | 
+PASS | B-UP5 真正的容器网桥（br-test）不受影响，容器仍经 B | http=200
+PASS | B-UP6 网桥拆掉后 reconfigure 不再排除任何网桥 | 
+PASS | D01 切到 direct：分流规则（含容器链）搬进随引擎启停的表，常驻表不再 redirect，验收全过 | PASS 15 / FAIL 0 / WARN 0
+PASS | D02 direct 模式引擎在跑时照常经 B | http=200
+PASS | D03 停引擎：分流表随之卸掉，本机公网直连兜底（B 日志无新增），DNS 真实 | http=200 直连，DNS → 28.0.0.125
+PASS | D03b 停引擎：程序手里缓存的 fake-ip 占位地址立刻被拒，不挂到超时 | rc=7 用时 0s
+PASS | D04 停引擎：容器也直连兜底 | http=200
+PASS | D05 停引擎：公网 UDP 也不再被拒（没有可达的目标就是超时） | timeout
+PASS | D06 引擎回来后重新经 B | http=200
+PASS | D07 direct 模式 check --quick 通过 | PASS 10 / FAIL 0 / WARN 0
+PASS | D08 切回 reject（默认 fail-closed） | 
+PASS | U01 切到 user 范围，两张表的范围规则都改为 uid 1000 | 
+PASS | U02 user 范围自动验收全过 | PASS 14 / FAIL 0 / WARN 0
+PASS | U HTTPS 经 B 转发 | flocks http=200，B 日志 baidu:443 94 → 95
+PASS | U 明文 HTTP(80) 也经 B（CONNECT :80） | http=200，B 日志 baidu:80 19 → 20
+PASS | U 被接管方 DNS 得到 fake-ip | flocks: www.baidu.com → 198.18.0.4
+PASS | U 例外用户 DNS 真实 | root: www.baidu.com → 28.0.0.125
+PASS | U 例外用户 HTTPS 不进引擎 | root 直连 http=200，引擎无新连接
+PASS | U 内网域名直连 | http=200，B 日志无 web.corp.local
+PASS | U 内网 IP 直连 | http=200
+PASS | U 被接管方公网 UDP 被拒绝 | 
+PASS | U 例外用户公网 UDP 不受影响 | 
+PASS | U 纯 IP 目标经 SNI 嗅探以域名交给 B | 连 28.0.0.125:443 → 识别为 www.baidu.com:443
+PASS | C09 user 范围默认不接管容器：容器流量直连，B 日志无新增 | http=200 直连
+PASS | FW firewalld 运行 + reload 后规则仍在、访问正常 | http=200
+PASS | S systemd-analyze verify（两个单元） | 
+PASS | S systemd-analyze security（信息） | → Overall exposure level for flocks-egress.service: 3.6 OK 🙂
+PASS | S 渲染出的 config.yaml 是合法 YAML | 
+PASS | X01 rollback 干净、配置目录改名保留 | /etc/flocks-egress.retired-20260922085804
+PASS | X02 rollback 后流量恢复直连 | DNS → 28.0.0.125，直连 http=200
+PASS | X03 有残留表却没有 settings.json → 拒绝安装并指向 rollback | 
+PASS | X04 rollback 后零参数安装（自解压包不带参数，代理地址取自 dnf.conf）：PASS 10 / FAIL 0 / WARN 1 | 
+PASS | X04b 自解压包跑完不留临时文件 | 
+PASS | X05 uninstall（rollback 别名，经自解压包透传） | 
+PASS | X04c 自解压包直接跟 IP:端口 → 当 install（dry-run 不落盘） | 
+PASS | X04d 自解压包不带参数、机器无代理设置 → 终端提问三句 → 认证代理可用（dry-run 不落盘、不留临时目录） | 
+PASS | X04e 自解压包 help 打用法（不解压、不装） | 
+PASS 160 / FAIL 0 / SKIP 0
+e2e rc=0
