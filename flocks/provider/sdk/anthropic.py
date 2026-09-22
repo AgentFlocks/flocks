@@ -104,9 +104,9 @@ class AnthropicProvider(BaseProvider):
         if thinking_enabled:
             return
         if cls._temperature_is_deprecated(model_id):
-            requested = kwargs.get("temperature")
-            if requested is not None and requested != 1:
-                raise ValueError(f"temperature is deprecated for {model_id}; omit it or use the default")
+            # Agent-level presets (including the production report Agent's 0.2)
+            # are shared across models. The provider cannot forward that preset
+            # to these models, so use their only supported sampling behavior.
             return
         request_params["temperature"] = kwargs.get("temperature", 0.7)
     

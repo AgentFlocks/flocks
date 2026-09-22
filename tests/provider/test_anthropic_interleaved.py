@@ -287,11 +287,11 @@ async def test_newer_opus_omits_deprecated_temperature(streaming):
 
     if streaming:
         _ = [chunk async for chunk in provider.chat_stream(
-            "claude-opus-4-8", messages, thinking={"type": "disabled"}
+            "claude-opus-4-8", messages, thinking={"type": "disabled"}, temperature=0.2
         )]
         sent = messages_api.stream.call_args.kwargs
     else:
-        await provider.chat("claude-opus-4-8", messages, thinking={"type": "disabled"})
+        await provider.chat("claude-opus-4-8", messages, thinking={"type": "disabled"}, temperature=0.2)
         sent = messages_api.create.await_args.kwargs
     assert sent["thinking"] == {"type": "disabled"}
     assert "temperature" not in sent
@@ -309,11 +309,12 @@ def test_anthropic_temperature_deprecation_boundary(model_id, deprecated):
     assert AnthropicProvider._temperature_is_deprecated(model_id) is deprecated
 
 
-def test_newer_opus_rejects_explicit_nondefault_temperature():
-    with pytest.raises(ValueError, match="temperature is deprecated"):
-        AnthropicProvider._add_temperature(
-            {}, {"temperature": 0.2}, "claude-opus-4-8", thinking_enabled=False
-        )
+def test_newer_opus_omits_shared_agent_temperature_preset():
+    request = {}
+    AnthropicProvider._add_temperature(
+        request, {"temperature": 0.2}, "claude-opus-4-8", thinking_enabled=False
+    )
+    assert "temperature" not in request
 
 
 @pytest.mark.asyncio
