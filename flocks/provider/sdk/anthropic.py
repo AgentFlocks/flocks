@@ -7,6 +7,7 @@ Supports tool/function calling for agent capabilities.
 from typing import List, AsyncIterator, Optional, Dict, Any
 import os
 import json
+import re
 
 from flocks.provider.provider import (
     BaseProvider,
@@ -84,6 +85,30 @@ class AnthropicProvider(BaseProvider):
         if isinstance(thinking, dict):
             return thinking.get("type") != "disabled"
         return bool(thinking)
+
+    @staticmethod
+    def _temperature_is_deprecated(model_id: str) -> bool:
+        """Claude Opus 4.7+ and Sonnet 5+ reject non-default sampling values."""
+        match = re.match(r"^claude-(opus|sonnet)-(\d+)(?:-(\d+))?(?:-|$)", model_id.lower())
+        if not match:
+            return False
+        family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+        return (family == "opus" and (major, minor) >= (4, 7)) or (
+            family == "sonnet" and major >= 5
+        )
+
+    @classmethod
+    def _add_temperature(
+        cls, request_params: Dict[str, Any], kwargs: Dict[str, Any], model_id: str, thinking_enabled: bool
+    ) -> None:
+        if thinking_enabled:
+            return
+        if cls._temperature_is_deprecated(model_id):
+            requested = kwargs.get("temperature")
+            if requested is not None and requested != 1:
+                raise ValueError(f"temperature is deprecated for {model_id}; omit it or use the default")
+            return
+        request_params["temperature"] = kwargs.get("temperature", 0.7)
     
     def get_models(self) -> List[ModelInfo]:
         """Return models from flocks.json (_config_models) only.
@@ -397,8 +422,7 @@ class AnthropicProvider(BaseProvider):
             request_params["thinking"] = thinking
             if "max_tokens" in kwargs:
                 request_params["max_tokens"] = kwargs["max_tokens"]
-        if not thinking_enabled:
-            request_params["temperature"] = kwargs.get("temperature", 0.7)
+        self._add_temperature(request_params, kwargs, model_id, thinking_enabled)
         if isinstance(kwargs.get("output_config"), dict):
             request_params["output_config"] = dict(kwargs["output_config"])
         
@@ -500,10 +524,7 @@ class AnthropicProvider(BaseProvider):
             # Override max_tokens if provided in kwargs
             if "max_tokens" in kwargs:
                 request_params["max_tokens"] = kwargs["max_tokens"]
-        if not thinking_enabled:
-            # Disabled thinking is an explicit payload, but temperature remains
-            # valid and must still be forwarded to compatible gateways.
-            request_params["temperature"] = kwargs.get("temperature", 0.7)
+        self._add_temperature(request_params, kwargs, model_id, thinking_enabled)
         if isinstance(kwargs.get("output_config"), dict):
             request_params["output_config"] = dict(kwargs["output_config"])
         

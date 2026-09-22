@@ -213,7 +213,7 @@ async def test_anthropic_chat_forwards_disabled_thinking_and_temperature_without
         create=AsyncMock(
             return_value=SimpleNamespace(
                 id="msg_1",
-                model="claude-opus-4-8",
+                model="claude-opus-4-6",
                 content=[SimpleNamespace(type="text", text="OK")],
                 stop_reason="end_turn",
                 usage=SimpleNamespace(input_tokens=2, output_tokens=1),
@@ -227,7 +227,7 @@ async def test_anthropic_chat_forwards_disabled_thinking_and_temperature_without
     )
 
     await provider.chat(
-        "claude-opus-4-8",
+        "claude-opus-4-6",
         [ChatMessage(role="user", content="hello")],
         thinking={"type": "disabled"},
         temperature=0.2,
@@ -256,7 +256,7 @@ async def test_anthropic_stream_forwards_disabled_thinking_and_temperature_witho
     chunks = [
         chunk
         async for chunk in provider.chat_stream(
-            "claude-opus-4-8",
+            "claude-opus-4-6",
             [ChatMessage(role="user", content="hello")],
             thinking={"type": "disabled"},
             temperature=0.2,
@@ -269,6 +269,51 @@ async def test_anthropic_stream_forwards_disabled_thinking_and_temperature_witho
     assert "cache_control" not in kwargs
     beta_messages_api.stream.assert_not_called()
     assert chunks[-1].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_newer_opus_omits_deprecated_temperature(streaming):
+    provider = AnthropicProvider()
+    messages_api = MagicMock()
+    messages_api.create = AsyncMock(return_value=SimpleNamespace(
+        id="msg_newer", model="claude-opus-4-8",
+        content=[SimpleNamespace(type="text", text="OK")],
+        stop_reason="end_turn", usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+    ))
+    messages_api.stream.return_value = _FakeAsyncStream([SimpleNamespace(type="message_stop")])
+    provider._client = SimpleNamespace(messages=messages_api)
+    messages = [ChatMessage(role="user", content="hello")]
+
+    if streaming:
+        _ = [chunk async for chunk in provider.chat_stream(
+            "claude-opus-4-8", messages, thinking={"type": "disabled"}
+        )]
+        sent = messages_api.stream.call_args.kwargs
+    else:
+        await provider.chat("claude-opus-4-8", messages, thinking={"type": "disabled"})
+        sent = messages_api.create.await_args.kwargs
+    assert sent["thinking"] == {"type": "disabled"}
+    assert "temperature" not in sent
+
+
+@pytest.mark.parametrize("model_id,deprecated", [
+    ("claude-opus-4-6", False),
+    ("claude-opus-4-7", True),
+    ("claude-opus-4-8", True),
+    ("claude-opus-5", True),
+    ("claude-sonnet-5", True),
+    ("claude-fable-5", False),
+])
+def test_anthropic_temperature_deprecation_boundary(model_id, deprecated):
+    assert AnthropicProvider._temperature_is_deprecated(model_id) is deprecated
+
+
+def test_newer_opus_rejects_explicit_nondefault_temperature():
+    with pytest.raises(ValueError, match="temperature is deprecated"):
+        AnthropicProvider._add_temperature(
+            {}, {"temperature": 0.2}, "claude-opus-4-8", thinking_enabled=False
+        )
 
 
 @pytest.mark.asyncio
