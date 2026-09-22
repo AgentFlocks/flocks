@@ -156,6 +156,22 @@ export interface HubSceneSuite {
   workspaceLatestVersion?: string | null;
 }
 
+export interface HubUpdatePlan {
+  type: HubPluginType;
+  id: string;
+  scope: string;
+  token: string;
+  requiresConfirmation: boolean;
+  items: Array<{
+    type: HubPluginType;
+    id: string;
+    name: string;
+    baselineKnown: boolean;
+    requiresConfirmation: boolean;
+    changes: Array<{ path: string; kind: 'added' | 'deleted' | 'modified' }>;
+  }>;
+}
+
 export const hubAPI = {
   sceneSuites: () => client.get<HubSceneSuite[]>('/api/hub/scene-suites'),
 
@@ -241,8 +257,11 @@ export const hubAPI = {
     });
   },
 
-  update: (type: HubPluginType, id: string, scope = 'global') =>
-    client.post(`/api/hub/plugins/${type}/${id}/update`, { scope }),
+  previewUpdate: (type: HubPluginType, id: string, scope = 'global') =>
+    client.post<HubUpdatePlan>(`/api/hub/plugins/${type}/${id}/update/preview`, { scope }),
+
+  update: (type: HubPluginType, id: string, scope = 'global', confirmation?: { confirmationToken: string; confirmChanges: boolean }) =>
+    client.post<{ backupPath?: string | null }>(`/api/hub/plugins/${type}/${id}/update`, { scope, ...confirmation }),
 
   uninstall: (type: HubPluginType, id: string) =>
     client.delete(`/api/hub/plugins/${type}/${id}`),

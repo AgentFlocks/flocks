@@ -44,6 +44,7 @@ dependencies = [
     "httpx[socks]>=0.26.0",
     "aiofiles>=23.2.1",
     # File & Code Processing
+    "filelock>=3.25.2",
     "tree-sitter>=0.21.0",
     "watchdog>=4.0.0",
     "gitpython>=3.1.41",

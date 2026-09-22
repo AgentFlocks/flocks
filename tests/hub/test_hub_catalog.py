@@ -9,34 +9,10 @@ from fastapi.testclient import TestClient
 from flocks.hub import local
 from flocks.hub.catalog import list_catalog, load_manifest, load_taxonomy
 from flocks.hub.files import file_tree, read_file_content
+from flocks.hub.update_protection import build_plan
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.plugin.loader import PluginLoader
 
-
-@pytest.fixture()
-def isolated_hub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    home = tmp_path / "home"
-    config_dir = tmp_path / "config"
-    data_dir = tmp_path / "data"
-    project_dir = tmp_path / "project"
-    home.mkdir()
-    config_dir.mkdir()
-    data_dir.mkdir()
-    project_dir.mkdir()
-    monkeypatch.chdir(project_dir)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("FLOCKS_DATA_DIR", str(data_dir))
-    (config_dir / "flocks.json").write_text(json.dumps({}), encoding="utf-8")
-
-    from flocks.config.config import Config
-    from flocks.skill.skill import Skill
-
-    Config._global_config = None
-    Config._cached_config = None
-    Skill.clear_cache()
-    yield {"home": home, "config_dir": config_dir, "data_dir": data_dir, "project_dir": project_dir}
-    Skill.clear_cache()
 
 
 def _patch_webui_bundle_build(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -208,7 +184,7 @@ async def test_hub_update_runtime_failure_restores_previous_plugin(
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_then_recover)
 
     with pytest.raises(RuntimeError, match="import failed"):
-        await update_plugin("tool", "soc_workspace_query")
+        await update_plugin("tool", "soc_workspace_query", confirmation_token=build_plan("tool", "soc_workspace_query")["token"], confirm_changes=True)
 
     assert refresh_calls == 2
     assert old_handler.read_text(encoding="utf-8") == "OLD = True\n"
@@ -964,7 +940,8 @@ async def test_scene_suite_state_reflects_real_payload_completeness(
             assert suite["installedVersion"] == load_manifest("component", "soc-workspace").version
 
         if expected_state == "partial":
-            await install_plugin("component", "soc-workspace")
+            plan = build_plan("component", "soc-workspace")
+            await install_plugin("component", "soc-workspace", confirmation_token=plan["token"], confirm_changes=True)
             repaired = await client.get("/hub/scene-suites", timeout=30)
             repaired_suite = next(item for item in repaired.json() if item["id"] == "soc-workspace")
             assert repaired_suite["state"] == "installed"
@@ -1242,7 +1219,12 @@ async def test_suite_update_follows_child_versions_without_bumping_suite(
         assert next(item for item in catalog.json() if item["id"] == child_id)["state"] == expected_state
 
         target = "component/soc-workspace" if update_mode == "suite" else f"{child_type}/{child_id}"
-        response = await client.post(f"/hub/plugins/{target}/update")
+        preview = await client.post(f"/hub/plugins/{target}/update/preview")
+        assert preview.status_code == 200
+        assert preview.json()["requiresConfirmation"] is needs_update
+        response = await client.post(f"/hub/plugins/{target}/update", json={
+            "confirmationToken": preview.json()["token"], "confirmChanges": needs_update,
+        })
         assert response.status_code == 200, response.text
         updated = local.get_record(child_type, child_id)
         assert updated.version == ("999.0.0" if version_state == "newer" else child_record.version)
@@ -1292,9 +1274,9 @@ async def test_official_child_update_does_not_copy_project_override(
     local.save_installed_record(record.model_copy(update={"version": "0.0.1"}))
     (installed_dir / payload_file).write_bytes(official_payload + b"\n")
     if update_mode == "suite":
-        await update_plugin("component", "soc-workspace")
+        await update_plugin("component", "soc-workspace", confirmation_token=build_plan("component", "soc-workspace")["token"], confirm_changes=True)
     else:
-        await update_plugin(child_type, child_id)
+        await update_plugin(child_type, child_id, confirmation_token=build_plan(child_type, child_id)["token"], confirm_changes=True)
     assert (installed_dir / payload_file).read_bytes() == official_payload
     assert (project_dir / payload_file).read_bytes() == official_payload + b"\n\n"
     assert local.get_record(child_type, child_id).version == record.version
@@ -1352,7 +1334,7 @@ async def test_suite_child_update_failure_preserves_old_payload_and_update_badge
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_workflow_refresh)
     with pytest.raises(RuntimeError, match="workflow refresh failed"):
-        await update_plugin("component", "soc-workspace")
+        await update_plugin("component", "soc-workspace", confirmation_token=build_plan("component", "soc-workspace")["token"], confirm_changes=True)
     assert old_payload.read_text(encoding="utf-8") == '{"name": "previous release"}'
     assert local.get_record("workflow", "stream_alert_triage") == child_record
     assert local.get_record("component", "soc-workspace") == suite_record
@@ -1528,7 +1510,7 @@ async def test_suite_uninstall_required_child_failure_has_context_and_can_retry(
     monkeypatch.setattr(installer, "_refresh_runtime", noop_refresh)
     _patch_webui_bundle_build(monkeypatch)
     await install_plugin("component", "soc-workspace")
-    original_uninstall = installer.uninstall_plugin
+    original_uninstall = installer._uninstall_plugin
 
     async def fail_required_tool(plugin_type, plugin_id):
         if plugin_type == "tool" and plugin_id == "soc_workspace_query":
@@ -1539,7 +1521,7 @@ async def test_suite_uninstall_required_child_failure_has_context_and_can_retry(
     app.include_router(router)
     app.dependency_overrides[require_admin] = lambda: object()
     endpoint = "/hub/plugins/component/soc-workspace"
-    monkeypatch.setattr(installer, "uninstall_plugin", fail_required_tool)
+    monkeypatch.setattr(installer, "_uninstall_plugin", fail_required_tool)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         failed = await client.delete(endpoint, timeout=30)
         assert failed.status_code == 422
@@ -1549,7 +1531,7 @@ async def test_suite_uninstall_required_child_failure_has_context_and_can_retry(
         assert local.get_record("component", "soc-workspace") is not None
         assert local.get_record("tool", "soc_workspace_query") is not None
 
-        monkeypatch.setattr(installer, "uninstall_plugin", original_uninstall)
+        monkeypatch.setattr(installer, "_uninstall_plugin", original_uninstall)
         retried = await client.delete(endpoint, timeout=30)
         assert retried.status_code == 200, retried.text
         assert retried.json() == {"removed": True}

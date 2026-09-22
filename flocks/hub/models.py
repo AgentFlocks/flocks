@@ -125,6 +125,8 @@ class InstalledPluginRecord(BaseModel):
     scope: Literal["global", "project"] = "global"
     checksum: Optional[str] = None
     installPath: Optional[str] = None
+    fileHashes: Optional[dict[str, str]] = None
+    backupPath: Optional[str] = None
 
 
 HubInstallProgressStatus = Literal["pending", "installing", "installed", "skipped", "failed", "completed"]

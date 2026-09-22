@@ -15,6 +15,7 @@ const { hubAPI, toastError } = vi.hoisted(() => ({
     install: vi.fn(),
     installStream: vi.fn(),
     update: vi.fn(),
+    previewUpdate: vi.fn(),
     uninstall: vi.fn(),
     get: vi.fn(),
     files: vi.fn(),
@@ -109,6 +110,9 @@ function renderHub() {
 describe('HubPage catalog loading', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    hubAPI.previewUpdate.mockResolvedValue({ data: {
+      scope: 'global', token: 'preview-token', requiresConfirmation: false, items: [],
+    } });
     hubAPI.categories.mockResolvedValue({
       data: { categories: [], tags: [], useCases: [] },
     });
@@ -143,11 +147,27 @@ describe('HubPage catalog loading', () => {
       expect(await screen.findByText('SOC Entry')).toBeInTheDocument();
       expect(screen.getByText('Update available')).toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: 'Update' }));
-      await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith(type, 'soc-entry'));
+      await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith(type, 'soc-entry', 'global', { confirmationToken: 'preview-token', confirmChanges: false }));
       expect(await screen.findByText('Installed')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
     },
   );
+
+  it('lets the user cancel a customized component update from the plaza', async () => {
+    const entry = { ...catalogEntry('soc_ui', 'SOC Pages'), type: 'webui' as const, state: 'updateAvailable' as const };
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([entry]));
+    hubAPI.previewUpdate.mockResolvedValue({ data: {
+      scope: 'global', token: 'custom', requiresConfirmation: true,
+      items: [{ id: 'soc_ui', type: 'webui', name: 'SOC Pages', requiresConfirmation: true, baselineKnown: true,
+        changes: [{ path: 'package/page.tsx', kind: 'modified' }] }],
+    } });
+    renderHub();
+    await userEvent.click(await screen.findByRole('button', { name: 'Update' }));
+    await screen.findByRole('dialog');
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(hubAPI.update).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
+  });
 
   it('ignores an older search response that finishes after the latest query', async () => {
     const oldSearch = deferred<ReturnType<typeof catalogPage>>();

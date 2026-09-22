@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { useProtectedHubUpdate } from '@/components/hub/useProtectedHubUpdate';
 import { useToast } from '@/components/common/Toast';
 import { extractErrorMessage } from '@/utils/error';
 import SuiteInstallProgressPanel, {
@@ -332,6 +333,7 @@ export default function HubPage() {
   currentCatalogRequestKeyRef.current = catalogRequestKey;
   currentTreeRequestKeyRef.current = treeRequestKey;
   const canManageHub = user?.role === 'admin';
+  const protectedUpdate = useProtectedHubUpdate();
 
   const fetchCatalog = useCallback(async (silent = false, propagateError = false) => {
     const requestKey = catalogRequestKey;
@@ -491,13 +493,22 @@ export default function HubPage() {
     const key = `${entry.type}:${entry.id}:${action}`;
     setActionId(key);
     try {
-      if (action === 'install' && entry.type === 'component') {
+      const installPreview = action === 'install' ? (await hubAPI.previewUpdate(entry.type, entry.id)).data : null;
+      if (installPreview?.requiresConfirmation) {
+        if (!await protectedUpdate.update(entry.type, entry.id, installPreview)) {
+          setActionId(null);
+          return;
+        }
+      } else if (action === 'install' && entry.type === 'component') {
         setSuiteInstallProgress(createSuiteInstallProgressState(entry));
         await hubAPI.installStream(entry.type, entry.id, handleSuiteInstallProgress);
       } else if (action === 'install') {
         await hubAPI.install(entry.type, entry.id);
       }
-      if (action === 'update') await hubAPI.update(entry.type, entry.id);
+      if (action === 'update' && !await protectedUpdate.update(entry.type, entry.id)) {
+        setActionId(null);
+        return;
+      }
       if (action === 'uninstall') await hubAPI.uninstall(entry.type, entry.id);
     } catch (error) {
       if (action === 'install' && entry.type === 'component') {
@@ -567,6 +578,7 @@ export default function HubPage() {
 
   return (
     <div className="h-full min-h-0 flex flex-col" aria-busy={loading}>
+      {protectedUpdate.dialog}
       <PageHeader
         title={hubTitle}
         description={hubDescription}

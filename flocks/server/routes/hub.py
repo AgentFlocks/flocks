@@ -22,6 +22,7 @@ from flocks.hub.catalog import (
 from flocks.hub.files import file_tree, read_file_content
 from flocks.license import license_status
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
+from flocks.hub.update_protection import UpdateConfirmationRequired, build_plan, public_plan
 from flocks.hub.models import (
     HubCatalogEntry,
     HubFileContent,
@@ -41,6 +42,11 @@ log = Log.create(service="hub-routes")
 
 class HubInstallRequest(BaseModel):
     scope: str = Field(default="global", description="'global' only")
+
+
+class HubUpdateRequest(HubInstallRequest):
+    confirmationToken: str | None = None
+    confirmChanges: bool = False
 
 
 class HubCatalogFacets(BaseModel):
@@ -377,6 +383,8 @@ async def hub_install_plugin(
     await _assert_edition_allowed(plugin_type, plugin_id)
     try:
         return await install_plugin(plugin_type, plugin_id, scope=req.scope)
+    except UpdateConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail={"code": "hub_update_confirmation_required", "plan": exc.plan}) from exc
     except Exception as exc:
         log.error("hub.install.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -440,16 +448,34 @@ async def hub_install_plugin_stream(
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-@router.post("/hub/plugins/{plugin_type}/{plugin_id}/update", response_model=InstalledPluginRecord)
-async def hub_update_plugin(
-    plugin_type: PluginType,
-    plugin_id: str,
+@router.post("/hub/plugins/{plugin_type}/{plugin_id}/update/preview")
+async def hub_preview_update(
+    plugin_type: PluginType, plugin_id: str,
     req: HubInstallRequest = HubInstallRequest(),
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    await _assert_edition_allowed(plugin_type, plugin_id)
     try:
-        return await update_plugin(plugin_type, plugin_id, scope=req.scope)
+        return public_plan(await asyncio.to_thread(build_plan, plugin_type, plugin_id, req.scope))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/hub/plugins/{plugin_type}/{plugin_id}/update", response_model=InstalledPluginRecord)
+async def hub_update_plugin(
+    plugin_type: PluginType,
+    plugin_id: str,
+    req: HubUpdateRequest = HubUpdateRequest(),
+    _admin: object = Depends(require_admin),
+):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    await _assert_edition_allowed(plugin_type, plugin_id)
+    try:
+        return await update_plugin(plugin_type, plugin_id, scope=req.scope,
+                                   confirmation_token=req.confirmationToken, confirm_changes=req.confirmChanges)
+    except UpdateConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail={"code": "hub_update_confirmation_required", "plan": exc.plan}) from exc
     except Exception as exc:
         log.error("hub.update.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
         raise HTTPException(status_code=422, detail=str(exc)) from exc

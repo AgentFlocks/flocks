@@ -23,6 +23,15 @@ from flocks.hub.models import (
     PluginType,
 )
 from flocks.hub.security import SKIP_NAMES, validate_package
+from flocks.hub.update_protection import (
+    UpdateConfirmationRequired,
+    build_plan,
+    create_backup,
+    mutation_lock,
+    payload_hashes,
+    public_plan,
+    tree_hashes,
+)
 
 
 _TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
@@ -218,13 +227,18 @@ def _rollback_replacement(dst: Path, backup: Path | None) -> None:
         _replace_with_retry(backup, dst)
 
 
-def _copy_package(src: Path, dst: Path, *, retain_backup: bool = False) -> Path | None:
+def _copy_package(
+    src: Path, dst: Path, *, retain_backup: bool = False,
+    before_replace: Callable[[], None] | None = None,
+) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
     _purge_stale_scratch(parent, dst.name)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
+        if before_replace is not None:
+            before_replace()
         backup = _replace_prepared_path(tmp, dst)
         if not retain_backup:
             _commit_replacement(backup)
@@ -258,6 +272,7 @@ def _copy_attached_access_contracts(
     scope: str,
     *,
     retain_backup: bool = False,
+    before_replace: Callable[[], None] | None = None,
 ) -> tuple[Path, Path | None] | None:
     if plugin_type != "webui":
         return None
@@ -265,7 +280,7 @@ def _copy_attached_access_contracts(
     if not access_src.is_dir():
         return None
     access_dst = _contracts_access_dir(plugin_id, scope)
-    backup = _copy_package(access_src, access_dst, retain_backup=retain_backup)
+    backup = _copy_package(access_src, access_dst, retain_backup=retain_backup, before_replace=before_replace)
     return access_dst, backup
 
 
@@ -310,6 +325,7 @@ def _copy_webui_package_with_build(
     dst: Path,
     *,
     retain_backup: bool = False,
+    before_replace: Callable[[], None] | None = None,
 ) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -318,6 +334,8 @@ def _copy_webui_package_with_build(
     try:
         _copy_package_contents(src, tmp)
         _build_webui_pages(plugin_id, tmp)
+        if before_replace is not None:
+            before_replace()
         backup = _replace_prepared_path(tmp, dst)
         if not retain_backup:
             _commit_replacement(backup)
@@ -466,7 +484,7 @@ async def _rollback_component_ref_installs(
         if record is None or record.installedBy != component_key:
             continue
         try:
-            await uninstall_plugin(plugin_type, plugin_id)
+            await _uninstall_plugin(plugin_type, plugin_id)
         except FileNotFoundError:
             local.remove_installed_record(plugin_type, plugin_id)
         except Exception:
@@ -528,6 +546,7 @@ async def _install_component_refs(
     *,
     scope: str,
     progress: InstallProgressCallback | None = None,
+    protection_plan: dict | None = None,
 ) -> list[tuple[PluginType, str]]:
     seen: set[tuple[PluginType, str]] = set()
     component_key = f"component:{manifest.id}"
@@ -558,7 +577,7 @@ async def _install_component_refs(
                     item.status = "installing"
                     await _emit_component_progress(progress, manifest, "item", item=item)
                     try:
-                        await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
+                        await _install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key, protection_plan=protection_plan)
                     except Exception as exc:
                         if ref.optional:
                             item.status = "skipped"
@@ -588,7 +607,7 @@ async def _install_component_refs(
             await _emit_component_progress(progress, manifest, "item", item=item)
             rollback_refs.append(key)
             try:
-                await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
+                await _install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key, protection_plan=protection_plan)
             except Exception as exc:
                 await _rollback_component_ref_installs([key], component_key)
                 if ref.optional:
@@ -630,7 +649,7 @@ async def _uninstall_component_refs(manifest: HubPluginManifest) -> bool:
                 continue
         removed = True
         try:
-            await uninstall_plugin(ref.type, ref.id)
+            await _uninstall_plugin(ref.type, ref.id)
         except FileNotFoundError:
             local.remove_installed_record(ref.type, ref.id)
         except Exception as exc:
@@ -661,6 +680,47 @@ async def install_plugin(
     scope: str = "global",
     installed_by: str | None = None,
     progress: InstallProgressCallback | None = None,
+    confirmation_token: str | None = None,
+    confirm_changes: bool = False,
+) -> InstalledPluginRecord:
+    async with mutation_lock():
+        plan = build_plan(plugin_type, plugin_id, scope)
+        if (confirmation_token is not None and confirmation_token != plan["token"]) or (
+            plan["requiresConfirmation"] and (not confirm_changes or confirmation_token != plan["token"])
+        ):
+            raise UpdateConfirmationRequired(public_plan(plan))
+        try:
+            backup = await asyncio.to_thread(create_backup, plan) if plan["requiresConfirmation"] else None
+        except Exception as exc:
+            raise RuntimeError(f"Backup failed; update cancelled: {exc}") from exc
+        try:
+            refreshed = build_plan(plugin_type, plugin_id, scope)
+            if refreshed["token"] != plan["token"]:
+                if backup is not None:
+                    raise RuntimeError("Files changed after backup; retry the update")
+                raise UpdateConfirmationRequired(public_plan(refreshed))
+            record = await _install_plugin(
+                plugin_type, plugin_id, scope=scope, installed_by=installed_by,
+                progress=progress, protection_plan=plan,
+            )
+            if backup is not None:
+                record = record.model_copy(update={"backupPath": str(backup)})
+                local.save_installed_record(record)
+            return record
+        except Exception as exc:
+            if backup is not None:
+                raise RuntimeError(f"Update failed; backup preserved at {backup}: {exc}") from exc
+            raise
+
+
+async def _install_plugin(
+    plugin_type: PluginType,
+    plugin_id: str,
+    *,
+    scope: str = "global",
+    installed_by: str | None = None,
+    progress: InstallProgressCallback | None = None,
+    protection_plan: dict | None = None,
 ) -> InstalledPluginRecord:
     manifest = load_manifest(plugin_type, plugin_id)
     # Match the official manifest with its own payload. The preview resolver
@@ -669,6 +729,25 @@ async def install_plugin(
     src = plugin_root(plugin_type, plugin_id, prefer_bundled=True)
     validate_package(src, manifest)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
+    access_dst = _contracts_access_dir(plugin_id, scope) if plugin_type == "webui" and (src / "access").is_dir() else None
+    expected = None
+    if protection_plan is not None:
+        expected = next(item for item in protection_plan["items"] if (item["type"], item["id"]) == (plugin_type, plugin_id))
+        if payload_hashes(plugin_type, dst, access_dst) != expected["_current"]:
+            raise RuntimeError(f"Plugin files changed during update: {plugin_type}/{plugin_id}; retry the update")
+
+    def verify_root(label: str, target: Path) -> None:
+        if expected is None:
+            return
+        current = {label + "/" + key: value for key, value in tree_hashes(
+            target, webui=plugin_type == "webui" and label == "package",
+        ).items()}
+        baseline = {key: value for key, value in expected["_current"].items() if key.startswith(label + "/")}
+        if current != baseline:
+            raise RuntimeError(f"Plugin files changed during update: {plugin_type}/{plugin_id}; retry the update")
+        if payload_hashes(plugin_type, src, src / "access" if access_dst else None, source=True) != expected["_official"]:
+            raise RuntimeError("Official package changed during update; retry the update")
+
     component_key = f"component:{plugin_id}"
     component_ref_installs: list[tuple[PluginType, str]] = []
     previous_record = local.get_record(plugin_type, plugin_id)
@@ -677,16 +756,17 @@ async def install_plugin(
     access_replacement: tuple[Path, Path | None] | None = None
     try:
         if plugin_type == "component":
-            component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress)
+            component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress, protection_plan=protection_plan)
         if plugin_type == "webui":
             package_backup = _copy_webui_package_with_build(
                 plugin_id,
                 src,
                 dst,
                 retain_backup=True,
+                before_replace=lambda: verify_root("package", dst),
             )
         else:
-            package_backup = _copy_package(src, dst, retain_backup=True)
+            package_backup = _copy_package(src, dst, retain_backup=True, before_replace=lambda: verify_root("package", dst))
         package_replaced = True
         access_replacement = _copy_attached_access_contracts(
             plugin_type,
@@ -694,6 +774,7 @@ async def install_plugin(
             src,
             scope,
             retain_backup=True,
+            before_replace=lambda: verify_root("access", access_dst),
         )
         record = local.make_record(
             plugin_type=plugin_type,
@@ -705,6 +786,7 @@ async def install_plugin(
             scope=scope,
             installed_by=installed_by,
         )
+        record = record.model_copy(update={"fileHashes": payload_hashes(plugin_type, dst, access_dst)})
         local.save_installed_record(record)
         clear_catalog_caches()
         await _refresh_runtime(plugin_type, dst)
@@ -734,10 +816,14 @@ async def install_plugin(
         raise
 
 
-async def update_plugin(plugin_type: PluginType, plugin_id: str, *, scope: str = "global") -> InstalledPluginRecord:
+async def update_plugin(
+    plugin_type: PluginType, plugin_id: str, *, scope: str = "global",
+    confirmation_token: str | None = None, confirm_changes: bool = False,
+) -> InstalledPluginRecord:
     previous_record = local.get_record(plugin_type, plugin_id)
     installed_by = previous_record.installedBy if previous_record and previous_record.scope == scope else None
-    return await install_plugin(plugin_type, plugin_id, scope=scope, installed_by=installed_by)
+    return await install_plugin(plugin_type, plugin_id, scope=scope, installed_by=installed_by,
+                                confirmation_token=confirmation_token, confirm_changes=confirm_changes)
 
 
 def _collect_storage_keys(install_path: Path) -> list[str]:
@@ -786,6 +872,11 @@ def _cleanup_orphan_api_services(storage_keys: list[str]) -> None:
 
 
 async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
+    async with mutation_lock():
+        return await _uninstall_plugin(plugin_type, plugin_id)
+
+
+async def _uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     _validate_uninstall_plugin_id(plugin_id)
     manifest = load_manifest(plugin_type, plugin_id) if plugin_type == "component" else None
     record = local.get_record(plugin_type, plugin_id)

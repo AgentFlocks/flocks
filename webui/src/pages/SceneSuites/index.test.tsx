@@ -12,6 +12,7 @@ const { hubAPI, webuiContractPagesAPI, flocksproUsersApi, toast } = vi.hoisted((
     install: vi.fn(),
     installStream: vi.fn(),
     update: vi.fn(),
+    previewUpdate: vi.fn(),
     uninstall: vi.fn(),
   },
   webuiContractPagesAPI: {
@@ -95,6 +96,9 @@ function card(suiteId: string): HTMLElement {
 describe('SceneSuitesPage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    hubAPI.previewUpdate.mockResolvedValue({ data: {
+      scope: 'global', token: 'preview-token', requiresConfirmation: false, items: [],
+    } });
     __resetSceneSuiteUpdatesForTesting();
     hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, CODE_AUDIT] });
     flocksproUsersApi.hasCapability.mockResolvedValue(false);
@@ -103,6 +107,21 @@ describe('SceneSuitesPage', () => {
     hubAPI.update.mockResolvedValue({});
     hubAPI.uninstall.mockResolvedValue({});
     webuiContractPagesAPI.setWorkspaceEnabled.mockResolvedValue({});
+  });
+
+  it.each(['updateAvailable', 'partial'] as const)('cancels a customized %s suite without updating or enabling its workspace', async (state) => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state }] });
+    hubAPI.previewUpdate.mockResolvedValue({ data: {
+      scope: 'global', token: 'custom', requiresConfirmation: true,
+      items: [{ id: 'soc_ui', type: 'webui', name: 'SOC 页面', requiresConfirmation: true, baselineKnown: false, changes: [] }],
+    } });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: state === 'partial' ? '补全安装' : '更新' }));
+    await screen.findByRole('dialog');
+    await userEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(hubAPI.update).not.toHaveBeenCalled();
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: state === 'partial' ? '补全安装' : '更新' })).toBeEnabled();
   });
 
   it('offers install, disable and uninstall for an installed suite', async () => {
@@ -234,7 +253,7 @@ describe('SceneSuitesPage', () => {
     const soc = await waitFor(() => card('soc-workspace'));
     await user.click(within(soc).getByRole('button', { name: '更新' }));
 
-    await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace'));
+    await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace', 'global', { confirmationToken: 'preview-token', confirmChanges: false }));
     expect(hubAPI.update).toHaveBeenCalledTimes(1);
     // A scene left disabled by an earlier 停用 must not stay disabled after an
     // update the user just asked for.
