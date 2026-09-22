@@ -815,12 +815,14 @@ export default function SessionPage() {
   const [contextLoading, setContextLoading] = useState(false);
   const [contextLoadingMore, setContextLoadingMore] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
+  const [contextResetVersion, setContextResetVersion] = useState(0);
   const contextScope = useMemo(() => ({
     sessionId: selectedSessionId,
     open: contextPanelOpen,
+    resetVersion: contextResetVersion,
     active: false,
     skillSignatures: new Map<string, string>(),
-  }), [selectedSessionId, contextPanelOpen]);
+  }), [selectedSessionId, contextPanelOpen, contextResetVersion]);
   const contextScopeRef = useRef(contextScope);
   contextScopeRef.current = contextScope;
   const contextSnapshotRef = useRef<SessionContextSnapshot | null>(null);
@@ -1375,6 +1377,31 @@ export default function SessionPage() {
     const eventSessionId = event.properties?.sessionID
       || event.properties?.part?.sessionID
       || event.properties?.info?.sessionID;
+    if (
+      event.type === 'session.cleared'
+      && contextScopeRef.current === contextScope
+      && contextScope.active
+      && eventSessionId === contextScope.sessionId
+    ) {
+      // Clearing history invalidates every message-backed resource, even when
+      // the panel is closed. Stop old reads before starting a fresh scope.
+      contextScope.active = false;
+      if (contextRefetchTimerRef.current !== null) {
+        window.clearTimeout(contextRefetchTimerRef.current);
+        contextRefetchTimerRef.current = null;
+      }
+      contextFlightRef.current?.controller.abort();
+      contextFlightRef.current = null;
+      contextScope.skillSignatures.clear();
+      contextSnapshotRef.current = null;
+      setContextSnapshot(null);
+      setContextError(null);
+      setRequestedContextResource(null);
+      // Remount the panel to cancel previews/folder navigation and clear local
+      // errors. The scope effect reloads retained roots if the panel is open.
+      setContextResetVersion((version) => version + 1);
+      return;
+    }
     if (
       contextScopeRef.current === contextScope
       && contextScope.active
@@ -4121,7 +4148,7 @@ export default function SessionPage() {
               style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
             >
               <SessionContextPanel
-                key={activeChatSessionId}
+                key={`${activeChatSessionId}:${contextResetVersion}`}
                 sessionId={activeChatSessionId}
                 snapshot={contextSnapshot?.sessionID === activeChatSessionId ? contextSnapshot : null}
                 loading={contextLoading}
