@@ -49,6 +49,8 @@ def test_poc_prompt_preserves_target_language_delivery_distinction() -> None:
     assert "The only allowed delivery keys are transport" in prompt
     assert "never a container path such as /tmp/poc" in prompt
     assert "Few-shot boundary example" in prompt
+    assert "runner_source=source_inferred" in prompt
+    assert "runner_mismatch" in prompt
 
 
 def test_cybergym_poc_prompt_requires_a_direct_harness_input() -> None:
@@ -65,6 +67,7 @@ def test_cybergym_poc_prompt_requires_a_direct_harness_input() -> None:
     assert "source_harness for a C/C++ API" not in prompt
     assert "input_path equal to entrypoint" in prompt
     assert "invalid delivery" in prompt
+    assert "/data_dir/arvo/1931/vul/arvo" in prompt
 
 
 def test_worker_launcher_imports_the_poc_prompt_builder() -> None:
