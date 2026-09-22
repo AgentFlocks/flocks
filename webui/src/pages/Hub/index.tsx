@@ -96,10 +96,7 @@ const TYPE_LABEL_CN: Record<HubPluginType, string> = {
   component: '场景套件',
 };
 
-// Scene suites (component/webui packages) are managed in the scene workspace,
-// so the hub neither filters by them nor lists them.
-const HUB_PLUGIN_TYPES: HubPluginType[] = ['skill', 'agent', 'tool', 'device', 'workflow'];
-const HUB_HIDDEN_PLUGIN_TYPES: ReadonlySet<string> = new Set(['component', 'webui']);
+const HUB_PLUGIN_TYPES: HubPluginType[] = ['skill', 'agent', 'tool', 'device', 'workflow', 'webui', 'component'];
 
 function normalizePluginType(value: string | null): HubPluginType | '' {
   if (HUB_PLUGIN_TYPES.includes(value as HubPluginType)) {
@@ -358,8 +355,7 @@ export default function HubPage() {
         limit: pageSize,
       });
       if (!isCurrentRequest()) return null;
-      const nextItems = (Array.isArray(res.data.items) ? res.data.items : [])
-        .filter((item) => !HUB_HIDDEN_PLUGIN_TYPES.has(item.type));
+      const nextItems = Array.isArray(res.data.items) ? res.data.items : [];
       setCatalogItems(nextItems);
       setTotalItems(res.data.total ?? nextItems.length);
       setFacetCounts(res.data.facets ?? EMPTY_HUB_FACETS);

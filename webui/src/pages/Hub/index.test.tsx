@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import HubPage from './index';
+import type { HubCatalogEntry } from '@/api/hub';
 
 const { hubAPI, toastError } = vi.hoisted(() => ({
   hubAPI: {
@@ -75,7 +76,7 @@ function catalogEntry(id: string, name: string, manifestPath = `${id}/manifest.j
   };
 }
 
-function catalogPage(items: ReturnType<typeof catalogEntry>[], total = items.length) {
+function catalogPage(items: HubCatalogEntry[], total = items.length) {
   return {
     data: {
       items,
@@ -128,6 +129,25 @@ describe('HubPage catalog loading', () => {
       }));
     });
   });
+
+  it.each(['component', 'webui', 'workflow', 'tool'] as const)(
+    'shows an updateable %s in the plaza and runs its update action', async (type) => {
+      const user = userEvent.setup();
+      const entry = { ...catalogEntry('soc-entry', 'SOC Entry'), type, state: 'updateAvailable' as const };
+      const updated = { ...entry, state: 'installed' as const, installedVersion: entry.version };
+      hubAPI.catalogPage.mockResolvedValueOnce(catalogPage([entry])).mockResolvedValue(catalogPage([updated]));
+      hubAPI.catalog.mockResolvedValue({ data: [updated] });
+      hubAPI.update.mockResolvedValue({ data: updated });
+
+      renderHub();
+      expect(await screen.findByText('SOC Entry')).toBeInTheDocument();
+      expect(screen.getByText('Update available')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Update' }));
+      await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith(type, 'soc-entry'));
+      expect(await screen.findByText('Installed')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
+    },
+  );
 
   it('ignores an older search response that finishes after the latest query', async () => {
     const oldSearch = deferred<ReturnType<typeof catalogPage>>();

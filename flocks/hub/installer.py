@@ -663,7 +663,10 @@ async def install_plugin(
     progress: InstallProgressCallback | None = None,
 ) -> InstalledPluginRecord:
     manifest = load_manifest(plugin_type, plugin_id)
-    src = plugin_root(plugin_type, plugin_id)
+    # Match the official manifest with its own payload. The preview resolver
+    # prefers project overrides and can otherwise reinstall old/custom files
+    # while recording the official release's new version.
+    src = plugin_root(plugin_type, plugin_id, prefer_bundled=True)
     validate_package(src, manifest)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
     component_key = f"component:{plugin_id}"
@@ -732,7 +735,9 @@ async def install_plugin(
 
 
 async def update_plugin(plugin_type: PluginType, plugin_id: str, *, scope: str = "global") -> InstalledPluginRecord:
-    return await install_plugin(plugin_type, plugin_id, scope=scope)
+    previous_record = local.get_record(plugin_type, plugin_id)
+    installed_by = previous_record.installedBy if previous_record and previous_record.scope == scope else None
+    return await install_plugin(plugin_type, plugin_id, scope=scope, installed_by=installed_by)
 
 
 def _collect_storage_keys(install_path: Path) -> list[str]:

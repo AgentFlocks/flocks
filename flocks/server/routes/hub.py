@@ -326,12 +326,20 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
 
 
 async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str, action: str) -> None:
-    if plugin_type != "component":
-        return
     from flocks.server.routes.event import publish_event
 
     try:
-        await publish_event("hub.scene_suites.changed", {"suiteId": plugin_id, "action": action})
+        suite_ids = [plugin_id] if plugin_type == "component" else []
+        if plugin_type != "component":
+            # Updating a child also changes its suite's update/completeness
+            # state. Refresh other open scene views without a manual reload.
+            entries = await asyncio.to_thread(list_catalog, plugin_type="component")
+            for entry in entries:
+                refs = load_manifest("component", entry.id).components
+                if any((ref.type, ref.id) == (plugin_type, plugin_id) for ref in refs):
+                    suite_ids.append(entry.id)
+        for suite_id in suite_ids:
+            await publish_event("hub.scene_suites.changed", {"suiteId": suite_id, "action": action})
     except Exception as exc:
         # Notification failures must not hide the installer result or prevent
         # streaming responses from closing after a failed installation.
