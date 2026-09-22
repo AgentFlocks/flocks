@@ -217,6 +217,10 @@ def normalize_open_questions(raw_items: Any) -> list[dict[str, Any]]:
         if unknown:
             raise ValueError(
                 "Unsupported open-question fields: " + ", ".join(sorted(unknown))
+                + "; required: question=unresolved question text, category=question category, "
+                "blocking=boolean (true only for coverage_blocking). "
+                "Optional: related_paths=array of snapshot paths, follow_up=next investigation step. "
+                'Example: {"question":"Is source analysis complete?","category":"coverage_blocking","blocking":true}'
             )
         question = raw.get("question")
         category = raw.get("category")
@@ -226,7 +230,9 @@ def normalize_open_questions(raw_items: Any) -> list[dict[str, Any]]:
         if len(question) > 1_000:
             raise ValueError("Open-question text may contain at most 1000 characters")
         if category not in OPEN_QUESTION_CATEGORIES:
-            raise ValueError("Unsupported open-question category")
+            raise ValueError(
+                "Unsupported open-question category; allowed: " + ", ".join(sorted(OPEN_QUESTION_CATEGORIES))
+            )
         expected_blocking = category == "coverage_blocking"
         if not isinstance(blocking, bool) or blocking is not expected_blocking:
             raise ValueError(
@@ -284,6 +290,9 @@ def normalize_dispositions(raw_items: Any) -> list[dict[str, str]]:
             raise ValueError(
                 f"dispositions[{index}] has unsupported fields: "
                 + ", ".join(sorted(unknown))
+                + "; fields: path=assigned snapshot-relative file, claim=analysis disposition, "
+                "reason=required only for failed or not_applicable; omit for analyzed. "
+                'Example: {"path":"src/parser.c","claim":"failed","reason":"source could not be read"}'
             )
         path = raw.get("path")
         claim = raw.get("claim")
@@ -291,7 +300,9 @@ def normalize_dispositions(raw_items: Any) -> list[dict[str, str]]:
             raise ValueError(f"dispositions[{index}].path must be a non-empty string")
         path = path.strip().replace("\\", "/")
         if claim not in COVERAGE_CLAIMS:
-            raise ValueError(f"dispositions[{index}].claim is unsupported")
+            raise ValueError(
+                f"dispositions[{index}].claim is unsupported; allowed: " + ", ".join(sorted(COVERAGE_CLAIMS))
+            )
         if path in seen:
             raise ValueError(f"Duplicate coverage disposition path: {path}")
         seen.add(path)

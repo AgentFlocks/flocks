@@ -718,7 +718,14 @@ async def audit_submit_threat_model(
         allowed_fields = {*canonical_fields, "evidence"}
         unknown = sorted(set(threat_model) - allowed_fields)
         if unknown:
-            raise ValueError("Unsupported threat-model fields: " + ", ".join(unknown))
+            raise ValueError(
+                "Unsupported threat-model fields: " + ", ".join(unknown)
+                + "; required fields: summary=repository security overview (string); "
+                "assets=protected resources, trustBoundaries=trust transitions, "
+                "attackerCapabilities=attacker actions, securityObjectives=security requirements "
+                "(non-empty arrays of strings); assumptions=assumptions (array of strings, may be empty); "
+                "evidence=source references (relative_path, blob_digest, start_line, end_line)."
+            )
         if not isinstance(threat_model["summary"], str):
             raise ValueError("Threat-model summary must be a string")
         summary = threat_model["summary"].strip()
@@ -904,7 +911,7 @@ async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) ->
             raise ValueError("identity_instance must be a stable lowercase semantic slug")
         severity = str(candidate["severity"]).lower()
         if severity not in {"critical", "high", "medium", "low", "informational"}:
-            raise ValueError("Unsupported severity")
+            raise ValueError("Unsupported severity; allowed: critical, high, medium, low, informational")
         confidence = float(candidate["confidence"])
         if not 0 <= confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
@@ -966,7 +973,8 @@ async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) ->
                 metadata[field] = value
             if metadata["role"] not in EVIDENCE_ROLES:
                 raise ValueError(
-                    f"evidence[{index}].role must be a canonical code-evidence role"
+                    f"evidence[{index}].role must be a canonical code-evidence role; allowed: "
+                    + ", ".join(sorted(EVIDENCE_ROLES))
                 )
             evidence_metadata.append(metadata)
         evidence = await asyncio.to_thread(
@@ -1040,7 +1048,9 @@ async def audit_submit_verdict(
         await sync_source_receipts(ctx, runtime, binding)
         normalized_verdict = str(verdict or "").lower()
         if normalized_verdict not in {"confirmed", "rejected", "insufficient_evidence"}:
-            raise ValueError("Unsupported verification verdict")
+            raise ValueError(
+                "Unsupported verification verdict; allowed: confirmed, rejected, insufficient_evidence"
+            )
         if not str(rationale or "").strip():
             raise ValueError("rationale is required")
         if len(str(rationale)) > 10_000:

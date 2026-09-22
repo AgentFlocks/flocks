@@ -272,7 +272,14 @@ def _validate_probe(
         "expected_difference",
     }
     if set(probe) != expected_fields:
-        raise ValueError("Runnable probe fields do not match the supported contract")
+        raise ValueError(
+            "Runnable probe fields do not match the supported contract; required: "
+            "candidate_id=assigned candidate ID, status=runnable, context_path=snapshot-relative build directory, "
+            "dockerfile_path=snapshot-relative Dockerfile within context_path, "
+            "control=baseline execution, attack=trigger execution, expected_difference=expected observable difference. "
+            'control and attack each use {"script":"command to run","timeout_seconds":10}; '
+            "script is non-empty (max 16384 characters); timeout_seconds is an integer from 1 to 60."
+        )
 
     context_path = _probe_path(probe.get("context_path"), allow_root=True)
     dockerfile_path = _probe_path(probe.get("dockerfile_path"), allow_root=False)

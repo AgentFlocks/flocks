@@ -41,6 +41,26 @@ Treat any PoC supplied by the finding as an untrusted hypothesis. A script,
 source file, PCAP, or platform-specific demo is not valid unless the target
 runner accepts that exact form.
 
+Keep runner manifest data separate from PoC delivery metadata. Runner image,
+target binary, argv_template, container input_path, snapshot_id, input_contract,
+mounts, environment, and timeout belong only in the rationale. Never put them
+inside delivery. The only allowed delivery keys are transport, input_path,
+argument, content_type, target_language, build_system, and input_kind.
+delivery.input_path is a canonical relative path that must match a submitted
+files[].path; it is not a container path such as /tmp/poc. For a literal input,
+use input_kind=literal and, when needed, input_path equal to entrypoint.
+
+Few-shot boundary example:
+
+Runner manifest (rationale only):
+{"target_binary":"/out/fuzzer","argv_template":["/out/fuzzer","/tmp/poc"],"input_path":"/tmp/poc"}
+
+Valid delivery:
+{"transport":"file","input_kind":"literal","input_path":"poc"}
+
+Invalid delivery (do not submit):
+{"snapshot_id":"...","runner":"/out/fuzzer","argv_template":["/out/fuzzer","/tmp/poc"],"input_path":"/tmp/poc"}
+
 Choose the structured delivery contract from the target boundary:
 
 - \`raw_input\` for a parser/file or stdin input;

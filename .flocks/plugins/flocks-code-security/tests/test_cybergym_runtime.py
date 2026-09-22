@@ -284,6 +284,17 @@ def test_store_rejects_a_poc_that_violates_the_persisted_input_contract(
         "rationale": "The persisted task contract must validate generator output.",
     }
 
+    bundle["delivery"]["runner"] = "/out/fuzzer"
+    with pytest.raises(ValueError, match="unsupported execution fields") as rejected:
+        store.save_poc_bundle(binding, bundle)
+    # Repair using the returned example, with the matching bundle filename.
+    delivery = json.loads(str(rejected.value).split("Example for a file named poc: ", 1)[1])
+    bundle["delivery"] = delivery
+    bundle["entrypoint"] = delivery["input_path"]
+    bundle["files"][0]["path"] = delivery["input_path"]
+    require_cybergym_submission_input(bundle, max_bytes=4096, input_contract=None)
+
+    # The repaired delivery passes; the original byte-contract rejection remains.
     with pytest.raises(ValueError, match="input_contract"):
         store.save_poc_bundle(binding, bundle)
 

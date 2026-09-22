@@ -2849,7 +2849,7 @@ class ScanStore:
         if not isinstance(candidate_id, str) or not candidate_id:
             raise ValueError("PoC bundle requires candidate_id")
         if artifact_type not in {"raw_input", "source_harness", "request", "bundle"}:
-            raise ValueError("Unsupported PoC artifact_type")
+            raise ValueError("Unsupported PoC artifact_type; allowed: raw_input, source_harness, request, bundle")
         if not isinstance(entrypoint, str) or not entrypoint.strip() or len(entrypoint) > 512:
             raise ValueError("PoC entrypoint must be a bounded non-empty string")
         if not isinstance(files, list) or not 1 <= len(files) <= 8:
@@ -2923,7 +2923,18 @@ class ScanStore:
                 "input_kind",
             }
             if not set(delivery) <= allowed_delivery_keys:
-                raise ValueError("PoC delivery metadata contains unsupported execution fields")
+                raise ValueError(
+                    "PoC delivery metadata contains unsupported execution fields; "
+                    "delivery fields (all values are non-empty strings, max 512 characters): "
+                    "transport=input channel (for example file or stdin); "
+                    "input_path=canonical bundle-relative files[].path, not a container path; "
+                    "argument=input argument; content_type=input media type; "
+                    "target_language=target programming language; build_system=build tool; "
+                    "input_kind=input form (CyberGym requires literal). "
+                    "Omit unused fields. For CyberGym, input_path must equal entrypoint. "
+                    "Runner and argv details belong in rationale. "
+                    'Example for a file named poc: {"transport":"file","input_path":"poc","input_kind":"literal"}'
+                )
             for key, value in delivery.items():
                 if not isinstance(value, str) or not value.strip() or len(value) > 512:
                     raise ValueError(f"PoC delivery field {key} must be a bounded string")
@@ -3583,9 +3594,17 @@ class ScanStore:
         if not isinstance(plan, dict) or set(plan) - {
             "stage", "hypothesis", "constraints", "next_action", "artifact_id", "recipe", "reason_code"
         }:
-            raise ValueError("Invalid solver checkpoint fields")
+            raise ValueError(
+                "Invalid solver checkpoint fields; required: stage=planning/execution stage. "
+                "Optional: hypothesis=input hypothesis, constraints=input requirements, next_action=next step, "
+                "artifact_id=existing artifact from this PoC, recipe=bit-edit plan, reason_code=blocking reason. "
+                'Example: {"stage":"input_planning","hypothesis":"check input framing"}'
+            )
         if plan.get("stage") not in {"input_planning", "materializing", "replaying", "diagnosing", "blocked", "inconclusive"}:
-            raise ValueError("Invalid solver checkpoint stage")
+            raise ValueError(
+                "Invalid solver checkpoint stage; allowed: input_planning, materializing, replaying, "
+                "diagnosing, blocked, inconclusive"
+            )
         if len(json.dumps(plan, ensure_ascii=False).encode("utf-8")) > 8 * 1024:
             raise ValueError("Solver checkpoint exceeds 8 KiB")
         artifact_id = plan.get("artifact_id")
@@ -4430,7 +4449,17 @@ class ScanStore:
                 frozenset(static_fields),
                 frozenset(dynamic_fields),
             }:
-                raise ValueError("Final adjudication has unsupported fields")
+                raise ValueError(
+                    "Final adjudication has unsupported fields; "
+                    'static decision example: {"action":"finalize","accepted_candidate_ids":[],'
+                    '"rejected_candidates":[{"candidate_id":"candidate_id","reason":"rejection rationale"}]}. '
+                    "accepted_candidate_ids lists accepted IDs; rejected_candidates lists rejected IDs and reasons. "
+                    "Classify every actual candidate exactly once; replace example IDs with bound candidate IDs. "
+                    "Dynamic scans additionally require dynamic_assessments, one per confirmed candidate: "
+                    '[{"candidate_id":"candidate_id","conclusion":"inconclusive","rationale":"assessment evidence"}]. '
+                    "Omit dynamic_assessments on static scans; choose the conclusion from "
+                    "reproduced, not_reproduced, inconclusive, not_run according to persisted run evidence."
+                )
             raw_accepted = decision["accepted_candidate_ids"]
             rejected = decision["rejected_candidates"]
             if not isinstance(raw_accepted, list) or not all(isinstance(item, str) and item for item in raw_accepted):
@@ -4483,7 +4512,10 @@ class ScanStore:
                         "inconclusive",
                         "not_run",
                     }:
-                        raise ValueError("Unsupported dynamic assessment conclusion")
+                        raise ValueError(
+                            "Unsupported dynamic assessment conclusion; allowed: "
+                            "reproduced, not_reproduced, inconclusive, not_run"
+                        )
                     if not isinstance(rationale, str) or not rationale.strip() or len(rationale.strip()) > 10_000:
                         raise ValueError("Dynamic assessment rationale must contain 1 to 10000 characters")
                     normalized_assessments.append(
@@ -4498,15 +4530,21 @@ class ScanStore:
                     raise ValueError("dynamic_assessments contains duplicates")
                 normalized_assessments.sort(key=lambda item: item["candidate_id"])
         else:
+            rescan_hint = (
+                'decision example: {"action":"targeted_rescan","rescan":{"reason":"why further analysis is needed",'
+                '"paths":["src/parser.c"],"questions":["Is the parser input length checked?"]}}. '
+                "reason explains the rescan; paths are 1-32 actual snapshot-relative paths narrower than '.'; "
+                "questions are 1-32 non-empty investigation questions. Replace the example path with an actual path."
+            )
             if set(decision) != {"action", "rescan"}:
-                raise ValueError("Targeted rescan requires only the rescan direction")
+                raise ValueError("Targeted rescan requires only the rescan direction; " + rescan_hint)
             raw_rescan = decision["rescan"]
             if not isinstance(raw_rescan, dict) or set(raw_rescan) != {
                 "reason",
                 "paths",
                 "questions",
             }:
-                raise ValueError("Targeted rescan requires only reason, paths, and questions")
+                raise ValueError("Targeted rescan requires only reason, paths, and questions; " + rescan_hint)
             reason = raw_rescan["reason"]
             paths = raw_rescan["paths"]
             questions = raw_rescan["questions"]
