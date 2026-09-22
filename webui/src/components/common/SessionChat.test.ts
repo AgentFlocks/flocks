@@ -21,6 +21,7 @@ import {
   getMessageErrorText,
   getMessageGroupClassName,
   getProcessGroupDurationMs,
+  mergeConsecutiveAssistantMessages,
   getRenderableThinkingText,
   getThinkingFirstSentence,
   getRenderableFileUrl,
@@ -6305,5 +6306,119 @@ describe('areChatMessagePartsRenderEqual', () => {
         } as Message['parts'][number],
       ],
     )).toBe(false);
+  });
+});
+
+
+describe('process duration across model/tool boundaries', () => {
+  const done = { id: 'done', type: 'tool', tool: 'read', state: {
+    status: 'completed', input: {}, output: 'ok', time: { start: 0, end: 5_000 },
+  } } as Message['parts'][number];
+  const marker = { id: 'model', type: 'step-start', time: { start: 20_000 } } as Message['parts'][number];
+
+  it.each(['pending', 'between-rounds', 'parallel'] as const)('keeps ticking during %s', (scenario) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(22_000);
+    try {
+      const extra: Message['parts'] = scenario === 'pending'
+        ? [marker, { id: 'pending', type: 'tool', tool: 'read', state: { status: 'pending', input: {} } }]
+        : scenario === 'between-rounds' ? [marker]
+          : [
+            { id: 'running', type: 'tool', tool: 'read', state: { status: 'running', input: {}, time: { start: 20_000 } } },
+            { ...done, id: 'finished-first', state: { ...done.state!, time: { start: 20_000, end: 21_000 } } },
+          ];
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({ role: 'assistant', parts: [done, ...extra] }),
+        isActive: true, collapseIntermediateSteps: true,
+      }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 7s');
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 17s');
+      expect(screen.getByText(`查看 ${scenario === 'pending' ? 2 : scenario === 'parallel' ? 3 : 1} 个步骤`)).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps final output timing after completion and remount', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(25_000);
+    try {
+      const output = { id: 'output', type: 'text', text: '最终回答', time: { start: 22_000 } } as Message['parts'][number];
+      const message = makeMessage({ role: 'assistant', parts: [done, marker, output] });
+      const mounted = render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      const completed = { ...message, finish: 'stop', parts: [done,
+        { ...marker, time: { start: 20_000, end: 25_000 } },
+        { ...output, time: { start: 22_000, end: 25_000 } },
+      ] };
+      mounted.rerender(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      mounted.unmount();
+      render(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      expect(screen.getByText('查看 1 个步骤')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not extend orphan intervals from older messages/attempts', () => {
+    const parts = [
+      { ...marker, id: 'old-model', messageID: 'old', time: { start: 0 } },
+      { ...done, id: 'old-tool', messageID: 'old', state: { status: 'running', time: { start: 0 } } },
+      { ...marker, messageID: 'new' },
+      { ...done, messageID: 'new' },
+    ] as Message['parts'];
+    expect(getProcessGroupDurationMs(parts, 22_000, 'old-tool', { messageId: 'new', modelPartId: 'model' })).toBe(7_000);
+    expect(getProcessGroupDurationMs(parts.slice(0, 2), 22_000, undefined, { messageId: 'new', modelPartId: 'model' })).toBeNull();
+  });
+
+  it('keeps a merged next round active before any visible output arrives', () => {
+    const merged = mergeConsecutiveAssistantMessages([
+      makeMessage({ id: 'old', role: 'assistant', finish: 'tool-calls', parts: [done] }),
+      makeMessage({ id: 'new', role: 'assistant', parts: [marker] }),
+    ]);
+    const items = buildChatTimelineItems({ messages: merged, skipIndices: new Set(), isStreaming: true });
+    expect(items).toHaveLength(1);
+    expect(items[0].isActive).toBe(true);
+  });
+
+  it('preserves the initial loading state and hides empty completed timing-only messages', () => {
+    const message = makeMessage({ role: 'assistant', parts: [marker] });
+    render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true }));
+    expect(screen.getByLabelText('思考中...')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-process-group')).not.toBeInTheDocument();
+    expect(shouldRenderMessage({ ...message, finish: 'stop' }, { isActive: false })).toBe(false);
+  });
+
+  it('assigns model intervals once across a visible question boundary', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({ role: 'assistant', parts: [
+        { ...marker, id: 'model-before', time: { start: 0, end: 5_000 } }, done,
+        { id: 'question', type: 'tool', tool: 'question', callID: 'question-call', state: { status: 'running', input: {} } },
+        { ...marker, time: { start: 20_000, end: 23_000 } },
+        { ...done, id: 'second-tool', state: { ...done.state!, time: { start: 22_000, end: 24_000 } } },
+      ] }),
+      pendingQuestions: { 'question-call': { requestId: 'req', questions: [{ id: 'scope', type: 'choice', question: '选择范围', options: [{ label: '全部' }] }] } },
+      isActive: false, collapseIntermediateSteps: true,
+    }));
+    const durations = screen.getAllByTestId('chat-process-duration');
+    expect(durations).toHaveLength(2);
+    expect(durations[0]).toHaveTextContent('已处理 5s');
+    expect(durations[1]).toHaveTextContent('已处理 4s');
+  });
+
+  it('does not change completed legacy message timing', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({ role: 'assistant', finish: 'stop', parts: [done,
+        { id: 'legacy-output', type: 'text', text: '完成', time: { start: 20_000, end: 30_000 } },
+      ] }), isActive: false, collapseIntermediateSteps: true,
+    }));
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+  });
+
+  it('merges model/tool overlap and excludes a real gap', () => {
+    expect(getProcessGroupDurationMs([
+      { ...marker, time: { start: 0, end: 5_000 } }, done,
+      { ...marker, id: 'next', time: { start: 20_000, end: 22_000 } },
+    ])).toBe(7_000);
   });
 });
