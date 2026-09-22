@@ -302,8 +302,6 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
             or (shell_present and not required_keys.issubset(installed_keys))
         ):
             state = "partial"
-        elif state == "installed" and child is not None and child.state == "updateAvailable":
-            state = "updateAvailable"
         suites.append(
             SceneSuiteEntry(
                 id=entry.id,

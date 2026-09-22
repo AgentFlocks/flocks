@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from flocks.hub import local
-from flocks.hub.catalog import _version_tuple, clear_catalog_caches, load_manifest
+from flocks.hub.catalog import _catalog_install_state, clear_catalog_caches, load_manifest
 from flocks.hub.files import plugin_root
 from flocks.hub.models import (
     HubComponentRef,
@@ -512,17 +512,15 @@ def _can_adopt_existing_ref(
 def _component_ref_is_outdated(
     ref: HubComponentRef,
     install_path: Path,
-    record: Optional[InstalledPluginRecord],
+    record: InstalledPluginRecord | None,
 ) -> bool:
-    """True when the installed child is older than the version this suite ships."""
+    """Use the catalog's update decision, including unversioned legacy installs."""
     try:
         available = load_manifest(ref.type, ref.id).version
     except Exception:
         return False
-    installed = record.version if record is not None else local.installed_payload_version(ref.type, install_path)
-    if not installed:
-        return False
-    return _version_tuple(installed) < _version_tuple(available)
+    state, _ = _catalog_install_state(ref.type, install_path, record, available)
+    return state == "updateAvailable"
 
 
 async def _install_component_refs(

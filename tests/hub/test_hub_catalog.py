@@ -1178,6 +1178,111 @@ async def test_scene_suite_infers_orphans_only_from_its_own_workflow_records(
         assert Path(record.installPath).is_dir()
 
 
+@pytest.mark.parametrize(("child_type", "child_id"), [
+    ("webui", "soc_ui"),
+    ("tool", "soc_workspace_query"),
+    ("workflow", "stream_alert_denoise"),
+    ("workflow", "stream_alert_triage"),
+])
+@pytest.mark.parametrize("version_state", ["older", "unrecorded", "current", "newer"])
+async def test_suite_update_follows_child_versions_without_bumping_suite(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+    child_type: str, child_id: str, version_state: str,
+):
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.server.auth import require_admin, require_user
+    from flocks.server.routes.hub import router
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    suite_record = await install_plugin("component", "soc-workspace")
+    before_records = local.load_installed_records()
+    child_record = local.get_record(child_type, child_id)
+    child_dir = Path(child_record.installPath)
+    old_file = child_dir / "old-release.txt"
+    old_file.write_text("old release payload", encoding="utf-8")
+    payload_path = child_dir / {
+        "webui": "soc_overview/src/index.tsx",
+        "tool": "soc_workspace_query.py",
+        "workflow": "workflow.json",
+    }[child_type]
+    latest_payload = payload_path.read_bytes()
+    payload_path.write_bytes(latest_payload + b"\n")
+    if version_state == "unrecorded":
+        local.remove_installed_record(child_type, child_id)
+        if child_type == "webui":
+            workspace_file = child_dir / "workspace.json"
+            workspace = json.loads(workspace_file.read_text(encoding="utf-8"))
+            workspace["version"] = "0.0.1"
+            workspace_file.write_text(json.dumps(workspace), encoding="utf-8")
+    elif version_state in {"older", "newer"}:
+        local.save_installed_record(child_record.model_copy(update={
+            "version": "0.0.1" if version_state == "older" else "999.0.0",
+        }))
+    needs_update = version_state in {"older", "unrecorded"}
+    expected_state = "updateAvailable" if needs_update else "installed"
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_user] = lambda: object()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/hub/scene-suites")
+        suite = next(item for item in response.json() if item["id"] == "soc-workspace")
+        assert suite["state"] == expected_state
+        assert suite["installedVersion"] == suite["version"] == suite_record.version
+        catalog = await client.get("/hub/catalog", params={"type": "component"})
+        assert next(item for item in catalog.json() if item["id"] == "soc-workspace")["state"] == expected_state
+
+        response = await client.post("/hub/plugins/component/soc-workspace/update")
+        assert response.status_code == 200, response.text
+        updated = local.get_record(child_type, child_id)
+        assert updated.version == ("999.0.0" if version_state == "newer" else child_record.version)
+        assert updated.installedBy == child_record.installedBy
+        assert old_file.exists() is (not needs_update)
+        assert payload_path.read_bytes() == (latest_payload if needs_update else latest_payload + b"\n")
+        for key, record in before_records.items():
+            if key not in {"component:soc-workspace", f"{child_type}:{child_id}"}:
+                assert local.load_installed_records()[key] == record
+        response = await client.get("/hub/scene-suites")
+        assert next(item for item in response.json() if item["id"] == "soc-workspace")["state"] == "installed"
+
+
+async def test_suite_child_update_failure_preserves_old_payload_and_update_badge(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.server.routes.hub import hub_scene_suites
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    suite_record = await install_plugin("component", "soc-workspace")
+    child_record = local.get_record("workflow", "stream_alert_triage").model_copy(update={"version": "0.0.1"})
+    local.save_installed_record(child_record)
+    old_payload = Path(child_record.installPath) / "workflow.json"
+    old_payload.write_text('{"name": "previous release"}', encoding="utf-8")
+
+    async def fail_workflow_refresh(plugin_type, _changed_path=None):
+        if plugin_type == "workflow":
+            raise RuntimeError("workflow refresh failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_workflow_refresh)
+    with pytest.raises(RuntimeError, match="workflow refresh failed"):
+        await update_plugin("component", "soc-workspace")
+    assert old_payload.read_text(encoding="utf-8") == '{"name": "previous release"}'
+    assert local.get_record("workflow", "stream_alert_triage") == child_record
+    assert local.get_record("component", "soc-workspace") == suite_record
+    clear_catalog_caches()
+    suite = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert suite.state == "updateAvailable"
+
+
 async def test_scene_suite_reports_page_package_versions(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
     """The suite version can stay put while its page package is behind; the
     manager needs both numbers to explain an "update available" badge."""

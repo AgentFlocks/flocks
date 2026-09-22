@@ -669,6 +669,23 @@ def _cached_catalog_entries(
         if manifest:
             entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
             seen.add((bundled_type, bundled_id))
+    # A suite can ship unchanged while a referenced workflow/tool/page gets a
+    # new release. Expose that update on the suite as well as on the child.
+    by_key = {(entry.type, entry.id): entry for entry in entries}
+    for entry in entries:
+        if entry.type != "component" or entry.state != "installed":
+            continue
+        try:
+            refs = load_manifest("component", entry.id).components
+        except Exception:
+            continue
+        if any(
+            child.state == "updateAvailable"
+            for ref in refs
+            if ref.type != "component"
+            and (child := by_key.get((ref.type, ref.id))) is not None
+        ):
+            entry.state = "updateAvailable"
     return tuple(entries)
 
 
