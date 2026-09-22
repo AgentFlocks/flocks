@@ -73,7 +73,7 @@ import {
   shouldLoadMcpCatalog,
   type TabKey,
 } from './tabLoading';
-import { getToolTabCounts } from './tabCounts';
+import { getApiServiceCount, getMcpServiceCount, getToolTabCounts } from './tabCounts';
 
 // ============================================================================
 // Constants & Config
@@ -189,14 +189,15 @@ export default function ToolPage() {
 
   // Sheet state
   const [showMCPSheet, setShowMCPSheet] = useState(false);
-  const [mcpRefreshKey, setMcpRefreshKey] = useState(0);
+  const [serviceRefreshKey, setServiceRefreshKey] = useState(0);
   const [showAPISheet, setShowAPISheet] = useState(false);
   const [showGenerateSheet, setShowGenerateSheet] = useState(false);
   // Sort: default by 类别 (source) MCP -> API -> 内置
   const [sort, setSort] = useState<SortState>({ field: 'source', dir: 'asc' });
   const [filters, setFilters] = useState<ColumnFilters>(EMPTY_FILTERS);
 
-  const [apiEnabledServicesCount, setApiEnabledServicesCount] = useState(0);
+  const [apiServicesCount, setApiServicesCount] = useState(0);
+  const [mcpInventory, setMcpInventory] = useState<Record<string, unknown> | MCPServer[]>({});
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
   const tabSourceFilter = getTabSourceFilter(activeTab);
   const sourceFilterParam = useMemo(() => {
@@ -310,27 +311,37 @@ export default function ToolPage() {
     setConfiguredIds(prev => { const next = new Set(prev); next.delete(id); return next; });
   }, []);
 
-  const fetchApiServicesCount = useCallback(async () => {
+  const fetchApiServicesCount = useCallback(async (force = false) => {
     try {
-      const res = await providerAPI.listApiServices();
-      const services = Array.isArray(res.data) ? res.data : [];
-      setApiEnabledServicesCount(services.filter((service) => service.enabled).length);
+      const res = await providerAPI.listApiServices(force ? { force: true } : undefined);
+      setApiServicesCount(getApiServiceCount(Array.isArray(res.data) ? res.data : []));
     } catch {
-      // Keep the previous count when the status request fails.
+      // Keep the previous native inventory count on a failed reload.
+    }
+  }, []);
+
+  const fetchMcpInventory = useCallback(async () => {
+    try {
+      const res = await mcpAPI.list();
+      setMcpInventory(res.data);
+    } catch {
+      // A tool facet cannot stand in for missing/zero-tool native services.
     }
   }, []);
 
   useEffect(() => {
-    fetchApiServicesCount();
-  }, [fetchApiServicesCount]);
+    void fetchApiServicesCount();
+    void fetchMcpInventory();
+  }, [fetchApiServicesCount, fetchMcpInventory]);
 
   const refreshToolData = useCallback(async () => {
     const [refreshResult] = await Promise.all([
       refetch(),
-      fetchApiServicesCount(),
+      fetchApiServicesCount(true),
+      fetchMcpInventory(),
     ]);
     return refreshResult;
-  }, [refetch, fetchApiServicesCount]);
+  }, [refetch, fetchApiServicesCount, fetchMcpInventory]);
 
   const { user } = useAuth();
   const readOnlyReason = user?.role === 'admin' ? undefined : t('pluginGroups:readOnly.admin');
@@ -424,8 +435,11 @@ export default function ToolPage() {
   const apiCatalogEntries = useMemo(() => [] as MCPCatalogEntry[], []);
 
   const tabCounts = useMemo(
-    () => getToolTabCounts(totalTools, toolFacets, apiEnabledServicesCount),
-    [totalTools, toolFacets, apiEnabledServicesCount],
+    () => getToolTabCounts(totalTools, toolFacets, {
+      api: apiServicesCount,
+      mcp: getMcpServiceCount(mcpInventory, mcpCatalogEntries),
+    }),
+    [totalTools, toolFacets, apiServicesCount, mcpInventory, mcpCatalogEntries],
   );
   const enabledSummary = useMemo(() => ({
     active: toolFacets.enabled['true'] ?? tools.filter((tool) => tool.enabled).length,
@@ -492,6 +506,7 @@ export default function ToolPage() {
       const message = extractErrorMessage(err, t('alert.unknownError'));
       toast.error(t('alert.refreshFailedTitle'), message);
     } finally {
+      setServiceRefreshKey((key) => key + 1);
       setRefreshing(false);
     }
   };
@@ -712,6 +727,7 @@ export default function ToolPage() {
           <MCPTabContent
             tools={processedTools}
             searchQuery={searchQuery}
+            onServersChange={setMcpInventory}
             onSelectTool={openDetail}
             onRefreshTools={refreshToolDataAfterMutation}
             catalogEntries={mcpCatalogEntries}
@@ -720,7 +736,7 @@ export default function ToolPage() {
             configuredIds={configuredIds}
             onConfiguredChange={onConfiguredChange}
             onConfiguredRemove={onConfiguredRemove}
-            refreshKey={mcpRefreshKey}
+            refreshKey={serviceRefreshKey}
             viewMode={viewMode}
           />
         ) : activeTab === 'api' ? (
@@ -729,6 +745,8 @@ export default function ToolPage() {
             searchQuery={searchQuery}
             matchingToolServices={apiToolSearchPending || error ? undefined : toolFacets.source_name}
             toolSearchPending={apiToolSearchPending}
+            onServiceCountChange={setApiServicesCount}
+            refreshKey={serviceRefreshKey}
             onSelectTool={openDetail}
             onRefreshTools={refreshToolDataAfterMutation}
             catalogEntries={apiCatalogEntries}
@@ -870,7 +888,7 @@ export default function ToolPage() {
             setShowMCPSheet(false);
             void handleRefresh();
           }}
-          onSaved={() => { setShowMCPSheet(false); handleRefresh(); setMcpRefreshKey(k => k + 1); }}
+          onSaved={() => { setShowMCPSheet(false); void handleRefresh(); }}
           onRefresh={handleRefresh}
         />
       )}

@@ -73,6 +73,8 @@ vi.mock('@/api/tool', () => ({
   },
 }));
 
+vi.mock('@/api/mcp', () => ({ mcpAPI: { list: vi.fn(() => Promise.resolve({ data: {} })) } }));
+
 vi.mock('@/api/provider', () => ({
   providerAPI: {
     listApiServices: vi.fn(() => Promise.resolve({ data: [] })),

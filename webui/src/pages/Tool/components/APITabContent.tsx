@@ -39,6 +39,8 @@ interface APITabContentProps {
   toolSearchPending?: boolean;
   onSelectTool: (tool: Tool) => void;
   onRefreshTools: () => Promise<void>;
+  onServiceCountChange?: (count: number) => void;
+  refreshKey?: number;
   viewMode?: 'list' | 'cards';
   catalogEntries: MCPCatalogEntry[];
   catalogCategories: Record<string, MCPCatalogCategory>;
@@ -54,6 +56,8 @@ export default function APITabContent({
   toolSearchPending = false,
   onSelectTool,
   onRefreshTools,
+  onServiceCountChange,
+  refreshKey,
   viewMode = 'list',
   catalogEntries,
   catalogCategories,
@@ -101,7 +105,7 @@ export default function APITabContent({
 
   useEffect(() => {
     fetchServices();
-  }, [fetchServices]);
+  }, [fetchServices, refreshKey]);
 
   const selectedService = useMemo(
     () => (selectedServiceId ? services.find((service) => service.id === selectedServiceId) ?? null : null),
@@ -344,6 +348,9 @@ export default function APITabContent({
     ...catalogEntries.filter((entry) => !nativeServices.some((service) => service.id === entry.id)).map(asCatalogGroupItem),
   ];
   const groupItems = groupInventory(services);
+  useEffect(() => {
+    if (!servicesLoading && servicesError === null) onServiceCountChange?.(groupItems.length);
+  }, [groupItems.length, servicesLoading, servicesError, onServiceCountChange]);
   const { warning } = useToast();
   const groupDrag = useGroupDrag(groupItems, warning);
   const reloadGroupData = () => fetchServices(true);

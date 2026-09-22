@@ -148,6 +148,24 @@ describe('APITabContent', () => {
     expect(mcpAPI.catalogInstall).not.toHaveBeenCalled();
   });
 
+  it('reports the full API inventory count across filters and native reloads', async () => {
+    const service = { id: 'api', name: 'API service', enabled: false, tool_count: 0, group: 'Ops' };
+    providerAPI.listApiServices.mockResolvedValue({ data: [service, { ...service, id: 'device', integration_type: 'device' }] });
+    const onServiceCountChange = vi.fn();
+    const props = { tools: [], onSelectTool: vi.fn(), onRefreshTools: vi.fn(), onServiceCountChange,
+      catalogEntries: [], catalogCategories: {}, catalogLoading: false, configuredIds: new Set<string>(), onConfiguredChange: vi.fn() };
+    const { rerender } = render(<APITabContent {...props} />);
+    await waitFor(() => expect(onServiceCountChange).toHaveBeenLastCalledWith(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Ops 1' }));
+    rerender(<APITabContent {...props} searchQuery="no-match" />);
+    expect(screen.getByText('api.noTools')).toBeInTheDocument();
+    expect(onServiceCountChange).toHaveBeenLastCalledWith(1);
+    providerAPI.listApiServices.mockResolvedValue({ data: [service, { ...service, id: 'added' }] });
+    rerender(<APITabContent {...props} searchQuery="no-match" refreshKey={1} />);
+    await waitFor(() => expect(onServiceCountChange).toHaveBeenLastCalledWith(2));
+    expect(screen.getByRole('button', { name: 'Ops 2' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('keeps versioned service identities, full group counts, card fields/actions and independent drawer tools', async () => {
     providerAPI.listApiServices.mockResolvedValue({ data: [
       { id: 'service-a__v9_2', name: 'Service A', version: '9.2', description: 'Service A description', enabled: true, status: 'connected', tool_count: 40, latency_ms: 12, verify_ssl: false, group: 'Alpha' },

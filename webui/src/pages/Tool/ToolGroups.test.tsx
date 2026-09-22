@@ -11,12 +11,13 @@ import zhGroups from '@/locales/zh-CN/pluginGroups.json';
 import enGroups from '@/locales/en-US/pluginGroups.json';
 
 const mocks = vi.hoisted(() => ({
-  listPage: vi.fn(), get: vi.fn(), patch: vi.fn(), refresh: vi.fn(), listServices: vi.fn(),
-  auth: { role: 'admin' }, toastWarning: vi.fn(),
+  listPage: vi.fn(), get: vi.fn(), patch: vi.fn(), refresh: vi.fn(), listServices: vi.fn(), listMcp: vi.fn(),
+  auth: { role: 'admin' }, toastWarning: vi.fn(), updateService: vi.fn(), deleteService: vi.fn(),
 }));
 vi.mock('@/api/client', () => ({ default: {
   get: (url: string, config?: { params?: Record<string, unknown> }) => {
     if (url === '/api/tools/page') return mocks.listPage(config?.params);
+    if (url === '/api/mcp') return mocks.listMcp();
     if (url.endsWith('/fixtures')) return Promise.resolve({ data: [] });
     return mocks.get(url);
   },
@@ -24,7 +25,7 @@ vi.mock('@/api/client', () => ({ default: {
   post: (...args: unknown[]) => mocks.refresh(...args),
 } }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: mocks.auth }) }));
-vi.mock('@/api/provider', () => ({ providerAPI: { listApiServices: mocks.listServices } }));
+vi.mock('@/api/provider', () => ({ providerAPI: { listApiServices: mocks.listServices, updateApiService: mocks.updateService, deleteApiService: mocks.deleteService } }));
 vi.mock('@/components/common/Toast', () => ({
   useToast: () => ({ error: vi.fn(), warning: mocks.toastWarning, success: vi.fn() }),
 }));
@@ -62,6 +63,7 @@ beforeEach(() => {
     group: index < 30 ? 'Alpha' : index < 60 ? 'Beta' : null,
   }));
   mocks.listServices.mockResolvedValue({ data: [] });
+  mocks.listMcp.mockResolvedValue({ data: {} });
   mocks.get.mockImplementation(async (url: string) => ({ data: inventory.find((tool) => url === `/api/tools/${tool.name}`) }));
   mocks.listPage.mockImplementation(async (params: Record<string, any>) => {
     const eligible = inventory.filter((tool) => (!params.q || tool.name.includes(params.q))
@@ -222,12 +224,12 @@ describe('Tools native group attributes and original view preservation', () => {
       { id: 'native-a', name: 'Native service A', group: 'Services', enabled: true, status: 'connected', tool_count: 0 },
       { id: 'native-b', name: 'Native service B', group: null, enabled: true, status: 'connected', tool_count: 0 },
     ] });
+    mocks.listMcp.mockResolvedValue({ data: {
+      'native-a': { status: 'connected', group: 'Services', tools: [], resources: [] },
+      'native-b': { status: 'connected', group: null, tools: [], resources: [] },
+    } });
     const originalGet = mocks.get.getMockImplementation()!;
     mocks.get.mockImplementation((url: string) => {
-      if (url === '/api/mcp') return Promise.resolve({ data: {
-        'native-a': { status: 'connected', group: 'Services', tools: [], resources: [] },
-        'native-b': { status: 'connected', group: null, tools: [], resources: [] },
-      } });
       if (url.startsWith('/api/mcp/catalog/')) return Promise.resolve({ data: url.endsWith('/categories') ? {} : [] });
       return originalGet(url);
     });
@@ -246,6 +248,99 @@ describe('Tools native group attributes and original view preservation', () => {
     resolvePage(await originalPage({ q: 'native', source: tab, offset: 0, limit: 25 }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Services 1' })).toHaveAttribute('aria-pressed', 'true'));
     expect(screen.queryByText(tab === 'api' ? 'Native service B' : 'native-b')).not.toBeInTheDocument();
+  });
+
+  it('counts all ten API services, excludes devices, and stays synchronized after native changes', async () => {
+    let services = Array.from({ length: 26 }, (_, index) => ({
+      id: `api-${index}`, name: `API service ${index}`, enabled: index < 7 || index >= 10,
+      integration_type: index >= 10 ? 'device' : undefined, group: index < 5 ? 'Ops' : null,
+      status: 'unknown', tool_count: 0, builtin: false, verify_ssl: false,
+    }));
+    mocks.listServices.mockImplementation(async () => ({ data: services }));
+    mocks.updateService.mockImplementation(async (id, body) => {
+      services = services.map((service) => service.id === id ? { ...service, ...body } : service);
+      return { data: services.find((service) => service.id === id) };
+    });
+    mocks.deleteService.mockImplementation(async (id) => {
+      services = services.filter((service) => service.id !== id);
+      return { data: {} };
+    });
+    mocks.refresh.mockResolvedValue({ data: { status: 'success', tool_count: 61, message: '', stages: {}, errors: [] } });
+    await mount();
+    fireEvent.click(await screen.findByRole('button', { name: /^API 集成\s+10$/ }));
+    await screen.findByText('API service 9');
+    const nav = screen.getByRole('complementary');
+    expect(within(nav).getByRole('button', { name: '全部 10' })).toBeInTheDocument();
+    expect(screen.queryByText('API service 10')).not.toBeInTheDocument();
+    const row = (index: number) => screen.getByText(`API service ${index}`).closest('[draggable]') as HTMLElement;
+    fireEvent.click(within(row(0)).getByTitle(zhTool.detail.disableServer));
+    await waitFor(() => expect(mocks.updateService).toHaveBeenCalledWith('api-0', { enabled: false }));
+    await waitFor(() => expect(within(row(0)).getByRole('button', { name: zhTool.detail.enableServer })).toBeEnabled());
+    expect(screen.getByRole('button', { name: /^API 集成\s+10$/ })).toBeInTheDocument();
+    fireEvent.click(within(row(7)).getByRole('button', { name: zhTool.detail.enableServer }));
+    await waitFor(() => expect(mocks.updateService).toHaveBeenCalledWith('api-7', { enabled: true }));
+    await waitFor(() => expect(within(row(7)).getByTitle(zhTool.detail.disableServer)).toBeEnabled());
+    expect(screen.getByRole('button', { name: /^API 集成\s+10$/ })).toBeInTheDocument();
+    fireEvent.click(within(row(9)).getByTitle(zhTool.button.delete));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^API 集成\s+9$/ })).toBeInTheDocument());
+    await waitFor(() => expect(within(nav).getByRole('button', { name: '全部 9' })).toBeInTheDocument());
+    services.push({ ...services[0], id: 'added', name: 'Added API' });
+    fireEvent.click(screen.getByTitle(zhTool.button.refreshList));
+    await screen.findByText('Added API');
+    expect(screen.getByRole('button', { name: /^API 集成\s+10$/ })).toBeInTheDocument();
+    expect(within(nav).getByRole('button', { name: '全部 10' })).toBeInTheDocument();
+    fireEvent.click(within(nav).getByRole('button', { name: 'Ops 6' }));
+    fireEvent.change(screen.getByPlaceholderText(zhTool.search.placeholder), { target: { value: 'zz-no-match-counts' } });
+    await screen.findByText(zhTool.api.noTools);
+    expect(screen.getByRole('button', { name: /^API 集成\s+10$/ })).toBeInTheDocument();
+    expect(within(nav).getByRole('button', { name: '全部 10' })).toBeInTheDocument();
+  });
+
+  it('counts eleven MCP services including zero-tool and inactive rows, without changing tool totals', async () => {
+    const statuses = ['connected', 'connected', 'connected', 'connected', 'connected', 'connected', 'connected', 'error', 'disabled', 'disabled', 'disconnected'];
+    let servers = Object.fromEntries(statuses.map((status, index) => [index === 6 ? 'gridinsoft' : `mcp-${index}`, {
+      status, tools_count: index < 6 ? [6, 6, 6, 1, 15, 15][index] : 0, tools: [], resources: [], group: 'MCP group',
+    }]));
+    const catalog = Object.keys(servers).filter((id) => id !== 'mcp-10').map((id) => ({
+      id, name: id === 'gridinsoft' ? 'GridinSoft' : id, description: 'Native catalog', category: 'intel', tool_type: 'mcp',
+      github: '', language: 'python', license: 'MIT', stars: 0, transport: 'stdio', install: {}, env_vars: {},
+      system_deps: [], tags: [], official: false, requires_auth: false, group: 'MCP group',
+    }));
+    mocks.listMcp.mockImplementation(async () => ({ data: servers }));
+    mocks.get.mockImplementation(async (url) => ({ data: url.endsWith('/entries') ? catalog : url.endsWith('/categories') ? {} : [] }));
+    const originalPage = mocks.listPage.getMockImplementation()!;
+    mocks.listPage.mockImplementation((params) => params.source === 'mcp' ? Promise.resolve({ data: {
+      items: [], total: params.q ? 0 : 49, offset: 0, limit: 25,
+      facets: { group: {}, category: {}, source: { mcp: params.q ? 0 : 49 }, source_groups: { mcp: params.q ? 0 : 6 }, source_name: {}, enabled: { true: 46, false: 3 } },
+    } }) : originalPage(params));
+    mocks.refresh.mockResolvedValue({ data: { status: 'success', tool_count: 49, message: '', stages: {}, errors: [] } });
+    await mount();
+    fireEvent.click(await screen.findByRole('button', { name: /^MCP 服务\s+11$/ }));
+    await screen.findByText('GridinSoft');
+    const nav = screen.getByRole('complementary');
+    expect(within(nav).getByRole('button', { name: '全部 11' })).toBeInTheDocument();
+    const header = screen.getByRole('heading', { name: zhTool.pageTitle }).parentElement!;
+    expect(header).toHaveTextContent(`46 ${zhTool.statusBadge.active}`);
+    expect(header).toHaveTextContent(`3 ${zhTool.statusBadge.inactive}`);
+    fireEvent.click(within(nav).getByRole('button', { name: 'MCP group 11' }));
+    fireEvent.change(screen.getByPlaceholderText(zhTool.search.placeholder), { target: { value: 'GridinSoft' } });
+    await waitFor(() => expect(mocks.listPage).toHaveBeenLastCalledWith(expect.objectContaining({ q: 'GridinSoft' })));
+    expect(screen.getByRole('button', { name: /^MCP 服务\s+11$/ })).toBeInTheDocument();
+    // A removed catalog-backed configuration still has its original catalog row.
+    delete servers['mcp-9'];
+    fireEvent.click(screen.getByTitle(zhTool.button.refreshList));
+    await waitFor(() => expect(screen.getByTitle(zhTool.button.refreshDone)).toBeEnabled());
+    expect(screen.getByRole('button', { name: /^MCP 服务\s+11$/ })).toBeInTheDocument();
+    delete servers['mcp-10'];
+    fireEvent.click(screen.getByTitle(zhTool.button.refreshDone));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^MCP 服务\s+10$/ })).toBeInTheDocument());
+    await waitFor(() => expect(within(nav).getByRole('button', { name: '全部 10' })).toBeInTheDocument());
+    mocks.listMcp.mockRejectedValue(new Error('native inventory offline'));
+    await waitFor(() => expect(screen.getByTitle(zhTool.button.refreshDone)).toBeEnabled());
+    fireEvent.click(screen.getByTitle(zhTool.button.refreshDone));
+    await screen.findByText('native inventory offline');
+    expect(screen.getByRole('button', { name: /^MCP 服务\s+10$/ })).toBeInTheDocument();
+    expect(within(nav).getByRole('button', { name: '全部 10' })).toBeInTheDocument();
   });
 
   it('filters API service names with no child tools and keeps the business group when search is cleared', async () => {

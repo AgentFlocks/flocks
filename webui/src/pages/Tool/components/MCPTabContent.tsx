@@ -46,6 +46,7 @@ interface MCPTabContentProps {
   searchQuery: string;
   onSelectTool: (tool: Tool) => void;
   onRefreshTools: () => Promise<void>;
+  onServersChange?: (servers: MCPServer[]) => void;
   viewMode?: 'list' | 'cards';
   catalogEntries: MCPCatalogEntry[];
   catalogCategories: Record<string, MCPCatalogCategory>;
@@ -73,6 +74,7 @@ export default function MCPTabContent({
   searchQuery,
   onSelectTool,
   onRefreshTools,
+  onServersChange,
   viewMode = 'list',
   catalogEntries,
   catalogCategories,
@@ -102,6 +104,7 @@ export default function MCPTabContent({
       const response = await mcpAPI.list();
       const newServers = serverRows(response.data);
       setServers(newServers);
+      onServersChange?.(newServers);
       setServersError(null);
       setSelectedServerData((prev) => {
         if (!prev) return prev;
@@ -115,17 +118,11 @@ export default function MCPTabContent({
     } finally {
       setServersLoading(false);
     }
-  }, []);
+  }, [onServersChange]);
 
   useEffect(() => {
     fetchServers();
-  }, [fetchServers]);
-
-  useEffect(() => {
-    if (refreshKey && refreshKey > 0) {
-      fetchServers();
-    }
-  }, [refreshKey, fetchServers]);
+  }, [fetchServers, refreshKey]);
 
   const handleConnect = async (name: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
