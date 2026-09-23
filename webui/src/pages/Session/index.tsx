@@ -2083,12 +2083,14 @@ export default function SessionPage() {
     setContextSnapshot(null);
     setRequestedContextResource(null);
     setSelectedAgent('rex');
-    setSelectedModelKey(null);
+    // Starting another blank draft keeps the session ID null, so the model
+    // initialization effect will not run again. Restore the default explicitly.
+    setSelectedModelKey(resolvedDefaultModelInitialized ? defaultSelectionKey : null);
     setSseStatus('disconnected');
     setShowAgentOptions(false);
     setShowModelOptions(false);
     setShowProjectOptions(false);
-  }, [selectSession]);
+  }, [defaultSelectionKey, resolvedDefaultModelInitialized, selectSession]);
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
