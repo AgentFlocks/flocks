@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { PhaseWorkspace } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/components/PhaseWorkspace";
-import { phaseGroupId } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/phaseGroups";
+import { phaseDisplayLabel, phaseGroupId } from "../../../.flocks/flockshub/plugins/webuis/code_security_ui/code-security-workspace/src/phaseGroups";
 import type {
   PhaseRun,
   ScanDetail,
@@ -33,17 +33,18 @@ afterEach(() => {
 });
 
 describe("audit display groups", () => {
-  it("keeps five groups and empty states without inventing execution records", () => {
+  it("keeps four groups and empty states without inventing execution records", () => {
     render(<PhaseWorkspace {...props} phases={[phase("snapshot")]} />);
     expect(
       within(
         screen.getByRole("navigation", { name: "审计阶段分组" }),
       ).getAllByRole("button"),
-    ).toHaveLength(5);
-    fireEvent.click(group("PoC 生成"));
-    expect(group("PoC 生成")).toHaveAttribute("aria-expanded", "true");
+    ).toHaveLength(4);
+    expect(screen.getByText("4 个分组")).toBeInTheDocument();
+    fireEvent.click(group("漏洞确认"));
+    expect(group("漏洞确认")).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "PoC 生成" })).toHaveTextContent(
+    expect(screen.getByRole("region", { name: "漏洞确认" })).toHaveTextContent(
       "暂无执行记录",
     );
   });
@@ -118,8 +119,9 @@ describe("audit display groups", () => {
       phase("snapshot"),
       phase("verification", 2),
       phase("targeted_rescan", 3, "running"),
+      phase("poc_generation", 4),
     ];
-    const request = { id: "verification-2" };
+    const request = { id: "poc_generation-4" };
     const view = render(
       <PhaseWorkspace
         {...props}
@@ -129,6 +131,7 @@ describe("audit display groups", () => {
       />,
     );
     expect(group("漏洞确认")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("tab", { name: /PoC 生成.*阶段/ })).toHaveAttribute("aria-selected", "true");
     fireEvent.click(group("审计准备"));
     view.rerender(
       <PhaseWorkspace
@@ -158,6 +161,14 @@ describe("audit display groups", () => {
       />,
     );
     expect(group("漏洞确认")).toHaveAttribute("aria-expanded", "true");
+    view.rerender(
+      <PhaseWorkspace {...props} phases={[
+        phase("baseline"), phase("verification", 2), phase("poc_generation", 3, "running"),
+      ]} currentPhase="poc_generation" />,
+    );
+    expect(group("漏洞确认")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("tab", { name: /PoC 生成.*阶段/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel")).toHaveTextContent("PoC 生成");
     fireEvent.click(group("代码分析"));
     view.rerender(
       <PhaseWorkspace
@@ -169,33 +180,33 @@ describe("audit display groups", () => {
     expect(group("代码分析")).toHaveAttribute("aria-expanded", "true");
   });
   it.each([
-    [{ scan: { dynamic_validator: "cybergym" } }, "poc"],
-    [{ scan: { scan_mode: "cybergym_level1" } }, "poc"],
-    [{ scan: {}, dynamicValidation: { validator: "cybergym" } }, "poc"],
-    [{ scan: { dynamic_validator: "docker_probe" } }, "confirm"],
-    [{ scan: { dynamic_enabled: true } }, "confirm"],
+    [{ scan: { dynamic_validator: "cybergym" } }, "CyberGym 验证"],
+    [{ scan: { scan_mode: "cybergym_level1" } }, "CyberGym 验证"],
+    [{ scan: {}, dynamicValidation: { validator: "cybergym" } }, "CyberGym 验证"],
+    [{ scan: { dynamic_validator: "docker_probe" } }, "动态验证"],
+    [{ scan: { dynamic_enabled: true } }, "动态验证"],
   ])(
-    "places validation using task metadata, including historical tasks: %j",
+    "labels validation using task metadata, including historical tasks: %j",
     (metadata, expected) => {
       expect(
-        phaseGroupId(phase("dynamic_validation"), metadata as ScanDetail),
+        phaseDisplayLabel(phase("dynamic_validation"), metadata as ScanDetail),
       ).toBe(expected);
     },
   );
   it("prefers per-run validator metadata and supports legacy worker phases", () => {
     expect(
-      phaseGroupId(
+      phaseDisplayLabel(
         {
           ...phase("dynamic_validation"),
           summary: { validator: "docker_probe" },
         },
         { scan: { dynamic_validator: "cybergym" } } as ScanDetail,
       ),
-    ).toBe("confirm");
-    expect(phaseGroupId(phase("cybergym_solving"))).toBe("poc");
+    ).toBe("动态验证");
+    expect(phaseGroupId(phase("cybergym_solving"))).toBe("confirm");
     expect(phaseGroupId(phase("probing"))).toBe("confirm");
   });
-  it("keeps cleanup and unknown records outside the five main groups", () => {
+  it("keeps cleanup and unknown records outside the four main groups", () => {
     render(
       <PhaseWorkspace
         {...props}

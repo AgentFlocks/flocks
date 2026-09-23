@@ -10,7 +10,7 @@ const englishMessages: Record<string, string> = {
   "审计准备": "Audit preparation",
   "代码分析": "Code analysis",
   "漏洞确认": "Finding confirmation",
-  "5 个分组": "5 groups",
+  "{{count}} 个分组": "{{count}} groups",
   "审计阶段分组": "Audit stage groups",
   "执行清理": "Execution cleanup",
   "其他执行记录": "Other execution records",

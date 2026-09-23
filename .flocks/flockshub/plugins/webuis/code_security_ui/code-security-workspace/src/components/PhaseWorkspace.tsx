@@ -158,20 +158,20 @@ export function PhaseWorkspace({
     if (phase) {
       appliedRequest.current = requestedPhase;
       setCollapsedGroupId(null);
-      setSelection({ groupId: phaseGroupId(phase, detail), phaseId: phase.phase_run_id });
+      setSelection({ groupId: phaseGroupId(phase), phaseId: phase.phase_run_id });
     }
   }, [requestedPhase, sorted, detail]);
   const groups = [
     ...phaseGroups,
-    ...(["cleanup", "other"] as const).filter(id => sorted.some(phase => phaseGroupId(phase, detail) === id))
+    ...(["cleanup", "other"] as const).filter(id => sorted.some(phase => phaseGroupId(phase) === id))
       .map(id => ({ id, label: id === "cleanup" ? "执行清理" : "其他执行记录" })),
-  ].map(group => ({ ...group, phases: sorted.filter(phase => phaseGroupId(phase, detail) === group.id) }));
+  ].map(group => ({ ...group, phases: sorted.filter(phase => phaseGroupId(phase) === group.id) }));
   const defaultPhase = sorted.find(phase => phase.phase_run_id === defaultId);
   const requestedSelection = sorted.find(phase => phase.phase_run_id === selection?.phaseId);
-  const selectedGroup = groups.find(group => group.id === (requestedSelection ? phaseGroupId(requestedSelection, detail) : selection?.groupId || (defaultPhase && phaseGroupId(defaultPhase, detail)))) || groups[0];
+  const selectedGroup = groups.find(group => group.id === (requestedSelection ? phaseGroupId(requestedSelection) : selection?.groupId || (defaultPhase && phaseGroupId(defaultPhase)))) || groups[0];
   const selected = selectedGroup.phases.find(phase => phase.phase_run_id === selection?.phaseId)
     || preferredPhase(selectedGroup.phases);
-  const selectPhase = (phase: PhaseRun) => setSelection({ groupId: phaseGroupId(phase, detail), phaseId: phase.phase_run_id });
+  const selectPhase = (phase: PhaseRun) => setSelection({ groupId: phaseGroupId(phase), phaseId: phase.phase_run_id });
   const displayStatus = (phase: PhaseRun) => phase.phase === "dynamic_validation"
     && phase.status === "completed" && dynamicValidationStatus === "not_runnable"
     && sorted.filter(item => item.phase === phase.phase).at(-1)?.phase_run_id === phase.phase_run_id
@@ -199,7 +199,7 @@ export function PhaseWorkspace({
     <section className="cs-execution" aria-label={t("审计阶段")}>
       <aside className="cs-context-rail">
         <div className="cs-phase-navigation-heading">
-          <h3>{t("审计阶段")}</h3><small>{t("5 个分组")}</small>
+          <h3>{t("审计阶段")}</h3><small>{t("{{count}} 个分组", { count: phaseGroups.length })}</small>
         </div>
         <nav className="cs-phase-groups" aria-label={t("审计阶段分组")}>
           {groups.map((group, index) => {
@@ -208,7 +208,7 @@ export function PhaseWorkspace({
             const completed = group.phases.filter(phase => phase.status === "completed").length;
             const groupId = `${panelId}-${group.id}`;
             return (
-              <section key={group.id} className={`cs-phase-group${open ? " is-open" : ""}${index >= 5 ? " is-auxiliary" : ""}`}>
+              <section key={group.id} className={`cs-phase-group${open ? " is-open" : ""}${index >= phaseGroups.length ? " is-auxiliary" : ""}`}>
                 <button type="button" className="cs-phase-group-heading" aria-expanded={open} aria-controls={groupId}
                   onClick={() => {
                     setCollapsedGroupId(open ? group.id : null);
@@ -216,7 +216,7 @@ export function PhaseWorkspace({
                       setSelection({ groupId: group.id, phaseId: preferredPhase(group.phases)?.phase_run_id });
                     }
                   }}>
-                  {index < 5 && <span className="cs-phase-group-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>}
+                  {index < phaseGroups.length && <span className="cs-phase-group-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>}
                   <strong>{t(group.label)}</strong><Icon name="chevron" />
                   <small>{running ? t("正在执行：{{phase}}", { phase: phaseTitle(running) }) : group.phases.length
                     ? t("{{count}} 条记录 · {{completed}} 条已完成", { count: group.phases.length, completed }) : t("暂无执行记录")}</small>

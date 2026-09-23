@@ -955,7 +955,7 @@ function WorkspacePage() {
   const taskProject = projects.find((project) => project.id === taskProjectId);
   const finalFindingMetric = detail ? deriveFinalFindingMetric(detail) : null;
   const executionPhase = { phase: detail?.scan.current_phase || "" };
-  const executionGroup = phaseGroups.find(group => group.id === phaseGroupId(executionPhase, detail ?? undefined));
+  const executionGroup = phaseGroups.find(group => group.id === phaseGroupId(executionPhase));
   const executionLabel = executionPhase.phase
     ? `${executionGroup ? `${t(executionGroup.label)} / ` : ""}${t(phaseDisplayLabel(executionPhase, detail ?? undefined))}`
     : t("等待阶段信息");

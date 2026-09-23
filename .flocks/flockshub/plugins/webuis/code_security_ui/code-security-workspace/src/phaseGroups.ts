@@ -6,7 +6,6 @@ export const phaseGroups = [
   { id: "prepare", label: "审计准备" },
   { id: "analysis", label: "代码分析" },
   { id: "confirm", label: "漏洞确认" },
-  { id: "poc", label: "PoC 生成" },
   { id: "report", label: "审计报告" },
 ] as const;
 
@@ -27,7 +26,7 @@ export function isCyberGymValidation(
     : detail?.scan.scan_mode === "cybergym_level1";
 }
 
-export function phaseGroupId(phase: DisplayPhase, detail?: ScanDetail): string {
+export function phaseGroupId(phase: DisplayPhase): string {
   switch (phase.phase) {
     case "snapshot":
     case "threat_modeling":
@@ -39,12 +38,10 @@ export function phaseGroupId(phase: DisplayPhase, detail?: ScanDetail): string {
     case "verification":
     case "adjudication":
     case "probing":
-      return "confirm";
     case "dynamic_validation":
-      return isCyberGymValidation(phase, detail) ? "poc" : "confirm";
     case "poc_generation":
     case "cybergym_solving":
-      return "poc";
+      return "confirm";
     case "finalization":
       return "report";
     case "cleanup":
