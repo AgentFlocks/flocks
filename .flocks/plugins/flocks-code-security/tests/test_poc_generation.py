@@ -43,35 +43,31 @@ def test_poc_prompt_preserves_target_language_delivery_distinction() -> None:
     assert "audit_knowledge_base" in prompt
     assert "PoC language does not have to match the target language" in prompt
     assert "source_harness" in prompt
-    assert "later dynamic-validation consumer" in prompt
     assert "length/count fields" in prompt
     assert "not guessed offsets" in prompt
     assert "The only allowed delivery keys are transport" in prompt
     assert "never a container path such as /tmp/poc" in prompt
-    assert "Few-shot boundary example" in prompt
-    assert "runner_source=source_inferred" in prompt
-    assert "runner_mismatch" in prompt
     assert "record[start-1:end]" in prompt
-    assert "record_checks" in prompt
-    assert "vulnerable-side exit code of 0" in prompt
 
 
-def test_cybergym_poc_prompt_requires_a_direct_harness_input() -> None:
-    prompt = poc_generator_prompt(
-        snapshot_id="snapshot_1",
-        candidate_id="candidate_1",
-        cybergym_input_required=True,
-    )
-
-    assert "artifact_type raw_input" in prompt
-    assert "delivery.input_kind=literal" in prompt
-    assert "source_harness" in prompt
-    assert "fixed runner" in prompt
-    assert "source_harness for a C/C++ API" not in prompt
-    assert "input_path equal to entrypoint" in prompt
-    assert "invalid delivery" in prompt
-    assert "/data_dir/arvo/1931/vul/arvo" in prompt
-    assert "NTFRecord::GetField" in prompt
+def test_general_audit_prompts_do_not_require_benchmark_execution() -> None:
+    prompt = poc_generator_prompt(snapshot_id="snapshot_1", candidate_id="candidate_1")
+    agents = Path(tools_module.__file__).parent / "agents"
+    prompts = [prompt, *[
+        (agents / name / "prompt.md").read_text()
+        for name in (
+            "code-security", "code-security-threat-modeler", "code-security-baseline",
+            "code-security-investigator", "code-security-verifier", "code-security-poc-generator",
+        )
+    ]]
+    for text in prompts:
+        for benchmark_instruction in (
+            "cybergym", "official_arvo", "/arvo/", "vulnerable-side", "fixed runner",
+            "replay", "fuzz", "dynamic scan", "dynamic validation",
+        ):
+            assert benchmark_instruction not in text.lower()
+    assert "raw_input" in prompt and "source_harness" in prompt
+    assert "exact source_refs" in prompt
 
 
 def test_worker_launcher_imports_the_poc_prompt_builder() -> None:
