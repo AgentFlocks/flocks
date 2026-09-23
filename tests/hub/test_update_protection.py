@@ -331,3 +331,130 @@ async def test_missing_optional_dependency_keeps_suite_install_working(client, m
     response = await client.post("/hub/plugins/component/soc-workspace/install")
     assert response.status_code == 200, response.text
     assert local.get_record("component", "soc-workspace") is not None
+
+
+@pytest.mark.parametrize("mode", ["child", "suite", "webui", "access"])
+async def test_final_swap_preserves_edits_after_last_check(client, monkeypatch, mode):
+    if mode == "suite":
+        await installer.install_plugin("component", "soc-workspace")
+    kind, identifier = ("webui", "soc_ui") if mode in {"webui", "access"} else ("workflow", "stream_alert_triage")
+    if mode != "suite":
+        await installer.install_plugin(kind, identifier)
+    record = local.get_record(kind, identifier)
+    local.save_installed_record(record.model_copy(update={"version": "0.0.1"}))
+    root = installer._contracts_access_dir(identifier, "global") if mode == "access" else Path(record.installPath)
+    url = "/hub/plugins/component/soc-workspace/update" if mode == "suite" else f"/hub/plugins/{kind}/{identifier}/update"
+    preview = (await client.post(url + "/preview")).json()
+    replace = installer._replace_with_retry
+
+    def write_just_before_rename(src, dst):
+        if src == root:
+            (root / "last-moment.txt").write_text("edit after final verification")
+        return replace(src, dst)
+
+    monkeypatch.setattr(installer, "_replace_with_retry", write_just_before_rename)
+    response = await client.post(url, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == 200, response.text
+    backup, plan = backup_manifest(response)
+    index = next(i for i, item in enumerate(plan["items"]) if item["id"] == identifier)
+    label = "access" if mode == "access" else "package"
+    assert not (backup / str(index) / label / "last-moment.txt").exists()
+    assert (backup / "replaced" / str(index) / label / "last-moment.txt").read_text() == "edit after final verification"
+    assert not (root / "last-moment.txt").exists()
+    # A later update must not purge the retained original as stale staging data.
+    preview = (await client.post(url + "/preview")).json()
+    response = await client.post(url, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == 200, response.text
+    assert (backup / "replaced" / str(index) / label / "last-moment.txt").exists()
+
+
+async def test_open_writer_to_old_inode_is_retained_after_update(client, monkeypatch):
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("Windows prevents renaming directories with open file handles")
+    root = await installed_workflow()
+    (root / "open-editor.txt").write_text("original")
+    preview = (await client.post(URL + "/preview")).json()
+    with (root / "open-editor.txt").open("a") as writer:
+        async def write_after_swap(*args):
+            writer.write(" + concurrent edit")
+            writer.flush()
+        monkeypatch.setattr(installer, "_refresh_runtime", write_after_swap)
+        response = await client.post(URL, json={"confirmationToken": preview["token"], "confirmChanges": True})
+        assert response.status_code == 200, response.text
+        backup, _ = backup_manifest(response)
+        writer.write(" + after update returned")
+        writer.flush()
+    assert (backup / "0/package/open-editor.txt").read_text() == "original"
+    assert (backup / "replaced/0/package/open-editor.txt").read_text() == "original + concurrent edit + after update returned"
+
+
+async def test_cannot_retain_original_aborts_before_overwrite(client, monkeypatch):
+    import errno
+    root = await installed_workflow()
+    (root / "custom.txt").write_text("keep original")
+    before = local.get_record("workflow", "stream_alert_triage")
+    preview = (await client.post(URL + "/preview")).json()
+    replace = installer._replace_with_retry
+    def fail_retention(src, dst):
+        if src == root:
+            raise OSError(errno.EXDEV, "Cross-device link")
+        return replace(src, dst)
+    monkeypatch.setattr(installer, "_replace_with_retry", fail_retention)
+    response = await client.post(URL, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == 422
+    assert "backup preserved at" in response.json()["detail"]
+    assert (root / "custom.txt").read_text() == "keep original"
+    assert local.get_record("workflow", "stream_alert_triage") == before
+
+
+@pytest.mark.parametrize("record_exists", [True, False])
+@pytest.mark.parametrize("failure_at", ["workflow", "component"])
+async def test_suite_repair_failure_never_uninstalls_preexisting_content(client, monkeypatch, record_exists, failure_at):
+    await installer.install_plugin("component", "soc-workspace")
+    record = local.get_record("workflow", "stream_alert_triage")
+    root = Path(record.installPath)
+    for name in ("workflow.json", "workflow.md"):
+        (root / name).unlink(missing_ok=True)
+    (root / "custom.txt").write_text("partial old data")
+    if not record_exists:
+        local.remove_installed_record("workflow", "stream_alert_triage")
+    before = tree_hashes(root)
+    url = "/hub/plugins/component/soc-workspace/update"
+    preview = (await client.post(url + "/preview")).json()
+    async def fail_refresh(kind, *args):
+        if kind == failure_at:
+            raise RuntimeError("injected repair failure")
+    monkeypatch.setattr(installer, "_refresh_runtime", fail_refresh)
+    response = await client.post(url, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == 422, response.text
+    assert root.is_dir()
+    if failure_at == "workflow":
+        assert tree_hashes(root) == before
+        assert local.get_record("workflow", "stream_alert_triage") == (record if record_exists else None)
+    else:
+        # A repaired child already committed before the parent failed; it must
+        # remain installed, just like a successfully upgraded existing child.
+        assert (root / "workflow.json").exists()
+        assert local.get_record("workflow", "stream_alert_triage") is not None
+    from flocks.config.config import Config
+    assert any(p.read_text() == "partial old data" for p in (Config.get_data_path() / "hub/backups").rglob("custom.txt"))
+
+
+async def test_late_edit_is_restored_when_update_fails(client, monkeypatch):
+    root = await installed_workflow()
+    before = local.get_record("workflow", "stream_alert_triage")
+    preview = (await client.post(URL + "/preview")).json()
+    replace = installer._replace_with_retry
+    def write_before_rename(src, dst):
+        if src == root:
+            (root / "last-moment.txt").write_text("keep latest edit on rollback")
+        return replace(src, dst)
+    async def fail_refresh(*args):
+        raise RuntimeError("injected failure after replacement")
+    monkeypatch.setattr(installer, "_replace_with_retry", write_before_rename)
+    monkeypatch.setattr(installer, "_refresh_runtime", fail_refresh)
+    response = await client.post(URL, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == 422
+    assert (root / "last-moment.txt").read_text() == "keep latest edit on rollback"
+    assert local.get_record("workflow", "stream_alert_triage") == before
