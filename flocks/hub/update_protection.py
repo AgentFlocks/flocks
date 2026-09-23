@@ -215,6 +215,7 @@ def create_backup(plan: dict) -> Path:
                     # Original trees moved here during replacement supplement
                     # the confirmed snapshots at <item-index>/<root-label>.
                     "replacementDirectory": "replaced",
+                    "failedDirectory": "failed",
                     "createdAt": datetime.now(timezone.utc).isoformat(),
                     "plan": plan,
                 },
@@ -228,12 +229,15 @@ def create_backup(plan: dict) -> Path:
             "<序号>/package、access：确认更新时的内容快照。\n"
             "replaced/<序号>/package、access：覆盖瞬间保留的原目录，可能包含快照后的并发修改。\n"
             "恢复时优先使用 replaced 中对应的目录；序号与 backup.json 中 plan.items 一致。\n"
-            "失败回滚可能已将 replaced 中的原目录移回安装位置；快照仍保留。\n\n"
+            "失败回滚可能已将 replaced 中的原目录移回安装位置；快照仍保留。\n"
+            "failed/：失败回滚前保留的新目录，包含升级期间的新改动；每份 recovery.json 记录原路径。\n\n"
             "<index>/<package|access> is the confirmed pre-update snapshot.\n"
             "replaced/<index>/<package|access> retains the original directory at replacement time,\n"
             "including later writes through existing file handles. Prefer it when restoring.\n"
             "Indices match plan.items in backup.json. Rollback may move retained originals\n"
-            "back to their install locations; confirmed snapshots remain available.\n",
+            "back to their install locations; confirmed snapshots remain available.\n"
+            "failed/ retains replacement directories before rollback, including edits during the update.\n"
+            "Each recovery.json records the install path of its adjacent content directory.\n",
             encoding="utf-8",
         )
         staging.rename(destination)

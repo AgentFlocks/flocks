@@ -458,3 +458,84 @@ async def test_late_edit_is_restored_when_update_fails(client, monkeypatch):
     assert response.status_code == 422
     assert (root / "last-moment.txt").read_text() == "keep latest edit on rollback"
     assert local.get_record("workflow", "stream_alert_triage") == before
+
+
+@pytest.mark.parametrize("mode", ["child", "suite", "webui", "access"])
+async def test_failed_update_preserves_edits_to_new_directory(client, monkeypatch, mode):
+    from flocks.config.config import Config
+    await installer.install_plugin("component", "soc-workspace")
+    kind, identifier = ("webui", "soc_ui") if mode in {"webui", "access"} else ("tool", "soc_workspace_query")
+    old = local.get_record(kind, identifier).model_copy(update={"version": "0.0.1"})
+    local.save_installed_record(old)
+    root = installer._contracts_access_dir(identifier, "global") if mode == "access" else Path(old.installPath)
+    (root / "old-custom.txt").write_text("before update")
+    url = "/hub/plugins/component/soc-workspace/update" if mode == "suite" else f"/hub/plugins/{kind}/{identifier}/update"
+    preview = (await client.post(url + "/preview")).json()
+    failed = False
+    async def edit_then_fail(plugin_type, path=None):
+        nonlocal failed
+        if plugin_type == kind and not failed:
+            failed = True
+            (root / "new-custom.txt").write_text("edit in replacement directory")
+            raise RuntimeError("injected failure after concurrent edit")
+    monkeypatch.setattr(installer, "_refresh_runtime", edit_then_fail)
+    response = await client.post(url, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == 422
+    assert (root / "old-custom.txt").read_text() == "before update"
+    assert local.get_record(kind, identifier) == old
+    saved = list((Config.get_data_path() / "hub/backups").rglob("new-custom.txt"))
+    assert len(saved) == 1
+    assert saved[0].read_text() == "edit in replacement directory"
+    assert "failed" in saved[0].parts
+    assert "backup preserved at" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("failure_at", ["tool", "component"])
+async def test_new_suite_children_are_preserved_before_rollback_cleanup(client, monkeypatch, failure_at):
+    from flocks.config.config import Config
+    webui_root = local.install_dir("webui", "soc_ui")
+    access_root = installer._contracts_access_dir("soc_ui", "global")
+    failed = False
+    async def edit_then_fail(kind, path=None):
+        nonlocal failed
+        if kind == failure_at and not failed:
+            failed = True
+            (webui_root / "new-custom.txt").write_text("newly installed page edit")
+            (access_root / "new-access.txt").write_text("newly installed access edit")
+            raise RuntimeError("injected suite failure")
+    monkeypatch.setattr(installer, "_refresh_runtime", edit_then_fail)
+    response = await client.post("/hub/plugins/component/soc-workspace/install")
+    assert response.status_code == 422
+    assert "backup preserved at" in response.json()["detail"]
+    assert not webui_root.exists()
+    assert not access_root.exists()
+    assert local.get_record("webui", "soc_ui") is None
+    backups = Config.get_data_path() / "hub/backups"
+    assert any(p.read_text() == "newly installed page edit" for p in backups.rglob("new-custom.txt"))
+    assert any(p.read_text() == "newly installed access edit" for p in backups.rglob("new-access.txt"))
+
+
+async def test_rollback_keeps_new_tree_if_retention_fails(client, monkeypatch):
+    root = await installed_workflow()
+    (root / "old-custom.txt").write_text("before update")
+    preview = (await client.post(URL + "/preview")).json()
+    failed = False
+    async def edit_then_fail(*args):
+        nonlocal failed
+        if not failed:
+            failed = True
+            (root / "new-custom.txt").write_text("must stay live")
+            raise RuntimeError("injected update failure")
+    replace = installer._replace_with_retry
+    def deny_retention(src, dst):
+        if src == root and "failed" in dst.parts:
+            raise PermissionError("cannot preserve failed tree")
+        return replace(src, dst)
+    monkeypatch.setattr(installer, "_refresh_runtime", edit_then_fail)
+    monkeypatch.setattr(installer, "_replace_with_retry", deny_retention)
+    response = await client.post(URL, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == 422
+    assert (root / "new-custom.txt").read_text() == "must stay live"
+    from flocks.config.config import Config
+    assert any(p.read_text() == "before update" for p in (Config.get_data_path() / "hub/backups").rglob("old-custom.txt"))
+    assert "cannot preserve failed tree" in response.json()["detail"]

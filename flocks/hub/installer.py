@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import re
 import shutil
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from flocks.config.config import Config
 from flocks.hub import local
 from flocks.hub.catalog import _catalog_install_state, clear_catalog_caches, load_manifest
 from flocks.hub.files import plugin_root
@@ -240,10 +243,39 @@ def _commit_replacement(backup: Path | None) -> None:
         pass
 
 
-def _rollback_replacement(dst: Path, backup: Path | None) -> None:
-    _remove_path(dst)
-    if backup is not None and (backup.exists() or backup.is_symlink()):
-        _replace_with_retry(backup, dst)
+def _new_recovery_root() -> Path:
+    return Config.get_data_path() / "hub" / "backups" / ("rollback-" + uuid.uuid4().hex) / "failed"
+
+
+def _rollback_replacement(
+    dst: Path, backup: Path | None, *, recovery_root: Path | None = None,
+) -> None:
+    if backup is not None and not (backup.exists() or backup.is_symlink()):
+        raise RuntimeError(f"Rollback stopped: original directory is missing at {backup}; kept {dst}")
+    preserved = None
+    if dst.exists() or dst.is_symlink():
+        root = recovery_root if recovery_root is not None else _new_recovery_root()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Unique containers avoid replacing an earlier recovery attempt. The
+        # metadata is written before moving anything; failures leave dst intact.
+        container = Path(tempfile.mkdtemp(prefix="tree-", dir=root))
+        preserved = container / "content"
+        (container / "recovery.json").write_text(
+            json.dumps({"installPath": str(dst), "originalBackup": str(backup) if backup else None}, indent=2),
+            encoding="utf-8",
+        )
+        try:
+            _replace_with_retry(dst, preserved)
+        except OSError as exc:
+            raise RuntimeError(f"Rollback stopped; kept current directory at {dst}: {exc}") from exc
+    if backup is not None:
+        try:
+            _replace_with_retry(backup, dst)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Rollback restore failed; current content preserved at {preserved}; "
+                f"original directory remains at {backup}: {exc}"
+            ) from exc
 
 
 def _copy_package(
@@ -308,11 +340,15 @@ def _copy_attached_access_contracts(
     return access_dst, backup
 
 
-def _remove_attached_access_contracts(plugin_type: PluginType, plugin_id: str, scope: str) -> bool:
+def _remove_attached_access_contracts(
+    plugin_type: PluginType, plugin_id: str, scope: str, *, recovery_root: Path | None = None,
+) -> bool:
     if plugin_type != "webui":
         return False
     access_dst = _validate_access_uninstall_target(plugin_id, scope)
-    if access_dst.is_dir():
+    if recovery_root is not None and (access_dst.exists() or access_dst.is_symlink()):
+        _rollback_replacement(access_dst, None, recovery_root=recovery_root / "access")
+    elif access_dst.is_dir():
         shutil.rmtree(access_dst)
     elif access_dst.exists():
         access_dst.unlink()
@@ -498,7 +534,10 @@ async def _emit_component_progress(
 async def _rollback_component_ref_installs(
     refs: list[tuple[PluginType, str]],
     component_key: str,
+    *, recovery_root: Path | None = None,
 ) -> None:
+    recovery_root = recovery_root if recovery_root is not None else _new_recovery_root()
+    errors: list[str] = []
     seen: set[tuple[PluginType, str]] = set()
     for plugin_type, plugin_id in reversed(refs):
         key = (plugin_type, plugin_id)
@@ -509,11 +548,13 @@ async def _rollback_component_ref_installs(
         if record is None or record.installedBy != component_key:
             continue
         try:
-            await _uninstall_plugin(plugin_type, plugin_id)
-        except FileNotFoundError:
-            local.remove_installed_record(plugin_type, plugin_id)
-        except Exception:
-            continue
+            await _uninstall_plugin(
+                plugin_type, plugin_id, recovery_root=recovery_root / plugin_type / plugin_id,
+            )
+        except Exception as exc:
+            errors.append(f"{plugin_type}/{plugin_id}: {exc}")
+    if errors:
+        raise RuntimeError("Dependency rollback incomplete; " + "; ".join(errors))
 
 
 def _is_project_install_path(plugin_type: PluginType, install_path: Path) -> bool:
@@ -661,7 +702,9 @@ async def _install_component_refs(
     except Exception:
         for original_record in reversed(adopted_records):
             local.save_installed_record(original_record)
-        await _rollback_component_ref_installs(rollback_refs, component_key)
+        await _rollback_component_ref_installs(
+            rollback_refs, component_key, recovery_root=(protection_plan or {}).get("_recoveryRoot"),
+        )
         raise
     return rollback_refs
 
@@ -730,6 +773,8 @@ async def install_plugin(
             backup = await asyncio.to_thread(create_backup, plan) if plan["requiresConfirmation"] else None
         except Exception as exc:
             raise RuntimeError(f"Backup failed; update cancelled: {exc}") from exc
+        recovery_root = backup / "failed" if backup is not None else _new_recovery_root()
+        plan["_recoveryRoot"] = recovery_root
         try:
             refreshed = build_plan(plugin_type, plugin_id, scope)
             if refreshed["token"] != plan["token"]:
@@ -750,8 +795,9 @@ async def install_plugin(
                 local.save_installed_record(record)
             return record
         except Exception as exc:
-            if backup is not None:
-                raise RuntimeError(f"Update failed; backup preserved at {backup}: {exc}") from exc
+            saved_backup = backup if backup is not None else recovery_root.parent if recovery_root.exists() else None
+            if saved_backup is not None:
+                raise RuntimeError(f"Update failed; backup preserved at {saved_backup}: {exc}") from exc
             raise
 
 
@@ -791,6 +837,7 @@ async def _install_plugin(
             raise RuntimeError("Official package changed during update; retry the update")
 
     retained_roots = expected.get("_retainedRoots", {}) if expected is not None else {}
+    recovery_root = (protection_plan or {}).get("_recoveryRoot") or _new_recovery_root()
     component_key = f"component:{plugin_id}"
     component_ref_installs: list[tuple[PluginType, str]] = []
     previous_record = local.get_record(plugin_type, plugin_id)
@@ -846,16 +893,22 @@ async def _install_plugin(
         return record
     except Exception:
         if access_replacement is not None:
-            _rollback_replacement(*access_replacement)
+            _rollback_replacement(
+                *access_replacement, recovery_root=recovery_root / plugin_type / plugin_id / "access",
+            )
         if package_replaced:
-            _rollback_replacement(dst, package_backup)
+            _rollback_replacement(
+                dst, package_backup, recovery_root=recovery_root / plugin_type / plugin_id / "package",
+            )
         if previous_record is None:
             local.remove_installed_record(plugin_type, plugin_id)
         else:
             local.save_installed_record(previous_record)
         clear_catalog_caches()
         if plugin_type == "component":
-            await _rollback_component_ref_installs(component_ref_installs, component_key)
+            await _rollback_component_ref_installs(
+                component_ref_installs, component_key, recovery_root=recovery_root,
+            )
         if package_replaced:
             try:
                 await _refresh_runtime(plugin_type, dst)
@@ -924,7 +977,9 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
         return await _uninstall_plugin(plugin_type, plugin_id)
 
 
-async def _uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
+async def _uninstall_plugin(
+    plugin_type: PluginType, plugin_id: str, *, recovery_root: Path | None = None,
+) -> bool:
     _validate_uninstall_plugin_id(plugin_id)
     manifest = load_manifest(plugin_type, plugin_id) if plugin_type == "component" else None
     record = local.get_record(plugin_type, plugin_id)
@@ -953,7 +1008,7 @@ async def _uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
         access_removed = False
         if plugin_type == "webui" and (record is None or record.scope != "project"):
             access_removed = await asyncio.to_thread(
-                _remove_attached_access_contracts, plugin_type, plugin_id, "global"
+                _remove_attached_access_contracts, plugin_type, plugin_id, "global", recovery_root=recovery_root,
             )
         local.remove_installed_record(plugin_type, plugin_id)
         clear_catalog_caches()
@@ -973,11 +1028,15 @@ async def _uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     )
     if manifest is not None:
         await _uninstall_component_refs(manifest)
-    if install_path.is_dir():
+    if recovery_root is not None:
+        _rollback_replacement(install_path, None, recovery_root=recovery_root / "package")
+    elif install_path.is_dir():
         shutil.rmtree(install_path)
     else:
         install_path.unlink()
-    _remove_attached_access_contracts(plugin_type, plugin_id, record.scope if record else "global")
+    _remove_attached_access_contracts(
+        plugin_type, plugin_id, record.scope if record else "global", recovery_root=recovery_root,
+    )
     local.remove_installed_record(plugin_type, plugin_id)
     clear_catalog_caches()
     _cleanup_orphan_api_services(orphan_keys)
