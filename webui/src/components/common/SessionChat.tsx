@@ -2131,6 +2131,7 @@ export default function SessionChat({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const focusedMessageRef = useRef('');
   const isAtBottomRef = useRef(true);
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2238,6 +2239,7 @@ export default function SessionChat({
       const el = scrollContainerRef.current;
       if (el) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+        setShowScrollToLatest(!isAtBottomRef.current);
       }
       rafScheduledRef.current = false;
     });
@@ -4391,6 +4393,14 @@ export default function SessionChat({
         )}
         <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
+
+      {showScrollToLatest && (
+        <div className="flex shrink-0 justify-center py-1">
+          <button type="button" onClick={() => { isAtBottomRef.current = true; setShowScrollToLatest(false); scrollToBottom(); }} className="flex items-center gap-1 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-600 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+            <ChevronDown className="h-3 w-3" />{t('chat.backToLatest', '回到最新')}
+          </button>
+        </div>
+      )}
 
       {/* Suggestions — shown before user sends any message */}
       {suggestions && suggestions.length > 0 && !hasUserMessage && !hideInput && (

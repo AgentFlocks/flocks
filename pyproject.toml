@@ -119,6 +119,9 @@ artifacts = [
     "flocks/channel/builtin/whatsapp/bridge/package-lock.json",
 ]
 
+[tool.hatch.build.targets.wheel.force-include]
+".flocks/flockshub" = "flocks/_bundled/flockshub"
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"

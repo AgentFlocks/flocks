@@ -14,6 +14,7 @@ const { hubAPI, webuiContractPagesAPI, flocksproUsersApi, toast } = vi.hoisted((
     update: vi.fn(),
     previewUpdate: vi.fn(),
     uninstall: vi.fn(),
+    setNativeSceneEnabled: vi.fn(),
   },
   webuiContractPagesAPI: {
     setWorkspaceEnabled: vi.fn(),
@@ -107,6 +108,37 @@ describe('SceneSuitesPage', () => {
     hubAPI.update.mockResolvedValue({});
     hubAPI.uninstall.mockResolvedValue({});
     webuiContractPagesAPI.setWorkspaceEnabled.mockResolvedValue({});
+    hubAPI.setNativeSceneEnabled.mockResolvedValue({});
+  });
+
+  it('installs a native scene through Add scene and exposes its own entry', async () => {
+    const monitor = { ...SOC, id: 'host-security-monitor', nameCn: '安全运营监测', workspaceId: 'host-security-monitor', workspaceKind: 'native', workspaceEntryRoute: '/suites/host-security-monitor/session' };
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...monitor, state: 'available', installedVersion: null, workspaceEnabled: null }] });
+    hubAPI.installStream.mockImplementation(async () => {
+      hubAPI.sceneSuites.mockResolvedValue({ data: [monitor] });
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: '安装', exact: true }));
+    await waitFor(() => expect(hubAPI.setNativeSceneEnabled).toHaveBeenCalledWith('host-security-monitor', true));
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).not.toHaveBeenCalled();
+    expect(await screen.findByRole('link', { name: '进入场景' })).toHaveAttribute('href', monitor.workspaceEntryRoute);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('disables and re-enables the native scene without using a contract workspace', async () => {
+    const monitor = { ...SOC, id: 'host-security-monitor', nameCn: '安全运营监测', workspaceId: 'host-security-monitor', workspaceKind: 'native', workspaceEntryRoute: '/suites/host-security-monitor/session' };
+    hubAPI.sceneSuites.mockResolvedValue({ data: [monitor] });
+    hubAPI.setNativeSceneEnabled.mockImplementation(async (_id, enabled) => {
+      hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...monitor, workspaceEnabled: enabled }] });
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: '停用', exact: true }));
+    expect(await screen.findByRole('button', { name: '启用', exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '进入场景' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '启用', exact: true }));
+    expect(await screen.findByRole('link', { name: '进入场景' })).toBeInTheDocument();
+    expect(hubAPI.setNativeSceneEnabled.mock.calls).toEqual([['host-security-monitor', false], ['host-security-monitor', true]]);
+    expect(webuiContractPagesAPI.setWorkspaceEnabled).not.toHaveBeenCalled();
   });
 
   it.each(['updateAvailable', 'partial'] as const)('cancels a customized %s suite without updating or enabling its workspace', async (state) => {

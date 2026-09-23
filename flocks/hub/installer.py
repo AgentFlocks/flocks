@@ -997,6 +997,9 @@ async def _install_plugin(
     # while recording the official release's new version.
     src = plugin_root(plugin_type, plugin_id, prefer_bundled=True)
     validate_package(src, manifest)
+    if plugin_type == "component" and plugin_id == "host-security-monitor":
+        from flocks.monitoring.lifecycle import validate_manifest
+        validate_manifest(manifest, src)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
     access_dst = _contracts_access_dir(plugin_id, scope) if plugin_type == "webui" and (src / "access").is_dir() else None
     expected = None
@@ -1022,6 +1025,7 @@ async def _install_plugin(
     component_key = f"component:{plugin_id}"
     component_ref_installs: list[tuple[PluginType, str]] = []
     previous_record = local.get_record(plugin_type, plugin_id)
+    monitor_registration_started = False
     package_backup: Path | None = None
     package_replaced = False
     access_replacement: tuple[Path, Path | None] | None = None
@@ -1066,6 +1070,10 @@ async def _install_plugin(
         local.save_installed_record(record)
         clear_catalog_caches()
         await _refresh_runtime(plugin_type, dst)
+        if plugin_type == "component" and plugin_id == "host-security-monitor":
+            from flocks.monitoring.lifecycle import install
+            monitor_registration_started = True
+            await install(manifest)
         if plugin_type == "component":
             await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
         if access_replacement is not None and "access" not in retained_roots:
@@ -1074,6 +1082,9 @@ async def _install_plugin(
             _commit_replacement(package_backup)
         return record
     except Exception:
+        if monitor_registration_started:
+            from flocks.monitoring.lifecycle import compensate_install_failure
+            await compensate_install_failure(previous_record is not None)
         if access_replacement is not None:
             _rollback_replacement(
                 *access_replacement, recovery_root=recovery_root / plugin_type / plugin_id / "access",
@@ -1163,6 +1174,9 @@ async def _uninstall_plugin(
     plugin_type: PluginType, plugin_id: str, *, recovery_root: Path | None = None,
 ) -> bool:
     _validate_uninstall_plugin_id(plugin_id)
+    if plugin_type == "component" and plugin_id == "host-security-monitor":
+        from flocks.monitoring.lifecycle import uninstall
+        await uninstall()
     manifest = load_manifest(plugin_type, plugin_id) if plugin_type == "component" else None
     record = local.get_record(plugin_type, plugin_id)
     install_path = Path(record.installPath) if record and record.installPath else local.infer_local_install(plugin_type, plugin_id)

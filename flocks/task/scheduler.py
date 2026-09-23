@@ -68,6 +68,10 @@ class TaskScheduler:
             next_run = self._parse_next_run(scheduler.trigger)
             if not next_run or next_run > now:
                 continue
+            if scheduler.context.get("monitoring"):
+                from flocks.monitoring.scheduling import admit_slots
+                await admit_slots(scheduler, now)
+                continue
             active = await TaskStore.get_active_execution_for_scheduler(scheduler.id)
             if active is not None:
                 continue

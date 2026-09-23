@@ -3505,14 +3505,14 @@ export default function SessionPage() {
             key={activeChatSessionId ?? 'empty-session'}
             sessionId={activeChatSessionId}
             live={Boolean(activeChatSessionId)}
-          hideInput={selectedSession?.canWrite === false}
+          hideInput={selectedSession?.canWrite === false || Boolean(selectedSession?.metadata?.monitorScope)}
           display={{
             compact: false,
             pageCanvas: true,
-            showActions: true,
+            showActions: selectedSession?.canWrite !== false,
             showTimestamp: true,
-            collapseIntermediateSteps: true,
-            processGroupsDefaultOpen: false,
+            collapseIntermediateSteps: !selectedSession?.id.startsWith('ses_monitor_'),
+            processGroupsDefaultOpen: Boolean(selectedSession?.id.startsWith('ses_monitor_')),
             processGroupsOpenWhileActive: true,
           }}
           agentName={selectedAgent}

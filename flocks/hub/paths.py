@@ -23,6 +23,7 @@ def _candidate_roots() -> list[Path]:
 
     package_root = Path(__file__).resolve().parents[2]
     roots.append(package_root / ".flocks" / "flockshub")
+    roots.append(package_root / "flocks" / "_bundled" / "flockshub")
     roots.append(package_root.parent / ".flocks" / "flockshub")
     return roots
 

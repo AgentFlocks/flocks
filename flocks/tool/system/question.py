@@ -364,6 +364,8 @@ async def question_tool(
     ctx: ToolContext,
     questions: List[Dict[str, Any]],
 ) -> ToolResult:
+    from flocks.session.interaction_policy import require_interactive
+    await require_interactive(ctx.session_id)
     """
     Ask questions to the user
     

@@ -306,6 +306,8 @@ class ToolContext:
             always: Always-allow patterns
             metadata: Additional metadata
         """
+        from flocks.session.interaction_policy import require_interactive
+        await require_interactive(self.session_id)
         execution_mode = self.extra.get("execution_mode")
         if execution_mode:
             from flocks.session.execution_mode import is_permission_allowed
@@ -736,6 +738,11 @@ class Tool:
                         },
                     )
                 else:
+                    from flocks.session.interaction_policy import require_monitor_read, require_interactive
+                    if self.info.requires_confirmation:
+                        await require_interactive(ctx.session_id)
+                    await require_monitor_read(self.info.name, coerced_kwargs, ctx.session_id,
+                                               resolved_device=ctx.extra.get("monitor_resolved_device"))
                     result = await self.handler(ctx, **coerced_kwargs)
                     terminal_status = "success" if result.success else "error"
             except asyncio.CancelledError as exc:
@@ -1219,6 +1226,19 @@ class ToolRegistry:
                 message_id="default"
             )
 
+        from flocks.session.interaction_policy import require_interactive
+        if tool_name == "question" or tool.info.requires_confirmation:
+            try:
+                await require_interactive(ctx.session_id)
+            except PermissionError as exc:
+                return ToolResult(success=False, error=str(exc))
+
+        from flocks.session.interaction_policy import require_monitor_read
+        try:
+            await require_monitor_read(tool_name, kwargs, ctx.session_id)
+        except PermissionError as exc:
+            return ToolResult(success=False, error=str(exc))
+
         execution_mode = ctx.extra.get("execution_mode")
         if execution_mode:
             from flocks.session.execution_mode import (
@@ -1325,6 +1345,7 @@ class ToolRegistry:
                         success=False,
                         error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
+                ctx.extra["monitor_resolved_device"] = device_id
                 result = await tool.execute(ctx, **kwargs)
         else:
             result = await tool.execute(ctx, **kwargs)

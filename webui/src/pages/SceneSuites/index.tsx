@@ -26,6 +26,7 @@ const TEXT = {
     uninstall: '卸载',
     enable: '启用',
     disable: '停用',
+    open: '进入场景',
     installed: '已安装',
     partial: '待补全',
     completeInstall: '补全安装',
@@ -66,6 +67,7 @@ const TEXT = {
     uninstall: 'Uninstall',
     enable: 'Enable',
     disable: 'Disable',
+    open: 'Open scene',
     installed: 'Installed',
     partial: 'Incomplete',
     completeInstall: 'Complete installation',
@@ -187,7 +189,8 @@ export default function SceneSuitesPage() {
       const workspaceId = suite.workspaceId || (await refetch({ silent: true, rejectOnError: true }))
         .find((entry) => entry.id === suite.id)?.workspaceId;
       if (!workspaceId) throw new Error(text.workspaceMissing);
-      await webuiContractPagesAPI.setWorkspaceEnabled(workspaceId, true);
+      if (suite.workspaceKind === 'native') await hubAPI.setNativeSceneEnabled(suite.id, true);
+      else await webuiContractPagesAPI.setWorkspaceEnabled(workspaceId, true);
       enabledWorkspaceId = workspaceId;
     };
     try {
@@ -216,7 +219,8 @@ export default function SceneSuitesPage() {
       if (action === 'uninstall') await hubAPI.uninstall('component', suite.id);
       if (action === 'enable' || action === 'disable') {
         if (!suite.workspaceId) throw new Error(text.workspaceMissing);
-        await webuiContractPagesAPI.setWorkspaceEnabled(suite.workspaceId, action === 'enable');
+        if (suite.workspaceKind === 'native') await hubAPI.setNativeSceneEnabled(suite.id, action === 'enable');
+        else await webuiContractPagesAPI.setWorkspaceEnabled(suite.workspaceId, action === 'enable');
         if (action === 'enable') enabledWorkspaceId = suite.workspaceId;
       }
       changed = true;
@@ -385,6 +389,11 @@ export default function SceneSuitesPage() {
                     </Link>
                   ) : (
                     <>
+                      {isInstalled && !isPartial && suite.workspaceEnabled && suite.workspaceEntryRoute && (
+                        <Link to={suite.workspaceEntryRoute} className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900">
+                          {text.open}
+                        </Link>
+                      )}
                       {(!isInstalled || isPartial) && (
                         <button
                           type="button"

@@ -381,7 +381,7 @@ def _session_to_response(
         model_auto=session.model_auto,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
-        canWrite=can_write,
+        canWrite=can_write and not (session.metadata or {}).get("monitorScope"),
         canDelete=can_delete,
         isShared=is_shared,
     )
@@ -428,7 +428,7 @@ def _session_to_list_item(
         model_auto=session.model_auto,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
-        canWrite=session.status == "active" and SessionPolicy.can_write(session, current_user),
+        canWrite=session.status == "active" and SessionPolicy.can_write(session, current_user) and not (session.metadata or {}).get("monitorScope"),
         canDelete=SessionPolicy.can_delete(session, current_user),
         isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
@@ -577,6 +577,8 @@ def _require_session_read_access(session: SessionModel, user) -> None:
 
 
 def _require_session_write_access(session: SessionModel, user) -> None:
+    if (session.metadata or {}).get("monitorScope"):
+        raise HTTPException(status_code=409, detail="自动监测会话仅供查看，请在任务中心停用监测后管理历史")
     if not SessionPolicy.can_write(session, user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可写，受邀用户为只读")
     if session.status != "active":
@@ -767,6 +769,9 @@ async def get_session_status() -> Dict[str, Any]:
     from flocks.session.core.turn_state import get_turn_state, get_context_state
     
     statuses = SessionStatus.list()
+    for monitor_id in list(statuses):
+        if monitor_id.startswith("ses_monitor_") and await Session.get_by_id(monitor_id) is None:
+            statuses.pop(monitor_id)
     return {
         session_id: {
             **status.model_dump(),
@@ -1684,7 +1689,10 @@ async def archive_session_for_user(session_id: str, current_user: AuthUser) -> S
 
     auth_token = set_current_auth_user(current_user)
     try:
-        archived_ok = await Session.archive(session.project_id, session.id)
+        try:
+            archived_ok = await Session.archive(session.project_id, session.id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         reset_current_auth_user(auth_token)
     if not archived_ok:
@@ -1802,7 +1810,10 @@ async def delete_session_for_user(session_id: str, current_user: AuthUser) -> bo
 
     auth_token = set_current_auth_user(current_user)
     try:
-        deleted_ok = await Session.delete(session.project_id, session_id)
+        try:
+            deleted_ok = await Session.delete(session.project_id, session_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         reset_current_auth_user(auth_token)
     if not deleted_ok:

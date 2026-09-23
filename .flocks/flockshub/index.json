@@ -14826,6 +14826,18 @@
       "riskLevel": "low",
       "edition": "pro",
       "manifestPath": "plugins/components/ai-redteam-workspace/manifest.json"
+    },
+    {
+      "id": "host-security-monitor",
+      "type": "component",
+      "name": "Security Operations Monitoring",
+      "nameCn": "安全运营监测",
+      "description": "只读监测、每日会话、总结看板与累计报告；处置未启用。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "trust": "official",
+      "riskLevel": "low",
+      "manifestPath": "plugins/components/host-security-monitor/manifest.json"
     }
   ]
 }

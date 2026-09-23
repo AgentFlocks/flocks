@@ -576,6 +576,29 @@ class Session:
         return session
     
     @classmethod
+    async def ensure_daily_session(cls, *, session_id: str, project_id: str,
+                                   directory: str, owner: str, scope: str,
+                                   business_date: str, read_only_tools: dict) -> SessionInfo:
+        # Runtime leadership limits monitoring to one backend process. The
+        # lifecycle lock serializes reservations in that process; an existing
+        # row is validated, never overwritten, including archived/deleted rows.
+        async with cls.lifecycle_lock(session_id):
+            existing = await Storage.get(f"session:{project_id}:{session_id}", SessionInfo)
+            if existing is not None:
+                if (existing.owner_user_id != owner or existing.project_id != project_id
+                        or (existing.metadata or {}).get("monitorScope") != scope
+                        or existing.status != "active"):
+                    raise ValueError("Daily monitoring session ownership or lifecycle mismatch")
+                return existing
+            return await cls.create(
+                id=session_id, project_id=project_id, directory=directory,
+                title=f"安全运营监测 · {business_date}", agent="rex", category="user",
+                owner_user_id=owner, owner_username=owner,
+                metadata={"monitorScope": scope, "businessDate": business_date,
+                          "interactionMode": "unattended", "readOnlyTools": read_only_tools},
+            )
+
+    @classmethod
     async def get(cls, project_id: str, session_id: str) -> Optional[SessionInfo]:
         """
         Get a session
@@ -950,6 +973,10 @@ class Session:
     async def delete(cls, project_id: str, session_id: str) -> bool:
         """Permanently delete a session tree and all application-owned data."""
 
+        if session_id.startswith("ses_monitor_"):
+            from flocks.monitoring.sessions import assert_history_mutable
+            await assert_history_mutable(session_id)
+
         from flocks.project.project import Project
 
         async with Project.lifecycle_guard(project_id):
@@ -1175,6 +1202,10 @@ class Session:
     @classmethod
     async def archive(cls, project_id: str, session_id: str) -> bool:
         """Archive a root session and its descendants."""
+
+        if session_id.startswith("ses_monitor_"):
+            from flocks.monitoring.sessions import assert_history_mutable
+            await assert_history_mutable(session_id)
 
         from flocks.project.project import Project
 

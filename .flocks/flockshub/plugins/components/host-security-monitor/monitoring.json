@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "scope": "host-security-monitor",
+  "cron": "*/10 * * * *",
+  "sessionPolicy": "daily",
+  "interactionMode": "unattended",
+  "actions": [
+    "list",
+    "get_entities",
+    "get_proof"
+  ],
+  "dispositionEnabled": false
+}

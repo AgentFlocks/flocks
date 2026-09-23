@@ -26,6 +26,10 @@ _workflow_cancel_events: dict[str, threading.Event] = {}
 _workflow_done_events: dict[str, threading.Event] = {}
 
 
+class SessionQueued(RuntimeError):
+    """No completion was observed; retain the execution and session binding."""
+
+
 class TaskExecutor:
     @classmethod
     def request_runtime_cancel(cls, execution: TaskExecution) -> bool:
@@ -44,6 +48,9 @@ class TaskExecutor:
         execution: TaskExecution,
         scheduler: TaskScheduler,
     ) -> TaskExecution:
+        if execution.execution_input_snapshot.get("context", {}).get("monitoring"):
+            from flocks.monitoring.runtime import dispatch
+            return await dispatch(execution, scheduler)
         # The execution row was already flipped to RUNNING atomically with the
         # queue ref inside TaskStore.claim_next_queue_execution. We only need
         # to make sure the in-memory object reflects that and to persist the
@@ -55,7 +62,7 @@ class TaskExecutor:
 
         session_id: Optional[str] = None
         if execution.execution_mode == ExecutionMode.AGENT:
-            session_id = await cls._create_task_session(execution, scheduler)
+            session_id = execution.session_id or await cls._create_task_session(execution, scheduler)
 
         execution.session_id = session_id
         await TaskStore.update_execution(execution)
@@ -84,6 +91,10 @@ class TaskExecutor:
             final_status = TaskStatus.COMPLETED
             execution.result_summary = result
             execution.delivery_status = DeliveryStatus.UNREAD
+        except SessionQueued:
+            execution.status = TaskStatus.QUEUED
+            await TaskStore.update_execution(execution)
+            return execution
         except Exception as exc:
             final_status = TaskStatus.FAILED
             execution.error = str(exc)
@@ -154,10 +165,14 @@ class TaskExecutor:
                 f"Task exceeded absolute timeout of {_TASK_ABSOLUTE_TIMEOUT_S}s "
                 f"({_TASK_ABSOLUTE_TIMEOUT_S // 3600}h)"
             )
+        if completed.status == "queued":
+            raise SessionQueued("Session execution is queued")
         if completed.status == "cancelled":
             raise RuntimeError(completed.error or "Agent execution was cancelled")
         if completed.status == "error":
             raise RuntimeError(completed.error or "Agent execution failed")
+        if completed.status != "completed":
+            raise RuntimeError(f"Agent execution is not complete: {completed.status}")
         return completed.output
 
     @classmethod

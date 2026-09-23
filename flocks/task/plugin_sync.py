@@ -70,16 +70,16 @@ async def upsert_task_specs(specs: Sequence[TaskSpec]) -> int:
             existing.tags = spec.tags
             if spec.task_type == "scheduled" and normalized_cron:
                 existing.mode = SchedulerMode.CRON
-                existing.status = (
-                    SchedulerStatus.ACTIVE if spec.enabled else SchedulerStatus.DISABLED
-                )
+                unchanged = (existing.trigger.cron == normalized_cron
+                             and existing.trigger.timezone == spec.timezone)
+                if not spec.enabled:
+                    existing.status = SchedulerStatus.DISABLED
                 existing.trigger = TaskTrigger(
                     cron=normalized_cron,
                     timezone=spec.timezone,
                     cron_description=spec.cron_description,
-                    next_run=SchedulerLoop.compute_next_run(
-                        normalized_cron,
-                        spec.timezone,
+                    next_run=existing.trigger.next_run if unchanged else SchedulerLoop.compute_next_run(
+                        normalized_cron, spec.timezone,
                     ),
                 )
             await TaskStore.update_scheduler(existing)
@@ -113,6 +113,7 @@ async def upsert_task_specs(specs: Sequence[TaskSpec]) -> int:
             tags=spec.tags,
             created_by="system",
             dedup_key=spec.dedup_key,
+            enabled=spec.enabled,
         )
         created += 1
 

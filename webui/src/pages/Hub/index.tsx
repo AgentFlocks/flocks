@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -1110,6 +1111,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-semibold text-gray-900">{getHubName(entry, language)}</h2>
             <StateBadge state={entry.state} text={text} />
+            {entry.id === 'host-security-monitor' && entry.type === 'component' && ['installed', 'updateAvailable'].includes(entry.state) && <Link to="/scenes/suites?workspace=host-security-monitor" onClick={onClose} className="ml-3 text-sm text-blue-600">管理场景</Link>}
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>
         </div>

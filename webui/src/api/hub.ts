@@ -152,6 +152,8 @@ export interface HubSceneSuite {
   workspaceTitle?: string | null;
   workspaceRoute?: string | null;
   workspaceEnabled?: boolean | null;
+  workspaceKind?: 'contract' | 'native';
+  workspaceEntryRoute?: string | null;
   /** Installed / latest version of the suite's page package (can lag behind the suite). */
   workspaceVersion?: string | null;
   workspaceLatestVersion?: string | null;
@@ -173,6 +175,7 @@ export interface HubUpdatePlan {
 
 export const hubAPI = {
   sceneSuites: () => client.get<HubSceneSuite[]>('/api/hub/scene-suites'),
+  setNativeSceneEnabled: (suiteId: string, enabled: boolean) => client.put(`/api/hub/scene-suites/${encodeURIComponent(suiteId)}/enabled`, { enabled }),
 
   catalog: (params?: HubCatalogParams) =>
     client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),

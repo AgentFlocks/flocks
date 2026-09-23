@@ -94,7 +94,7 @@ class BackgroundManager:
         return self._tasks.get(task_id)
 
     async def launch(self, input_data: LaunchInput) -> BackgroundTask:
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = f"bg_{Identifier.ascending('task')}"
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -115,7 +115,7 @@ class BackgroundManager:
         return task
 
     async def resume(self, input_data: ResumeInput) -> BackgroundTask:
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = f"bg_{Identifier.ascending('task')}"
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -148,6 +148,7 @@ class BackgroundManager:
         parent_model: Optional[dict] = None,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
+        runner=None,
     ) -> BackgroundTask:
         """Run the session loop on an already-created session.
 
@@ -155,7 +156,7 @@ class BackgroundManager:
         This is used by TaskExecutor which creates the session upfront so that
         the task record can hold sessionID at the moment it becomes RUNNING.
         """
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = f"bg_{Identifier.ascending('task')}"
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -173,25 +174,38 @@ class BackgroundManager:
             model_id=model_id,
         )
         self._tasks[task_id] = task
-        handle = asyncio.create_task(self._run_existing_session(task, session_id))
+        handle = asyncio.create_task(self._run_existing_session(task, session_id, runner=runner))
         self._task_handles[task_id] = handle
         return task
 
-    async def _run_existing_session(self, task: BackgroundTask, session_id: str) -> None:
+    async def _run_existing_session(self, task: BackgroundTask, session_id: str, *, runner=None) -> None:
         async with self._semaphore:
             task.started_at = int(datetime.now().timestamp() * 1000)
             task.last_activity_at = task.started_at
             task.status = "running"
             try:
                 callbacks = self._build_activity_callbacks(task)
-                result = await self._run_session_with_watchdog(
-                    task,
-                    session_id,
-                    callbacks,
-                    allow_user_questions=task.allow_user_questions,
-                    provider_id=task.provider_id,
-                    model_id=task.model_id,
-                )
+                from flocks.session.interaction_policy import unattended_scope
+                with unattended_scope(runner is not None):
+                    if runner is not None:
+                        result = await runner()
+                    else:
+                        result = await self._run_session_with_watchdog(
+                            task,
+                            session_id,
+                            callbacks,
+                            allow_user_questions=task.allow_user_questions,
+                            provider_id=task.provider_id,
+                            model_id=task.model_id,
+                        )
+                if result.action == "queued":
+                    # Another loop owns the session. No completion can be inferred.
+                    task.status = "queued"
+                    return
+                if result.action == "error":
+                    raise RuntimeError(result.error or "Session loop failed")
+                if result.action != "stop":
+                    raise RuntimeError(f"Session loop returned non-terminal action: {result.action}")
                 output = ""
                 if result.last_message:
                     output = await Message.get_text_content(result.last_message)

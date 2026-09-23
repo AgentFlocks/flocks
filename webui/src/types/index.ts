@@ -4,6 +4,7 @@
  * Session 会话信息
  */
 export interface Session {
+  metadata?: Record<string, unknown>;
   id: string;
   slug?: string;
   projectID: string;

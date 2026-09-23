@@ -1,13 +1,12 @@
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 /**
- * The fixed partitions of the top bar. `scene` is the SOC workspace: every
- * enabled scene suite lives inside it, so a new scene never adds a tab, and
- * the tab goes away while no scene suite is enabled.
+ * The fixed partitions of the top bar. Contract scenes share the SOC
+ * workspace. Native monitoring is an independent installed scene.
  */
-export type NavPartitionId = 'agent' | 'scene' | 'settings';
+export type NavPartitionId = 'agent' | 'scene' | 'monitor' | 'settings';
 
-export const NAV_PARTITION_IDS: readonly NavPartitionId[] = ['agent', 'scene', 'settings'] as const;
+export const NAV_PARTITION_IDS: readonly NavPartitionId[] = ['agent', 'scene', 'monitor', 'settings'] as const;
 
 export const AGENT_PARTITION_DEFAULT_PATH = '/';
 export const SETTINGS_PARTITION_DEFAULT_PATH = '/settings/preferences';
@@ -54,6 +53,7 @@ export function resolveNavPartition(
   pathname: string,
   workspaces?: readonly WebUIContractWorkspaceListItem[] | null,
 ): NavPartitionId {
+  if (pathname === '/suites/host-security-monitor' || pathname.startsWith('/suites/host-security-monitor/')) return 'monitor';
   const workspaceId = workspaceIdFromPath(pathname);
   if (workspaceId) {
     const workspace = workspaces?.find((item) => item.id === workspaceId);

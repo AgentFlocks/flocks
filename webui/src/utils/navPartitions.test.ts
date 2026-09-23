@@ -22,6 +22,10 @@ describe('navPartitions', () => {
   });
 
   it('maps a route to the partition that owns it', () => {
+    expect(resolveNavPartition('/suites/host-security-monitor/session')).toBe('monitor');
+    expect(resolveNavPartition('/suites/host-security-monitor/dashboard')).toBe('monitor');
+    expect(resolveNavPartition('/suites/host-security-monitor/report')).toBe('monitor');
+    expect(resolveNavPartition('/suites/host-security-monitor-other')).toBe('agent');
     expect(resolveNavPartition('/')).toBe('agent');
     expect(resolveNavPartition('/sessions')).toBe('agent');
     expect(resolveNavPartition('/devices')).toBe('agent');
@@ -83,11 +87,13 @@ describe('navPartitions', () => {
       agent: '/workflows/wf-1',
       scene: '/contracts/webui/workspaces/soc_ui/soc-alerts?severity=high',
       settings: '/settings/account',
+      monitor: '/suites/host-security-monitor/report',
     });
     expect(readPartitionPaths()).toEqual({
       agent: '/workflows/wf-1',
       scene: '/contracts/webui/workspaces/soc_ui/soc-alerts?severity=high',
       settings: '/settings/account',
+      monitor: '/suites/host-security-monitor/report',
     });
   });
 

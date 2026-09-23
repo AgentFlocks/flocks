@@ -5,8 +5,13 @@ import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import Layout from './Layout';
 import Home from '@/pages/Home';
+import type { HubSceneSuite } from '@/api/hub';
 import { UPDATE_DISMISSED_KEY } from '@/utils/updateDismissal';
 import { getTokenPolicyStatus, claimTokenPolicy, confirmTokenPolicyDisplay } from '@/api/tokenPolicy';
+
+// SSE-driven monitoring navigation has its own hook tests. Layout exercises
+// scene ownership and menus without opening an EventSource in jsdom.
+vi.mock('@/hooks/useMonitorNavigation', () => ({ useMonitorNavigation: vi.fn() }));
 
 vi.mock('@/api/tokenPolicy', () => ({
   getTokenPolicyStatus: vi.fn(),
@@ -78,7 +83,7 @@ const {
     resetProductFavicon: vi.fn(),
   },
   updateModalMock: vi.fn(() => null),
-  useSceneSuiteUpdates: vi.fn(() => ({ hasUnseenSuites: false })),
+  useSceneSuiteUpdates: vi.fn<() => { hasUnseenSuites: boolean; suites?: HubSceneSuite[]; loading?: boolean; error?: string | null }>(() => ({ hasUnseenSuites: false })),
   useAuth: vi.fn(),
   useStats: vi.fn(),
   useWebUIContractPages: vi.fn(() => ({
@@ -1891,6 +1896,32 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(screen.queryByRole('link', { name: '待构建页面' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '构建中页面' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '构建失败页面' })).not.toBeInTheDocument();
+  });
+
+  it('opens monitoring in its own top-level scene and keeps SOC navigation separate', async () => {
+    mockSocWorkspaceNav();
+    useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: false, loading: false, suites: [{
+      id: 'host-security-monitor', name: 'Security monitoring', description: '', version: '1.0.0',
+      edition: 'oss', state: 'installed', workspaceKind: 'native', workspaceEnabled: true,
+    }] });
+    renderLayoutAt('/sessions');
+    await userEvent.click(screen.getByRole('tab', { name: '安全运营监测' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/suites/host-security-monitor/session'));
+    expect(screen.getByRole('tab', { name: '安全运营监测' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('link', { name: '监测对话' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '总结看板' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '累计报告' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    expect(await screen.findByRole('link', { name: '告警调查' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '监测对话' })).not.toBeInTheDocument();
+  });
+
+  it('returns disabled monitoring deep links to Add scene without exposing its tab', async () => {
+    useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: false, loading: false, suites: [] });
+    renderLayoutAt('/suites/host-security-monitor/report');
+    await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites?workspace=host-security-monitor'));
+    expect(screen.queryByRole('tab', { name: '安全运营监测' })).not.toBeInTheDocument();
   });
 
   it('collapses the scene sections independently of the agent accordion', async () => {

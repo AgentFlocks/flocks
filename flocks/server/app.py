@@ -1269,6 +1269,8 @@ app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
 app.include_router(hub_router, prefix="/api", tags=["Hub"])
+from flocks.server.routes.security_monitoring import router as security_monitoring_router
+app.include_router(security_monitoring_router, prefix="/api", tags=["Security Monitoring"])
 # WebUI: Hook management routes
 app.include_router(hooks_router, prefix="/api/hooks", tags=["Hooks"])
 # Model management: Default model routes

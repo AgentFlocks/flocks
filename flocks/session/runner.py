@@ -1638,6 +1638,9 @@ class SessionRunner:
         # Build prompts and tools
         tools_started_at = time.perf_counter()
         tools = await self._build_callable_tool_schema(agent, messages)
+        from flocks.session.interaction_policy import is_unattended
+        if is_unattended():
+            tools = [tool for tool in tools if tool.get("function", {}).get("name") != "question"]
         self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
         prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
 

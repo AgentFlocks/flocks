@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "host-security-monitor",
+  "type": "component",
+  "name": "Security Operations Monitoring",
+  "nameCn": "安全运营监测",
+  "description": "Read-only scheduled XDR monitoring with native daily sessions and cumulative reports.",
+  "descriptionCn": "每十分钟只读监测，复用每日原生会话，关联分析、总结看板与累计报告。处置未启用。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "xdr",
+    "monitoring"
+  ],
+  "useCases": [
+    "alert-triage",
+    "log-analysis",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/components/host-security-monitor"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [
+      "sangfor_xdr_incidents"
+    ],
+    "network": true,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": [
+      "只读查询；不执行安全处置"
+    ]
+  },
+  "entrypoints": [
+    "component.json",
+    "monitoring.json"
+  ],
+  "components": [],
+  "checksums": {},
+  "requiredCoreCapabilities": [
+    "monitor.daily.v1",
+    "monitor.readonly.v1",
+    "monitor.native-messages.v1"
+  ],
+  "edition": "oss"
+}

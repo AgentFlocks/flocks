@@ -14,7 +14,8 @@ def _component_entries():
 def test_bundled_scene_suites_declare_their_edition():
     entries = _component_entries()
 
-    assert set(entries) == {"soc-workspace", "code-audit-workspace", "ai-redteam-workspace"}
+    assert set(entries) == {"soc-workspace", "code-audit-workspace", "ai-redteam-workspace", "host-security-monitor"}
+    assert entries["host-security-monitor"].edition == "oss"
     assert entries["soc-workspace"].edition == "oss"
     assert entries["code-audit-workspace"].edition == "pro"
     assert entries["ai-redteam-workspace"].edition == "pro"

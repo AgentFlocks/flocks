@@ -1,3 +1,4 @@
+import { useMonitorNavigation } from '@/hooks/useMonitorNavigation';
 import { Link, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import {
   Home,
@@ -299,6 +300,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
+  useMonitorNavigation(user?.id);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
@@ -351,7 +353,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     error: webuiContractNavError,
   } = useWebUIContractPages();
   const viewingScenes = location.pathname === '/scenes' || location.pathname.startsWith('/scenes/');
-  const { hasUnseenSuites } = useSceneSuiteUpdates({ viewingScenes, userId: user?.id });
+  const { hasUnseenSuites, suites: sceneSuites = [], loading: sceneSuitesLoading, error: sceneSuitesError } = useSceneSuiteUpdates({ viewingScenes, userId: user?.id });
+  const monitorScene = sceneSuites.find((suite) => suite.id === 'host-security-monitor' && suite.workspaceKind === 'native');
+  const monitorSceneEnabled = monitorScene?.workspaceEnabled === true;
   const workspacePageOrders = useWorkspacePageOrders();
   const [openTabRecords, setOpenTabRecords] = useLayoutOpenTabs();
   // Tab whose close is in flight: React Router commits the navigation as a
@@ -845,13 +849,22 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           ]),
         },
         ...sceneWorkspaceSections,
+        ...(monitorSceneEnabled ? [{
+          id: 'security-monitor', name: i18n.language.startsWith('zh') ? '安全运营监测' : 'Security monitoring',
+          partition: 'monitor' as const,
+          items: [
+            { name: i18n.language.startsWith('zh') ? '监测对话' : 'Monitoring conversation', href: '/suites/host-security-monitor/session', icon: MessageSquare },
+            { name: i18n.language.startsWith('zh') ? '总结看板' : 'Dashboard', href: '/suites/host-security-monitor/dashboard', icon: ShieldCheck },
+            { name: i18n.language.startsWith('zh') ? '累计报告' : 'Reports', href: '/suites/host-security-monitor/report', icon: ShieldCheck },
+          ],
+        }] : []),
         ...(customPageItems.length > 0
           ? [{ id: 'customPages', name: t('customPages'), partition: customPagesPartition, collapsible: true, items: customPageItems }]
           : []),
         ...settingsSections,
       ];
     },
-    [i18n.language, productName, settingsGroups, webuiContractPages, webuiContractWorkspaces, workspacePageOrders, t],
+    [i18n.language, monitorSceneEnabled, productName, settingsGroups, webuiContractPages, webuiContractWorkspaces, workspacePageOrders, t],
   );
 
   // Selection comes from the live route, so a failed/empty navigation cannot
@@ -864,6 +877,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   // Until the navigation data arrives the scene state is unknown (see resolveNavPartition).
   const routePartition = resolveNavPartition(location.pathname, webuiContractNavLoading ? null : webuiContractWorkspaces);
   const selectedPartition = routePartition;
+  useEffect(() => {
+    if (routePartition === 'monitor' && !sceneSuitesLoading && !sceneSuitesError && !monitorSceneEnabled) {
+      navigate(`${SCENE_SUITES_PATH}?workspace=host-security-monitor`, { replace: true });
+    }
+  }, [routePartition, sceneSuitesLoading, sceneSuitesError, monitorSceneEnabled, navigate]);
   // The SOC workspace tab is shown only while a scene suite is enabled; a
   // disabled suite stays installed but no longer has a tab to land on.
   const hasScenePartition = sceneWorkspaces.some((workspace) => workspace.enabled);
@@ -905,7 +923,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const partitionItems = useMemo<PartitionTopBarItem[]>(() => [
     { id: 'agent', name: t('partitionAgent'), icon: Sparkles },
     ...(hasScenePartition ? [{ id: 'scene' as const, name: t('partitionScene'), icon: ShieldCheck }] : []),
-  ], [hasScenePartition, t]);
+    ...(monitorSceneEnabled ? [{ id: 'monitor' as const, name: i18n.language.startsWith('zh') ? '安全运营监测' : 'Security monitoring', icon: ShieldCheck }] : []),
+  ], [hasScenePartition, monitorSceneEnabled, i18n.language, t]);
   const topBarSettings = useMemo(() => navigation.filter((section) => section.partition === 'settings'), [navigation]);
 
   // Remember where each partition was left so the top bar returns to it.

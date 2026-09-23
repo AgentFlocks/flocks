@@ -39,6 +39,7 @@ const WorkflowDetail = lazyPage(() => import('@/pages/WorkflowDetail'), ['workfl
 const TaskPage = lazyPage(() => import('@/pages/Task'), ['task']);
 const ToolPage = lazyPage(() => import('@/pages/Tool'), ['tool']);
 const HubPage = lazyPage(() => import('@/pages/Hub'));
+const SecurityMonitor = lazyPage(() => import('@/pages/SecurityMonitor'));
 const SkillPage = lazyPage(() => import('@/pages/Skill'), ['skill']);
 const ModelPage = lazyPage(() => import('@/pages/Model'), ['model']);
 const ChannelPage = lazyPage(() => import('@/pages/Channel'), ['channel']);
@@ -111,6 +112,7 @@ export const contentRoutes: RouteObject[] = [
 
   // Agent Smith
   { path: 'tools', element: <LazyRoute><ToolPage /></LazyRoute> },
+  { path: 'suites/host-security-monitor/*', element: <LazyRoute><SecurityMonitor /></LazyRoute> },
   { path: 'hub', element: <LazyRoute><HubPage /></LazyRoute> },
   { path: 'models', element: <LazyRoute><ModelPage /></LazyRoute> },
   { path: 'skills', element: <LazyRoute><SkillPage /></LazyRoute> },

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -243,6 +243,8 @@ class SceneSuiteEntry(BaseModel):
     workspaceTitle: Optional[str] = None
     workspaceRoute: Optional[str] = None
     workspaceEnabled: Optional[bool] = None
+    workspaceKind: Literal["contract", "native"] = "contract"
+    workspaceEntryRoute: Optional[str] = None
     # The suite's page package has its own version; an update can be pending
     # there while the suite version itself has not moved.
     workspaceVersion: Optional[str] = None
@@ -275,6 +277,23 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
     workspaces = {item.id: item for item in WebUIPagesStore().list_workspaces()}
     suites: list[SceneSuiteEntry] = []
     for entry in entries:
+        # Native monitoring pages ship with the application, not a dynamically
+        # built WebUI child. They still participate in the scene manager.
+        if entry.id == "host-security-monitor":
+            from flocks.hub.local import get_record
+
+            record = get_record("component", entry.id)
+            suites.append(SceneSuiteEntry(
+                id=entry.id, name=entry.name, nameCn=entry.nameCn,
+                description=entry.description, descriptionCn=entry.descriptionCn,
+                version=entry.version, installedVersion=entry.installedVersion,
+                edition=entry.edition, state=entry.state,
+                workspaceId=entry.id, workspaceTitle=entry.nameCn or entry.name,
+                workspaceKind="native", workspaceRoute="/suites/host-security-monitor",
+                workspaceEntryRoute="/suites/host-security-monitor/session",
+                workspaceEnabled=record.enabled if record else None,
+            ))
+            continue
         try:
             refs = load_manifest("component", entry.id).components
         except Exception:
@@ -303,6 +322,26 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
         )
     suites.sort(key=lambda item: (item.edition != "oss", item.id))
     return suites
+
+
+class SceneEnabledRequest(BaseModel):
+    enabled: bool
+
+
+@router.put("/hub/scene-suites/{suite_id}/enabled")
+async def set_native_scene_enabled(
+    suite_id: str, req: SceneEnabledRequest, _admin: object = Depends(require_admin),
+):
+    if suite_id != "host-security-monitor":
+        raise HTTPException(404, "未找到原生场景")
+    from flocks.monitoring.lifecycle import set_scene_enabled
+
+    try:
+        await set_scene_enabled(req.enabled)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    await _publish_scene_suites_changed("component", suite_id, "enable" if req.enabled else "disable")
+    return {"enabled": req.enabled}
 
 
 async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str, action: str) -> None:

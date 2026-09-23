@@ -55,6 +55,8 @@ async def api_question_handler(
         QuestionRejectedError: If user rejects the question
         TimeoutError: If user doesn't respond within timeout
     """
+    from flocks.session.interaction_policy import require_interactive
+    await require_interactive(session_id)
     if not questions:
         return []
     

@@ -87,6 +87,10 @@ class TaskManager:
         if cls._instance and cls._instance._running:
             return cls._instance
         await TaskStore.init()
+        from filelock import FileLock
+        # A second worker must never recover the first worker's running queue.
+        runtime_lock = FileLock(str(TaskStore.get_db_path()) + ".executor.lock")
+        runtime_lock.acquire(timeout=0)
         cls._startup_error = None
 
         mgr = cls(
@@ -94,17 +98,34 @@ class TaskManager:
             poll_interval=poll_interval,
             scheduler_interval=scheduler_interval,
         )
-        recovered = await mgr._recover_orphaned_executions()
-        if recovered:
-            log.info("manager.orphan_recovery", {"count": recovered})
-        recovered_queued = await mgr._recover_orphaned_queued_executions()
-        if recovered_queued:
-            log.info("manager.orphaned_queue_recovery", {"count": recovered_queued})
+        mgr._runtime_lock = runtime_lock
+        try:
+            from flocks.monitoring.lifecycle import reconcile
+            from flocks.monitoring.recovery import recover
+            await reconcile()
+            await recover()
+            recovered = await mgr._recover_orphaned_executions()
+            if recovered:
+                log.info("manager.orphan_recovery", {"count": recovered})
+            recovered_queued = await mgr._recover_orphaned_queued_executions()
+            if recovered_queued:
+                log.info("manager.orphaned_queue_recovery", {"count": recovered_queued})
 
-        mgr._running = True
-        mgr._loop_task = asyncio.create_task(mgr._execution_loop())
-        mgr._cleanup_task = asyncio.create_task(mgr._cleanup_loop())
-        await mgr.scheduler.start()
+            import time
+            mgr._last_stale_recovery_check = time.monotonic()
+            mgr._last_orphaned_queue_recovery_check = time.monotonic()
+            mgr._running = True
+            mgr._loop_task = asyncio.create_task(mgr._execution_loop())
+            mgr._cleanup_task = asyncio.create_task(mgr._cleanup_loop())
+            await mgr.scheduler.start()
+        except BaseException:
+            mgr._running = False
+            for task in (mgr._loop_task, mgr._cleanup_task):
+                if task:
+                    task.cancel()
+            await mgr.scheduler.stop()
+            runtime_lock.release()
+            raise
         cls._instance = mgr
         log.info("manager.started")
         return mgr
@@ -124,6 +145,11 @@ class TaskManager:
                 except asyncio.CancelledError:
                     pass
         await mgr.scheduler.stop()
+        from flocks.monitoring.runtime import _running, cancel
+        for execution_id in list(_running):
+            await cancel(execution_id)
+        if getattr(mgr, "_runtime_lock", None):
+            mgr._runtime_lock.release()
         cls._instance = None
         log.info("manager.stopped")
 
@@ -176,6 +202,7 @@ class TaskManager:
         tags: Optional[List[str]] = None,
         created_by: str = "rex",
         dedup_key: Optional[str] = None,
+        enabled: bool = True,
     ) -> TaskScheduler:
         trigger = trigger.model_copy(deep=True) if trigger is not None else TaskTrigger()
         if trigger.cron:
@@ -187,7 +214,7 @@ class TaskManager:
             title=title,
             description=description,
             mode=mode,
-            status=SchedulerStatus.ACTIVE,
+            status=SchedulerStatus.ACTIVE if enabled else SchedulerStatus.DISABLED,
             priority=priority,
             source=source,
             trigger=trigger,
@@ -673,6 +700,9 @@ class TaskManager:
                 TaskExecutor.dispatch(execution, scheduler),
                 timeout=_DISPATCH_GUARD_TIMEOUT_S,
             )
+            if execution.status == TaskStatus.QUEUED:
+                await self._enqueue_execution(execution)
+                should_finish_queue_ref = False
         except asyncio.CancelledError:
             current = await TaskStore.get_execution(execution.id)
             if current is not None:
@@ -721,15 +751,22 @@ class TaskManager:
             )
 
     async def _process_retry_queue(self) -> None:
+        from flocks.monitoring.reports import retry_exports
+        await retry_exports()
         retryable = await TaskStore.list_retryable_failed_executions()
         for execution in retryable:
+            if execution.execution_input_snapshot.get("context", {}).get("monitoring"):
+                scheduler = await TaskStore.get_scheduler(execution.scheduler_id)
+                if not scheduler or not scheduler.is_active:
+                    continue
             execution.retry.retry_after = None
             execution.status = TaskStatus.QUEUED
             execution.queued_at = datetime.now(timezone.utc)
             execution.started_at = None
             execution.completed_at = None
             execution.duration_ms = None
-            execution.session_id = None
+            if not execution.execution_input_snapshot.get("context", {}).get("monitoring"):
+                execution.session_id = None
             await self._enqueue_execution(execution)
 
     async def _recover_orphaned_executions(self) -> int:
@@ -902,6 +939,9 @@ class TaskManager:
 
     @classmethod
     async def _cancel_execution_runtime(cls, execution: TaskExecution) -> None:
+        if execution.execution_input_snapshot.get("context", {}).get("monitoring"):
+            from flocks.monitoring.runtime import cancel
+            await cancel(execution.id)
         latest = await TaskStore.get_execution(execution.id)
         if latest is not None:
             execution.execution_mode = latest.execution_mode

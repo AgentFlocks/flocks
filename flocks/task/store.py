@@ -806,6 +806,14 @@ class TaskStore:
             FROM task_execution_queue_refs q
             JOIN task_executions e ON e.id = q.execution_id
             WHERE q.status = 'queued' {excl}
+              AND (json_extract(e.execution_input_snapshot, '$.context.monitoring') IS NULL
+                   OR NOT EXISTS (
+                     SELECT 1 FROM task_execution_queue_refs busy
+                     JOIN task_executions running ON running.id=busy.execution_id
+                     WHERE busy.status='running'
+                       AND json_extract(running.execution_input_snapshot, '$.context.monitoring.owner') = json_extract(e.execution_input_snapshot, '$.context.monitoring.owner')
+                       AND json_extract(running.execution_input_snapshot, '$.context.monitoring.scope') = json_extract(e.execution_input_snapshot, '$.context.monitoring.scope')
+                   ))
             ORDER BY
               CASE e.priority
                 WHEN 'urgent' THEN 1

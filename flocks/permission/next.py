@@ -323,6 +323,8 @@ class PermissionNext:
 
         Ported from original PermissionNext.ask().
         """
+        from flocks.session.interaction_policy import require_interactive
+        await require_interactive(session_id)
         metadata = metadata or {}
 
         if auto_approve_enabled():
