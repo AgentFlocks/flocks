@@ -220,6 +220,7 @@ async def execute_ssh_host_command(
 
 @ToolRegistry.register_function(
     name="ssh_host_cmd",
+    group="终端执行",
     description="Execute a command on a remote Linux host via SSH.",
     category=ToolCategory.TERMINAL,
     parameters=[

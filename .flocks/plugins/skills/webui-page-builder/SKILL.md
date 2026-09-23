@@ -1,5 +1,6 @@
 ---
 name: webui-page-builder
+group: 系统辅助
 category: system
 description: Guide users to create, develop, hide, or delete WebUI page plugins that appear in the WebUI left navigation under Home, with live preview and no restart required. Also guide development of page-scoped backend APIs through the WebUI Page Backend API Runtime when built-in APIs are insufficient. Trigger when the user asks to create, remove, or delete a WebUI contract page, WebUI page, dashboard, navigation tab, integrate custom APIs for a page, or sends messages such as "create a WebUI contract page", "delete WebUI contract page", "remove WebUI page", "创建WebUI 契约页面", "删除WebUI 契约页面", "用户WebUI 契约页面", "WebUI 契约页面", "左侧导航页面", "首页下面的页面", "页面数据来源", "自定义 API", or wants help understanding how WebUI contract pages work in Flocks.
 ---

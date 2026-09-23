@@ -1,0 +1,83 @@
+{
+  "title": "业务分组",
+  "navigation": "按业务分组筛选",
+  "countsDescription": "拖动插件到分组即可归组。",
+  "defaultNames": {
+    "平台集成": "平台集成",
+    "安全研判": "安全研判",
+    "系统辅助": "系统辅助",
+    "威胁情报": "威胁情报",
+    "文件操作": "文件操作",
+    "终端执行": "终端执行",
+    "代码分析": "代码分析",
+    "检索": "检索",
+    "任务与工作流": "任务与工作流",
+    "代理协作": "代理协作",
+    "系统管理": "系统管理",
+    "企业协作": "企业协作",
+    "网络测绘": "网络测绘",
+    "网络防护": "网络防护",
+    "SIEM 与日志分析": "SIEM 与日志分析",
+    "安全运营": "安全运营",
+    "数据处理": "数据处理",
+    "合规": "合规",
+    "代码安全": "代码安全"
+  },
+  "all": "全部",
+  "ungrouped": "未分组",
+  "create": "新建分组",
+  "groupAction": "分组",
+  "editGroup": "编辑分组",
+  "rename": "重命名",
+  "delete": "删除分组",
+  "renameNamed": "重命名分组 {{name}}",
+  "deleteNamed": "删除分组 {{name}}",
+  "save": "保存",
+  "saving": "正在保存…",
+  "saved": "分组更改已保存。",
+  "cancel": "取消",
+  "close": "关闭",
+  "confirmScope": "将以下 {{count}} 个插件移到“{{group}}”？\n{{items}}\n不会删除插件。",
+  "dialog": {
+    "createTitle": "新建业务分组",
+    "renameTitle": "重命名业务分组",
+    "moveTitle": "设置 {{name}} 的分组",
+    "name": "分组名称",
+    "firstPlugin": "首个可编辑插件",
+    "choosePlugin": "选择一个插件",
+    "destination": "目标分组"
+  },
+  "validation": {
+    "length": "名称需为 1–32 个字符，不计首尾空格，不能包含控制字符。",
+    "duplicate": "已有同名分组，请使用其他名称。",
+    "firstPlugin": "请选择一个可编辑插件。"
+  },
+  "readOnly": {
+    "system": "内置插件的分组不能修改。",
+    "builtinSkill": "内置技能的分组不能修改。",
+    "admin": "你没有修改分组的权限。",
+    "catalog": "请先安装或配置此服务。",
+    "noEditable": "暂无可修改分组的插件。"
+  },
+  "errors": {
+    "missing": "插件或分组不可用，请刷新后重试。",
+    "readOnlyMembers": "以下插件的分组不能修改：{{items}}",
+    "write": "无法保存此插件的分组。",
+    "partial": "已保存 {{succeeded}} 个，失败 {{failed}} 个。",
+    "succeededItems": "已保存插件：",
+    "failedItems": "失败插件：",
+    "refresh": "列表刷新失败，请刷新后重试。"
+  },
+  "drag": {
+    "sourceLabel": "{{name}}。按 Alt+M 移入业务分组。",
+    "reorderLabel": "调整分组 {{name}} 的顺序",
+    "reorderHint": "拖动或按上下方向键调整顺序。",
+    "orderPlaced": "分组顺序已更新。",
+    "cancelled": "已取消。"
+  },
+  "view": {
+    "label": "展示布局",
+    "cards": "卡片视图",
+    "list": "列表视图"
+  }
+}

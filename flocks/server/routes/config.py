@@ -67,6 +67,62 @@ def _normalize_slack_dm_policy(config_data: Dict[str, Any]) -> None:
         slack["dmPolicy"] = "open"
 
 
+async def _validate_plugin_group_updates(config_data: Dict[str, Any]) -> None:
+    """Check native definition locks before any config or secret side effects."""
+    try:
+        for section in ("mcp", "api_services"):
+            entries = config_data.get(section)
+            if not isinstance(entries, dict):
+                continue
+            groups = [entry["group"] for entry in entries.values() if isinstance(entry, dict) and "group" in entry]
+            if not groups:
+                continue
+            if section == "mcp":
+                from flocks.mcp.types import normalize_mcp_group as normalize_group
+            else:
+                from flocks.tool.schema.api_service_schema import normalize_api_service_group as normalize_group
+            for group in groups:
+                normalize_group(group)
+
+        for section in ("agent", "mode"):
+            entries = config_data.get(section)
+            if not isinstance(entries, dict):
+                continue
+            updates = {
+                name: entry for name, entry in entries.items()
+                if isinstance(entry, dict) and "group" in entry
+            }
+            if not updates:
+                continue
+            from flocks.agent.agent import normalize_agent_group
+            from flocks.agent.registry import Agent
+
+            for entry in updates.values():
+                normalize_agent_group(entry["group"])
+            try:
+                await Agent.validate_group_settings(updates)
+            except ValueError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        settings = config_data.get("tool_settings")
+        if isinstance(settings, dict):
+            updates = {
+                name: entry for name, entry in settings.items()
+                if isinstance(entry, dict) and "group" in entry
+            }
+            if updates:
+                from flocks.tool.registry import ToolRegistry, normalize_tool_group
+
+                for entry in updates.values():
+                    normalize_tool_group(entry["group"])
+                try:
+                    ToolRegistry.validate_group_settings(updates)
+                except ValueError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _build_model_from_config(
     provider_id: str,
     model_id: str,
@@ -648,6 +704,7 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     {secret:channel_<id>_<field>} references before the config is written to
     flocks.json, so that plaintext secrets never land in that file.
     """
+    await _validate_plugin_group_updates(config_data)
     try:
         channel_allow_from_deletions = _channel_allow_from_deletion_ids(config_data)
         _normalize_slack_dm_policy(config_data)
@@ -670,6 +727,10 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Clear cache to reload
         Config.clear_cache()
+        if any(isinstance(config_data.get(section), dict) and config_data[section] for section in ("agent", "mode")):
+            from flocks.agent.registry import Agent
+
+            Agent.invalidate_cache()
         # Refresh only OSS-owned channel routing and Agent visibility config.
         from flocks.channel.inbound.dispatcher import (
             InboundDispatcher,

@@ -1,4 +1,5 @@
 name: tdp_login_api_list
+group: NDR
 description: >
   查询 TDP 登录入口相关数据。`summary` 返回登录入口头部统计，`category` 返回分类统计，
   `list` 返回登录入口明细列表。优先使用顶层语义化参数，例如业务组、分类、风险标签和布尔筛选；

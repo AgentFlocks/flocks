@@ -151,6 +151,7 @@ def find_similar_files(directory: str, filename: str, max_suggestions: int = 3) 
 
 @ToolRegistry.register_function(
     name="read",
+    group="文件操作",
     description=DESCRIPTION,
     category=ToolCategory.FILE,
     parameters=[

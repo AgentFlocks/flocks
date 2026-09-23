@@ -13,6 +13,7 @@ from flocks.tool.registry import (
 
 @ToolRegistry.register_function(
     name="mkdir",
+    group="文件操作",
     description="Create a directory recursively.",
     category=ToolCategory.FILE,
     parameters=[

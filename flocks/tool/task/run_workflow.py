@@ -376,6 +376,7 @@ async def _record_workflow_tool_result(workflow_id: str, result: Any) -> None:
 
 @ToolRegistry.register_function(
     name="run_workflow",
+    group="任务与工作流",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     requires_confirmation=True,

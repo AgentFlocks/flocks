@@ -26,6 +26,8 @@ export type ToolListSortField = 'category' | 'source' | 'source_name' | 'enabled
 export type ToolListSortDir = 'asc' | 'desc';
 
 export interface ToolListPageParams {
+  /** Omitted = All; empty string = Ungrouped; otherwise one exact name. */
+  group?: string;
   source?: string;
   category?: string;
   sourceName?: string;
@@ -38,6 +40,8 @@ export interface ToolListPageParams {
 }
 
 export interface ToolListFacets {
+  /** Counts before group selection and pagination; '' denotes Ungrouped. */
+  group?: Record<string, number>;
   category: Record<string, number>;
   source: Record<string, number>;
   source_groups: Record<string, number>;
@@ -74,6 +78,7 @@ export const toolAPI = {
   listPage: (params?: ToolListPageParams) =>
     client.get<ToolListPageResponse>('/api/tools/page', {
       params: {
+        group: params?.group,
         source: params?.source,
         category: params?.category,
         source_name: params?.sourceName,
@@ -108,10 +113,10 @@ export const toolAPI = {
       options?.device_id ? { params: { device_id: options.device_id } } : undefined,
     ),
 
-  /**
-   * Remove the user-level setting and restore the YAML/registration default
-   * for this tool (currently only the `enabled` flag is overlaid).
-   */
+  updateGroup: (name: string, group: string | null) =>
+    client.patch<Tool>(`/api/tools/${encodeURIComponent(name)}`, { group }),
+
+  /** Restore the enabled default without removing other native settings. */
   resetSetting: (name: string) =>
     client.post<Tool>(`/api/tools/${name}/reset`),
 
@@ -119,7 +124,7 @@ export const toolAPI = {
     client.delete<ToolDeleteResponse>(`/api/tools/${name}`),
 };
 
-export async function listAllToolPages(params: ToolListPageParams): Promise<Tool[]> {
+export async function listAllToolPages(params: ToolListPageParams, options?: { requireComplete?: boolean }): Promise<Tool[]> {
   const pageSize = 200;
   const items: Tool[] = [];
   let offset = 0;
@@ -133,6 +138,9 @@ export async function listAllToolPages(params: ToolListPageParams): Promise<Tool
     const pageItems = Array.isArray(response.data.items) ? response.data.items : [];
     items.push(...pageItems);
     offset += pageItems.length;
+    if (options?.requireComplete && pageItems.length === 0 && offset < response.data.total) {
+      throw new Error('The native tool inventory changed before all members could be loaded. Refresh and try again.');
+    }
     if (pageItems.length === 0 || offset >= response.data.total) break;
   }
 

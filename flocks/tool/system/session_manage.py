@@ -156,6 +156,7 @@ SESSION_MANAGE_PARAMETERS = [
 
 @ToolRegistry.register_function(
     name="session_manage",
+    group="系统管理",
     description=SESSION_MANAGE_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=SESSION_MANAGE_PARAMETERS,

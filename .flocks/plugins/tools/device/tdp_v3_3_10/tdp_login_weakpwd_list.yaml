@@ -1,4 +1,5 @@
 name: tdp_login_weakpwd_list
+group: NDR
 description: >
   查询 TDP 弱口令列表，可结合登录入口、攻击结果、应用分类和关键词筛选。优先使用顶层语义化参数；
   `condition` / `page` 仅作为高级兼容入口。

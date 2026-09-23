@@ -95,6 +95,7 @@ def _usage_for_command(command: str) -> str:
 
 @ToolRegistry.register_function(
     name="run_slash_command",
+    group="系统管理",
     description=build_run_slash_command_description(),
     category=ToolCategory.SYSTEM,
     parameters=[

@@ -1,4 +1,5 @@
 name: qingteng_system_audit
+group: EDR/HIDS
 description: >
   查询青藤云平台系统审计日志。支持按操作名称和操作账号模糊过滤，
   适用于排查配置变更来源、分析用户操作轨迹和审计外部 API 调用记录。

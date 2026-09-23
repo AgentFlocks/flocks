@@ -1,4 +1,5 @@
 name: ngsoc_assets
+group: SIEM
 description: >
   NGSOC asset center grouped tool. Use the `action` parameter to fetch
   per-asset detail, list asset-IDs grouped by asset-group, and traverse

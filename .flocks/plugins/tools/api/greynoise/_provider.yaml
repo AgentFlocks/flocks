@@ -1,4 +1,5 @@
 name: greynoise
+group: 威胁情报
 description: GreyNoise Threat Intelligence - Internet-wide scan and attack traffic analysis
 auth:
   secret: greynoise_api_key

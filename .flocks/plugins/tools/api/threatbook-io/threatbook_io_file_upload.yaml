@@ -1,4 +1,5 @@
 name: threatbook_io_file_upload
+group: 威胁情报
 description: >
   Upload a file to ThreatBook sandbox for malware analysis. Supports PE, Office,
   PDF, HTML, scripts, and archive formats up to 100MB. Use when analyzing

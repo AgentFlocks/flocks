@@ -10,9 +10,10 @@ import shutil
 from pathlib import Path
 from typing import List, Optional, Set
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic_core import PydanticCustomError
 
-from flocks.skill.skill import Skill, SkillInfo
+from flocks.skill.skill import Skill, SkillInfo, normalize_skill_group
 from flocks.skill.installer import SkillInstaller, SkillInstallResult, DepInstallResult
 from flocks.command.command import API_SURFACES, Command, CommandInfo
 from flocks.server.auth import require_user
@@ -76,6 +77,8 @@ class SkillInstallSpecResponse(BaseModel):
 class SkillResponse(BaseModel):
     """Skill response"""
     name: str = Field(..., description="Skill name")
+    group: Optional[str] = None
+    group_readonly: bool = False
     description: str = Field(..., description="Skill description")
     location: str = Field(..., description="Path to SKILL.md")
     source: Optional[str] = Field(None, description="Discovery source")
@@ -95,8 +98,26 @@ class SkillResponse(BaseModel):
 class SkillCreateRequest(BaseModel):
     """Request to create a new skill"""
     name: str = Field(..., description="Skill name")
+    group: Optional[str] = None
     description: str = Field(..., description="Skill description")
     content: str = Field(..., description="Skill content (markdown)")
+    _validate_group = field_validator("group", mode="before")(normalize_skill_group)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if not Skill._is_valid_name(value):
+            raise PydanticCustomError(
+                "skill_name", "Skill name must contain lowercase letters, numbers, and single hyphens"
+            )
+        return value
+
+
+class SkillMetadataUpdateRequest(BaseModel):
+    """Partial native metadata edit; ordinary PUT still requires its full body."""
+    model_config = ConfigDict(extra="forbid")
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_skill_group)
 
 
 class SkillInstallRequest(BaseModel):
@@ -203,8 +224,7 @@ def _skill_to_response(
     content = None
     if include_content:
         try:
-            with open(skill.location, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = Path(skill.location).read_bytes().decode("utf-8")
         except Exception:
             pass
 
@@ -242,6 +262,8 @@ def _skill_to_response(
 
     return SkillResponse(
         name=skill.name,
+        group=skill.group,
+        group_readonly=skill.group_readonly,
         description=skill.description,
         location=skill.location,
         source=skill.source,
@@ -419,15 +441,17 @@ async def create_skill(req: SkillCreateRequest, _user=Depends(require_user)):
     (~/.flocks/plugins/skills/<name>/SKILL.md).
     """
     try:
-        skill_dir = _user_skills_root() / req.name
-        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_dir = await _require_new_skill_name(req.name)
+        skill_dir.mkdir(parents=True, exist_ok=False)
 
         skill_path = skill_dir / "SKILL.md"
 
-        frontmatter = f"---\nname: {req.name}\ndescription: {req.description}\n---\n\n"
-        full_content = frontmatter + req.content
+        metadata = {"name": req.name, "description": req.description}
+        if "group" in req.model_fields_set:
+            metadata["group"] = req.group
+        full_content = Skill.render_frontmatter("", metadata, body=req.content)
 
-        skill_path.write_text(full_content, encoding="utf-8")
+        skill_path.write_bytes(full_content.encode("utf-8"))
 
         # Defensive cleanup: if a previous skill with this name was disabled
         # and the JSON record was not purged (e.g. manual edit, partial
@@ -441,6 +465,7 @@ async def create_skill(req: SkillCreateRequest, _user=Depends(require_user)):
 
         return SkillResponse(
             name=req.name,
+            group=req.group,
             description=req.description,
             location=str(skill_path),
             source="user",
@@ -453,6 +478,50 @@ async def create_skill(req: SkillCreateRequest, _user=Depends(require_user)):
     except Exception as e:
         log.error("skill.create.error", {"name": req.name, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to create skill: {str(e)}")
+
+
+def _require_writable_skill(skill: SkillInfo) -> None:
+    if Skill.is_readonly(skill):
+        raise HTTPException(
+            status_code=403,
+            detail="Built-in skills are read-only; their definitions and group cannot be changed",
+        )
+
+
+async def _require_new_skill_name(name: str) -> Path:
+    """Reject create/rename collisions, including user shadows of built-ins."""
+    existing = await Skill.get(name)
+    if existing is not None:
+        _require_writable_skill(existing)
+        raise HTTPException(status_code=409, detail=f"Skill already exists: {name}")
+    target = _user_skills_root() / name
+    # Also protect undiscoverable definitions and existing resource directories.
+    if target.exists() or target.is_symlink():
+        raise HTTPException(status_code=409, detail=f"Skill directory already exists: {name}")
+    return target
+
+
+@router.patch("/skills/{name}", response_model=SkillResponse)
+async def update_skill_metadata(
+    name: str, req: SkillMetadataUpdateRequest, _user=Depends(require_user)
+):
+    """Patch the skill's own frontmatter without editing its Markdown body."""
+    try:
+        skill = await Skill.get(name)
+        if not skill:
+            raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
+        _require_writable_skill(skill)
+        if "group" in req.model_fields_set:
+            Skill.update_frontmatter(Path(skill.location), {"group": req.group})
+            Skill.clear_cache()
+            skill = skill.model_copy(update={"group": req.group})
+        # Group metadata does not affect prompts or enable/disable preferences.
+        return _skill_to_response(Skill.check_eligibility(skill), include_content=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("skill.metadata.update.error", {"name": name, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Failed to update skill metadata: {exc}")
 
 
 @router.put("/skills/{name}", response_model=SkillResponse)
@@ -469,20 +538,19 @@ async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
 
-        frontmatter = f"---\nname: {req.name}\ndescription: {req.description}\n---\n\n"
-        full_content = frontmatter + req.content
+        _require_writable_skill(skill)
+        metadata = {"name": req.name, "description": req.description}
+        if "group" in req.model_fields_set:
+            metadata["group"] = req.group
+        existing_content = Path(skill.location).read_bytes().decode("utf-8")
+        full_content = Skill.render_frontmatter(existing_content, metadata, body=req.content)
         is_rename = req.name != name
 
         if is_rename:
-            if skill.source == 'project':
-                raise HTTPException(
-                    status_code=400,
-                    detail="Built-in project skills (.flocks/plugins/skills/) cannot be renamed",
-                )
-            new_dir = _user_skills_root() / req.name
+            new_dir = await _require_new_skill_name(req.name)
             new_path = new_dir / "SKILL.md"
-            new_dir.mkdir(parents=True, exist_ok=True)
-            new_path.write_text(full_content, encoding="utf-8")
+            new_dir.mkdir(parents=True, exist_ok=False)
+            new_path.write_bytes(full_content.encode("utf-8"))
 
             old_dir = Path(skill.location).parent
             if old_dir.exists() and old_dir != new_dir:
@@ -503,7 +571,7 @@ async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require
             Skill.rename_disabled(name, req.name)
             log.info("skill.renamed", {"old": name, "new": req.name, "path": location})
         else:
-            Path(skill.location).write_text(full_content, encoding="utf-8")
+            Path(skill.location).write_bytes(full_content.encode("utf-8"))
             location = skill.location
             log.info("skill.updated", {"name": name, "path": location})
 
@@ -511,6 +579,7 @@ async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require
         await _refresh_agents_for_skill_change()
         return SkillResponse(
             name=req.name,
+            group=Skill._parse_frontmatter(full_content).get("group"),
             description=req.description,
             location=location,
             source=skill.source,
@@ -541,11 +610,7 @@ async def delete_skill(name: str, _user=Depends(require_user)):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
 
-        if skill.source == 'project':
-            raise HTTPException(
-                status_code=403,
-                detail="Built-in project skills (.flocks/plugins/skills/) cannot be deleted",
-            )
+        _require_writable_skill(skill)
 
         skill_dir = Path(skill.location).parent
         if skill_dir.exists():

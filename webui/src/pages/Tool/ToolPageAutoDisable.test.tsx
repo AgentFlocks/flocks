@@ -1,3 +1,4 @@
+vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: { role: 'admin' } }) }));
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -71,6 +72,8 @@ vi.mock('@/api/tool', () => ({
     test: testToolMock,
   },
 }));
+
+vi.mock('@/api/mcp', () => ({ mcpAPI: { list: vi.fn(() => Promise.resolve({ data: {} })) } }));
 
 vi.mock('@/api/provider', () => ({
   providerAPI: {

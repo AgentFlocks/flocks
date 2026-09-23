@@ -38,8 +38,14 @@ def clear_skill_cache():
 
 
 @pytest.fixture
-def tmp_skills_dir(tmp_path: Path):
-    """Temp directory to serve as the user skills root."""
+def tmp_skills_dir(tmp_path: Path, monkeypatch):
+    """Keep install/discovery tests independent of actual bundled skill names."""
+    from flocks.project.instance import Instance
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Skill, "_source_root", lambda: tmp_path / "source")
+    monkeypatch.setattr(Instance, "get_directory", lambda: str(tmp_path / "workspace"))
+    monkeypatch.setattr(Instance, "get_worktree", lambda: str(tmp_path / "workspace"))
     d = tmp_path / ".flocks" / "plugins" / "skills"
     d.mkdir(parents=True)
     return d
@@ -980,3 +986,132 @@ class TestBuildInstallCommandExtended:
         spec = SkillInstallSpec(kind="download", url="https://example.com/tool")
         cmd = SkillInstaller._build_install_command(spec)
         assert cmd is None
+
+
+INSTALL_GROUP_FAMILIES = [
+    "skills-sh", "safeskill", "clawhub", "github-zip", "contents-api", "github-raw", "url", "local", "raw",
+]
+
+
+async def _install_group_package(family, content, tmp_path, monkeypatch, *, scope="global"):
+    """Exercise each real replacement boundary with offline download responses."""
+    import httpx
+
+    def response(text="", *, payload=None, data=None):
+        return MagicMock(status_code=200, text=text, content=payload or text.encode(), headers={}, json=lambda: data)
+
+    if family in {"skills-sh", "safeskill"}:
+        root = ".agents/skills" if family == "skills-sh" else ".flocks/plugins/skills"
+        staged = tmp_path / "staging" / root / "group-demo"
+        staged.mkdir(parents=True, exist_ok=True)
+        (staged / "SKILL.md").write_bytes(content.encode())
+        (staged / "asset.txt").write_text("New asset")
+        try:
+            imported = SkillInstaller._import_staged_skill_dirs(tmp_path / "staging", scope)
+            return SkillInstallResult(success=bool(imported))
+        except ValueError as exc:
+            return SkillInstallResult(success=False, error=str(exc))
+    if family == "local":
+        source = tmp_path / "incoming.md"
+        source.write_bytes(content.encode())
+        return await SkillInstaller._install_from_local(str(source), scope)
+    if family == "raw":
+        return SkillInstaller._save_skill_content(content, scope)
+
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
+    if family in {"clawhub", "github-zip"}:
+        archive = io.BytesIO()
+        prefix = "repository-main/skills/group-demo/" if family == "github-zip" else ""
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr(prefix + "SKILL.md", content)
+            zf.writestr(prefix + "asset.txt", "New asset")
+        if family == "clawhub":
+            client.get.return_value = response(payload=archive.getvalue())
+            return await SkillInstaller._install_from_clawhub("group-demo", scope)
+        with zipfile.ZipFile(io.BytesIO(archive.getvalue())) as zf:
+            return SkillInstaller._import_skill_from_github_zip(
+                zf, "owner", "repository", "main", ["skills/group-demo"], "group-demo", scope,
+            )
+    if family == "contents-api":
+        entries = [
+            {"type": "file", "name": "SKILL.md", "download_url": "https://offline.invalid/skill"},
+            {"type": "file", "name": "asset.txt", "download_url": "https://offline.invalid/asset"},
+        ]
+        async def get(url):
+            if "api.github.com" in url:
+                return response(data=entries)
+            return response(content if url.endswith("/skill") else "New asset")
+        client.get.side_effect = get
+        return await SkillInstaller._download_github_dir(client, "owner", "repository", "main", "", scope)
+    client.get.return_value = response(content)
+    if family == "github-raw":
+        return await SkillInstaller._download_github_skill_md_raw(client, "owner", "repository", "main", "", scope)
+    return await SkillInstaller._install_from_url("https://offline.invalid/skill", scope)
+
+
+@pytest.mark.parametrize("family", INSTALL_GROUP_FAMILIES)
+@pytest.mark.parametrize("old_metadata", [{"group": "Personal"}, {"group": ""}, {"group": None}, {}, None])
+async def test_all_installer_families_preserve_explicit_groups_before_replacement(
+    tmp_path, tmp_skills_dir, monkeypatch, family, old_metadata,
+):
+    import yaml
+
+    destination = tmp_skills_dir / "group-demo" / "SKILL.md"
+    if old_metadata is not None:
+        destination.parent.mkdir()
+        destination.write_text("---\n" + yaml.safe_dump({"name": "group-demo", "description": "Old", **old_metadata}) + "---\nOld body\n")
+    incoming = (
+        "---\r\nname: group-demo\r\ndescription: Analyze: alerts\r\ngroup: Package\r\n"
+        "metadata:\r\n  extra:\r\n    values: [1, 2]\r\n---\r\n\r\nNew body  \r\n"
+    )
+    result = await _install_group_package(family, incoming, tmp_path, monkeypatch)
+    assert result.success, result.error
+    saved = destination.read_bytes().decode()
+    metadata = Skill._parse_frontmatter(saved)
+    expected = (old_metadata["group"] or "") if old_metadata is not None and "group" in old_metadata else "Package"
+    assert metadata["group"] == expected
+    assert metadata["description"] == "Analyze: alerts"
+    assert metadata["metadata"] == {"extra": {"values": [1, 2]}}
+    assert saved.endswith("---\r\n\r\nNew body  \r\n")
+    assert "\n" not in saved.replace("\r\n", "")
+
+
+@pytest.mark.parametrize("family", INSTALL_GROUP_FAMILIES)
+@pytest.mark.parametrize("old_header", ["group: [not, scalar]\n", "metadata: [unclosed\n"])
+async def test_all_installer_families_fail_before_overwriting_unrecoverable_metadata(
+    tmp_path, tmp_skills_dir, monkeypatch, family, old_header,
+):
+    destination = tmp_skills_dir / "group-demo" / "SKILL.md"
+    destination.parent.mkdir()
+    original = f"---\nname: group-demo\ndescription: Old\n{old_header}---\nOld body\n".encode()
+    destination.write_bytes(original)
+    asset = destination.parent / "asset.txt"
+    asset.write_text("Original asset")
+    incoming = "---\nname: group-demo\ndescription: New\ngroup: Package\n---\nNew body\n"
+    result = await _install_group_package(family, incoming, tmp_path, monkeypatch)
+    assert not result.success
+    assert destination.read_bytes() == original
+    assert asset.read_text() == "Original asset"
+
+
+@pytest.mark.parametrize("family", INSTALL_GROUP_FAMILIES)
+@pytest.mark.parametrize("protected_source", ["shipped", "project", "flocks"])
+async def test_all_installer_families_cannot_shadow_readonly_skills(
+    tmp_path, tmp_skills_dir, monkeypatch, family, protected_source,
+):
+    roots = {
+        "shipped": tmp_path / "source/.flocks/plugins/skills",
+        "project": tmp_path / "workspace/.flocks/plugins/skills",
+        "flocks": tmp_path / ".flocks/skills",
+    }
+    protected = roots[protected_source] / "group-demo" / "SKILL.md"
+    protected.parent.mkdir(parents=True)
+    original = "---\nname: group-demo\ndescription: Original\ngroup: Fixed\n---\nOld body\n"
+    protected.write_text(original)
+    incoming = "---\nname: group-demo\ndescription: Replacement\ngroup: Replacement\n---\nNew body\n"
+    result = await _install_group_package(family, incoming, tmp_path, monkeypatch)
+    assert not result.success and "read-only" in result.error
+    assert protected.read_text() == original
+    assert not (tmp_skills_dir / "group-demo").exists()
