@@ -28,6 +28,7 @@ from flocks.session.message import (
     ToolStateCompleted,
     ToolStateError,
 )
+from flocks.session.streaming.model_activity import ModelActivity
 from flocks.session.streaming.stream_events import (
     StreamEvent,
     ToolCallEvent,
@@ -125,6 +126,7 @@ class StreamProcessor:
         plan_file_path: Optional[str] = None,
         plan_relative_path: Optional[str] = None,
         plan_permission_path: Optional[str] = None,
+        model_activity: Optional[ModelActivity] = None,
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -136,6 +138,7 @@ class StreamProcessor:
         self.tool_start_callback = tool_start_callback
         self.tool_end_callback = tool_end_callback
         self.event_publish_callback = event_publish_callback
+        self.model_activity = model_activity or ModelActivity(session_id, assistant_message.id, event_publish_callback)
         self._config_data = config_data
         self._session_key = session_key or session_id
         self._main_session_key = main_session_key or session_id
@@ -227,7 +230,8 @@ class StreamProcessor:
             if self._should_run_tool_call_parallel(event):
                 self._start_parallel_tool_call(event)
             else:
-                await self._handle_tool_call(event)
+                async with self.model_activity.suspend():
+                    await self._handle_tool_call(event)
         
         elif event_type == "text-start":
             await self._handle_text_start(event)
@@ -737,7 +741,14 @@ class StreamProcessor:
             # Get all parts of current assistant message from storage
             parts = await Message.parts(self.assistant_message.id, self.session_id)
             
-            recent_parts = parts[-DOOM_LOOP_THRESHOLD:]
+            # Observational timing markers must not interrupt doom-loop detection.
+            recent_parts = []
+            for part in reversed(parts):
+                if part.type == "step-start" and getattr(part, "time", None):
+                    continue
+                recent_parts.append(part)
+                if len(recent_parts) == DOOM_LOOP_THRESHOLD:
+                    break
             
             if (
                 len(recent_parts) == DOOM_LOOP_THRESHOLD and

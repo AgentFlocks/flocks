@@ -539,3 +539,53 @@ async def test_rollback_keeps_new_tree_if_retention_fails(client, monkeypatch):
     from flocks.config.config import Config
     assert any(p.read_text() == "before update" for p in (Config.get_data_path() / "hub/backups").rglob("old-custom.txt"))
     assert "cannot preserve failed tree" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("mode", ["child", "suite"])
+@pytest.mark.parametrize("fail_update", [False, True])
+async def test_soc_update_retains_group_and_backup_protection(client, monkeypatch, mode, fail_update):
+    from flocks.config.config import Config
+
+    await installer.install_plugin("component", "soc-workspace")
+    record = local.get_record("workflow", "stream_alert_triage").model_copy(update={"version": "0.0.1"})
+    local.save_installed_record(record)
+    root = Path(record.installPath)
+    definition = json.loads((root / "workflow.json").read_text())
+    official_description = definition["description"]
+    definition["description"] = "Local body from an older release"
+    (root / "workflow.json").write_text(json.dumps(definition))
+    metadata = json.loads((root / "meta.json").read_text())
+    metadata["group"] = "My SOC workflows"
+    (root / "meta.json").write_text(json.dumps(metadata))
+    url = "/hub/plugins/component/soc-workspace/update" if mode == "suite" else URL
+    preview = (await client.post(url + "/preview")).json()
+    assert preview["requiresConfirmation"]
+    failed = False
+
+    async def edit_then_fail(kind, path=None):
+        nonlocal failed
+        if kind == "workflow" and path == root and not failed:
+            failed = True
+            assert json.loads((root / "meta.json").read_text())["group"] == "My SOC workflows"
+            assert json.loads((root / "workflow.json").read_text())["description"] == official_description
+            (root / "concurrent-edit.txt").write_text("keep the edit after group preservation")
+            raise RuntimeError("injected update failure")
+
+    if fail_update:
+        monkeypatch.setattr(installer, "_refresh_runtime", edit_then_fail)
+    response = await client.post(url, json={"confirmationToken": preview["token"], "confirmChanges": True})
+    assert response.status_code == (422 if fail_update else 200), response.text
+    assert json.loads((root / "meta.json").read_text())["group"] == "My SOC workflows"
+    expected_description = definition["description"] if fail_update else official_description
+    assert json.loads((root / "workflow.json").read_text())["description"] == expected_description
+    if fail_update:
+        assert failed
+        assert local.get_record("workflow", "stream_alert_triage") == record
+        saved = list((Config.get_data_path() / "hub/backups").rglob("concurrent-edit.txt"))
+        assert len(saved) == 1 and "failed" in saved[0].parts
+    else:
+        backup, plan = backup_manifest(response)
+        index = next(i for i, item in enumerate(plan["items"]) if item["id"] == "stream_alert_triage")
+        for tree in (backup / str(index) / "package", backup / "replaced" / str(index) / "package"):
+            assert json.loads((tree / "meta.json").read_text())["group"] == "My SOC workflows"
+            assert json.loads((tree / "workflow.json").read_text())["description"] == definition["description"]

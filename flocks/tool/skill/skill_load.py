@@ -216,6 +216,7 @@ async def get_skill(name: str) -> dict | None:
 
 @ToolRegistry.register_function(
     name="skill_load",
+    group="系统管理",
     description=SKILL_TOOL_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     native=True,

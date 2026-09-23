@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import DeviceIntegrationPage from './index';
@@ -386,6 +386,99 @@ describe('DeviceIntegrationPage', () => {
     mocks.updateDeviceTool.mockResolvedValue({ data: {} });
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
     mocks.getSessionMessagesPage.mockResolvedValue({ items: [] });
+  });
+
+  it('keeps business groups and rooms independent in one rail, with metadata-only native writes', async () => {
+    localStorage.clear();
+    let devices = ['One', 'Two', 'Three'].map((name, index) => ({
+      id: `d${index}`, name: `Device ${name}`, group_id: index === 1 ? 'r2' : 'r1', group: index < 2 ? 'Ops' : null,
+      storage_key: 'existing_device_v1', service_id: 'existing_device', enabled: true, verify_ssl: false,
+      fields: { base_url: `https://${name}.example.com` }, fields_set: {}, status: 'connected', created_at: 0, updated_at: 0,
+    }));
+    mocks.listDevices.mockImplementation(async () => ({ data: devices }));
+    mocks.listTemplates.mockResolvedValue({ data: [{ ...buildTemplate(), source: 'bundled', group: 'Fixed template group', group_readonly: true }] });
+    mocks.listGroups.mockResolvedValue({ data: [
+      { id: 'r1', name: 'Room One', sort_order: 0 }, { id: 'r2', name: 'Room Two', sort_order: 1 },
+    ] });
+    mocks.updateDevice.mockImplementation(async (id, body) => {
+      devices = devices.map((device) => device.id === id ? { ...device, ...body } : device);
+      return { data: devices.find((device) => device.id === id) };
+    });
+    render(<DeviceIntegrationPage />);
+    await screen.findByText('Device One');
+    const businessNav = screen.getByRole('complementary', { name: 'title' });
+    const rail = businessNav.closest('div.w-52') as HTMLElement;
+    expect(rail).toBeInTheDocument();
+    fireEvent.click(within(businessNav).getByRole('button', { name: 'Ops 2' }));
+    fireEvent.click(within(rail).getByText('Room One'));
+    expect(screen.getByText('Device One')).toBeInTheDocument();
+    expect(screen.queryByText('Device Two')).not.toBeInTheDocument();
+    expect(screen.queryByText('Device Three')).not.toBeInTheDocument();
+    const cardText = screen.getByText('Device One').closest('button')!.textContent;
+    fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
+    expect(screen.getByText('Device One').closest('button')!.textContent).toBe(cardText);
+    const primaryAction = screen.getByText('Device One').closest('button')!;
+    const groupAction = within(primaryAction.parentElement!).getByRole('button', { name: 'editGroup' });
+    expect(primaryAction).not.toContainElement(groupAction);
+    expect(primaryAction.querySelector('button')).toBeNull();
+    fireEvent.click(groupAction);
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(mocks.updateDevice).toHaveBeenCalledExactlyOnceWith('d0', { group: null }));
+    expect(devices[0].group_id).toBe('r1');
+    expect(mocks.syncDevices).not.toHaveBeenCalled();
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1);
+    expect(mocks.createGroup).not.toHaveBeenCalled();
+    fireEvent.click(within(rail).getByText('Room Two'));
+    expect(await screen.findByText('Device Two')).toBeInTheDocument();
+    expect(within(businessNav).getByRole('button', { name: 'Ops 1' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('loads and renames the complete visible native business group across rooms', async () => {
+    localStorage.clear();
+    const devices = ['r1', 'r2'].map((room, index) => ({
+      id: `d${index}`, name: `Device ${index}`, group_id: room, group: 'Ops',
+      storage_key: 'existing_device_v1', service_id: 'existing_device', enabled: true, verify_ssl: false,
+      fields: {}, fields_set: {}, status: 'connected', created_at: 0, updated_at: 0,
+    }));
+    mocks.listDevices.mockResolvedValue({ data: devices });
+    mocks.listGroups.mockResolvedValue({ data: [{ id: 'r1', name: 'Room One', sort_order: 0 }, { id: 'r2', name: 'Room Two', sort_order: 1 }] });
+    mocks.updateDevice.mockResolvedValue({ data: devices[0] });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<DeviceIntegrationPage />);
+    await screen.findByText('Device 0');
+    const nav = screen.getByRole('complementary', { name: 'title' });
+    fireEvent.click(within(nav.closest('div.w-52') as HTMLElement).getByText('Room One'));
+    expect(screen.queryByText('Device 1')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'renameNamed' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'dialog.name' }), { target: { value: 'New' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(mocks.updateDevice).toHaveBeenCalledTimes(2));
+    expect(mocks.updateDevice).toHaveBeenNthCalledWith(1, 'd0', { group: 'New' });
+    expect(mocks.updateDevice).toHaveBeenNthCalledWith(2, 'd1', { group: 'New' });
+    expect(mocks.listDevices).toHaveBeenCalledTimes(3);
+    expect(mocks.updateGroup).not.toHaveBeenCalled();
+    expect(mocks.syncDevices).not.toHaveBeenCalled();
+  });
+
+  it.each(['create', 'rename'])('rejects fresh business-group collisions before %s without changing rooms', async (operation) => {
+    localStorage.clear();
+    const device = {
+      id: 'd0', name: 'Native device', group_id: 'default', group: 'Ops',
+      storage_key: 'existing_device_v1', service_id: 'existing_device', enabled: true, verify_ssl: false,
+      fields: {}, fields_set: {}, status: 'connected', created_at: 0, updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValueOnce({ data: [device] }).mockResolvedValue({ data: [device, { ...device, id: 'd1', group: 'Existing' }] });
+    render(<DeviceIntegrationPage />);
+    await screen.findByText('Native device');
+    fireEvent.click(within(screen.getByRole('complementary', { name: 'title' })).getByRole('button', { name: operation === 'create' ? 'create' : 'renameNamed' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'dialog.name' }), { target: { value: 'Existing' } });
+    if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'd0' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:validation.duplicate'));
+    expect(mocks.updateDevice).not.toHaveBeenCalled();
+    expect(mocks.updateGroup).not.toHaveBeenCalled();
+    expect(mocks.createGroup).not.toHaveBeenCalled();
   });
 
   it('refreshes templates and syncs devices when the window regains focus', async () => {

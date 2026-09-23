@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  hasEnabledSceneWorkspace,
   readPartitionPaths,
   resolveNavPartition,
   savePartitionPaths,
@@ -29,12 +30,41 @@ describe('navPartitions', () => {
     expect(resolveNavPartition('/contracts/webui/workspaces/soc_ui/soc-alerts')).toBe('scene');
     expect(resolveNavPartition('/contracts/webui/workspaces/code_audit_ui')).toBe('scene');
     expect(resolveNavPartition('/scenes/suites')).toBe('scene');
-    expect(resolveNavPartition('/contracts/webui/dash-1')).toBe('scene');
-    expect(resolveNavPartition('/user-defined-pages/dash-1')).toBe('scene');
     expect(resolveNavPartition('/settings')).toBe('settings');
     expect(resolveNavPartition('/settings/audit-logs')).toBe('settings');
     // A path that merely starts with the same letters is not the settings partition.
     expect(resolveNavPartition('/settings-export')).toBe('agent');
+  });
+
+  it('puts custom pages next to an enabled scene and under Agent while no scene is enabled', () => {
+    const scene = {
+      id: 'soc_ui', route: '/contracts/webui/workspaces/soc_ui', placement: 'sceneWorkspace', enabled: true,
+    } as WebUIContractWorkspaceListItem;
+    const workbench = {
+      id: 'assistant', route: '/contracts/webui/workspaces/assistant', placement: 'aiWorkbench', enabled: true,
+    } as WebUIContractWorkspaceListItem;
+    // The suite manager follows the same rule, so it never shows an empty SOC menu.
+    for (const path of ['/contracts/webui/dash-1', '/user-defined-pages/dash-1', '/scenes/suites']) {
+      expect(resolveNavPartition(path, [scene])).toBe('scene');
+      expect(resolveNavPartition(path, [{ ...scene, enabled: false }])).toBe('agent');
+      // A workbench workspace is not a scene: it does not bring the SOC workspace tab.
+      expect(resolveNavPartition(path, [workbench])).toBe('agent');
+      expect(resolveNavPartition(path, [])).toBe('agent');
+      // Not loaded yet: keep the default-install partition instead of flashing Agent.
+      expect(resolveNavPartition(path)).toBe('scene');
+      expect(resolveNavPartition(path, null)).toBe('scene');
+    }
+    expect(hasEnabledSceneWorkspace([scene])).toBe(true);
+    expect(hasEnabledSceneWorkspace([{ ...scene, enabled: false }, workbench])).toBe(false);
+    // The scene routes themselves keep the scene partition, enabled or not (Layout redirects them).
+    expect(resolveNavPartition(`${scene.route}/alerts`, [{ ...scene, enabled: false }])).toBe('scene');
+  });
+
+  it('keeps a stored custom page under Agent or the SOC workspace until the scene state is known', () => {
+    savePartitionPaths({ agent: '/contracts/webui/dash-1?tab=2', scene: '/contracts/webui/dash-2' });
+    expect(readPartitionPaths()).toEqual({ agent: '/contracts/webui/dash-1?tab=2', scene: '/contracts/webui/dash-2' });
+    savePartitionPaths({ settings: '/contracts/webui/dash-1' });
+    expect(readPartitionPaths()).toEqual({});
   });
 
   it('keeps AI workbench extensions under Agent once workspace placement is known', () => {
@@ -104,7 +134,6 @@ describe('navPartitions', () => {
     'https://example.com/contracts/webui/workspaces/assistant/chat',
     'contracts/webui/workspaces/assistant/chat',
     '/settings/account',
-    '/contracts/webui/custom-page',
     '/scenes/suites',
   ])('still rejects unsafe or known non-Agent stored routes: %s', (path) => {
     savePartitionPaths({ agent: path });

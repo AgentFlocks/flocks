@@ -1,4 +1,5 @@
 name: sangfor_xdr_vulns
+group: XDR
 description: >
   Query and manage Sangfor XDR vulnerability data. Retrieve baseline
   compliance data, vulnerability lists, update fix status, and query

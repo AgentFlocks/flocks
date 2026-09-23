@@ -1,4 +1,5 @@
 name: prometheus
+group: 系统辅助
 name_cn: 任务规划智能体
 description: >-
   Strategic planner. Clarifies scope through interview-style questions,

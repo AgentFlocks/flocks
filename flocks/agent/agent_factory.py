@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from flocks.agent.agent import AgentInfo, AgentModel, AgentPromptMetadata, DelegationTrigger
+from flocks.agent.agent import AgentInfo, AgentModel, AgentPromptMetadata, DelegationTrigger, normalize_agent_group
 from flocks.agent.toolset import resolve_agent_initial_tools
 from flocks.utils.log import Log
 
@@ -38,6 +38,16 @@ log = Log.create(service="agent.factory")
 
 # Directory containing built-in agent folders
 _BUILTIN_AGENTS_DIR = Path(__file__).parent / "agents"
+_SYSTEM_AGENT_ROOTS = (
+    Path(__file__).resolve().parent / "agents",
+    Path(__file__).resolve().parents[2] / ".flocks" / "plugins" / "agents",
+)
+
+
+def is_system_agent_definition(path: Path) -> bool:
+    """Only definitions shipped at the installation location have a fixed group."""
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(root.resolve()) for root in _SYSTEM_AGENT_ROOTS)
 
 # Default plugin root (same as plugin loader convention)
 try:
@@ -172,6 +182,8 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
             name=name,
             name_cn=name_cn,
             description=raw.get("description"),
+            group=raw.get("group"),
+            group_readonly=is_system_agent_definition(yaml_path),
             description_cn=desc_cn,
             mode=raw.get("mode", "subagent"),
             native=native,
@@ -437,6 +449,8 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
         name=name,
         name_cn=name_cn,
         description=raw.get("description"),
+        group=raw.get("group"),
+        group_readonly=is_system_agent_definition(yaml_path),
         description_cn=desc_cn,
         mode=raw.get("mode", "subagent"),
         native=False,
@@ -485,6 +499,13 @@ def update_yaml_agent(name: str, updates: Dict[str, Any]) -> bool:
 
     try:
         data = _read_yaml_raw(path)
+        updates = dict(updates)
+        if "group" in updates:
+            updates["group"] = normalize_agent_group(updates["group"])
+            if is_system_agent_definition(path):
+                if updates["group"] != normalize_agent_group(data.get("group")):
+                    raise ValueError("System agent group is read-only")
+                updates.pop("group")
 
         prompt_update = updates.pop("prompt", None)
         if prompt_update is not None:

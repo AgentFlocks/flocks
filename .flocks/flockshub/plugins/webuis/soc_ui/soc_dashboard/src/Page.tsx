@@ -103,6 +103,7 @@ const DEFAULT_TIME_RANGE = '7d';
 const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
 const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
 const CUSTOM_COMMAND_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
+const CUSTOM_COMMAND_TITLE_MAX_LENGTH = 64;
 const SOC_MOCK_ACTIVITY_KEY = 'soc-dashboard-mock-activity-v1';
 const SOC_MOCK_TASK_CENTER_KEY = 'soc-dashboard-mock-task-center-v1';
 const SOC_MOCK_DASHBOARD_KEY = 'soc-dashboard-mock-v1';
@@ -139,6 +140,27 @@ function readCustomCommandTitle() {
   } catch {
     return '';
   }
+}
+
+// Persists the title and announces it the same way the old host dialog did, so
+// anything still listening for the event stays in sync. An empty title means
+// "use the default" and clears the stored value.
+function writeCustomCommandTitle(title) {
+  const normalizedTitle = String(title ?? '').trim();
+  try {
+    if (normalizedTitle) {
+      window.localStorage.setItem(CUSTOM_COMMAND_TITLE_KEY, normalizedTitle);
+    } else {
+      window.localStorage.removeItem(CUSTOM_COMMAND_TITLE_KEY);
+    }
+  } catch {
+    // Storage can be unavailable in restricted browser contexts; the title still
+    // applies to the page that is open.
+  }
+  window.dispatchEvent(new CustomEvent(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, {
+    detail: { title: normalizedTitle || null },
+  }));
+  return normalizedTitle;
 }
 
 function isMockSwitchEnabled(value) {
@@ -1669,7 +1691,143 @@ function TimeRefreshPopover({ value, refreshValue, open, onToggle, onApply, onCl
   ]);
 }
 
-function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
+function PageSettingsIcon() {
+  // Lucide "settings" glyph (ISC), drawn inline because the page bundle has no icon library.
+  return h('svg', {
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': 'true',
+  }, [
+    h('path', {
+      d: 'M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915',
+      key: 'gear',
+    }),
+    h('circle', { cx: 12, cy: 12, r: 3, key: 'hub' }),
+  ]);
+}
+
+// Mounted only while the popover is open, so the draft always starts from the
+// title currently shown and is dropped on cancel.
+function PageSettingsPanel({ initialTitle, onCancel, onSave, onReset }) {
+  const { useState } = getReact();
+  const [draft, setDraft] = useState(initialTitle);
+
+  return h('div', { className: 'command-settings-panel', role: 'dialog', 'aria-label': '页面设置' }, h('form', {
+    onSubmit: (event) => {
+      event.preventDefault();
+      onSave(draft);
+    },
+  }, [
+    h('div', { className: 'command-settings-head', key: 'head' }, '页面设置'),
+    h('div', { className: 'command-settings-body', key: 'body' }, [
+      h('label', { key: 'title' }, [
+        h('span', { key: 'label' }, '页面标题'),
+        h('input', {
+          type: 'text',
+          value: draft,
+          maxLength: CUSTOM_COMMAND_TITLE_MAX_LENGTH,
+          placeholder: DEFAULT_COMMAND_TITLE,
+          autoFocus: true,
+          onChange: (event) => setDraft(event.target.value),
+          key: 'input',
+        }),
+      ]),
+      h('p', { key: 'hint' }, '只修改告警态势页的大标题，保存在当前浏览器。'),
+    ]),
+    h('div', { className: 'command-settings-actions', key: 'actions' }, [
+      h('button', { className: 'ghost', type: 'button', onClick: onReset, key: 'reset' }, '恢复默认'),
+      h('div', { key: 'buttons' }, [
+        h('button', { type: 'button', onClick: onCancel, key: 'cancel' }, '取消'),
+        h('button', { className: 'primary', type: 'submit', key: 'save' }, '保存'),
+      ]),
+    ]),
+  ]));
+}
+
+function PageSettingsPopover({ open, customTitle, onToggle, onClose, onSave, onReset }) {
+  const { useEffect, useRef } = getReact();
+  const triggerRef = useRef(null);
+  const refocusTrigger = () => triggerRef.current?.focus();
+
+  useEffect(() => {
+    if (!open) return undefined;
+    // Own root marker instead of the shared data-soc-menu-root, so pressing the
+    // time filter (or any other menu) closes this panel too.
+    const closeOnOutsidePress = (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-soc-page-settings-root]')) return;
+      onClose();
+    };
+    const closeOnEscape = (event) => {
+      // Esc while an IME candidate list is open only cancels the composition.
+      if (event.key !== 'Escape' || event.isComposing) return;
+      onClose();
+      refocusTrigger();
+    };
+    document.addEventListener('mousedown', closeOnOutsidePress, true);
+    document.addEventListener('touchstart', closeOnOutsidePress, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsidePress, true);
+      document.removeEventListener('touchstart', closeOnOutsidePress, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [onClose, open]);
+
+  return h('div', { className: 'command-settings', 'data-soc-page-settings-root': 'true' }, [
+    h('button', {
+      className: cx('command-settings-trigger', open && 'open'),
+      type: 'button',
+      title: '页面设置',
+      'aria-label': '页面设置',
+      'aria-haspopup': 'dialog',
+      'aria-expanded': open,
+      onClick: onToggle,
+      ref: triggerRef,
+      key: 'trigger',
+    }, h(PageSettingsIcon)),
+    open ? h(PageSettingsPanel, {
+      initialTitle: customTitle,
+      onCancel: () => {
+        onClose();
+        refocusTrigger();
+      },
+      onSave: (value) => {
+        onSave(value);
+        refocusTrigger();
+      },
+      onReset: () => {
+        onReset();
+        refocusTrigger();
+      },
+      key: 'panel',
+    }) : null,
+  ]);
+}
+
+function CommandHeader({
+  title,
+  customTitle,
+  timeFilter,
+  refreshKey,
+  timeMenuOpen,
+  onToggleTimeMenu,
+  onCloseTimeMenu,
+  pageSettingsOpen,
+  onTogglePageSettings,
+  onClosePageSettings,
+  onSaveTitle,
+  onResetTitle,
+  applyTimeRefresh,
+  stats,
+  loading,
+  refresh,
+  activity,
+}) {
   const active = [activity.denoise.current, activity.triage.current].some((event) => event?.status === 'running');
   const loadActive = activity.mode !== 'normal' && activity.batch?.receivedCount > 0;
   const status = activity.connection === 'error'
@@ -1700,12 +1858,21 @@ function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMen
         value: timeFilter,
         refreshValue: refreshKey,
         open: timeMenuOpen,
-        onToggle: () => setTimeMenuOpen((current) => !current),
+        onToggle: onToggleTimeMenu,
         onApply: applyTimeRefresh,
-        onClose: () => setTimeMenuOpen(false),
+        onClose: onCloseTimeMenu,
         key: 'time-filter',
       }),
       h('button', { className: 'command-refresh', type: 'button', disabled: loading, onClick: refresh, key: 'refresh' }, loading ? '刷新中' : '刷新'),
+      h(PageSettingsPopover, {
+        open: pageSettingsOpen,
+        customTitle,
+        onToggle: onTogglePageSettings,
+        onClose: onClosePageSettings,
+        onSave: onSaveTitle,
+        onReset: onResetTitle,
+        key: 'page-settings',
+      }),
       h('div', { className: 'command-clock', key: 'clock' }, [
         h('b', { key: 'time' }, stats.generatedAt ? stats.generatedAt.slice(11, 19) : '--:--:--'),
         h('span', { title: timeFilterLabel(timeFilter), key: 'range' }, timeFilterLabel(timeFilter)),
@@ -2527,6 +2694,7 @@ export default function Page() {
   const [timeFilter, setTimeFilter] = useState(() => createRelativeTimeFilter());
   const [refreshKey, setRefreshKey] = useState('off');
   const [timeMenuOpen, setTimeMenuOpen] = useState(false);
+  const [pageSettingsOpen, setPageSettingsOpen] = useState(false);
   const [eventRailCollapsed, setEventRailCollapsed] = useState(false);
   const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
   const [rightRailView, setRightRailView] = useState('aiTasks');
@@ -2675,6 +2843,25 @@ export default function Page() {
     setRefreshKey(nextRefreshKey);
     setTimeMenuOpen(false);
   }, []);
+
+  // The time filter and page settings popovers share the header; only one is open at a time.
+  const toggleTimeMenu = useCallback(() => {
+    setPageSettingsOpen(false);
+    setTimeMenuOpen((current) => !current);
+  }, []);
+  const closeTimeMenu = useCallback(() => setTimeMenuOpen(false), []);
+  const togglePageSettings = useCallback(() => {
+    setTimeMenuOpen(false);
+    setPageSettingsOpen((current) => !current);
+  }, []);
+  const closePageSettings = useCallback(() => setPageSettingsOpen(false), []);
+  const saveCommandTitle = useCallback((value) => {
+    const nextTitle = writeCustomCommandTitle(value);
+    // Set after the change event so this value wins even if storage was unavailable.
+    setCustomCommandTitle(nextTitle);
+    setPageSettingsOpen(false);
+  }, []);
+  const resetCommandTitle = useCallback(() => saveCommandTitle(''), [saveCommandTitle]);
 
   useEffect(() => {
     let stopped = false;
@@ -2919,10 +3106,17 @@ export default function Page() {
     h(CommandHeader, {
       key: 'header',
       title: customCommandTitle || DEFAULT_COMMAND_TITLE,
+      customTitle: customCommandTitle,
       timeFilter,
       refreshKey,
       timeMenuOpen,
-      setTimeMenuOpen,
+      onToggleTimeMenu: toggleTimeMenu,
+      onCloseTimeMenu: closeTimeMenu,
+      pageSettingsOpen,
+      onTogglePageSettings: togglePageSettings,
+      onClosePageSettings: closePageSettings,
+      onSaveTitle: saveCommandTitle,
+      onResetTitle: resetCommandTitle,
       applyTimeRefresh,
       stats,
       loading,
@@ -4363,7 +4557,8 @@ const CSS = `
 .command-live i.warn { background: #ffae34; box-shadow: 0 0 10px #ffae34; }
 .command-live b { color: #47ddb0; font-weight: 600; }
 .command-tools { justify-content: flex-end; gap: 8px; min-width: 0; }
-.command-refresh {
+.command-refresh,
+.command-settings-trigger {
   height: 34px;
   border: 1px solid rgba(255,255,255,.16);
   border-radius: 7px;
@@ -4373,7 +4568,8 @@ const CSS = `
   font-size: 12px;
 }
 .command-refresh { padding: 0 15px; cursor: pointer; }
-.command-refresh:hover { border-color: rgba(32,213,155,.55); color: #53e0b3; }
+.command-refresh:hover,
+.command-settings-trigger:hover { border-color: rgba(32,213,155,.55); color: #53e0b3; }
 .command-refresh:disabled { opacity: .55; cursor: default; }
 .command-time-filter { position: relative; z-index: 40; }
 .command-time-trigger {
@@ -4461,6 +4657,80 @@ const CSS = `
 .command-time-panel-actions { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid rgba(88,166,255,.14); padding: 10px 12px; }
 .command-time-panel-actions button { height: 30px; min-width: 64px; border-color: rgba(88,166,255,.28); background: rgba(11,34,53,.8); }
 .command-time-panel-actions button.primary { border-color: rgba(43,231,255,.58); color: #061725; background: linear-gradient(135deg, #35d4ff, #40e1bd); font-weight: 700; }
+.command-settings { position: relative; z-index: 40; flex: 0 0 auto; }
+.command-settings-trigger {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  padding: 0;
+  cursor: pointer;
+}
+.command-settings-trigger svg { width: 16px; height: 16px; }
+.command-settings-trigger.open { border-color: rgba(43,231,255,.58); color: #73e7ff; box-shadow: inset 0 0 18px rgba(43,231,255,.06); }
+.command-settings-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  border: 1px solid rgba(43,231,255,.3);
+  border-radius: 9px;
+  color: #d9f7ff;
+  background: linear-gradient(155deg, rgba(8,31,51,.99), rgba(5,18,34,.99));
+  box-shadow: 0 18px 46px rgba(0,0,0,.48), inset 0 0 28px rgba(43,231,255,.035);
+}
+.command-settings-panel form { margin: 0; }
+.command-settings-head {
+  border-bottom: 1px solid rgba(88,166,255,.14);
+  padding: 12px 13px 10px;
+  color: #d9f7ff;
+  font-size: 13px;
+  font-weight: 700;
+}
+.command-settings-body { display: grid; gap: 8px; padding: 13px; }
+.command-settings-body label { display: block; margin: 0; }
+.command-settings-body label span { display: block; margin-bottom: 7px; color: rgba(170,222,255,.62); font-size: 11px; font-weight: 650; }
+.command-settings-body input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid rgba(88,166,255,.3);
+  border-radius: 5px;
+  color: #d9f7ff;
+  background: rgba(4,18,33,.86);
+  padding: 0 9px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.command-settings-body input::placeholder { color: rgba(170,222,255,.38); }
+.command-settings-body input:focus { border-color: rgba(43,231,255,.7); box-shadow: 0 0 0 2px rgba(43,231,255,.08); }
+.command-settings-body p { margin: 0; color: rgba(170,222,255,.55); font-size: 11px; line-height: 1.5; }
+.command-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid rgba(88,166,255,.14);
+  padding: 10px 12px;
+}
+.command-settings-actions > div { display: flex; gap: 8px; }
+.command-settings-actions button {
+  height: 30px;
+  min-width: 64px;
+  border: 1px solid rgba(88,166,255,.28);
+  border-radius: 5px;
+  color: rgba(190,222,240,.68);
+  background: rgba(11,34,53,.8);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.command-settings-actions button:hover { color: #d9f7ff; }
+.command-settings-actions button.primary { border-color: rgba(43,231,255,.58); color: #061725; background: linear-gradient(135deg, #35d4ff, #40e1bd); font-weight: 700; }
+.command-settings-actions button.ghost { min-width: 0; border-color: transparent; background: transparent; padding: 0 4px; color: rgba(170,222,255,.62); }
+.command-settings-actions button.ghost:hover { color: #73e7ff; }
 .command-clock {
   display: flex;
   align-items: flex-end;
@@ -5746,7 +6016,8 @@ const CSS = `
 }
 .command-live b { color: #2ee6a6; }
 .command-time-trigger,
-.command-refresh {
+.command-refresh,
+.command-settings-trigger {
   border-color: rgba(88,166,255,.28);
   color: #d9f7ff;
   background: rgba(10,31,51,.9);

@@ -1,4 +1,5 @@
 name: urlscan_quotas
+group: 威胁情报
 description: >
   Get current API quota usage and limits for the authenticated user.
   Returns information about remaining scans, search quota, and rate limits.

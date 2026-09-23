@@ -1,4 +1,5 @@
 name: skyeye_dashboard_view
+group: NDR
 description: >
   查询 SkyEye 仪表板视图数据。默认返回整体视图，可通过 `name` 切换到告警统计、
   资产态势、攻击源排行和系统维护等不同看板；部分视图还支持关键字、分页和排序参数。

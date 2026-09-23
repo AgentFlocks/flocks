@@ -1,4 +1,5 @@
 name: ngsoc_users
+group: SIEM
 description: >
   NGSOC user management grouped tool. Use the `action` parameter to fetch
   the username (nickname) directory used elsewhere as audit / dispatch

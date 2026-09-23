@@ -66,6 +66,7 @@
   "servers": [
     {
       "id": "threatbook_mcp",
+      "group": "威胁情报",
       "name": "ThreatBook MCP",
       "description": "ThreatBook threat intelligence MCP service for IOC lookups, threat analysis, and security investigation workflows.",
       "category": "threat_intelligence",
@@ -101,6 +102,7 @@
     },
     {
       "id": "nsfocus_mcp",
+      "group": "威胁情报",
       "name": "NSFOCUS MCP",
       "description": "NSFOCUS threat analysis MCP service for security capability access, intelligence queries, and analyst-assisted investigation workflows.",
       "category": "threat_intelligence",
@@ -136,6 +138,7 @@
     },
     {
       "id": "qianxin_mcp",
+      "group": "威胁情报",
       "name": "QiAnXin MCP",
       "description": "QiAnXin threat intelligence MCP service for intelligence lookups, threat analysis, and security operations support.",
       "category": "threat_intelligence",
@@ -171,6 +174,7 @@
     },
     {
       "id": "panther",
+      "group": "SIEM 与日志分析",
       "name": "Panther SIEM",
       "description": "Panther SIEM platform integration for writing detection rules with natural language, querying logs, and managing alerts.",
       "category": "siem",
@@ -208,6 +212,7 @@
     },
     {
       "id": "secops",
+      "group": "安全运营",
       "name": "SecOps Toolbox",
       "description": "All-in-one security testing toolkit integrating multiple open-source security tools for penetration testing, vulnerability scanning, and threat hunting.",
       "category": "secops_platform",
@@ -233,6 +238,7 @@
     },
     {
       "id": "tenzir",
+      "group": "数据处理",
       "name": "Tenzir",
       "description": "Tenzir security data pipeline engine integration with TQL queries, OCSF integration, and automated parser generation.",
       "category": "data_pipeline",
@@ -263,6 +269,7 @@
     },
     {
       "id": "cybersec_watchdog",
+      "group": "合规",
       "name": "CyberSec Watchdog",
       "description": "Comprehensive Linux server security audit with 89 CIS benchmark controls and NIST 800-53 / PCI-DSS compliance checks.",
       "category": "compliance",
@@ -289,6 +296,7 @@
     },
     {
       "id": "npm_audit",
+      "group": "代码安全",
       "name": "NPM Security Audit",
       "description": "NPM package dependency security audit using the remote npm registry for real-time security checks.",
       "category": "code_security",
@@ -316,6 +324,7 @@
     },
     {
       "id": "gridinsoft",
+      "group": "威胁情报",
       "name": "GridinSoft Inspector",
       "description": "Domain and URL security analysis for verifying website and link safety.",
       "category": "threat_intelligence",
@@ -342,6 +351,7 @@
     },
     {
       "id": "chimera_csl",
+      "group": "合规",
       "name": "Chimera CSL (Z3 Verification)",
       "description": "Deterministic AI security policy engine using Z3 formal verification to write and enforce machine-verifiable AI constraints.",
       "category": "compliance",
@@ -367,6 +377,7 @@
     },
     {
       "id": "aim_guard",
+      "group": "安全运营",
       "name": "AIM Guard",
       "description": "Security-oriented MCP server providing security guidelines and content analysis for AI agents.",
       "category": "secops_platform",

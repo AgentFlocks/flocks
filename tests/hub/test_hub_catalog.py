@@ -352,12 +352,14 @@ def test_bundled_hub_manifest_and_files_load():
 
 
 async def test_hub_installs_and_uninstalls_skill(isolated_hub_env):
-    record = await install_plugin("skill", "ndr-alert-analysis")
-    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "ndr-alert-analysis"
+    # Hub-only packages remain installable; a same-named readonly native Skill
+    # (such as ndr-alert-analysis) must not be shadowed by this install path.
+    record = await install_plugin("skill", "triaging-security-incident")
+    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "triaging-security-incident"
     assert (skill_dir / "SKILL.md").is_file()
     assert record.enabled is True
 
-    removed = await uninstall_plugin("skill", "ndr-alert-analysis")
+    removed = await uninstall_plugin("skill", "triaging-security-incident")
     assert removed is True
     assert not skill_dir.exists()
 
@@ -1562,17 +1564,17 @@ async def test_hub_uninstalls_python_tool_without_record(isolated_hub_env, monke
 
 
 async def test_catalog_clears_stale_skill_record_after_external_delete(isolated_hub_env):
-    await install_plugin("skill", "ndr-alert-analysis")
-    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "ndr-alert-analysis"
+    await install_plugin("skill", "triaging-security-incident")
+    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "triaging-security-incident"
     assert (skill_dir / "SKILL.md").is_file()
 
     import shutil
 
     shutil.rmtree(skill_dir)
     entries = list_catalog(plugin_type="skill")
-    entry = next(item for item in entries if item.id == "ndr-alert-analysis")
+    entry = next(item for item in entries if item.id == "triaging-security-incident")
     assert entry.state == "available"
-    assert local.get_record("skill", "ndr-alert-analysis") is None
+    assert local.get_record("skill", "triaging-security-incident") is None
 
 
 def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
@@ -1625,17 +1627,20 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     )
     assert traversal.status_code == 400
 
-    installed = client.post("/api/hub/plugins/skill/ndr-alert-analysis/install", json={"scope": "global"})
+    protected = client.post("/api/hub/plugins/skill/ndr-alert-analysis/install", json={"scope": "global"})
+    assert protected.status_code == 422 and "read-only" in protected.text
+
+    installed = client.post("/api/hub/plugins/skill/triaging-security-incident/install", json={"scope": "global"})
     assert installed.status_code == 200
-    assert installed.json()["id"] == "ndr-alert-analysis"
+    assert installed.json()["id"] == "triaging-security-incident"
 
     installed_catalog = client.get("/api/hub/catalog", params={"state": "installed"}).json()
-    assert any(item["id"] == "ndr-alert-analysis" for item in installed_catalog)
+    assert any(item["id"] == "triaging-security-incident" for item in installed_catalog)
 
-    removed = client.delete("/api/hub/plugins/skill/ndr-alert-analysis")
+    removed = client.delete("/api/hub/plugins/skill/triaging-security-incident")
     assert removed.status_code == 200
     available_catalog = client.get("/api/hub/catalog", params={"state": "available"}).json()
-    assert any(item["id"] == "ndr-alert-analysis" for item in available_catalog)
+    assert any(item["id"] == "triaging-security-incident" for item in available_catalog)
 
 
 def test_hub_paginated_facets_exclude_their_own_filter():

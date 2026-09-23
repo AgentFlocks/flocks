@@ -257,6 +257,7 @@ async def default_question_handler(
 
 @ToolRegistry.register_function(
     name="question",
+    group="系统管理",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=[

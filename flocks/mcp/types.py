@@ -6,8 +6,23 @@ Defines all MCP-related types and data models
 
 from typing import Optional, Dict, Any, List
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 import time
+
+
+def normalize_mcp_group(value: Optional[str]) -> Optional[str]:
+    """Normalize native server grouping metadata."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group cannot contain control characters")
+    return value
 
 
 class McpStatus(str, Enum):
@@ -23,6 +38,8 @@ class McpStatus(str, Enum):
 class McpStatusInfo(BaseModel):
     """MCP status information"""
     status: McpStatus
+    group: Optional[str] = None
+    group_readonly: bool = False
     error: Optional[str] = None
     connected_at: Optional[float] = None
     tools_count: int = 0
@@ -97,6 +114,9 @@ class ServerConfig(BaseModel):
     env: Optional[Dict[str, str]] = None  # optional for local
     cwd: Optional[str] = None  # optional for local
     enabled: bool = True
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_mcp_group)
+
     timeout: float = 30.0
     auth: Optional[Dict[str, Any]] = None
     retry: Optional[RetryConfig] = None

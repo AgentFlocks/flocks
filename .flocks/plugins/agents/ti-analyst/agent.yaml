@@ -1,4 +1,5 @@
 name: ti-analyst
+group: 威胁情报
 name_cn: 威胁情报智能体
 description: >-
   Threat intelligence analyst subagent for IOC analysis, attribution, and threat actor research.

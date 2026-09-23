@@ -1,4 +1,5 @@
 name: host-forensics-fast
+group: 安全研判
 name_cn: 主机快速排查智能体
 description: >-
   Fast Linux host compromise triage subagent for first-pass investigation. Use when the user

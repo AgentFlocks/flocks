@@ -1,4 +1,5 @@
 name: greynoise_ip_timeline
+group: 威胁情报
 description: >
   Get IP activity timeline showing when an IP was observed by GreyNoise sensors.
   Returns timestamps of scanning activity. Useful for understanding attack timing.

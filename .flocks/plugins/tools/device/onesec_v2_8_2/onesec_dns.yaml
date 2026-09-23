@@ -1,4 +1,5 @@
 name: onesec_dns
+group: EDR/HIDS
 description: >
   OneSEC DNS grouped tool. Use the `action` parameter to access DNS security
   query and policy APIs. Configure the OneSEC service with separate API Key and
