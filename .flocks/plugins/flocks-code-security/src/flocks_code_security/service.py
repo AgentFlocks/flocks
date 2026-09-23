@@ -158,7 +158,6 @@ class StartScanRequest:
     copy_source: bool = True
     cleanup_intermediates: bool = False
     dynamic_enabled: bool = False
-    poc_enabled: bool = False
     coverage_policy: str = "evidence_backed_partial"
     idempotency_key: str | None = None
     knowledge_base: KnowledgeBaseInput | None = None
@@ -657,7 +656,6 @@ class AuditService:
             copy_source=bool(request.copy_source),
             cleanup_intermediates=request.cleanup_intermediates,
             dynamic_enabled=bool(request.dynamic_enabled),
-            poc_enabled=bool(request.poc_enabled),
             coverage_policy=str(request.coverage_policy or "").strip(),
             idempotency_key=(request.idempotency_key or "").strip() or None,
             knowledge_base=self._validate_knowledge_base(request.knowledge_base),
@@ -667,13 +665,6 @@ class AuditService:
         if normalized.scan_mode not in {"standard", "cybergym_level1"}:
             raise AuditServiceError("invalid_parameter", "Unsupported scan_mode")
         if normalized.scan_mode == "cybergym_level1":
-            # CyberGym is a dynamic validator, so its execution input must come
-            # from the independent generic PoC phase even when callers omit the
-            # convenience flag.
-            if not normalized.poc_enabled:
-                normalized = StartScanRequest(
-                    **{**normalized.__dict__, "poc_enabled": True}
-                )
             if normalized.cybergym_manifest is None:
                 raise AuditServiceError(
                     "cybergym_manifest_required",
@@ -750,7 +741,6 @@ class AuditService:
                 cleanup_intermediates=normalized.cleanup_intermediates,
                 mode=normalized.scan_mode,
                 dynamic_enabled=normalized.dynamic_enabled,
-                poc_enabled=normalized.poc_enabled,
                 coverage_policy=normalized.coverage_policy,
                 cybergym_manifest=normalized.cybergym_manifest,
             )
@@ -855,7 +845,6 @@ class AuditService:
                 request.target_path,
                 recorder,
                 dynamic_enabled=request.dynamic_enabled,
-                poc_enabled=request.poc_enabled,
                 scan_mode=request.scan_mode,
                 prepared=prepared,
             ).run()
@@ -1606,7 +1595,6 @@ class AuditService:
                 dynamic_enabled=request.dynamic_enabled,
                 knowledge_base_enabled=request.knowledge_base is not None,
                 cybergym_enabled=request.scan_mode == "cybergym_level1",
-                poc_enabled=request.poc_enabled,
             )
             await Storage.init()
             provider_id, model_id = await _resolve_model(request.model)
@@ -1842,7 +1830,7 @@ class AuditService:
             "copy_source": request.copy_source,
             "cleanup_intermediates": request.cleanup_intermediates,
             "dynamic_enabled": request.dynamic_enabled,
-            "poc_enabled": request.poc_enabled,
+            "poc_enabled": True,
             "coverage_policy": request.coverage_policy,
             "knowledge_base": (
                 {

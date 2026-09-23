@@ -350,12 +350,6 @@ def security_audit(
         "--dynamic",
         help="Execute validated probes in a network-isolated local Docker runtime",
     ),
-    poc: bool = typer.Option(
-        False,
-        "--poc",
-        "--generate-poc",
-        help="Generate independent source-backed PoC bundles after static adjudication",
-    ),
     cleanup_intermediates: bool = typer.Option(
         False,
         "--cleanup-intermediates/--no-cleanup-intermediates",
@@ -400,7 +394,8 @@ def security_audit(
 
     All audit stages expose standard file, bash, grep, webfetch, websearch and
     todo tools by default; the model chooses when to use them. No tool opt-in
-    flags are needed. --poc and --dynamic enable separate audit phases.
+    flags are needed. PoC generation always follows static adjudication;
+    --dynamic additionally enables dynamic validation.
     """
     try:
         run_standard_audit, _scan_status = _load_plugin_cli()
@@ -420,8 +415,6 @@ def security_audit(
             audit_kwargs["copy_source"] = False
         if dynamic:
             audit_kwargs["dynamic_enabled"] = True
-        if poc:
-            audit_kwargs["poc_enabled"] = True
         if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:
             raise ValueError("Unsupported coverage policy")
         if coverage_policy != "evidence_backed_partial":

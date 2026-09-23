@@ -37,13 +37,11 @@ class PhaseTimeout(TimeoutError):
         super().__init__(f"Phase {details['timeout_phase']} exceeded {details['phase_budget_seconds']} seconds")
 
 
-def validate_budgets(value: dict, *, poc: bool, dynamic: bool) -> dict[str, int]:
+def validate_budgets(value: dict, *, dynamic: bool) -> dict[str, int]:
     if not isinstance(value, dict):
         raise ValueError("phase_timeouts must be an object of phase names and positive seconds")
     unknown = value.keys() - PHASES
     required = set(PHASES)
-    if not (poc or dynamic):
-        required.remove("poc_generation")
     if not dynamic:
         required.remove("dynamic_validation")
     missing = required - value.keys()

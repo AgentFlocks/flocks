@@ -31,7 +31,7 @@ def make_phase_batch(tmp_path, monkeypatch, **overrides):
     (source / "repo-vul.tar.gz").write_bytes(b"archive")
     return batch.prepare_batch(
         source.parent, run_dir=tmp_path / "run", concurrency=1, model="test/model",
-        poc=True, max_snapshot_bytes=1024, phase_timeouts=budgets(**overrides),
+        max_snapshot_bytes=1024, phase_timeouts=budgets(**overrides),
     )
 
 
@@ -71,13 +71,16 @@ def test_internal_dynamic_phases_share_one_budget():
 @pytest.mark.parametrize("invalid", [{}, {"unknown": 1}, budgets(baseline=0), budgets(baseline=True), budgets(baseline=1.5)])
 def test_reject_invalid_configuration(invalid):
     with pytest.raises(ValueError):
-        validate_budgets(invalid, poc=True, dynamic=True)
+        validate_budgets(invalid, dynamic=True)
 
 
-def test_disabled_optional_phases_need_no_budget():
+def test_poc_budget_is_required_without_dynamic_validation():
     values = budgets()
-    del values["poc_generation"], values["dynamic_validation"]
-    assert validate_budgets(values, poc=False, dynamic=False) == values
+    del values["dynamic_validation"]
+    assert validate_budgets(values, dynamic=False) == values
+    del values["poc_generation"]
+    with pytest.raises(ValueError, match="poc_generation"):
+        validate_budgets(values, dynamic=False)
 
 
 def test_corrupt_read_keeps_last_deadline_and_attempts_are_isolated(tmp_path):
@@ -103,6 +106,22 @@ def test_new_config_has_no_overall_timeout(tmp_path, monkeypatch):
     config = batch.read_json(root / "batch.json")
     assert config["version"] == 2
     assert "task_timeout" not in config
+    assert config["poc"] is True
+
+
+@pytest.mark.asyncio
+async def test_resume_legacy_batch_adds_default_poc_budget(tmp_path, monkeypatch):
+    root = make_phase_batch(tmp_path, monkeypatch)
+    config = batch.read_json(root / "batch.json")
+    config["poc"] = False
+    del config["phase_timeouts"]["poc_generation"]
+    config["tasks"] = {}
+    batch.atomic_json(root / "batch.json", config)
+    batch.atomic_json(root / "state.json", {"tasks": {}})
+    await batch.run_batch(root, progress=lambda _: None)
+    saved = batch.read_json(root / "batch.json")
+    assert saved["poc"] is True
+    assert saved["phase_timeouts"]["poc_generation"] == DEFAULT_PHASE_TIMEOUTS["poc_generation"]
 
 
 PHASE_WORKER = r'''

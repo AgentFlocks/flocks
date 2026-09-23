@@ -148,7 +148,6 @@ def prepare_batch(
     task_timeout: int | None = None,
     phase_timeouts: dict[str, int] | None = None,
     model: str | None,
-    poc: bool,
     max_snapshot_bytes: int,
     dynamic: bool = False,
     dynamic_concurrency: int = 2,
@@ -162,7 +161,7 @@ def prepare_batch(
     if phase_timeouts is not None:
         if task_timeout is not None:
             raise ValueError("Choose phase_timeouts or legacy task_timeout, not both")
-        phase_timeouts = validate_budgets(phase_timeouts, poc=poc, dynamic=dynamic)
+        phase_timeouts = validate_budgets(phase_timeouts, dynamic=dynamic)
     elif type(task_timeout) is not int or task_timeout < 1:
         raise ValueError("task_timeout must be a positive integer in seconds")
     if concurrency < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
@@ -225,7 +224,7 @@ def prepare_batch(
                 "concurrency": concurrency,
                 **({"phase_timeouts": phase_timeouts} if phase_timeouts is not None else {"task_timeout": task_timeout}),
                 "model": model,
-                "poc": poc or dynamic,
+                "poc": True,
                 "dynamic": dynamic,
                 "dynamic_concurrency": dynamic_concurrency,
                 "max_snapshot_bytes": max_snapshot_bytes,
@@ -631,8 +630,15 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
     with file_lock(root / "run.lock"):
         config = read_json(root / "batch.json")
         budgets = config.get("phase_timeouts")
+        # Older batches could omit the PoC phase and its budget. New attempts
+        # always generate PoCs, including when resuming those saved batches.
+        if not config.get("poc", False):
+            config["poc"] = True
+            if budgets is not None:
+                budgets.setdefault("poc_generation", DEFAULT_PHASE_TIMEOUTS["poc_generation"])
+            atomic_json(root / "batch.json", config)
         if budgets is not None:
-            validate_budgets(budgets, poc=config["poc"], dynamic=config.get("dynamic", False))
+            validate_budgets(budgets, dynamic=config.get("dynamic", False))
         state = read_json(root / "state.json")
         queue = asyncio.Queue()
         # Adopt running tasks before dispatching pending tasks, so they count toward the limit.

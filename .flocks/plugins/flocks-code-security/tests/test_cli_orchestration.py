@@ -65,6 +65,18 @@ def test_static_cli_preflight_does_not_require_dynamic_only_tools() -> None:
         submit_probe.info.enabled = original_enabled
 
 
+def test_default_audit_requires_poc_tools() -> None:
+    register_tools()
+    submit_poc = ToolRegistry.get("audit_submit_poc")
+    original_enabled = submit_poc.info.enabled
+    submit_poc.info.enabled = False
+    try:
+        with pytest.raises(RuntimeError, match="audit_submit_poc"):
+            audit_cli._require_enabled_audit_tools()
+    finally:
+        submit_poc.info.enabled = original_enabled
+
+
 def test_static_cli_preflight_requires_knowledge_tool_only_for_guided_audits() -> None:
     register_tools()
     knowledge_base = ToolRegistry.get("audit_knowledge_base")
@@ -310,6 +322,8 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
                 "threat_model_status": "completed",
                 "counts": {"unverified_candidates": 0},
             },
+            {"counts": {"confirmed_without_poc_bundle": 2}},
+            {"counts": {"confirmed_without_poc_bundle": 0}},
         ]
     )
 
@@ -359,6 +373,10 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         pytest.fail("successful pipeline must not be cancelled")
 
     class Store:
+        @staticmethod
+        def list_confirmed_without_poc_record(_scan_id: str):
+            return [{"candidate_id": "one"}, {"candidate_id": "two"}]
+
         @staticmethod
         def get_scan(_scan_id: str):
             return {"snapshot_id": "snapshot_test"}
@@ -416,7 +434,7 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         lambda event, payload: events.append((event, payload)),
     ).run()
 
-    assert phases == ["threat_modeling", "baseline", "investigation", "verification"]
+    assert phases == ["threat_modeling", "baseline", "investigation", "verification", "poc_generation"]
     assert result["report_path"] == "/output/report.md"
     assert [event for event, _payload in events] == [
         "scan.prepared",
@@ -437,6 +455,11 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
         "batch.status",
         "scan.status",
         "scan.adjudicated",
+        "phase.dispatching",
+        "batch.started",
+        "batch.status",
+        "scan.status",
+        "poc_generation.completed",
         "finalization.started",
         "scan.finalized",
     ]
@@ -594,6 +617,7 @@ async def test_threat_modeling_retries_once_with_distinct_attempt_ordinals(
                 "threat_model_status": "completed",
                 "counts": {"unverified_candidates": 0},
             },
+            {"counts": {"confirmed_without_poc_bundle": 0}},
         ]
     )
 
@@ -682,6 +706,7 @@ async def test_dynamic_pipeline_probes_and_runs_before_parent(
                 "threat_model_status": "completed",
                 "counts": {"terminal_dynamic_runs": 1},
             },
+            {"counts": {"confirmed_without_poc_bundle": 0}},
         ]
     )
 
@@ -865,6 +890,7 @@ async def test_orchestrator_runs_one_parent_directed_rescan(
                 "threat_model_status": "completed",
                 "counts": {"unverified_candidates": 0},
             },
+            {"counts": {"confirmed_without_poc_bundle": 0}},
         ]
     )
 
@@ -1227,6 +1253,7 @@ async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
                 "threat_model_status": "completed",
                 "counts": {"unverified_candidates": 0},
             },
+            {"counts": {"confirmed_without_poc_bundle": 0}},
         ]
     )
 
@@ -1336,7 +1363,7 @@ async def test_poc_partial_batch_drains_unassigned_candidates(tmp_path, monkeypa
     monkeypatch.setattr(audit_cli, "_run_phase", phase)
     events = []
     orchestrator = audit_cli.AuditOrchestrator(
-        SimpleNamespace(extra={}), tmp_path, lambda event, payload: events.append(event), poc_enabled=True,
+        SimpleNamespace(extra={}), tmp_path, lambda event, payload: events.append(event),
     )
     result = await orchestrator._run_poc_generation(
         "scan-test", {"counts": {"confirmed_without_poc_bundle": 3}}, None,

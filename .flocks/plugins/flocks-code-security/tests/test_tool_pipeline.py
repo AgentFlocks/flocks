@@ -210,6 +210,46 @@ def _submit_final_adjudication(runtime, scan_id: str) -> dict:
     )
 
 
+async def _complete_poc_generation(runtime, scan_id: str) -> None:
+    candidates = runtime.store.list_confirmed_without_poc_record(scan_id)
+    if not candidates:
+        return
+    batch = runtime.store.create_worker_batch(
+        scan_id=scan_id, phase="poc_generation",
+        units=tools_module.plan_poc_units(candidates),
+    )
+    runtime.store.update_worker_batch_status(batch["batch_id"], "running")
+    snapshot_id = runtime.store.get_scan(scan_id)["snapshot_id"]
+    for unit, candidate in zip(batch["units"], candidates, strict=True):
+        session_id = f"poc-{candidate['candidate_id']}"
+        runtime.store.bind_session(
+            session_id=session_id, scan_id=scan_id, snapshot_id=snapshot_id,
+            role="poc_generator", work_unit_id=unit["work_unit_id"],
+        )
+        ctx = _agent_context(session_id, "poc-message", "code-security-poc-generator")
+        assert (await tools_module.audit_poc_subject(ctx)).success
+        assert (await audit_repository_summary(ctx)).success
+        refs = []
+        for evidence in candidate["evidence"]:
+            assert (await read_source(
+                ctx, evidence["relative_path"],
+                start_line=evidence["start_line"], end_line=evidence["end_line"],
+            )).success
+            refs.append({key: evidence[key] for key in (
+                "relative_path", "blob_digest", "start_line", "end_line",
+            )})
+        result = await tools_module.audit_submit_poc(ctx, {
+            "candidate_id": candidate["candidate_id"], "artifact_type": "raw_input",
+            "entrypoint": "input.txt",
+            "files": [{"path": "input.txt", "encoding": "utf8", "data": "__import__('os').getcwd()"}],
+            "source_refs": refs,
+            "rationale": "The handler evaluates the supplied expression with process authority.",
+        })
+        assert result.success, result.error
+        runtime.store.update_work_unit_status(unit["work_unit_id"], "completed")
+    runtime.store.update_worker_batch_status(batch["batch_id"], "completed")
+
+
 def test_legacy_open_questions_remain_coverage_blocking() -> None:
     assert normalize_open_questions(["Legacy unresolved coverage question."]) == [
         {
@@ -1452,9 +1492,10 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     adjudication = _submit_final_adjudication(runtime, scan_id)
     assert adjudication["dynamic_assessments"] is None
 
+    assert prepared.output["poc_enabled"] is True
+    if not poc_failed:
+        await _complete_poc_generation(runtime, scan_id)
     if poc_failed:
-        with runtime.store._connect() as connection:
-            connection.execute("UPDATE scans SET poc_enabled = 1 WHERE scan_id = ?", (scan_id,))
         # Unassigned or active work must still block finalization.
         with pytest.raises(ValueError, match="PoC generation"):
             runtime.store.ensure_ready_to_finalize(scan_id)
@@ -1823,6 +1864,7 @@ async def test_dynamic_report_seals_facts_and_promotes_only_reproduced_poc(
         },
     )
 
+    await _complete_poc_generation(runtime, scan_id)
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success
     output = Path(finalized.output["output_dir"])
@@ -3339,6 +3381,7 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
     )
     _submit_final_adjudication(runtime, scan_id)
 
+    await _complete_poc_generation(runtime, scan_id)
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.output["status"] == "completed"
     output_path = Path(finalized.output["output_dir"])
@@ -3699,6 +3742,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     assert verification_wait.output["status"] == "completed"
     _submit_final_adjudication(runtime, scan_id)
 
+    await _complete_poc_generation(runtime, scan_id)
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
     assert finalized.output["status"] == "completed"

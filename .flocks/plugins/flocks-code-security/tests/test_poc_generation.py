@@ -80,7 +80,7 @@ def test_poc_evidence_read_ranges_may_be_covered_in_chunks() -> None:
     assert not _ranges_cover([(1, 400), (402, 500)], 1, 500)
 
 
-def test_store_poc_flag_and_empty_generation_queue(tmp_path: Path) -> None:
+def test_store_enables_poc_by_default_with_empty_generation_queue(tmp_path: Path) -> None:
     store = ScanStore(tmp_path / "audit.db")
     store.initialize()
     root = tmp_path / "snapshot"
@@ -104,7 +104,6 @@ def test_store_poc_flag_and_empty_generation_queue(tmp_path: Path) -> None:
         snapshot_id="snapshot_1",
         mode="standard",
         ruleset_digest="rules",
-        poc_enabled=True,
     )
 
     assert store.get_scan(scan_id)["poc_enabled"] is True

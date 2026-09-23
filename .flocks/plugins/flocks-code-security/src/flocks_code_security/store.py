@@ -1569,7 +1569,7 @@ class ScanStore:
         ruleset_digest: str,
         cleanup_intermediates: bool = False,
         dynamic_enabled: bool = False,
-        poc_enabled: bool = False,
+        poc_enabled: bool = True,
         coverage_policy: str = "evidence_backed_partial",
         owner_subject: str | None = None,
         request_source: str = "cli",

@@ -59,9 +59,9 @@ Standard tools are available at every stage in both single audits and batch runs
 the model chooses which tools to call. No per-scan tool switches are required.
 When migrating commands from the experimental CLI branch, remove `--bash` and
 `--web-search` from `flocks security audit` and `flocks security batch run`.
-These flags are no longer accepted. Keep `--poc` / `--generate-poc` (single audit)
-or `--poc` (batch) when PoC generation is needed, and `--dynamic` when dynamic
-validation is needed; those options enable audit phases, not standard tools.
+PoC generation always runs after static adjudication in single audits and batch
+runs. Remove `--poc` / `--generate-poc` from existing commands; these switches are
+no longer accepted. Use `--dynamic` when dynamic validation is also needed.
 
 To skip the source copy and audit the source directory directly:
 

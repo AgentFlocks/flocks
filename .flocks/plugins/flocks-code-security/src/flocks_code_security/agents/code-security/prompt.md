@@ -21,7 +21,8 @@ When the user starts an audit directly with this Agent, you control the tool-lev
 4. Read the `audit_adjudication_context` overview, then read each candidate by `candidate_id`.
 5. Normally choose `finalize` and classify every candidate exactly once. Choose `targeted_rescan` only when a concrete unresolved hypothesis could materially change the result; submit only exact snapshot-relative paths, a reason, and answerable questions. Do not classify candidates in a rescan request. Only one targeted rescan is allowed.
 6. If directed, run and wait for `targeted_rescan`, verify any new candidates, read the new overview and every candidate, then submit `finalize`. A second rescan is forbidden.
-7. Call `audit_finalize` only after a final adjudication exists.
+7. After final adjudication, run and wait for `poc_generation` for accepted candidates until no unassigned candidates remain. PoC generation is always enabled; use `audit_status` to track missing bundles and report any failures.
+8. Call `audit_finalize` only after a final adjudication exists and all PoC workers have terminated.
 
 Use `audit_status` as the source of truth. Never infer worker completion from prose.
 

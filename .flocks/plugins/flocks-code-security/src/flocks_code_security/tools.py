@@ -328,7 +328,6 @@ async def audit_prepare(
     cleanup_intermediates: bool = False,
     mode: str = "standard",
     dynamic_enabled: bool = False,
-    poc_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     cybergym_manifest: dict[str, Any] | None = None,
     max_files: int = 50_000,
@@ -367,8 +366,7 @@ async def audit_prepare(
             mode=mode,
             ruleset_digest=RULESET_DIGEST,
             dynamic_enabled=dynamic_enabled,
-            # CyberGym consumes the independent generic PoC by definition.
-            poc_enabled=bool(poc_enabled or mode == "cybergym_level1"),
+            poc_enabled=True,
             coverage_policy=coverage_policy,
             cleanup_intermediates=cleanup_intermediates,
         )
@@ -398,7 +396,7 @@ async def audit_prepare(
                     if mode == "cybergym_level1"
                     else "docker_probe" if dynamic_enabled else None
                 ),
-                "poc_enabled": bool(poc_enabled or mode == "cybergym_level1"),
+                "poc_enabled": True,
                 "coverage_policy": coverage_policy,
                 "snapshot": snapshot.public_dict(),
                 "cybergym_task": cybergym_task,
@@ -3238,13 +3236,6 @@ def register_tools() -> None:
                 required=False,
                 default="standard",
                 enum=["standard"],
-            ),
-            _parameter(
-                "poc_enabled",
-                ParameterType.BOOLEAN,
-                "Generate independent source-backed PoC bundles after static adjudication.",
-                required=False,
-                default=False,
             ),
             _parameter(
                 "coverage_policy",

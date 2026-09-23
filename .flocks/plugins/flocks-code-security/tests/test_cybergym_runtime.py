@@ -2193,7 +2193,7 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
     monkeypatch.setattr(batch_dynamic, "preflight", lambda *_: None)
     monkeypatch.setattr(batch_dynamic, "remove_containers", lambda *_: None)
     root = batch.prepare_batch(source.parent, run_dir=tmp_path / "run", concurrency=30,
-        task_timeout=60, model="test/model", poc=False, max_snapshot_bytes=1024, dynamic=True,
+        task_timeout=60, model="test/model", max_snapshot_bytes=1024, dynamic=True,
         skip_external_symlinks=[] if automatic_exclusion else ["install-sh=/usr/share/automake/install-sh"],
         auto_exclude_external_symlinks=automatic_exclusion)
     task = batch.resolve_task(root, "1")
@@ -2219,7 +2219,7 @@ async def test_dynamic_batch_worker_passes_frozen_manifest_to_existing_audit(tmp
     assert result["source_exclusions"] == exclusions
     assert batch.read_json(task / "source-exclusions.json")["exclusions"] == exclusions
     assert captured["scan_mode"] == "cybergym_level1"
-    assert captured["poc_enabled"] is True
+    assert "poc_enabled" not in captured
     assert captured["cybergym_manifest"]["gdb_supported"] is True
     assert not captured.get("dynamic_enabled", False)  # Generic probes are a different mode.
     assert "work_dir" not in batch.read_json(task / "current.json")

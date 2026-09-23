@@ -1245,12 +1245,8 @@ class ReportWriter:
                         "crash was reproduced"
                     )
         if poc_generation is not None and cybergym is None:
-            runtime_status = (
-                "Source-backed PoC bundles were generated; target code was not executed."
-            )
-            validation_mode = (
-                "Independent static source verification plus source-backed PoC generation"
-            )
+            runtime_status += f" Source-backed PoC bundles generated: {len(poc_generation.get('bundles', []))}."
+            validation_mode += " plus source-backed PoC generation"
         scope: dict[str, Any] = {
             "includePaths": coverage["includePaths"],
             "excludePaths": coverage["excludePaths"],

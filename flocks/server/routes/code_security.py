@@ -139,7 +139,6 @@ class CreateScanRequest(BaseModel):
     copy_source: bool = Field(True, alias="copySource")
     cleanup_intermediates: bool = Field(False, alias="cleanupIntermediates", strict=True)
     dynamic_enabled: bool = Field(False, alias="dynamicEnabled")
-    poc_enabled: bool = Field(False, alias="pocEnabled")
     dynamic_confirmed: bool = Field(False, alias="dynamicConfirmed")
     coverage_policy: str = Field(
         "evidence_backed_partial",
@@ -309,7 +308,6 @@ async def _create_scan(request: Request, payload: CreateScanRequest):
                 copy_source=payload.copy_source,
                 cleanup_intermediates=payload.cleanup_intermediates,
                 dynamic_enabled=payload.dynamic_enabled,
-                poc_enabled=payload.poc_enabled,
                 coverage_policy=payload.coverage_policy,
                 idempotency_key=payload.idempotency_key,
             ),

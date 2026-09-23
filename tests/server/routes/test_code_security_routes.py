@@ -63,6 +63,10 @@ def test_create_scan_request_has_no_vote_configuration() -> None:
     )
 
     assert "verification_votes" not in type(payload).model_fields
+    assert "poc_enabled" not in type(payload).model_fields
+    assert "pocEnabled" not in code_security.CreateScanRequest(
+        workspaceId="workspace-1", pocEnabled=False,
+    ).model_dump(by_alias=True)
     assert payload.copy_source is True
     assert payload.max_file_bytes is None
     assert code_security.CreateScanRequest(

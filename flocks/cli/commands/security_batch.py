@@ -39,9 +39,8 @@ def start(
     source: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True),
     concurrency: int = typer.Option(30, min=1, max=128),
     model: Optional[str] = typer.Option(None),
-    poc: bool = typer.Option(False, "--poc"),
     dynamic: bool = typer.Option(
-        False, "--dynamic", help="Enable local fuzz/GDB validation using each task's cybergym.json; implies --poc."
+        False, "--dynamic", help="Enable local fuzz/GDB validation using each task's cybergym.json."
     ),
     dynamic_concurrency: int = typer.Option(
         2, min=1, max=128, help="Maximum active dynamic containers per batch; each uses 1 CPU and 1024 MiB."
@@ -68,7 +67,7 @@ def start(
 
     Each audit exposes standard file, bash, grep, webfetch, websearch and todo
     tools at every stage by default; the model chooses when to use them.
-    No tool opt-in flags are needed.
+    No tool opt-in flags are needed. PoC generation is always enabled.
 
     With --dynamic, each folder must also contain a trusted cybergym.json with
     a prebuilt vulnerable_runner image, target_binary, fuzzer_target,
@@ -83,7 +82,6 @@ def start(
             run_dir=run_dir,
             concurrency=concurrency,
             model=model,
-            poc=poc,
             dynamic=dynamic,
             dynamic_concurrency=dynamic_concurrency,
             task_timeout=task_timeout,

@@ -19,6 +19,14 @@ from flocks.cli.main import app
 runner = CliRunner()
 
 
+@pytest.mark.parametrize("command", [["audit"], ["batch", "run"]])
+def test_poc_generation_has_no_cli_switch(command) -> None:
+    result = runner.invoke(security_cmd.security_app, [*command, "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--poc" not in result.output
+    assert "--generate-poc" not in result.output
+
+
 @pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
 def test_audit_process_exits_after_opening_workflow_database(tmp_path, outcome) -> None:
     script = textwrap.dedent('''

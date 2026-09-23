@@ -31,7 +31,6 @@ def make_batch(tmp_path, monkeypatch, count=1, concurrency=30):
         run_dir=tmp_path / "run",
         concurrency=concurrency,
         model="test/model",
-        poc=True,
         task_timeout=10,
         max_snapshot_bytes=1024,
     )
@@ -494,7 +493,6 @@ def test_dynamic_batch_freezes_validated_manifest_and_checks_images(tmp_path, mo
         run_dir=tmp_path / "dynamic",
         concurrency=30,
         model=None,
-        poc=False,
         task_timeout=60,
         max_snapshot_bytes=1024,
         dynamic=True,
@@ -711,7 +709,7 @@ def test_exclusion_does_not_relax_other_archive_guards(tmp_path, entries, policy
 def test_batch_freezes_exact_link_policy_and_cli_exposes_option(tmp_path, monkeypatch):
     root = make_batch(tmp_path, monkeypatch)
     second = batch.prepare_batch(tmp_path / "input", run_dir=tmp_path / "second",
-        concurrency=1, task_timeout=10, model=None, poc=False, max_snapshot_bytes=1024,
+        concurrency=1, task_timeout=10, model=None, max_snapshot_bytes=1024,
         skip_external_symlinks=["./install-sh=/usr/share/install-sh"])
     assert batch.read_json(second / "batch.json")["skip_external_symlinks"] == {"install-sh": "/usr/share/install-sh"}
     assert batch.read_json(root / "batch.json")["skip_external_symlinks"] == {}
