@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import secrets
 from urllib.parse import quote, unquote, urlparse
 
 import pytest
@@ -134,6 +135,94 @@ async def test_check_version_keeps_flocks_channel_public(monkeypatch: pytest.Mon
     info = await update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
 
     assert info.current_version == "v2026.5.9"
+
+
+async def test_current_release_is_available_to_members_and_cached(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import VersionInfo
+
+    calls = 0
+
+    def _member(_request):
+        return object()
+
+    async def _release(version):
+        nonlocal calls
+        calls += 1
+        assert version == "2026.9.23"
+        return VersionInfo(
+            current_version=version,
+            latest_version=version,
+            release_notes="Full official release notes by @author in #749",
+        )
+
+    monkeypatch.setattr(update_routes, "require_user", _member)
+    monkeypatch.setattr(update_routes, "get_current_version", lambda: "2026.9.23")
+    monkeypatch.setattr(update_routes, "get_installed_release", _release)
+
+    first = await update_routes.current_release(_request())
+    second = await update_routes.current_release(_request())
+
+    assert calls == 1
+    assert first.release_notes == second.release_notes
+    assert first.latest_version == "2026.9.23"
+
+
+async def test_current_release_deduplicates_concurrent_lookup(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import VersionInfo
+
+    calls = 0
+
+    async def _release(version):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return VersionInfo(current_version=version, latest_version=version)
+
+    monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
+    monkeypatch.setattr(update_routes, "get_current_version", lambda: "2026.9.23")
+    monkeypatch.setattr(update_routes, "get_installed_release", _release)
+
+    await asyncio.gather(*[update_routes.current_release(_request()) for _ in range(5)])
+
+    assert calls == 1
+
+
+async def test_current_release_http_allows_logged_in_member(client, monkeypatch: pytest.MonkeyPatch):
+    from flocks.auth.service import AuthService
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import VersionInfo
+
+    password = secrets.token_urlsafe(18)  # secret-guard: allow - generated test credential
+    await AuthService.bootstrap_admin(username="release-admin", password=password)
+    member = await AuthService._create_user_internal(username="release-member", password=password)
+    browser_headers = {"sec-fetch-mode": "cors"}
+
+    async def _release(version):
+        return VersionInfo(
+            current_version=version,
+            latest_version=version,
+            release_notes="Full official notes by @author in #749",
+        )
+
+    monkeypatch.setattr(update_routes, "get_current_version", lambda: "2026.9.23")
+    monkeypatch.setattr(update_routes, "get_installed_release", _release)
+
+    denied = await client.get("/api/update/current-release", headers=browser_headers)
+    assert denied.status_code == 401
+
+    login = await client.post(
+        "/api/auth/login",
+        json={"username": member.username, "password": password},
+        headers=browser_headers,
+    )
+    assert login.status_code == 200, login.text
+    response = await client.get("/api/update/current-release", headers=browser_headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["current_version"] == "2026.9.23"
+    assert response.json()["release_notes"] == "Full official notes by @author in #749"
 
 
 async def test_check_version_reuses_cached_flocks_result(monkeypatch: pytest.MonkeyPatch):

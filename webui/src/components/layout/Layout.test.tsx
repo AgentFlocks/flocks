@@ -17,6 +17,7 @@ vi.mock('@/api/tokenPolicy', () => ({
 const {
   catalogAPI,
   checkUpdate,
+  getCurrentRelease,
   defaultModelAPI,
   mcpAPI,
   onboardingAPI,
@@ -38,6 +39,7 @@ const {
     list: vi.fn(),
   },
   checkUpdate: vi.fn(),
+  getCurrentRelease: vi.fn(),
   defaultModelAPI: {
     getResolved: vi.fn(),
   },
@@ -121,6 +123,7 @@ vi.mock('@/api/session', () => ({
 
 vi.mock('@/api/update', () => ({
   checkUpdate,
+  getCurrentRelease,
 }));
 
 vi.mock('@/api/notifications', () => ({
@@ -277,15 +280,6 @@ function rcNotices() {
       body: 'Holiday transition support',
       highlights: [],
       priority: 10,
-    },
-    {
-      id: 'whats-new-2026.9.23',
-      kind: 'whats_new',
-      title: 'Flocks v2026.9.23 更新内容',
-      body: 'Static release details',
-      version: '2026.9.23',
-      highlights: [],
-      priority: 20,
     },
   ];
 }
@@ -493,6 +487,15 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+
+beforeEach(() => {
+  getCurrentRelease.mockResolvedValue({
+    current_version: '0.2.0',
+    latest_version: '0.2.0',
+    release_notes: null,
+    error: null,
+  });
+});
 
 describe('Layout onboarding entry', () => {
   beforeEach(() => {
@@ -1189,9 +1192,9 @@ describe('Layout onboarding entry', () => {
     expect(checkUpdate).toHaveBeenCalledTimes(2);
   });
 
-  it('reuses update check release notes for the notification modal', async () => {
+  it('renders the installed release notes using the original language selector', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    checkUpdate.mockResolvedValue({
+    getCurrentRelease.mockResolvedValue({
       has_update: false,
       latest_version: '2026.04.28',
       current_version: '2026.04.28',
@@ -1222,12 +1225,19 @@ describe('Layout onboarding entry', () => {
     expect(screen.queryByText(/English update 1/)).not.toBeInTheDocument();
     expect(getActiveNotifications).toHaveBeenCalledTimes(1);
     expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.04.28');
-    expect(checkUpdate).toHaveBeenCalledTimes(1);
+    expect(getCurrentRelease).toHaveBeenCalledTimes(1);
   });
 
-  it('shows both RC notices when the admin update check has no release notes', async () => {
+  it('shows the full Core release beside the benefit when the Pro update channel is stale', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     getActiveNotifications.mockResolvedValue(rcNotices());
+    getCurrentRelease.mockResolvedValue({
+      has_update: false,
+      latest_version: '2026.9.23',
+      current_version: '2026.9.23',
+      release_notes: '### 工作台与场景\n\n* feat(webui): 保留页面状态 by @jamon-bodhi in #749',
+      error: null,
+    });
     checkUpdate.mockResolvedValue({
       has_update: false,
       latest_version: 'v2026.9.14',
@@ -1240,49 +1250,50 @@ describe('Layout onboarding entry', () => {
 
     expect(await screen.findByText('10 月 Token 政策调整')).toBeInTheDocument();
     expect(screen.getByText('Flocks v2026.9.23 更新内容')).toBeInTheDocument();
-    expect(screen.getByText('Static release details')).toBeInTheDocument();
-    expect(getNotificationAckStatus).not.toHaveBeenCalled();
+    expect(screen.getByText(/feat\(webui\): 保留页面状态 by @jamon-bodhi in #749/)).toBeInTheDocument();
+    expect(screen.queryByText('Flocks v2026.9.14 更新内容')).not.toBeInTheDocument();
+    expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.9.23');
   });
 
-  it('shows both RC notices to members without an admin update check', async () => {
+  it('shows the Core release to members without running an upgrade check', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     useAuth.mockReturnValue({
       user: { id: 'member-1', username: 'member', role: 'member', status: 'active' },
       logout: vi.fn(),
     });
     getActiveNotifications.mockResolvedValue(rcNotices());
-
-    renderHomeWithLayout();
-
-    expect(await screen.findByText('10 月 Token 政策调整')).toBeInTheDocument();
-    expect(screen.getByText('Flocks v2026.9.23 更新内容')).toBeInTheDocument();
-    expect(checkUpdate).not.toHaveBeenCalled();
-  });
-
-  it('deduplicates bundled release notes against the same dynamic release', async () => {
-    localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    getActiveNotifications.mockResolvedValue(rcNotices());
-    checkUpdate.mockResolvedValue({
+    getCurrentRelease.mockResolvedValue({
       has_update: false,
-      latest_version: 'v2026.9.23',
+      latest_version: '2026.9.23',
       current_version: '2026.9.23',
-      release_notes: 'Dynamic release details',
+      release_notes: '### 工作台与场景\n\n* fix(webui): 修复页签 by @stephamie7 in #770',
       error: null,
     });
 
     renderHomeWithLayout();
 
-    expect(await screen.findByText('Flocks v2026.9.23 更新内容')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.9.23');
-    });
-    expect(screen.getAllByText('Flocks v2026.9.23 更新内容')).toHaveLength(1);
-    expect(screen.queryByText('Dynamic release details')).not.toBeInTheDocument();
+    expect(await screen.findByText('10 月 Token 政策调整')).toBeInTheDocument();
+    expect(screen.getByText('Flocks v2026.9.23 更新内容')).toBeInTheDocument();
+    expect(screen.getByText(/fix\(webui\): 修复页签 by @stephamie7 in #770/)).toBeInTheDocument();
+    expect(checkUpdate).not.toHaveBeenCalled();
+    expect(getCurrentRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the benefit visible if the release lookup fails', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    getActiveNotifications.mockResolvedValue(rcNotices());
+    getCurrentRelease.mockRejectedValue(new Error('release source unavailable'));
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('10 月 Token 政策调整')).toBeInTheDocument();
+    expect(screen.queryByText('Flocks v2026.9.23 更新内容')).not.toBeInTheDocument();
+    expect(getNotificationAckStatus).not.toHaveBeenCalled();
   });
 
   it('does not show acknowledged update release notes again', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    checkUpdate.mockResolvedValue({
+    getCurrentRelease.mockResolvedValue({
       has_update: false,
       latest_version: '2026.04.28',
       current_version: '2026.04.28',
@@ -1331,7 +1342,7 @@ describe('Layout onboarding entry', () => {
 
   it('waits for benefit and release notifications before opening the combined modal', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    checkUpdate.mockResolvedValue({
+    getCurrentRelease.mockResolvedValue({
       has_update: false,
       latest_version: '2026.04.28',
       current_version: '2026.04.28',

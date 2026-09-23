@@ -140,50 +140,6 @@ DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
             ),
         },
     ),
-    NotificationConfig(
-        id="whats-new-2026.9.23",
-        kind="whats_new",
-        priority=20,
-        version="2026.9.23",
-        startsAt="2026-09-23T00:00:00+08:00",
-        expiresAt="2026-10-15T00:00:00+08:00",
-        locales={
-            "zh-CN": NotificationContent(
-                title="Flocks v2026.9.23 更新内容",
-                summary="工作台、会话、插件和部署均有更新。",
-                body=(
-                    "### 工作台与场景\n\n"
-                    "- 重整 Agent、SOC 工作区和系统设置导航，切换页签时保留页面状态；"
-                    "支持场景套件管理及主题跟随系统。\n"
-                    "- 修复页签残影、导航与场景启停不同步等问题。\n\n"
-                    "### 会话与工具\n\n"
-                    "- 新增会话上下文面板和固定会话地址，支持刷新及浏览器前进后退。\n"
-                    "- 修复工具结果压缩与流式截断参数的处理，避免不完整编辑被执行。\n\n"
-                    "### 插件与部署\n\n"
-                    "- 新增插件业务分组，场景套件更新前保护用户修改；"
-                    "提供 x86_64、aarch64 Linux 离线安装包。\n\n"
-                    "[查看完整更新日志](https://github.com/AgentFlocks/flocks/releases/tag/v2026.9.23)"
-                ),
-            ),
-            "en-US": NotificationContent(
-                title="What's new in Flocks v2026.9.23",
-                summary="Updates to workspaces, sessions, plugins, and deployment.",
-                body=(
-                    "### Workspaces and scenes\n\n"
-                    "- Agent, SOC workspace, and Settings navigation now preserves tab state, "
-                    "supports scene suite management, and follows the system theme.\n"
-                    "- Fixed stale tab content and navigation that did not follow scene changes.\n\n"
-                    "### Sessions and tools\n\n"
-                    "- Added a session context panel and stable session URLs with refresh and browser history support.\n"
-                    "- Fixed tool result compaction and rejected truncated streaming edit arguments.\n\n"
-                    "### Plugins and deployment\n\n"
-                    "- Added plugin business groups, protection for user edits during suite updates, "
-                    "and Linux offline installers for x86_64 and aarch64.\n\n"
-                    "[Read the full release notes](https://github.com/AgentFlocks/flocks/releases/tag/v2026.9.23)"
-                ),
-            ),
-        },
-    ),
 )
 
 

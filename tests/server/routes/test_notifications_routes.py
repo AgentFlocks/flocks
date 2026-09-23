@@ -11,7 +11,6 @@ from flocks.notifications.service import NotificationService
 
 
 HOLIDAY_NOTICE_ID = "holiday-benefits-2026-09-23"
-RELEASE_NOTICE_ID = "whats-new-2026.9.23"
 
 
 @pytest.fixture
@@ -91,7 +90,7 @@ async def test_holiday_notification_localized_api_content(
     response = await client.get("/api/notifications/active", params={"locale": locale})
     assert response.status_code == 200, response.text
     notices = response.json()
-    assert [notice["id"] for notice in notices] == [HOLIDAY_NOTICE_ID, RELEASE_NOTICE_ID]
+    assert [notice["id"] for notice in notices] == [HOLIDAY_NOTICE_ID]
     notice = notices[0]
     assert notice["kind"] == "benefit"
     assert notice["priority"] == 10
@@ -108,45 +107,12 @@ async def test_holiday_notification_localized_api_content(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("locale", "title", "body_fragments"),
-    [
-        (
-            "zh-CN",
-            "Flocks v2026.9.23 更新内容",
-            ("工作台与场景", "会话与工具", "插件与部署", "releases/tag/v2026.9.23"),
-        ),
-        (
-            "en-US",
-            "What's new in Flocks v2026.9.23",
-            ("Workspaces and scenes", "Sessions and tools", "Plugins and deployment", "releases/tag/v2026.9.23"),
-        ),
-    ],
-)
-async def test_release_notification_is_served_without_update_check(
-    client: AsyncClient, holiday_clock, locale, title, body_fragments
-):
-    response = await client.get("/api/notifications/active", params={"locale": locale})
-    assert response.status_code == 200, response.text
-    notice = response.json()[1]
-    assert notice["id"] == RELEASE_NOTICE_ID
-    assert notice["kind"] == "whats_new"
-    assert notice["title"] == title
-    assert notice["version"] == "2026.9.23"
-    assert notice["priority"] == 20
-    assert notice["qr_code"] is None
-    for fragment in body_fragments:
-        assert fragment in notice["body"]
-
-
-@pytest.mark.asyncio
 async def test_holiday_notification_uses_english_for_unsupported_locale(
     client: AsyncClient, holiday_clock
 ):
     response = await client.get("/api/notifications/active", params={"locale": "fr-FR"})
     assert response.status_code == 200, response.text
     assert response.json()[0]["title"] == "October Token policy changes"
-    assert response.json()[1]["title"] == "What's new in Flocks v2026.9.23"
 
 
 @pytest.mark.asyncio
@@ -165,9 +131,7 @@ async def test_holiday_notification_time_window_boundaries(
     holiday_clock[0] = datetime.fromisoformat(now)
     response = await client.get("/api/notifications/active", params={"locale": "zh-CN"})
     assert response.status_code == 200, response.text
-    ids = {item["id"] for item in response.json()}
-    assert (HOLIDAY_NOTICE_ID in ids) is visible
-    assert (RELEASE_NOTICE_ID in ids) is visible
+    assert (HOLIDAY_NOTICE_ID in {item["id"] for item in response.json()}) is visible
 
 
 @pytest.mark.asyncio
@@ -207,15 +171,7 @@ async def test_holiday_dismissal_is_persisted_per_logged_in_user(
     assert status.json()["acknowledged"] is True
     response = await client.get("/api/notifications/active", headers=browser_headers)
     assert response.status_code == 200, response.text
-    assert [item["id"] for item in response.json()] == [RELEASE_NOTICE_ID]
-
-    release_ack = await client.post(
-        f"/api/notifications/{RELEASE_NOTICE_ID}/ack", headers=browser_headers
-    )
-    assert release_ack.status_code == 200, release_ack.text
-    response = await client.get("/api/notifications/active", headers=browser_headers)
-    assert response.status_code == 200, response.text
-    assert response.json() == []
+    assert HOLIDAY_NOTICE_ID not in {item["id"] for item in response.json()}
 
     login = await client.post(
         "/api/auth/login",
@@ -231,7 +187,7 @@ async def test_holiday_dismissal_is_persisted_per_logged_in_user(
     assert status.json()["acknowledged"] is False
     response = await client.get("/api/notifications/active", headers=browser_headers)
     assert response.status_code == 200, response.text
-    assert [item["id"] for item in response.json()] == [HOLIDAY_NOTICE_ID, RELEASE_NOTICE_ID]
+    assert HOLIDAY_NOTICE_ID in {item["id"] for item in response.json()}
 
 
 @pytest.mark.asyncio
@@ -246,7 +202,7 @@ async def test_retired_notice_ack_does_not_hide_holiday_notice(
     assert status.json()["acknowledged"] is False
     response = await client.get("/api/notifications/active")
     assert response.status_code == 200, response.text
-    assert [item["id"] for item in response.json()] == [HOLIDAY_NOTICE_ID, RELEASE_NOTICE_ID]
+    assert [item["id"] for item in response.json()] == [HOLIDAY_NOTICE_ID]
 
 
 @pytest.mark.asyncio

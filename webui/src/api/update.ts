@@ -67,6 +67,11 @@ export const checkUpdate = async (
   return response.data;
 };
 
+export const getCurrentRelease = async (): Promise<VersionInfo> => {
+  const response = await client.get<VersionInfo>('/api/update/current-release');
+  return response.data;
+};
+
 /**
  * Apply the upgrade and stream progress events via SSE.
  *
