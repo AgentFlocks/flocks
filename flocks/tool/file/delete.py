@@ -14,6 +14,7 @@ from flocks.tool.registry import (
 
 @ToolRegistry.register_function(
     name="delete",
+    group="文件操作",
     description="Delete file or directory permanently.",
     category=ToolCategory.FILE,
     parameters=[

@@ -342,3 +342,26 @@ async def test_isolated_agent_binding_cannot_be_switched_away(
 
     with pytest.raises(SessionAgentMismatchError, match="cannot be removed"):
         await Session.update(claimed.project_id, claimed.id, metadata={})
+
+
+@pytest.mark.asyncio
+async def test_atomic_metadata_updates_preserve_dedicated_policy(policy_storage, tmp_path):
+    session = SessionInfo(projectID="policy-project", directory=str(tmp_path), agent="rex")
+    await _store_session(session)
+    claimed = await prepare_session_for_agent(session, _isolated_agent(tmp_path / "runtime"))
+    updated = await Session.mutate_metadata(
+        claimed.project_id, claimed.id, lambda metadata: {**metadata, "panel": "open"},
+    )
+    assert updated.metadata["panel"] == "open"
+    assert updated.metadata["_dedicated_agent_policy"] == claimed.metadata["_dedicated_agent_policy"]
+    with pytest.raises(SessionAgentMismatchError, match="cannot be removed"):
+        await Session.mutate_metadata(claimed.project_id, claimed.id, lambda _: {})
+
+    def change_agent(metadata):
+        metadata["_dedicated_agent_policy"]["agent"] = "rex"
+        return metadata
+
+    with pytest.raises(SessionAgentMismatchError, match="cannot be removed"):
+        await Session.mutate_metadata(claimed.project_id, claimed.id, change_agent)
+    stored = await Session.get(claimed.project_id, claimed.id)
+    assert stored.metadata["_dedicated_agent_policy"]["agent"] == "isolated-security"

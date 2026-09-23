@@ -497,6 +497,7 @@ _SCHEDULE_TASK_ACTIONS_BY_RESOURCE = {
 
 @ToolRegistry.register_function(
     name="schedule_task",
+    group="任务与工作流",
     description=(
         "Manage task scheduler definitions and execution instances. Always select "
         "resource_type. Scheduler actions: create, list, status, update, enable, "

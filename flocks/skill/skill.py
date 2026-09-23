@@ -17,7 +17,8 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Literal, Optional, Set
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.utils.log import Log
 from flocks.project.instance import Instance
@@ -159,9 +160,26 @@ class SkillMetadata(BaseModel):
     managed_by: Optional[str] = None
 
 
+def normalize_skill_group(value: Any) -> str:
+    """Validate the group stored in this skill's own frontmatter."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group must not contain control characters")
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    return value
+
+
 class SkillInfo(BaseModel):
     """Skill information"""
     name: str = Field(..., description="Skill name")
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_skill_group)
+
     description: str = Field(..., description="Skill description")
     location: str = Field(..., description="Path to SKILL.md file")
     source: Optional[str] = Field(default=None, description="Discovery source")
@@ -173,6 +191,12 @@ class SkillInfo(BaseModel):
         "are considered custom (user-defined). "
         "Derived from source; not declared in SKILL.md frontmatter."
     ))
+
+    @computed_field
+    @property
+    def group_readonly(self) -> bool:
+        """Project/flocks definitions retain their existing, stricter readonly rule."""
+        return Skill.is_readonly(self)
 
     # Extended metadata (populated from frontmatter metadata.flocks / metadata.openclaw)
     metadata: Optional[SkillMetadata] = Field(default=None, description="Parsed skill metadata")
@@ -214,6 +238,55 @@ class Skill:
     def _source_root() -> Path:
         """Return the Flocks source installation root."""
         return Path(__file__).resolve().parents[2]
+
+    @classmethod
+    def is_system_shipped(cls, path: Path | str) -> bool:
+        """Identify definitions at the installation root, never the request cwd."""
+        resolved = Path(path).resolve()
+        root = cls._source_root() / ".flocks"
+        return any(
+            resolved.is_relative_to((root / subdir).resolve())
+            for subdir in ("skill", "skills", "plugins/skill", "plugins/skills")
+        )
+
+    @classmethod
+    def is_readonly(cls, skill: SkillInfo) -> bool:
+        return (
+            skill.native
+            or skill.source in {"project", "flocks"}
+            or cls.is_system_shipped(skill.location)
+        )
+
+    @classmethod
+    def preserve_install_group(
+        cls, destination: Path, content: str, *, scope: str, name: Optional[str] = None,
+    ) -> str:
+        """Prepare an installation before any destructive write.
+
+        All native installers, including Hub, use this same readonly/collision
+        check and key-presence merge. No copy may shadow a selected readonly
+        definition. First installs retain the incoming default verbatim.
+        """
+        incoming, _, _ = cls._decode_frontmatter(content)
+        name = (incoming.get("name") or name or destination.parent.name).strip()
+        if not cls._is_valid_name(name):
+            raise ValueError(f"Invalid skill name: {name!r}")
+        # Re-discover at the write boundary: a warmed cache is not permission to
+        # overwrite a definition which has since appeared on disk.
+        selected = cls._discover().get(name)
+        if cls.is_system_shipped(destination) or (selected and cls.is_readonly(selected)):
+            raise ValueError(f"Skill '{name}' is read-only; installation cannot replace or shadow it")
+        if destination.parent.is_symlink() or destination.is_symlink():
+            raise ValueError(f"Cannot install through a skill symlink: {destination}")
+        if destination.exists():
+            if scope == "project":
+                raise ValueError(f"Skill '{name}' is read-only; project definitions cannot be replaced")
+            previous, _, _ = cls._decode_frontmatter(destination.read_bytes().decode("utf-8"))
+            if "group" in previous:
+                return cls.render_frontmatter(content, {"group": previous["group"]})
+        if "group" in incoming:
+            normalize_skill_group(incoming["group"])
+        return content
 
     @staticmethod
     def _cache_context() -> tuple[str, str]:
@@ -335,6 +408,7 @@ class Skill:
 
             return SkillInfo(
                 name=name,
+                group=data.get("group"),
                 description=description,
                 location=filepath,
                 source=source,
@@ -350,41 +424,80 @@ class Skill:
             return None
 
     @staticmethod
-    def _parse_frontmatter(content: str) -> Dict[str, Any]:
-        """Parse YAML frontmatter using yaml.safe_load for full nested support."""
-        lines = content.splitlines()
+    def _decode_frontmatter(content: str) -> tuple[Dict[str, Any], str, str]:
+        """Decode native YAML or the old UI's unquoted, flat string fields.
+
+        Recovery quotes only the offending top-level scalar, then lets the
+        *same* YAML decoder validate the whole document. In particular, nested
+        metadata is never flattened by a second key/value parser. Ambiguous or
+        otherwise broken YAML fails closed before a writer touches the file.
+        """
+        import yaml
+
+        lines = content.splitlines(keepends=True)
+        newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
         if not lines or lines[0].strip() != "---":
-            return {}
-
-        end_index = None
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                end_index = i
+            return {}, content, newline
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+        if end is None:
+            raise ValueError("SKILL.md frontmatter has no closing delimiter")
+        header = lines[1:end]
+        repaired: set[int] = set()
+        while True:
+            try:
+                parsed = yaml.safe_load("".join(header))
                 break
+            except yaml.YAMLError as exc:
+                mark = getattr(exc, "problem_mark", None)
+                index = mark.line if mark is not None else -1
+                match = (
+                    re.fullmatch(r"(name|description|category|group):[ \t]+([^\r\n]+)[\r\n]*", header[index])
+                    if 0 <= index < len(header) and index not in repaired else None
+                )
+                value = match[2].rstrip() if match else ""
+                # Quotes/collections/tags/anchors/block scalars are real YAML,
+                # not the legacy flat-string format. Do not guess at repairs.
+                if not value or value[0] in "'\"[{!&*|>@`%" or not re.search(r":(?:\s|$)", value):
+                    raise ValueError("Cannot safely decode SKILL.md frontmatter") from exc
+                # The legacy UI wrote the whole flat value verbatim, including
+                # any hashes. Retain it rather than silently treating its tail
+                # as a YAML comment during recovery.
+                header[index] = f"{match[1]}: {json.dumps(value, ensure_ascii=False)}{newline}"
+                repaired.add(index)
+        if parsed is not None and not isinstance(parsed, dict):
+            raise ValueError("SKILL.md frontmatter must be a mapping")
+        return parsed or {}, "".join(lines[end + 1:]), newline
 
-        if end_index is None:
+    @classmethod
+    def _parse_frontmatter(cls, content: str) -> Dict[str, Any]:
+        """Discovery skips damaged definitions; writers use the strict decoder."""
+        try:
+            return cls._decode_frontmatter(content)[0]
+        except ValueError:
             return {}
 
-        frontmatter_text = "\n".join(lines[1:end_index])
-        try:
-            import yaml  # pyyaml
-            parsed = yaml.safe_load(frontmatter_text)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
+    @classmethod
+    def render_frontmatter(
+        cls, content: str, updates: Dict[str, Any], *, body: Optional[str] = None
+    ) -> str:
+        """Merge metadata without normalizing the original Markdown body bytes."""
+        import yaml
 
-        # Fallback: simple key: value line parser (no nesting)
-        data: Dict[str, Any] = {}
-        for line in lines[1:end_index]:
-            if ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            key = key.strip()
-            value = value.strip().strip('"\'')
-            if key and value:
-                data[key] = value
-        return data
+        data, original_body, newline = cls._decode_frontmatter(content)
+        data.update(updates)
+        if "group" in updates:
+            data["group"] = normalize_skill_group(updates["group"])
+        header = yaml.safe_dump(data, allow_unicode=True, sort_keys=False).replace("\n", newline)
+        rendered_body = original_body if body is None else newline + body
+        return f"---{newline}{header}---{newline}{rendered_body}"
+
+    @classmethod
+    def update_frontmatter(cls, path: Path, updates: Dict[str, Any]) -> str:
+        """Patch one already-resolved SKILL.md without changing its body bytes."""
+        content = path.read_bytes().decode("utf-8")
+        rendered = cls.render_frontmatter(content, updates)
+        path.write_bytes(rendered.encode("utf-8"))
+        return rendered
 
     @staticmethod
     def _is_valid_name(name: str) -> bool:

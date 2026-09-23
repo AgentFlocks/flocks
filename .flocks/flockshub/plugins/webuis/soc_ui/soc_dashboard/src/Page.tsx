@@ -1,7 +1,13 @@
 import { severityKey, severityRows } from './severityValues';
 
+// The host installs the runtime for this page right before the bundle
+// evaluates. Bind it here once: this page keeps polling while another SOC
+// page is open in a kept-alive pane, and reading the global later would pick
+// up that page's `api.page` scope instead of ours.
+const boundSdk = globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
+
 function getSdk() {
-  const sdk = globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
+  const sdk = boundSdk ?? globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
   if (!sdk || !sdk.React || !sdk.api) {
     throw new Error('Flocks WebUI contract page runtime is not initialized.');
   }
@@ -24,56 +30,56 @@ const EMPTY_STATS = {
   eventRange: { start: '', end: '', label: '', source: '' },
   generatedAt: '',
   latencyMs: 0,
-  sourceStatus: { workflowRoot: '', denoise: [], triage: [], denoiseFiles: [], triageFiles: [], missing: [], metricQuality: {}, triageQuality: {} },
+  sourceStatus: { workflowRoot: '', denoise: [], triage: [], denoiseFiles: [], triageFiles: [], missing: [] },
   denoise: {
-    totalRaw: null,
-    totalNormalized: null,
-    afterFilter: null,
-    totalUnique: null,
-    filterRemoved: null,
-    dedupRemoved: null,
-    duplicates: null,
-    duplicateRate: null,
-    dedupRate: null,
-    uniqueRate: null,
-    files: null,
-    parseErrors: null,
+    totalRaw: 0,
+    totalNormalized: 0,
+    afterFilter: 0,
+    totalUnique: 0,
+    filterRemoved: 0,
+    dedupRemoved: 0,
+    duplicates: 0,
+    duplicateRate: 0,
+    dedupRate: 0,
+    uniqueRate: 0,
+    files: 0,
+    parseErrors: 0,
   },
   triage: {
-    totalRecords: null,
-    newTriaged: null,
-    cacheHit: null,
-    triageFailed: null,
-    followersReused: null,
-    attackTotal: null,
-    attackSuccess: null,
-    attack: null,
-    attackFailed: null,
-    benign: null,
-    unknown: null,
-    attackRate: null,
-    successRate: null,
-    cacheRate: null,
-    coverageRate: null,
-    avgTriageMs: null,
-    files: null,
-    parseErrors: null,
+    totalRecords: 0,
+    newTriaged: 0,
+    cacheHit: 0,
+    triageFailed: 0,
+    followersReused: 0,
+    attackTotal: 0,
+    attackSuccess: 0,
+    attack: 0,
+    attackFailed: 0,
+    benign: 0,
+    unknown: 0,
+    attackRate: 0,
+    successRate: 0,
+    cacheRate: 0,
+    coverageRate: 0,
+    avgTriageMs: 0,
+    files: 0,
+    parseErrors: 0,
   },
   pipeline: {
-    raw: null,
-    unique: null,
-    triageTotal: null,
-    attackTotal: null,
-    reductionSaved: null,
-    llmSaved: null,
-    uniqueRate: null,
-    workloadReuseRate: null,
-    coverageRate: null,
-    attackRate: null,
-    successRate: null,
+    raw: 0,
+    unique: 0,
+    triageTotal: 0,
+    attackTotal: 0,
+    reductionSaved: 0,
+    llmSaved: 0,
+    uniqueRate: 0,
+    workloadReuseRate: 0,
+    coverageRate: 0,
+    attackRate: 0,
+    successRate: 0,
   },
   sources: [],
-  closedLoop: { autoClosed: null, resolved: null, manualDecision: null, pending: null, resolutionRate: null },
+  closedLoop: { autoClosed: 0, resolved: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
   tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [], dailyLabels: [], source: '' },
   verdicts: [],
   attackProfile: [],
@@ -86,6 +92,7 @@ const EMPTY_STATS = {
 const ACTIVITY_QUEUE_LIMIT = 8;
 const EVENT_RAIL_TASK_LIMIT = 10;
 const ACTIVITY_POLL_MS = 3000;
+const WORKFLOW_CONFIRMATION_TTL_MS = 30000;
 const ACTIVITY_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 const ACTIVITY_SEEN_KEY = 'soc-dashboard-seen-activity-v1';
 const EVENT_RAIL_DEFAULT_WIDTH = 330;
@@ -96,6 +103,7 @@ const DEFAULT_TIME_RANGE = '7d';
 const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
 const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
 const CUSTOM_COMMAND_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
+const CUSTOM_COMMAND_TITLE_MAX_LENGTH = 64;
 const SOC_MOCK_ACTIVITY_KEY = 'soc-dashboard-mock-activity-v1';
 const SOC_MOCK_TASK_CENTER_KEY = 'soc-dashboard-mock-task-center-v1';
 const SOC_MOCK_DASHBOARD_KEY = 'soc-dashboard-mock-v1';
@@ -132,6 +140,27 @@ function readCustomCommandTitle() {
   } catch {
     return '';
   }
+}
+
+// Persists the title and announces it the same way the old host dialog did, so
+// anything still listening for the event stays in sync. An empty title means
+// "use the default" and clears the stored value.
+function writeCustomCommandTitle(title) {
+  const normalizedTitle = String(title ?? '').trim();
+  try {
+    if (normalizedTitle) {
+      window.localStorage.setItem(CUSTOM_COMMAND_TITLE_KEY, normalizedTitle);
+    } else {
+      window.localStorage.removeItem(CUSTOM_COMMAND_TITLE_KEY);
+    }
+  } catch {
+    // Storage can be unavailable in restricted browser contexts; the title still
+    // applies to the page that is open.
+  }
+  window.dispatchEvent(new CustomEvent(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, {
+    detail: { title: normalizedTitle || null },
+  }));
+  return normalizedTitle;
 }
 
 function isMockSwitchEnabled(value) {
@@ -184,6 +213,7 @@ function createActivityState() {
     denoise: { current: null, queue: [], last: null },
     triage: { current: null, queue: [], last: null },
     recent: [],
+    lastIdentified: null,
     batch: emptyActivityBatch(),
     batchUpdatedAt: 0,
     mode: 'normal',
@@ -382,69 +412,6 @@ function createTaskCenterState() {
   };
 }
 
-function createAiTasksState() {
-  return {
-    connection: 'initializing',
-    generatedAt: '',
-    reason: '',
-    summary: {
-      active: 0,
-      running: 0,
-      waiting: 0,
-      stale: 0,
-      disabled: 0,
-      returned: 0,
-      truncated: false,
-    },
-    tasks: [],
-  };
-}
-
-function createMockAiTasksState() {
-  const now = Date.now();
-  const tasks = [
-    {
-      taskId: 'workflow:stream_alert_triage:mock-triage-run-002',
-      workflowId: 'stream_alert_triage',
-      executionId: 'mock-triage-run-002',
-      stage: 'triage',
-      status: 'running',
-      startedAt: now - 6200,
-      title: '远程命令执行攻击（Mock）',
-      sourceType: 'tdp',
-      counts: { raw: null },
-      dataQuality: 'pending',
-      progress: { mode: 'steps', current: 2, total: 4, percent: 0.5, label: '2 / 4 步' },
-    },
-    {
-      taskId: 'workflow:stream_alert_denoise:mock-denoise-run-004',
-      workflowId: 'stream_alert_denoise',
-      executionId: 'mock-denoise-run-004',
-      stage: 'denoise',
-      status: 'queued',
-      startedAt: now - 18000,
-      title: '端口扫描聚类（Mock）',
-      sourceType: 'qingteng',
-      counts: { raw: 12 },
-      dataQuality: 'complete',
-      progress: { mode: 'queued', current: 0, total: 4, percent: null, label: '等待执行' },
-    },
-  ];
-  return {
-    ...createAiTasksState(),
-    connection: 'online',
-    generatedAt: new Date(now).toISOString(),
-    summary: {
-      ...createAiTasksState().summary,
-      active: tasks.length,
-      running: 1,
-      waiting: 1,
-      returned: tasks.length,
-    },
-    tasks,
-  };
-}
-
 function createMockTaskCenterState() {
   const now = Date.now();
   const startedAt = now - 7 * 60 * 1000;
@@ -566,6 +533,85 @@ function isRunningWorkflowEvent(event) {
     && ['running', 'queued', 'pending'].includes(String(event?.status || '').toLowerCase());
 }
 
+function workflowActivityPriority(event) {
+  return isRunningWorkflowEvent(event) ? event.status === 'running' ? 2 : 1 : 0;
+}
+
+function displayAlertText(value) {
+  if (typeof value !== 'string') return '';
+  const text = value.trim();
+  return /^(unknown|none|null|--|待识别|待识别资产|未知告警|未知来源)$/i.test(text) ? '' : text;
+}
+
+function hasAlertIdentity(event) {
+  const alert = event?.alert || {};
+  return Boolean(displayAlertText(alert.srcIp) || displayAlertText(alert.dstIp)
+    || (displayAlertText(alert.threatName) && !/^(降噪批次|研判批次)/.test(alert.threatName)));
+}
+
+function isVisibleActivity(event) {
+  if (!event?.eventId || !['denoise', 'triage'].includes(event.stage)) return false;
+  return !(event.stage === 'denoise' && event.triggerSource === 'workflow_execution'
+    && event.result?.rawCount === 0 && !hasAlertIdentity(event));
+}
+
+function mergeActivityEvent(previous, incoming) {
+  if (!previous) return incoming;
+  const previousTime = Date.parse(previous.updatedAt || previous.occurredAt || '') || 0;
+  const incomingTime = Date.parse(incoming.updatedAt || incoming.occurredAt || '') || 0;
+  if (incomingTime < previousTime) return previous;
+  // A late polling response cannot resurrect a terminal execution.
+  if (previous.triggerSource === 'workflow_execution'
+    && ['completed', 'success', 'failed', 'cancelled'].includes(previous.status)
+    && isRunningWorkflowEvent(incoming)) return previous;
+  if (incoming.status === 'unconfirmed' && previous.lastConfirmedAt > incoming.lastConfirmedAt) return previous;
+  const incomingIdentity = hasAlertIdentity(incoming);
+  const incomingId = displayAlertText(incoming.alert?.id);
+  const previousId = displayAlertText(previous.alert?.id);
+  // An execution ID is not an alert ID (including responses from older builds).
+  // Without a shared real identity, use a whole preview, never graft endpoints.
+  const sameAlert = incomingId && incomingId === previousId
+    && incomingId !== executionIdFromWorkflowEvent(incoming)
+    && previousId !== executionIdFromWorkflowEvent(previous);
+  const alert = incomingIdentity && !sameAlert ? {} : { ...previous.alert };
+  for (const [key, value] of Object.entries(incoming.alert || {})) {
+    if (displayAlertText(value)) {
+      if (key === 'id' && !incomingIdentity && hasAlertIdentity(previous)) continue;
+      if (key === 'threatName' && /^(降噪批次|研判批次)/.test(value) && hasAlertIdentity(previous)) continue;
+      alert[key] = value;
+    }
+  }
+  return {
+    ...previous, ...incoming, alert,
+    result: { ...previous.result, ...incoming.result },
+    playbackStartedAt: previous.playbackStartedAt,
+    lastConfirmedAt: Math.max(previous.lastConfirmedAt || 0, incoming.lastConfirmedAt || 0),
+  };
+}
+
+function expireWorkflowActivity(previous, now = Date.now()) {
+  let changed = false;
+  const expire = (event) => {
+    if (!isRunningWorkflowEvent(event) || !event.lastConfirmedAt
+      || now - event.lastConfirmedAt < WORKFLOW_CONFIRMATION_TTL_MS) return event;
+    changed = true;
+    // A missing/truncated response is not evidence of completion or failure.
+    return { ...event, status: 'unconfirmed' };
+  };
+  const next = { ...previous, recent: previous.recent.map(expire), lastIdentified: expire(previous.lastIdentified) };
+  for (const kind of ['denoise', 'triage']) {
+    const lane = previous[kind];
+    const current = expire(lane.current);
+    next[kind] = {
+      ...lane,
+      current: current?.status === 'unconfirmed' ? null : current,
+      last: current?.status === 'unconfirmed' ? current : expire(lane.last),
+      queue: lane.queue.map(expire).filter((event) => event.status !== 'unconfirmed'),
+    };
+  }
+  return changed ? next : previous;
+}
+
 function normalizeActivityBatch(raw) {
   const batch = { ...emptyActivityBatch(), ...(raw || {}) };
   for (const key of ['windowMs', 'receivedCount', 'duplicateCount', 'uniqueCount', 'clusterCount', 'triageUpdatedCount', 'sampledCount', 'suppressedCount', 'ratePerSecond']) {
@@ -584,14 +630,18 @@ function resolveActivityMode(previous, batch) {
   return { mode, calmPolls };
 }
 
-function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) {
+function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch, workflowSnapshotComplete = false) {
+  previous = expireWorkflowActivity(previous);
   const batch = normalizeActivityBatch(rawBatch);
   const modeState = resolveActivityMode(previous, batch);
   const hasBatch = batch.receivedCount > 0 || batch.triageUpdatedCount > 0;
-  const incomingEvents = (events || []).filter(Boolean);
-  const incomingRecentEvents = (recentEvents || []).filter(Boolean);
+  const confirmed = (event) => event.triggerSource === 'workflow_execution'
+    ? { ...event, lastConfirmedAt: Date.now() } : event;
+  const incomingEvents = (events || []).filter(isVisibleActivity).map(confirmed);
+  const incomingRecentEvents = (recentEvents || []).filter(isVisibleActivity).map(confirmed);
   if (
     !hasBatch
+    && !workflowSnapshotComplete
     && !incomingEvents.length
     && !incomingRecentEvents.length
     && previous.connection === 'online'
@@ -610,20 +660,40 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) 
     mode: modeState.mode,
     calmPolls: modeState.calmPolls,
   };
+  if (workflowSnapshotComplete) {
+    const ids = new Set(incomingEvents.map((event) => event.eventId));
+    const retained = (event) => !(isRunningWorkflowEvent(event) || event?.status === 'unconfirmed') || ids.has(event.eventId);
+    for (const kind of ['denoise', 'triage']) {
+      const lane = next[kind];
+      if (lane.current && !retained(lane.current)) lane.current = null;
+      if (lane.last?.status === 'unconfirmed' && !retained(lane.last)) lane.last = null;
+      lane.queue = lane.queue.filter(retained);
+    }
+    next.recent = next.recent.filter(retained);
+  }
   if (batch.mode !== 'normal' && batch.receivedCount > 0) next.denoise.queue = [];
   for (const event of incomingEvents) {
     if (!event || !['denoise', 'triage'].includes(event.stage) || !event.eventId) continue;
+    const known = [next[event.stage].current, next[event.stage].last, ...next.recent]
+      .find((item) => item?.eventId === event.eventId);
+    const merged = mergeActivityEvent(known, event);
     const enriched = event.stage === 'denoise'
-      ? { ...event, playbackMode: batch.mode, batch }
-      : event;
+      ? { ...merged, playbackMode: batch.mode, batch }
+      : merged;
     const lane = next[enriched.stage];
+    if (enriched.triggerSource === 'workflow_execution' && !isRunningWorkflowEvent(enriched)) {
+      if (lane.current?.eventId === enriched.eventId) lane.current = null;
+      lane.queue = lane.queue.filter((item) => item.eventId !== enriched.eventId);
+      if (!lane.last || activityTimestamp(enriched) >= activityTimestamp(lane.last)) lane.last = enriched;
+      continue;
+    }
     if (lane.current?.eventId === enriched.eventId) {
-      lane.current = { ...lane.current, ...enriched, playbackStartedAt: lane.current.playbackStartedAt };
+      lane.current = mergeActivityEvent(lane.current, enriched);
       continue;
     }
     const queuedIndex = lane.queue.findIndex((item) => item?.eventId === enriched.eventId);
     if (queuedIndex >= 0) {
-      lane.queue[queuedIndex] = { ...lane.queue[queuedIndex], ...enriched };
+      lane.queue[queuedIndex] = mergeActivityEvent(lane.queue[queuedIndex], enriched);
       continue;
     }
     const knownLast = lane.last?.eventId === enriched.eventId;
@@ -631,19 +701,30 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) 
   }
   for (const kind of ['denoise', 'triage']) {
     const lane = next[kind];
+    lane.queue.sort((a, b) => workflowActivityPriority(b) - workflowActivityPriority(a));
+    if (workflowActivityPriority(lane.queue[0]) > workflowActivityPriority(lane.current)) {
+      const previousCurrent = lane.current;
+      lane.current = lane.queue.shift();
+      if (isRunningWorkflowEvent(previousCurrent)) lane.queue.push(previousCurrent);
+    }
     if (lane.queue.length > ACTIVITY_QUEUE_LIMIT) {
-      lane.queue = lane.queue.slice(-ACTIVITY_QUEUE_LIMIT);
+      lane.queue = lane.queue.slice(0, ACTIVITY_QUEUE_LIMIT);
     }
   }
-  const incomingRecent = incomingRecentEvents.length ? incomingRecentEvents : [...incomingEvents].reverse();
+  const incomingRecent = [...incomingRecentEvents, ...incomingEvents];
   for (const event of [...incomingRecent].reverse()) {
     if (!event?.eventId) continue;
-    const merged = [event, ...next.recent.filter((item) => item.eventId !== event.eventId)];
+    const merged = [mergeActivityEvent(next.recent.find((item) => item.eventId === event.eventId), event),
+      ...next.recent.filter((item) => item.eventId !== event.eventId)];
+    const priority = (a, b) => Number(isRunningWorkflowEvent(b)) - Number(isRunningWorkflowEvent(a))
+      || activityTimestamp(b) - activityTimestamp(a);
     next.recent = [
-      ...merged.filter((item) => item.stage === 'triage').slice(0, 12),
-      ...merged.filter((item) => item.stage === 'denoise').slice(0, 12),
+      ...merged.filter((item) => item.stage === 'triage').sort(priority).slice(0, 12),
+      ...merged.filter((item) => item.stage === 'denoise').sort(priority).slice(0, 12),
     ].sort((left, right) => Date.parse(right.occurredAt || '') - Date.parse(left.occurredAt || ''));
   }
+  next.lastIdentified = [...next.recent, next.lastIdentified]
+    .filter(hasAlertIdentity).sort((a, b) => activityTimestamp(b) - activityTimestamp(a))[0] || null;
   return next;
 }
 
@@ -775,128 +856,36 @@ function refreshLabel(value) {
 }
 
 function mergeStats(raw) {
-  const sourceStatus = {
-    ...EMPTY_STATS.sourceStatus,
-    ...((raw || {}).sourceStatus || {}),
-    metricQuality: {
-      ...(EMPTY_STATS.sourceStatus.metricQuality || {}),
-      ...((raw || {}).sourceStatus?.metricQuality || {}),
-    },
-    triageQuality: {
-      ...(EMPTY_STATS.sourceStatus.triageQuality || {}),
-      ...((raw || {}).sourceStatus?.triageQuality || {}),
-    },
-  };
-  const metricQuality = sourceStatus.metricQuality || {};
-  const triageQuality = sourceStatus.triageQuality || {};
-  const denoiseMetricsUnavailable = metricQuality.metricsAvailable === false;
-  const triageMetricsUnavailable = triageQuality.metricsAvailable === false;
-  const sourceMetricsUnavailable = denoiseMetricsUnavailable
-    || metricQuality.sourceMetricsAvailable === false;
   const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
-  if (denoiseMetricsUnavailable) {
-    for (const key of [
-      'totalRaw', 'totalNormalized', 'afterFilter', 'totalUnique',
-      'filterRemoved', 'dedupRemoved', 'duplicates', 'duplicateRate',
-      'dedupRate', 'uniqueRate',
-    ]) denoise[key] = null;
-    if (metricQuality.dataAvailable === false) denoise.files = null;
-  }
-  const triage = { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) };
-  if (triageMetricsUnavailable) {
-    for (const key of Object.keys(EMPTY_STATS.triage)) triage[key] = null;
-  }
-  const pipeline = { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) };
-  if (denoiseMetricsUnavailable) {
-    for (const key of ['raw', 'unique', 'reductionSaved', 'uniqueRate', 'coverageRate']) {
-      pipeline[key] = null;
-    }
-  }
-  if (triageMetricsUnavailable) {
-    for (const key of [
-      'triageTotal', 'attackTotal', 'llmSaved', 'workloadReuseRate',
-      'attackRate', 'successRate',
-    ]) pipeline[key] = null;
-  }
-  const timeline = { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) };
-  if (denoiseMetricsUnavailable) {
-    timeline.denoiseRaw = [];
-    timeline.denoiseUnique = [];
-  }
-  if (triageMetricsUnavailable) {
-    timeline.triageTotal = [];
-    timeline.triageAttack = [];
-  }
-  const sources = Array.isArray((raw || {}).sources) ? raw.sources : [];
-  const closedLoop = { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) };
-  if (triageMetricsUnavailable) {
-    for (const key of Object.keys(EMPTY_STATS.closedLoop)) closedLoop[key] = null;
-  }
+  const processedTotal = Math.max(Number(denoise.totalRaw || 0), 0);
+  denoise.totalNormalized = processedTotal;
   return {
     ...EMPTY_STATS,
     ...(raw || {}),
-    sourceStatus,
+    sourceStatus: { ...EMPTY_STATS.sourceStatus, ...((raw || {}).sourceStatus || {}) },
     denoise,
-    triage,
-    pipeline,
-    closedLoop,
+    triage: { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) },
+    pipeline: { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) },
+    closedLoop: { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) },
     tokenUsage: { ...EMPTY_STATS.tokenUsage, ...((raw || {}).tokenUsage || {}) },
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
-    timeline,
-    sources: sourceMetricsUnavailable
-      ? sources.map((item) => ({ ...item, value: null, rate: null, active: false }))
-      : sources,
-    verdicts: triageMetricsUnavailable
-      ? ((raw || {}).verdicts || []).map((item) => ({ ...item, value: null }))
-      : ((raw || {}).verdicts || []),
-    attackProfile: triageMetricsUnavailable ? [] : ((raw || {}).attackProfile || []),
-    topThreatTypes: triageMetricsUnavailable ? [] : ((raw || {}).topThreatTypes || []),
-    severityLevels: triageMetricsUnavailable ? [] : ((raw || {}).severityLevels || []),
-    riskLevels: triageMetricsUnavailable ? [] : ((raw || {}).riskLevels || []),
+    timeline: { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) },
+    sources: [
+      { key: 'ndr', label: 'NDR', value: processedTotal, rate: processedTotal > 0 ? 1 : 0, active: processedTotal > 0 },
+      { key: 'other', label: '其他接入', value: 0, rate: 0, active: false },
+    ],
   };
 }
 
 function fullNumber(value) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
-  const n = Number(value);
+  const n = Number(value || 0);
   return new Intl.NumberFormat('zh-CN').format(n);
 }
 
-function workflowDenoiseActivity(callCount, delta, generatedAt, workflowEvent) {
-  if (workflowEvent) {
-    return {
-      ...workflowEvent,
-      eventId: `workflow-playback:${callCount}:${workflowEvent.eventId}`,
-      statsDelta: delta,
-      workflowCallCount: callCount,
-    };
-  }
-  const occurredAt = generatedAt || new Date().toISOString();
-  return {
-    eventId: `workflow-denoise:${callCount}:${occurredAt}`,
-    stage: 'denoise',
-    status: 'completed',
-    occurredAt,
-    triggerSource: 'workflow_stats',
-    statsDelta: delta,
-    workflowCallCount: callCount,
-    hiddenFromQueue: true,
-    sampleCount: delta,
-    alert: {
-      sourceType: 'workflow.db',
-      threatName: '降噪工作流统计更新',
-    },
-    result: {
-      clusterId: `累计 ${fullNumber(callCount)}`,
-      isDuplicate: false,
-    },
-  };
-}
 
 function compactNumber(value) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
-  const n = Number(value);
+  const n = Number(value || 0);
   if (Math.abs(n) >= 100000000) return `${trim(n / 100000000)}亿`;
   if (Math.abs(n) >= 10000) return `${trim(n / 10000)}万`;
   return fullNumber(n);
@@ -910,8 +899,7 @@ function formatTokenVolume(value) {
 
 function AnimatedNumber({ value, format, tag = 'span', className, duration = 900 }) {
   const { useEffect, useRef, useState } = getReact();
-  const unavailable = value === null || value === undefined || !Number.isFinite(Number(value));
-  const target = unavailable ? 0 : Number(value);
+  const target = Number(value || 0);
   const current = useRef(0);
   const [display, setDisplay] = useState(0);
   const formatter = format || ((number) => compactNumber(Math.round(number)));
@@ -939,8 +927,8 @@ function AnimatedNumber({ value, format, tag = 'span', className, duration = 900
 
   return h(tag, {
     className: cx('animated-number', className),
-    title: unavailable ? '数据不可用' : formatter(target),
-  }, unavailable ? '--' : formatter(display));
+    title: formatter(target),
+  }, formatter(display));
 }
 
 function trim(value) {
@@ -948,8 +936,7 @@ function trim(value) {
 }
 
 function pct(value) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
-  return `${Math.round(Number(value) * 1000) / 10}%`;
+  return `${Math.round(Number(value || 0) * 1000) / 10}%`;
 }
 
 function ratio(part, total) {
@@ -1041,9 +1028,7 @@ function SourceColumn({ stats }) {
   return h('div', { className: 'column left-col' }, [
     h(Panel, { key: 'sources', title: '多源告警接入', meta: `${stats.denoise.files || 0} 个降噪批次` }, [
       h('div', { className: 'source-list', key: 'list' }, stats.sources.map((item) => {
-        const width = item.value === null || item.value === undefined
-          ? '0%'
-          : `${Math.max(4, Math.round((item.rate || 0) * 100))}%`;
+        const width = `${Math.max(4, Math.round((item.rate || 0) * 100))}%`;
         return h('div', { className: 'source-row', key: item.key }, [
           h('div', { className: cx('source-node', item.active && 'active'), key: 'node' }),
           h('div', { className: 'source-main', key: 'main' }, [
@@ -1242,12 +1227,13 @@ function ActivityStageCard({ kind, lane, stats }) {
 }
 
 function AiCore({ stats, activity }) {
-  const denoiseActive = Boolean(activity.denoise.current);
-  const triageActive = Boolean(activity.triage.current);
+  const denoiseActive = activity.denoise.current?.status === 'running';
+  const triageActive = activity.triage.current?.status === 'running';
   const activeCount = Number(denoiseActive) + Number(triageActive);
-  const activeEvent = activity.denoise.current || activity.triage.current;
+  const activeEvent = (denoiseActive && activity.denoise.current) || (triageActive && activity.triage.current) || null;
   const activeKind = activeEvent?.stage || '';
-  const queueCount = activity.denoise.queue.length + activity.triage.queue.length;
+  const queueCount = buildEventQueueTasks(activity)
+    .filter((task) => task.state === 'waiting').length;
   const coreLabel = activeCount === 2
     ? '双任务处理中'
     : denoiseActive
@@ -1257,72 +1243,25 @@ function AiCore({ stats, activity }) {
   const workflowDenoiseActive = activeKind === 'denoise'
     && ['workflow_stats', 'workflow_execution'].includes(activeEvent?.triggerSource);
   const workflowExecutionActive = workflowDenoiseActive && activeEvent?.triggerSource === 'workflow_execution';
-  const workflowMetricsAvailable = workflowExecutionActive && activeEvent?.result?.metricsAvailable;
-  const alertName = activeEvent?.alert?.threatName || '未知告警';
-  const alertSource = activeEvent?.alert?.sourceType || '未知来源';
-  const sourceAddress = activeEvent?.alert?.srcIp || '待识别';
-  const targetAddress = activeEvent?.alert?.dstIp || '待识别';
-  const operations = workflowExecutionActive && !workflowMetricsAvailable
-    ? [
-        `接入告警 ${alertName}`,
-        `识别来源 ${alertSource}`,
-        `关联资产 ${sourceAddress} → ${targetAddress}`,
-        '等待可用降噪结果',
-      ]
-    : workflowExecutionActive
-    ? [
-        `接入原始告警 ${fullNumber(activeEvent?.result?.rawCount)}`,
-        `完成标准化 ${fullNumber(activeEvent?.result?.normalizedCount)}`,
-        `过滤与收敛 ${fullNumber(activeEvent?.result?.reducedCount)}`,
-        `留存研判告警 ${fullNumber(activeEvent?.result?.uniqueCount)}`,
-      ]
-    : workflowDenoiseActive
-    ? [
-        '检测 workflow.db 统计更新',
-        `读取降噪调用增量 +${fullNumber(activeEvent?.statsDelta || 1)}`,
-        '同步降噪处理状态',
-        `累计调用 ${fullNumber(activeEvent?.workflowCallCount)}`,
-      ]
+  // Keep one coherent alert. A historical fallback is labelled, never grafted
+  // onto a running execution whose input has not been provided.
+  const evidenceEvent = [activity.denoise.current, activity.triage.current].find(hasAlertIdentity)
+    || [...(activity.recent || []), activity.lastIdentified, activity.denoise.last, activity.triage.last]
+      .filter(hasAlertIdentity).sort((a, b) => activityTimestamp(b) - activityTimestamp(a))[0]
+    || activeEvent;
+  const evidenceIsCurrent = evidenceEvent && [activity.denoise.current, activity.triage.current]
+    .some((event) => event?.eventId === evidenceEvent.eventId && event.status === 'running');
+  const evidenceItems = [
+    { label: '告警名称', value: displayAlertText(evidenceEvent?.alert?.threatName) || '未提供' },
+    { label: '来源类型', value: displayAlertText(evidenceEvent?.alert?.sourceType) || '未提供' },
+    { label: '源地址', value: displayAlertText(evidenceEvent?.alert?.srcIp) || '未提供' },
+    { label: '目标地址', value: displayAlertText(evidenceEvent?.alert?.dstIp) || '未提供' },
+  ];
+  const operations = workflowExecutionActive
+    ? ['降噪工作流执行中', '提取告警特征', '等待降噪结果', '以实际执行状态为准']
     : activeKind === 'denoise'
-    ? [
-        `接入 ${activeEvent?.alert?.sourceType || '告警数据'}`,
-        '提取请求与网络特征',
-        `匹配相似簇 ${activeEvent?.result?.clusterId || '--'}`,
-        activeEvent?.result?.isDuplicate ? '输出：重复告警收敛' : '输出：保留代表告警',
-      ]
-    : [
-        '提取攻击证据',
-        '关联历史情报与资产',
-        '执行风险推理',
-        `生成结论：${activeEvent?.result?.verdictLabel || '待确认'}`,
-      ];
-  const evidenceItems = workflowExecutionActive && !workflowMetricsAvailable
-    ? [
-        { label: '告警名称', value: alertName },
-        { label: '来源类型', value: alertSource },
-        { label: '源地址', value: sourceAddress },
-        { label: '目标地址', value: targetAddress },
-      ]
-    : workflowExecutionActive
-    ? [
-        { label: '原始告警', value: fullNumber(activeEvent?.result?.rawCount) },
-        { label: '过滤数量', value: fullNumber(activeEvent?.result?.filterRemovedCount) },
-        { label: '去重数量', value: fullNumber(activeEvent?.result?.duplicateCount) },
-        { label: '降噪率', value: pct(activeEvent?.result?.reductionRate) },
-      ]
-    : workflowDenoiseActive
-    ? [
-        { label: '本次增量', value: `+${fullNumber(activeEvent?.statsDelta || 1)}` },
-        { label: '累计处理', value: fullNumber(activeEvent?.workflowCallCount) },
-        { label: '处理模式', value: activity.mode === 'surge' ? '洪峰' : activity.mode === 'burst' ? '批量' : '实时' },
-        { label: '当前队列', value: fullNumber(queueCount) },
-      ]
-    : activeEvent ? [
-        { label: '攻击源', value: activeEvent.alert?.srcIp || activeEvent.alert?.sourceType || '新告警' },
-        { label: '目标资产', value: activeEvent.alert?.dstIp || '待识别资产' },
-        { label: activeKind === 'denoise' ? '特征' : '攻击路径', value: activeEvent.alert?.requestUri || activeEvent.alert?.threatName || '特征提取中' },
-        { label: activeKind === 'denoise' ? '相似聚类' : '风险判断', value: activeKind === 'denoise' ? `簇 ${activeEvent.result?.clusterId || '--'}` : activityResultText(activeEvent) },
-      ] : [];
+      ? ['告警接入记录', '提取请求与网络特征', '相似特征聚类', '降噪结果展示']
+      : ['提取攻击证据', '关联历史情报与资产', '执行风险推理', '等待研判结果'];
   const statusLabel = activity.connection === 'error'
     ? '活动数据等待重连'
     : activeCount
@@ -1367,14 +1306,16 @@ function AiCore({ stats, activity }) {
         key: 'operation-idle',
       }, `AI新增研判 ${compactNumber(stats.triage.newTriaged)}`),
     ]),
-    activeEvent ? h('div', { className: 'ai-evidence-field', key: `evidence-${activeEvent.eventId}` }, evidenceItems.map((item, index) => h('div', {
+    h('div', { className: 'ai-evidence-field', key: 'evidence', 'aria-label': evidenceIsCurrent ? '当前任务告警' : '最近告警记录' }, evidenceItems.map((item, index) => h('div', {
       className: `ai-evidence-card evidence-${index + 1}`,
       key: item.label,
       style: { animationDelay: `${180 + index * 220}ms` },
     }, [
       h('span', { key: 'label' }, item.label),
       h('b', { title: item.value, key: 'value' }, item.value),
-    ]))) : null,
+    ]))),
+    h('span', { className: 'core-evidence-source', key: 'evidence-source' },
+      evidenceIsCurrent ? '当前任务告警' : evidenceEvent ? '最近告警记录' : '等待告警数据'),
     h('div', { className: 'core-particle particle-a', key: 'particle-a' }),
     h('div', { className: 'core-particle particle-b', key: 'particle-b' }),
     h('div', { className: 'core-particle particle-c', key: 'particle-c' }),
@@ -1750,8 +1691,144 @@ function TimeRefreshPopover({ value, refreshValue, open, onToggle, onApply, onCl
   ]);
 }
 
-function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
-  const active = activity.denoise.current || activity.triage.current;
+function PageSettingsIcon() {
+  // Lucide "settings" glyph (ISC), drawn inline because the page bundle has no icon library.
+  return h('svg', {
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': 'true',
+  }, [
+    h('path', {
+      d: 'M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915',
+      key: 'gear',
+    }),
+    h('circle', { cx: 12, cy: 12, r: 3, key: 'hub' }),
+  ]);
+}
+
+// Mounted only while the popover is open, so the draft always starts from the
+// title currently shown and is dropped on cancel.
+function PageSettingsPanel({ initialTitle, onCancel, onSave, onReset }) {
+  const { useState } = getReact();
+  const [draft, setDraft] = useState(initialTitle);
+
+  return h('div', { className: 'command-settings-panel', role: 'dialog', 'aria-label': '页面设置' }, h('form', {
+    onSubmit: (event) => {
+      event.preventDefault();
+      onSave(draft);
+    },
+  }, [
+    h('div', { className: 'command-settings-head', key: 'head' }, '页面设置'),
+    h('div', { className: 'command-settings-body', key: 'body' }, [
+      h('label', { key: 'title' }, [
+        h('span', { key: 'label' }, '页面标题'),
+        h('input', {
+          type: 'text',
+          value: draft,
+          maxLength: CUSTOM_COMMAND_TITLE_MAX_LENGTH,
+          placeholder: DEFAULT_COMMAND_TITLE,
+          autoFocus: true,
+          onChange: (event) => setDraft(event.target.value),
+          key: 'input',
+        }),
+      ]),
+      h('p', { key: 'hint' }, '只修改告警态势页的大标题，保存在当前浏览器。'),
+    ]),
+    h('div', { className: 'command-settings-actions', key: 'actions' }, [
+      h('button', { className: 'ghost', type: 'button', onClick: onReset, key: 'reset' }, '恢复默认'),
+      h('div', { key: 'buttons' }, [
+        h('button', { type: 'button', onClick: onCancel, key: 'cancel' }, '取消'),
+        h('button', { className: 'primary', type: 'submit', key: 'save' }, '保存'),
+      ]),
+    ]),
+  ]));
+}
+
+function PageSettingsPopover({ open, customTitle, onToggle, onClose, onSave, onReset }) {
+  const { useEffect, useRef } = getReact();
+  const triggerRef = useRef(null);
+  const refocusTrigger = () => triggerRef.current?.focus();
+
+  useEffect(() => {
+    if (!open) return undefined;
+    // Own root marker instead of the shared data-soc-menu-root, so pressing the
+    // time filter (or any other menu) closes this panel too.
+    const closeOnOutsidePress = (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-soc-page-settings-root]')) return;
+      onClose();
+    };
+    const closeOnEscape = (event) => {
+      // Esc while an IME candidate list is open only cancels the composition.
+      if (event.key !== 'Escape' || event.isComposing) return;
+      onClose();
+      refocusTrigger();
+    };
+    document.addEventListener('mousedown', closeOnOutsidePress, true);
+    document.addEventListener('touchstart', closeOnOutsidePress, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsidePress, true);
+      document.removeEventListener('touchstart', closeOnOutsidePress, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [onClose, open]);
+
+  return h('div', { className: 'command-settings', 'data-soc-page-settings-root': 'true' }, [
+    h('button', {
+      className: cx('command-settings-trigger', open && 'open'),
+      type: 'button',
+      title: '页面设置',
+      'aria-label': '页面设置',
+      'aria-haspopup': 'dialog',
+      'aria-expanded': open,
+      onClick: onToggle,
+      ref: triggerRef,
+      key: 'trigger',
+    }, h(PageSettingsIcon)),
+    open ? h(PageSettingsPanel, {
+      initialTitle: customTitle,
+      onCancel: () => {
+        onClose();
+        refocusTrigger();
+      },
+      onSave: (value) => {
+        onSave(value);
+        refocusTrigger();
+      },
+      onReset: () => {
+        onReset();
+        refocusTrigger();
+      },
+      key: 'panel',
+    }) : null,
+  ]);
+}
+
+function CommandHeader({
+  title,
+  customTitle,
+  timeFilter,
+  refreshKey,
+  timeMenuOpen,
+  onToggleTimeMenu,
+  onCloseTimeMenu,
+  pageSettingsOpen,
+  onTogglePageSettings,
+  onClosePageSettings,
+  onSaveTitle,
+  onResetTitle,
+  applyTimeRefresh,
+  stats,
+  loading,
+  refresh,
+  activity,
+}) {
+  const active = [activity.denoise.current, activity.triage.current].some((event) => event?.status === 'running');
   const loadActive = activity.mode !== 'normal' && activity.batch?.receivedCount > 0;
   const status = activity.connection === 'error'
     ? '活动通道重连中'
@@ -1781,12 +1858,21 @@ function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMen
         value: timeFilter,
         refreshValue: refreshKey,
         open: timeMenuOpen,
-        onToggle: () => setTimeMenuOpen((current) => !current),
+        onToggle: onToggleTimeMenu,
         onApply: applyTimeRefresh,
-        onClose: () => setTimeMenuOpen(false),
+        onClose: onCloseTimeMenu,
         key: 'time-filter',
       }),
       h('button', { className: 'command-refresh', type: 'button', disabled: loading, onClick: refresh, key: 'refresh' }, loading ? '刷新中' : '刷新'),
+      h(PageSettingsPopover, {
+        open: pageSettingsOpen,
+        customTitle,
+        onToggle: onTogglePageSettings,
+        onClose: onClosePageSettings,
+        onSave: onSaveTitle,
+        onReset: onResetTitle,
+        key: 'page-settings',
+      }),
       h('div', { className: 'command-clock', key: 'clock' }, [
         h('b', { key: 'time' }, stats.generatedAt ? stats.generatedAt.slice(11, 19) : '--:--:--'),
         h('span', { title: timeFilterLabel(timeFilter), key: 'range' }, timeFilterLabel(timeFilter)),
@@ -1891,9 +1977,6 @@ function laneLinkStatus(kind, event, peerLane) {
 }
 
 function triageContextText(stats) {
-  if (stats?.sourceStatus?.triageQuality?.metricsAvailable === false) {
-    return '窗口研判数据不可用';
-  }
   const triage = stats?.triage || EMPTY_STATS.triage;
   const total = Math.max(Number(triage.totalRecords || 0), 0);
   const newTriaged = Math.max(Number(triage.newTriaged || 0), 0);
@@ -1904,7 +1987,7 @@ function triageContextText(stats) {
 
 function CommandActivityLane({ kind, lane, peerLane, stats }) {
   const event = lane.current || lane.last;
-  const active = Boolean(lane.current);
+  const active = lane.current?.status === 'running';
   const steps = kind === 'denoise' ? ['接入', '特征', '聚类', '降噪'] : ['证据', '情报', '推理', '结论'];
   const duration = activityDuration(event);
   const drumDuration = kind === 'denoise' ? (active ? '2.6s' : '6.6s') : (active ? '7.2s' : '9.2s');
@@ -1912,7 +1995,8 @@ function CommandActivityLane({ kind, lane, peerLane, stats }) {
   const playbackMode = kind === 'denoise' ? event?.playbackMode : 'normal';
   const status = active
     ? playbackMode === 'surge' ? '洪峰处理' : playbackMode === 'burst' ? '批量处理' : '处理中'
-    : event ? '最近完成' : '待机巡航';
+    : event?.status === 'unconfirmed' ? '状态待确认' : isRunningWorkflowEvent(event) ? '等待处理'
+      : event?.status === 'failed' ? '最近失败' : event ? '最近完成' : '待机巡航';
   const sampleCount = Math.max(Number(event?.sampleCount || 1), 1);
   const eventTitle = event?.alert?.threatName
     ? `${event.alert.threatName}${sampleCount > 1 ? ` × ${sampleCount}` : ''}`
@@ -1964,8 +2048,8 @@ function CommandActivityLane({ kind, lane, peerLane, stats }) {
 }
 
 function CommandGraph({ stats, activity }) {
-  const denoiseActive = Boolean(activity.denoise.current);
-  const triageActive = Boolean(activity.triage.current);
+  const denoiseActive = activity.denoise.current?.status === 'running';
+  const triageActive = activity.triage.current?.status === 'running';
   const severityToneFor = (event) => {
     if (!event) return '';
     return severityKey(event.result?.threatSeverity);
@@ -1973,10 +2057,8 @@ function CommandGraph({ stats, activity }) {
   const activeSeverityTone = severityToneFor(activity.triage.current);
   const recentSeverityTone = severityToneFor(activity.triage.last);
   const activeSources = [...(stats.sources || [])].sort((a, b) => Number(b.value || 0) - Number(a.value || 0)).slice(0, 2);
-  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: null });
-  const triageMetricsAvailable = Boolean(stats.generatedAt)
-    && stats.sourceStatus?.triageQuality?.metricsAvailable !== false;
-  const severities = severityRows(stats, triageMetricsAvailable);
+  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: 0 });
+  const severities = severityRows(stats);
   return h('section', { className: cx('command-graph', denoiseActive && 'denoise-running', triageActive && 'triage-running', `load-${activity.mode}`) }, [
     h(CommandConnections, { key: 'links' }),
     h('div', { className: 'source-stack', key: 'sources' }, activeSources.map((source) => h('div', { className: 'command-source', key: source.key }, [
@@ -2064,7 +2146,7 @@ function CommandMetrics({ stats }) {
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
-    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate === null ? null : stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
+    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
     h(TokenUsageMetric, { tokenUsage, key: 'tokens' }),
   ]);
 }
@@ -2075,78 +2157,31 @@ function activityTimestamp(event) {
 }
 
 function activityTaskKey(event) {
-  const alertId = String(event?.alert?.id || '').trim();
-  return alertId || String(event?.eventId || '').trim();
+  // Executions are tasks, not alerts. Two executions can preview the same alert.
+  return String(event?.eventId || '').trim();
 }
 
 function buildEventQueueTasks(activity, timeFilter) {
-  const stateByEventId = new Map();
-  for (const kind of ['denoise', 'triage']) {
-    const lane = activity[kind];
-    if (lane.current?.eventId) stateByEventId.set(lane.current.eventId, 'processing');
-    for (const event of lane.queue) {
-      if (event?.eventId) stateByEventId.set(event.eventId, 'waiting');
-    }
-  }
-
+  const taskByKey = new Map();
   const allEvents = [
     ...(activity.recent || []),
-    activity.denoise.last,
-    activity.triage.last,
-    ...activity.denoise.queue,
-    ...activity.triage.queue,
-    activity.denoise.current,
-    activity.triage.current,
-  ].filter((event) => event?.eventId && !event.hiddenFromQueue && eventMatchesTimeFilter(event, timeFilter));
-  const taskByKey = new Map();
-  for (const event of allEvents) {
-    const key = activityTaskKey(event);
-    if (!key) continue;
-    const task = taskByKey.get(key) || { key, denoise: null, triage: null, latestAt: 0 };
-    task[event.stage] = event;
-    task.latestAt = Math.max(task.latestAt, activityTimestamp(event));
-    taskByKey.set(key, task);
+    activity.denoise.last, activity.triage.last,
+    ...activity.denoise.queue, ...activity.triage.queue,
+    activity.denoise.current, activity.triage.current,
+  ].filter((event) => isVisibleActivity(event) && !event.hiddenFromQueue
+    && event.triggerSource === 'workflow_execution' && (!timeFilter || eventMatchesTimeFilter(event, timeFilter)));
+  for (const incoming of allEvents) {
+    const key = activityTaskKey(incoming);
+    const event = mergeActivityEvent(taskByKey.get(key)?.event, incoming);
+    const status = String(event.status || '').toLowerCase();
+    const state = status === 'unconfirmed' ? 'unconfirmed' : status === 'running' ? 'processing'
+      : ['queued', 'pending'].includes(status) ? 'waiting' : 'completed';
+    taskByKey.set(key, { key, event, state, stage: event.stage,
+      [event.stage]: event, latestAt: activityTimestamp(event) });
   }
-
-  const tasks = [...taskByKey.values()].map((task) => {
-    const denoiseState = stateByEventId.get(task.denoise?.eventId) || '';
-    const triageState = stateByEventId.get(task.triage?.eventId) || '';
-    let state = 'completed';
-    let stage = task.triage ? 'triage' : 'denoise';
-    if (triageState === 'processing') {
-      state = 'processing';
-      stage = 'triage';
-    } else if (denoiseState === 'processing') {
-      state = 'processing';
-      stage = 'denoise';
-    } else if (triageState === 'waiting') {
-      state = 'waiting';
-      stage = 'triage';
-    } else if (denoiseState === 'waiting') {
-      state = 'waiting';
-      stage = 'denoise';
-    } else if (!task.triage && task.denoise && task.denoise.status !== 'failed' && !task.denoise.result?.isDuplicate) {
-      state = 'waiting';
-      stage = 'triage';
-    }
-    return {
-      ...task,
-      state,
-      stage,
-      event: stage === 'triage' && task.triage ? task.triage : task.denoise,
-    };
-  });
-
-  const stateRank = { processing: 0, waiting: 1, completed: 2 };
-  tasks.sort((left, right) => {
-    const stateDelta = stateRank[left.state] - stateRank[right.state];
-    if (stateDelta) return stateDelta;
-    if (left.state === 'waiting') return right.latestAt - left.latestAt;
-    if (left.state === 'processing' && left.stage !== right.stage) return left.stage === 'triage' ? -1 : 1;
-    return right.latestAt - left.latestAt;
-  });
-
-  return tasks;
+  const stateRank = { processing: 0, waiting: 1, unconfirmed: 2, completed: 3 };
+  return [...taskByKey.values()].sort((a, b) => stateRank[a.state] - stateRank[b.state]
+    || b.latestAt - a.latestAt || a.key.localeCompare(b.key));
 }
 
 function useAnimatedTaskWindow(tasks, transitionKey) {
@@ -2175,6 +2210,8 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
     task.event?.eventId || '',
     task.event?.playbackStartedAt || '',
     task.latestAt || '',
+    JSON.stringify(task.event?.alert || {}),
+    JSON.stringify(task.event?.result || {}),
   ].join(':')).join('|');
 
   useEffect(() => {
@@ -2236,30 +2273,10 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
   return displayedTasks;
 }
 
-function EventQueueProgress({ event }) {
-  const { useEffect, useRef, useState } = getReact();
-  const duration = Math.max(activityDuration(event), 1);
-  const start = useRef({ eventId: '', value: 0 });
-  if (start.current.eventId !== event.eventId) {
-    start.current = {
-      eventId: event.eventId,
-      value: Number(event.playbackStartedAt || Date.now()),
-    };
-  }
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const update = () => setNow(Date.now());
-    update();
-    const id = window.setInterval(update, 500);
-    return () => window.clearInterval(id);
-  }, [event.eventId]);
-  const elapsed = Math.min(Math.max(now - start.current.value, 0), duration);
-  const progress = elapsed / duration;
-  const elapsedSeconds = Math.min(Math.floor(elapsed / 1000), Math.round(duration / 1000));
-  return h('div', { className: 'event-rail-progress', 'aria-label': 'AI 任务处理进度' }, [
-    h('span', { className: 'event-rail-progress-track', style: { '--queue-progress': progress }, key: 'track' }, [h('i', { key: 'fill' })]),
-    h('small', { key: 'duration' }, `${elapsedSeconds}s / ${Math.round(duration / 1000)}s`),
-  ]);
+function EventQueueProgress() {
+  // Animation duration is not workflow progress. Avoid a fabricated countdown.
+  return h('div', { className: 'event-rail-progress', 'aria-label': '工作流运行状态' },
+    h('small', null, '执行中 · 等待结果更新'));
 }
 
 function taskCenterPercent(value) {
@@ -2548,83 +2565,54 @@ function CommandTaskCenterPanel({ taskCenter }) {
   ]);
 }
 
-function WorkflowTaskProgress({ task }) {
-  const progress = task.progress || {};
-  if (progress.mode !== 'steps' || !Number.isFinite(Number(progress.percent))) {
-    return h('div', { className: 'event-rail-progress indeterminate', 'aria-label': 'AI 任务执行中' }, [
-      h('span', { className: 'event-rail-progress-track', key: 'track' }, [h('i', { key: 'fill' })]),
-      h('small', { key: 'label' }, progress.label || '执行中'),
-    ]);
-  }
-  const percent = Math.max(Math.min(Number(progress.percent), 1), 0);
-  return h('div', { className: 'event-rail-progress', 'aria-label': 'AI 任务步骤进度' }, [
-    h('span', { className: 'event-rail-progress-track', style: { '--queue-progress': percent }, key: 'track' }, [h('i', { key: 'fill' })]),
-    h('small', { key: 'label' }, progress.label || `${Math.round(percent * 100)}%`),
-  ]);
-}
-
-function CommandAiTaskPanel({ aiTasks }) {
-  const summary = { ...createAiTasksState().summary, ...(aiTasks.summary || {}) };
-  const visibleTasks = (aiTasks.tasks || []).slice(0, EVENT_RAIL_TASK_LIMIT);
-  const banner = aiTasks.connection === 'error' || aiTasks.connection === 'unavailable'
-    ? '处理任务数据不可用，正在重试'
-    : summary.running && summary.waiting
-      ? `正在处理 ${summary.running} 个，等待 ${summary.waiting} 个`
-      : summary.running
-        ? `AI 正在处理 ${summary.running} 个任务`
-        : summary.waiting
-          ? `${summary.waiting} 个任务等待处理`
-          : summary.stale
-            ? `发现 ${summary.stale} 个失联任务，已移出活跃列表`
-            : '当前没有运行或等待中的 AI 任务';
+function CommandAiTaskPanel({ activity, timeFilter }) {
+  const tasks = buildEventQueueTasks(activity, timeFilter);
+  const filterTransitionKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
+  const visibleTasks = useAnimatedTaskWindow(
+    tasks.filter((task) => task.state !== 'completed'),
+    filterTransitionKey,
+  );
+  const counts = {
+    processing: tasks.filter((task) => task.state === 'processing').length,
+    waiting: tasks.filter((task) => task.state === 'waiting').length,
+    unconfirmed: tasks.filter((task) => task.state === 'unconfirmed').length,
+  };
+  const banner = activity.connection === 'error'
+    ? '处理任务连接异常，正在重试'
+    : counts.processing
+      ? `AI 正在并行处理 ${counts.processing} 个任务`
+      : counts.waiting ? '最新 10 条待处理任务'
+        : counts.unconfirmed ? '任务状态待确认，等待数据更新' : '等待新的降噪或研判任务';
   return [
-    h('div', { className: cx('event-update-banner', ['error', 'unavailable'].includes(aiTasks.connection) && 'warn'), key: 'banner' }, banner),
-    summary.truncated
-      ? h('small', { className: 'event-rail-limit-note', key: 'limit' }, `共 ${summary.active} 条活跃任务，当前展示 ${visibleTasks.length} 条`)
-      : null,
+    h('div', { className: cx('event-update-banner', activity.connection === 'error' && 'warn'), key: 'banner' }, banner),
     h('div', { className: 'event-rail-list', key: 'list' }, visibleTasks.length ? visibleTasks.map((task) => {
-      const processing = task.status === 'running';
-      const waiting = ['queued', 'pending'].includes(task.status);
-      const title = task.title || (task.stage === 'triage' ? '研判任务' : '降噪任务');
+      const event = task.event;
+      const title = displayAlertText(event?.alert?.threatName) || (task.stage === 'triage' ? '研判批次' : '降噪批次 · 数量未提供');
       const stageLabel = task.stage === 'triage'
-        ? waiting ? '待研判' : '智能研判'
-        : waiting ? '待降噪' : '智能降噪';
-      const stateLabel = processing ? '处理中' : '等待处理';
-      const unverifiedZero = task.stage === 'denoise'
-        && Number(task.counts?.raw) === 0
-        && !task.emptyInput
-        && task.rawCountSource !== 'workflow_input';
-      const qualityDetail = unverifiedZero
-        ? ' · 原始条数待校验'
-        : task.dataQuality === 'invalid'
-        ? ' · 指标格式异常'
-        : task.dataQuality === 'empty-input'
-          ? ' · 空输入任务'
-        : task.dataQuality === 'missing'
-          ? ' · 原始条数未知'
-          : task.dataQuality === 'pending' && (task.counts?.raw === null || task.counts?.raw === undefined)
-            ? ' · 原始条数待生成'
-            : '';
-      const rawDetail = task.stage === 'denoise' && !task.emptyInput && !unverifiedZero && task.counts?.raw !== null && task.counts?.raw !== undefined
-        ? ` · 原始 ${task.counts.raw} 条`
-        : '';
-      const detail = task.stage === 'triage'
-        ? processing ? '研判工作流执行中' : '等待研判工作流调度'
-        : processing ? '降噪工作流执行中' : '等待降噪工作流调度';
-      const hasExecution = Boolean(task.workflowId && task.executionId);
+        ? task.state === 'waiting' ? '待研判' : '智能研判'
+        : task.state === 'waiting' ? '待降噪' : '智能降噪';
+      const stateLabel = task.state === 'processing'
+        ? '处理中'
+        : task.state === 'unconfirmed' ? '状态待确认' : '等待处理';
+      const detail = task.state === 'unconfirmed'
+        ? '近期未收到该任务的状态，尚不能确认是否结束'
+        : task.state === 'processing'
+        ? task.stage === 'triage' ? '研判工作流处理中' : '降噪工作流处理中'
+        : task.stage === 'triage' ? '研判工作流排队中' : '降噪工作流排队中';
+      const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
       const handleOpen = () => {
-        if (hasExecution) openWorkflowExecution(task.workflowId, task.executionId);
+        if (hasExecution) openWorkflowExecutionFromEvent(event);
       };
       const handleKeyDown = (keyboardEvent) => {
         if (!hasExecution) return;
         if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
           keyboardEvent.preventDefault();
-          openWorkflowExecution(task.workflowId, task.executionId);
+          openWorkflowExecutionFromEvent(event);
         }
       };
       return h('article', {
-        className: cx('event-rail-item', processing ? 'state-processing' : 'state-waiting', `kind-${task.stage}`, hasExecution && 'clickable'),
-        key: task.taskId,
+        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, hasExecution && 'clickable'),
+        key: task.key,
         role: hasExecution ? 'button' : undefined,
         tabIndex: hasExecution ? 0 : undefined,
         title: hasExecution ? '打开执行详情' : undefined,
@@ -2634,19 +2622,20 @@ function CommandAiTaskPanel({ aiTasks }) {
         h('div', { className: 'event-rail-meta', key: 'meta' }, [
           h('span', { className: cx('event-queue-kind', `kind-${task.stage}`), key: 'kind' }, stageLabel),
           h('span', { className: 'event-stage', key: 'stage' }, stateLabel),
-          h('time', { key: 'time' }, eventTimeLabel(task.startedAt)),
+          h('time', { key: 'time' }, eventTimeLabel(event?.occurredAt)),
         ]),
         h('strong', { title, key: 'title' }, title),
-        h('span', { key: 'endpoint' }, [task.srcIp, task.dstIp].filter(Boolean).join(' → ') || '未提供网络端点'),
-        h('small', { key: 'result' }, `${detail}${rawDetail}${qualityDetail}${hasExecution ? ' · 查看执行' : ''}`),
-        processing ? h(WorkflowTaskProgress, { task, key: 'progress' }) : null,
+        h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)),
+        h('small', { key: 'result' }, hasExecution ? `${detail} · 查看执行` : detail),
+        task.state === 'processing' ? h(EventQueueProgress, { event, key: 'progress' }) : null,
       ]);
-    }) : h('div', { className: 'event-rail-empty' }, '暂无活跃的降噪或研判任务')),
+    }) : h('div', { className: 'event-rail-empty' }, '等待新的降噪或研判任务')),
   ];
 }
 
-function CommandEventRail({ aiTasks, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
-  const queueCount = Math.max(Number(aiTasks.summary?.active || 0), 0);
+function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
+  const tasks = buildEventQueueTasks(activity, timeFilter);
+  const queueCount = tasks.filter((task) => task.state !== 'completed').length;
   const taskCenterCount = Number(taskCenter.sessionCount || 0);
   const content = collapsed ? [] : [
     h('div', { className: 'event-rail-head rail-view-head', key: 'head' }, [
@@ -2672,7 +2661,7 @@ function CommandEventRail({ aiTasks, taskCenter, view, onViewChange, collapsed, 
     ]),
     view === 'taskCenter'
       ? h(CommandTaskCenterPanel, { taskCenter, key: 'taskCenterContent' })
-      : h(CommandAiTaskPanel, { aiTasks, key: 'aiTaskContent' }),
+      : h(CommandAiTaskPanel, { activity, timeFilter, key: 'aiTaskContent' }),
   ];
   return h('aside', { className: cx('command-event-rail', collapsed && 'collapsed') }, [
     collapsed ? null : h('div', {
@@ -2705,6 +2694,7 @@ export default function Page() {
   const [timeFilter, setTimeFilter] = useState(() => createRelativeTimeFilter());
   const [refreshKey, setRefreshKey] = useState('off');
   const [timeMenuOpen, setTimeMenuOpen] = useState(false);
+  const [pageSettingsOpen, setPageSettingsOpen] = useState(false);
   const [eventRailCollapsed, setEventRailCollapsed] = useState(false);
   const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
   const [rightRailView, setRightRailView] = useState('aiTasks');
@@ -2714,7 +2704,6 @@ export default function Page() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activity, setActivity] = useState(createActivityState);
-  const [aiTasks, setAiTasks] = useState(createAiTasksState);
   const [taskCenter, setTaskCenter] = useState(createTaskCenterState);
   const activityCursor = useRef('');
   const workflowProgressByFilter = useRef(new Map());
@@ -2822,6 +2811,12 @@ export default function Page() {
   }, [loadStats, timeFilter]);
 
   useEffect(() => {
+    // Also expires stale state while requests are failing or remain in flight.
+    const timer = window.setInterval(() => setActivity(expireWorkflowActivity), ACTIVITY_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const intervalMs = REFRESH_INTERVAL_MS[refreshKey];
     if (!intervalMs) return undefined;
     const id = window.setInterval(() => void loadStats(timeFilter, { skipIfBusy: true }), intervalMs);
@@ -2848,6 +2843,25 @@ export default function Page() {
     setRefreshKey(nextRefreshKey);
     setTimeMenuOpen(false);
   }, []);
+
+  // The time filter and page settings popovers share the header; only one is open at a time.
+  const toggleTimeMenu = useCallback(() => {
+    setPageSettingsOpen(false);
+    setTimeMenuOpen((current) => !current);
+  }, []);
+  const closeTimeMenu = useCallback(() => setTimeMenuOpen(false), []);
+  const togglePageSettings = useCallback(() => {
+    setTimeMenuOpen(false);
+    setPageSettingsOpen((current) => !current);
+  }, []);
+  const closePageSettings = useCallback(() => setPageSettingsOpen(false), []);
+  const saveCommandTitle = useCallback((value) => {
+    const nextTitle = writeCustomCommandTitle(value);
+    // Set after the change event so this value wins even if storage was unavailable.
+    setCustomCommandTitle(nextTitle);
+    setPageSettingsOpen(false);
+  }, []);
+  const resetCommandTitle = useCallback(() => saveCommandTitle(''), [saveCommandTitle]);
 
   useEffect(() => {
     let stopped = false;
@@ -2904,50 +2918,6 @@ export default function Page() {
   useEffect(() => {
     let stopped = false;
     let timer = 0;
-
-    const schedule = (delay) => {
-      if (!stopped) timer = window.setTimeout(() => void poll(), delay);
-    };
-
-    const poll = async () => {
-      if (stopped) return;
-      if (document.hidden) {
-        schedule(ACTIVITY_POLL_MS);
-        return;
-      }
-      try {
-        const response = await getApi().page.get('/ai-tasks', { params: {} });
-        const payload = response.data || {};
-        if (!stopped) {
-          setAiTasks({
-            ...createAiTasksState(),
-            ...payload,
-            summary: { ...createAiTasksState().summary, ...(payload.summary || {}) },
-            tasks: Array.isArray(payload.tasks) ? payload.tasks : [],
-          });
-        }
-      } catch (aiTaskError) {
-        if (!stopped) {
-          setAiTasks((previous) => ({
-            ...previous,
-            connection: 'error',
-            reason: aiTaskError instanceof Error ? aiTaskError.message : 'ai tasks api failed',
-          }));
-        }
-      }
-      schedule(ACTIVITY_POLL_MS);
-    };
-
-    void poll();
-    return () => {
-      stopped = true;
-      window.clearTimeout(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    let stopped = false;
-    let timer = 0;
     let statsTimer = 0;
     let lastStatsRefreshAt = 0;
     let retryDelay = ACTIVITY_POLL_MS;
@@ -2981,6 +2951,7 @@ export default function Page() {
           : { cursor: activityCursor.current, limit: 40, ...timeFilterParams(timeFilter) };
         const response = await getApi().page.get('/activity', { params });
         const payload = response.data || {};
+        if (stopped) return;
         if (payload.error) throw new Error(payload.error);
         activityCursor.current = payload.cursor || activityCursor.current;
         if (!stopped) {
@@ -2992,8 +2963,7 @@ export default function Page() {
             : (payload.events || []);
           const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
           const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
-          const activeWorkflowEvents = workflowEvents.filter(isRunningWorkflowEvent);
-          for (const workflowEvent of activeWorkflowEvents) {
+          for (const workflowEvent of workflowEvents) {
             const hasExecution = Boolean(workflowIdFromEvent(workflowEvent) && executionIdFromWorkflowEvent(workflowEvent));
             if (hasExecution) {
               incomingEvents.push(workflowEvent);
@@ -3003,7 +2973,6 @@ export default function Page() {
           const hasWorkflowCount = rawCallCount !== null
             && rawCallCount !== undefined
             && Number.isFinite(Number(rawCallCount));
-          let workflowDelta = 0;
           let workflowChanged = false;
           if (hasWorkflowCount) {
             const callCount = Math.max(Math.trunc(Number(rawCallCount)), 0);
@@ -3013,29 +2982,18 @@ export default function Page() {
               callCount > previousProgress.callCount
               || latestStartedAt > previousProgress.latestStartedAt
             );
-            if (workflowChanged) {
-              workflowDelta = Math.max(callCount - previousProgress.callCount, 1);
-              incomingEvents.push(workflowDenoiseActivity(
-                callCount,
-                workflowDelta,
-                payload.generatedAt,
-                workflowEvents[0],
-              ));
-            }
             workflowProgressByFilter.current.set(workflowFilterKey, { callCount, latestStartedAt });
           }
           const incomingRecentEvents = bootstrap
-            ? [...(payload.recentEvents || []), ...activeWorkflowEvents]
+            ? [...(payload.recentEvents || []), ...workflowEvents]
             : workflowChanged
-              ? [...rawIncomingEvents, ...activeWorkflowEvents]
+              ? [...rawIncomingEvents, ...workflowEvents]
               : rawIncomingEvents;
-          setActivity((previous) => enqueueActivity(
-            previous,
-            incomingEvents,
-            payload.generatedAt,
-            incomingRecentEvents,
-            payload.batch,
-          ));
+          setActivity((previous) => {
+            const next = enqueueActivity(previous, incomingEvents, payload.generatedAt,
+              incomingRecentEvents, payload.batch, payload.workflowSnapshotComplete === true);
+            return payload.workflowSnapshotAvailable === false ? { ...next, connection: 'error' } : next;
+          });
           const batch = normalizeActivityBatch(payload.batch);
           const hasStatsChange = workflowChanged
             || batch.receivedCount > 0
@@ -3130,14 +3088,6 @@ export default function Page() {
     ),
     [mockDashboardEnabled, taskCenter],
   );
-  const displayAiTasks = useMemo(
-    () => (
-      mockDashboardEnabled && !aiTasks.tasks.length
-        ? createMockAiTasksState()
-        : aiTasks
-    ),
-    [aiTasks, mockDashboardEnabled],
-  );
   const displayActivityBusy = Boolean(
     displayActivity.denoise.current
     || displayActivity.triage.current
@@ -3146,46 +3096,6 @@ export default function Page() {
     || displayActivity.batch?.receivedCount
     || displayActivity.batch?.triageUpdatedCount
   );
-  const metricQuality = stats.sourceStatus?.metricQuality || {};
-  const triageQuality = stats.sourceStatus?.triageQuality || {};
-  const metricIssues = [];
-  if (Number(metricQuality.invalidExecutionCount || 0) > 0) {
-    metricIssues.push(`${metricQuality.invalidExecutionCount} 次指标格式异常`);
-  }
-  if (Number(metricQuality.errorExecutionCount || 0) > 0) {
-    metricIssues.push(`${metricQuality.errorExecutionCount} 次执行失败`);
-  }
-  if (Number(metricQuality.unprocessedInputCount || 0) > 0) {
-    metricIssues.push(`${metricQuality.unprocessedInputCount} 条输入未完成归一化`);
-  }
-  const sourceCoverageRate = Number(metricQuality.sourceCoverageRate);
-  if (metricQuality.metricsAvailable && Number.isFinite(sourceCoverageRate) && sourceCoverageRate < 1) {
-    metricIssues.push(`来源覆盖 ${Math.round(sourceCoverageRate * 1000) / 10}%`);
-  }
-  const metricQualityWarning = !stats.generatedAt
-    ? ''
-    : metricQuality.dataAvailable === false || metricQuality.status === 'unavailable'
-      ? '降噪统计数据源不可用，相关数字已隐藏；系统正在重试'
-      : metricQuality.status === 'stale'
-        ? '降噪统计查询失败，当前显示上次缓存数据，可能已过期'
-      : metricQuality.status === 'partial' && !metricQuality.metricsAvailable
-        ? `降噪指标校验未通过，相关数字已隐藏${metricIssues.length ? `：${metricIssues.join('；')}` : ''}`
-    : metricQuality.metricsAvailable
-    ? metricQuality.status === 'partial'
-      ? `降噪指标部分可用${metricIssues.length ? `：${metricIssues.join('；')}` : ''}${metricQuality.coverageStartedAt ? `；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}` : ''}`
-      : metricIssues.length
-        ? `降噪指标存在异常：${metricIssues.join('；')}`
-        : ''
-    : metricQuality.status === 'legacy-partial'
-      ? `精确降噪指标尚未覆盖当前时间范围，相关数字已隐藏；完整采集始于 ${taskCenterTimeLabel(metricQuality.coverageStartedAt)}`
-      : '精确降噪指标尚不可用，相关数字已隐藏；新指标链路产生数据后将自动显示';
-  const triageQualityWarning = !stats.generatedAt || triageQuality.metricsAvailable !== false
-    ? ''
-    : triageQuality.unavailableReason === 'soc_db_missing'
-      ? 'SOC 事件数据库不可用，研判、事件与闭环数字已隐藏；系统正在重试'
-      : triageQuality.unavailableReason === 'soc_dashboard_schema_unavailable'
-        ? 'SOC 统计结构尚未就绪，研判、事件与闭环数字已隐藏；系统正在重试'
-      : 'SOC 研判统计查询失败，研判、事件与闭环数字已隐藏；系统正在重试';
 
   return h('div', {
     className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
@@ -3196,10 +3106,17 @@ export default function Page() {
     h(CommandHeader, {
       key: 'header',
       title: customCommandTitle || DEFAULT_COMMAND_TITLE,
+      customTitle: customCommandTitle,
       timeFilter,
       refreshKey,
       timeMenuOpen,
-      setTimeMenuOpen,
+      onToggleTimeMenu: toggleTimeMenu,
+      onCloseTimeMenu: closeTimeMenu,
+      pageSettingsOpen,
+      onTogglePageSettings: togglePageSettings,
+      onClosePageSettings: closePageSettings,
+      onSaveTitle: saveCommandTitle,
+      onResetTitle: resetCommandTitle,
       applyTimeRefresh,
       stats,
       loading,
@@ -3207,8 +3124,6 @@ export default function Page() {
       activity: displayActivity,
     }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
-    metricQualityWarning ? h('div', { className: 'quality-banner', key: 'quality' }, metricQualityWarning) : null,
-    triageQualityWarning ? h('div', { className: 'quality-banner', key: 'triage-quality' }, triageQualityWarning) : null,
     h('main', {
       className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
       key: 'main',
@@ -3219,7 +3134,8 @@ export default function Page() {
       ]),
       h(CommandEventRail, {
         key: 'events',
-        aiTasks: displayAiTasks,
+        activity: displayActivity,
+        timeFilter,
         taskCenter: displayTaskCenter,
         view: rightRailView,
         onViewChange: setRightRailView,
@@ -3236,7 +3152,7 @@ export default function Page() {
 const CSS = `
 .adtd-root {
   box-sizing: border-box;
-  min-height: 100vh;
+  min-height: 100%;
   min-width: 1100px;
   margin: 0;
   padding: 0 16px;
@@ -3250,15 +3166,6 @@ const CSS = `
   overflow-x: auto;
 }
 .adtd-root * { box-sizing: border-box; }
-.quality-banner {
-  margin: 8px 0 0;
-  padding: 8px 12px;
-  border: 1px solid rgba(255,176,32,.34);
-  border-radius: 6px;
-  color: #f1c67d;
-  background: rgba(139,88,22,.16);
-  font-size: 11px;
-}
 .adtd-header {
   position: relative;
   display: grid;
@@ -4560,7 +4467,7 @@ const CSS = `
   --command-blue: #3677bc;
   --command-border: rgba(255, 255, 255, .09);
   position: relative;
-  height: 100vh;
+  height: 100%;
   min-height: 720px;
   min-width: 1180px;
   margin: 0;
@@ -4650,7 +4557,8 @@ const CSS = `
 .command-live i.warn { background: #ffae34; box-shadow: 0 0 10px #ffae34; }
 .command-live b { color: #47ddb0; font-weight: 600; }
 .command-tools { justify-content: flex-end; gap: 8px; min-width: 0; }
-.command-refresh {
+.command-refresh,
+.command-settings-trigger {
   height: 34px;
   border: 1px solid rgba(255,255,255,.16);
   border-radius: 7px;
@@ -4660,7 +4568,8 @@ const CSS = `
   font-size: 12px;
 }
 .command-refresh { padding: 0 15px; cursor: pointer; }
-.command-refresh:hover { border-color: rgba(32,213,155,.55); color: #53e0b3; }
+.command-refresh:hover,
+.command-settings-trigger:hover { border-color: rgba(32,213,155,.55); color: #53e0b3; }
 .command-refresh:disabled { opacity: .55; cursor: default; }
 .command-time-filter { position: relative; z-index: 40; }
 .command-time-trigger {
@@ -4748,6 +4657,80 @@ const CSS = `
 .command-time-panel-actions { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid rgba(88,166,255,.14); padding: 10px 12px; }
 .command-time-panel-actions button { height: 30px; min-width: 64px; border-color: rgba(88,166,255,.28); background: rgba(11,34,53,.8); }
 .command-time-panel-actions button.primary { border-color: rgba(43,231,255,.58); color: #061725; background: linear-gradient(135deg, #35d4ff, #40e1bd); font-weight: 700; }
+.command-settings { position: relative; z-index: 40; flex: 0 0 auto; }
+.command-settings-trigger {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  padding: 0;
+  cursor: pointer;
+}
+.command-settings-trigger svg { width: 16px; height: 16px; }
+.command-settings-trigger.open { border-color: rgba(43,231,255,.58); color: #73e7ff; box-shadow: inset 0 0 18px rgba(43,231,255,.06); }
+.command-settings-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  border: 1px solid rgba(43,231,255,.3);
+  border-radius: 9px;
+  color: #d9f7ff;
+  background: linear-gradient(155deg, rgba(8,31,51,.99), rgba(5,18,34,.99));
+  box-shadow: 0 18px 46px rgba(0,0,0,.48), inset 0 0 28px rgba(43,231,255,.035);
+}
+.command-settings-panel form { margin: 0; }
+.command-settings-head {
+  border-bottom: 1px solid rgba(88,166,255,.14);
+  padding: 12px 13px 10px;
+  color: #d9f7ff;
+  font-size: 13px;
+  font-weight: 700;
+}
+.command-settings-body { display: grid; gap: 8px; padding: 13px; }
+.command-settings-body label { display: block; margin: 0; }
+.command-settings-body label span { display: block; margin-bottom: 7px; color: rgba(170,222,255,.62); font-size: 11px; font-weight: 650; }
+.command-settings-body input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid rgba(88,166,255,.3);
+  border-radius: 5px;
+  color: #d9f7ff;
+  background: rgba(4,18,33,.86);
+  padding: 0 9px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.command-settings-body input::placeholder { color: rgba(170,222,255,.38); }
+.command-settings-body input:focus { border-color: rgba(43,231,255,.7); box-shadow: 0 0 0 2px rgba(43,231,255,.08); }
+.command-settings-body p { margin: 0; color: rgba(170,222,255,.55); font-size: 11px; line-height: 1.5; }
+.command-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid rgba(88,166,255,.14);
+  padding: 10px 12px;
+}
+.command-settings-actions > div { display: flex; gap: 8px; }
+.command-settings-actions button {
+  height: 30px;
+  min-width: 64px;
+  border: 1px solid rgba(88,166,255,.28);
+  border-radius: 5px;
+  color: rgba(190,222,240,.68);
+  background: rgba(11,34,53,.8);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.command-settings-actions button:hover { color: #d9f7ff; }
+.command-settings-actions button.primary { border-color: rgba(43,231,255,.58); color: #061725; background: linear-gradient(135deg, #35d4ff, #40e1bd); font-weight: 700; }
+.command-settings-actions button.ghost { min-width: 0; border-color: transparent; background: transparent; padding: 0 4px; color: rgba(170,222,255,.62); }
+.command-settings-actions button.ghost:hover { color: #73e7ff; }
 .command-clock {
   display: flex;
   align-items: flex-end;
@@ -4780,7 +4763,7 @@ const CSS = `
   z-index: 2;
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--event-rail-width, 330px);
-  height: calc(100vh - 68px);
+  height: calc(100% - 68px);
   min-height: 652px;
   transition: grid-template-columns .24s ease;
 }
@@ -5519,12 +5502,6 @@ const CSS = `
 }
 .event-update-banner:before { content: "ⓘ"; margin-right: 7px; color: #6ba4fb; }
 .event-update-banner.warn { border-color: rgba(255,174,52,.42); color: #f1c67d; background: rgba(139,88,22,.2); }
-.event-rail-limit-note {
-  display: block;
-  margin: 5px 14px 0;
-  color: rgba(170,222,255,.62);
-  font-size: 9px;
-}
 .task-center-panel {
   min-height: 0;
   padding: 8px 14px 18px;
@@ -5902,6 +5879,7 @@ const CSS = `
 .event-stage { color: #83aef1; background: rgba(52,86,143,.5); }
 .event-rail-item.state-processing .event-stage { color: #57e1b5; background: rgba(23,111,83,.48); }
 .event-rail-item.state-waiting .event-stage { color: #d6a95e; background: rgba(120,81,23,.38); }
+.event-rail-item.state-unconfirmed .event-stage { color: #a9c0d0; background: rgba(75,98,118,.32); }
 .event-rail-item > strong,
 .event-rail-item > span,
 .event-rail-item > small {
@@ -5951,11 +5929,6 @@ const CSS = `
   box-shadow: 0 0 10px #73e9ff;
   transform: translate(50%, -50%);
 }
-.event-rail-progress.indeterminate .event-rail-progress-track i {
-  width: 38%;
-  transform: translateX(-120%);
-  animation: commandTaskIndeterminate 1.4s ease-in-out infinite;
-}
 .event-rail-progress > small {
   color: #9a8eff;
   font-size: 9px;
@@ -5969,10 +5942,6 @@ const CSS = `
   font-size: 11px;
 }
 @keyframes commandFlow { to { stroke-dashoffset: -36; } }
-@keyframes commandTaskIndeterminate {
-  0% { transform: translateX(-120%); }
-  100% { transform: translateX(340%); }
-}
 @keyframes commandSpin { to { transform: rotate(360deg); } }
 @keyframes commandSpinReverse { to { transform: rotate(-360deg); } }
 @keyframes commandCorePulse {
@@ -6047,7 +6016,8 @@ const CSS = `
 }
 .command-live b { color: #2ee6a6; }
 .command-time-trigger,
-.command-refresh {
+.command-refresh,
+.command-settings-trigger {
   border-color: rgba(88,166,255,.28);
   color: #d9f7ff;
   background: rgba(10,31,51,.9);
@@ -6388,12 +6358,23 @@ const CSS = `
   inset: 0;
   pointer-events: none;
 }
+.core-evidence-source {
+  position: absolute;
+  z-index: 8;
+  bottom: 2%;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #9bd5e9;
+  font-size: 10px;
+  white-space: nowrap;
+}
 .ai-evidence-card {
   position: absolute;
   display: flex;
   flex-direction: column;
   width: 104px;
   min-height: 42px;
+  pointer-events: auto;
   padding: 6px 8px;
   opacity: 0;
   border: 1px solid color-mix(in srgb, var(--core-task-accent) 48%, transparent);

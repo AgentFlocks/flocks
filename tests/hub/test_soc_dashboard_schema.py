@@ -1,9 +1,287 @@
 import importlib.util
+import asyncio
+import gc
 import json
 import sqlite3
+import subprocess
 import sys
+import time
+import tracemalloc
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
+
+import pytest
+
+
+def _activity_workflow_db(tmp_path):
+    path = tmp_path / "workflow.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE workflow_executions (
+            id TEXT PRIMARY KEY, workflow_id TEXT, status TEXT,
+            started_at INTEGER, updated_at INTEGER,
+            input_params TEXT, output_results TEXT, payload TEXT)""")
+        conn.execute("CREATE INDEX idx_started ON workflow_executions(workflow_id, started_at DESC)")
+        conn.execute("CREATE INDEX idx_status ON workflow_executions(workflow_id, status)")
+    return path
+
+
+def _activity_execution(path, key, *, status="running", started=1000, inputs=None, output=None, payload=None):
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+            key, "stream_alert_denoise", status, started, started + 100,
+            json.dumps(inputs or {}), json.dumps(output or {}), json.dumps(payload or {}),
+        ))
+
+
+@pytest.mark.parametrize("wrapper", ["direct", "preview", "syslog", "nested"])
+def test_activity_preview_handles_bounded_execution_shapes(wrapper):
+    handlers = _load_dashboard_handlers()
+    record = {"id": "a", "threat_name": "scan", "_source_type": "ndr",
+              "net_real_src_ip": "192.0.2.1", "net_dest_ip": "198.51.100.2"}
+    output, inputs = {}, {}
+    if wrapper == "direct":
+        inputs = {"alerts": [record]}
+    elif wrapper == "preview":
+        output = {"unique_alerts": {"_type": "list", "preview": [record]}}
+    elif wrapper == "syslog":
+        inputs = {"syslog_message": {"message": "Sep 11 device vendor: " + json.dumps(record)}}
+    else:
+        inputs = {"syslog_message": {"message": json.dumps({"data": {"message": json.dumps(record)}})}}
+    alert, count = handlers._dashboard_execution_detail(json.dumps(output), json.dumps(inputs))
+    assert alert == {"id": "a", "threatName": "scan", "sourceType": "ndr",
+                     "srcIp": "192.0.2.1", "dstIp": "198.51.100.2"}
+    assert count == (1 if wrapper == "direct" else None)
+
+
+def test_activity_does_not_combine_unrelated_alerts_or_guess_source():
+    handlers = _load_dashboard_handlers()
+    output = {"unique_alerts": [
+        {"id": "a", "threat_name": "first", "sip": "192.0.2.1"},
+        {"id": "b", "dip": "198.51.100.2", "_source_type": "ndr"},
+    ]}
+    alert, _ = handlers._dashboard_execution_detail(json.dumps(output), "{}")
+    assert alert["id"] == "a"
+    assert alert["dstIp"] == alert["sourceType"] == ""
+
+
+def test_activity_distinguishes_empty_unknown_and_real_batches(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "empty", output={"stats": {"raw_count": 0}})
+    _activity_execution(handlers.WORKFLOW_DB, "unknown", inputs={"source_log_type": "ndr"})
+    _activity_execution(handlers.WORKFLOW_DB, "nonempty", inputs={"_soc_alert_count": 5})
+    _activity_execution(handlers.WORKFLOW_DB, "queued", status="queued", inputs={"_soc_alert_count": 2})
+    events = {e["eventId"]: e for e in handlers._get_workflow_recent_events("stream_alert_denoise")}
+    assert "workflow-execution:empty" not in events
+    assert events["workflow-execution:unknown"]["result"]["rawCount"] is None
+    assert events["workflow-execution:unknown"]["alert"]["threatName"] == "降噪批次 · 数量未提供"
+    assert events["workflow-execution:nonempty"]["result"]["rawCount"] == 5
+    assert events["workflow-execution:queued"]["status"] == "queued"
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        assert conn.execute("SELECT count(*) FROM workflow_executions").fetchone()[0] == 4
+
+
+def test_activity_keeps_long_running_execution_and_bounds_history(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "long-running", started=1000)
+    for index in range(30):
+        _activity_execution(handlers.WORKFLOW_DB, f"done-{index}", status="success", started=2000 + index)
+    snapshot = {"complete": True}
+    events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
+    assert len(events) == 11
+    assert events[0]["eventId"] == "workflow-execution:long-running"
+    assert events[0]["updatedAt"] != events[0]["occurredAt"]
+    assert snapshot["complete"] is True
+    assert all(e["eventId"] != "workflow-execution:long-running" for e in
+               handlers._get_workflow_recent_events("stream_alert_denoise", 2, 3))
+
+
+def test_activity_large_payload_and_database_lock_degrade_without_writes(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "large", payload={"large": "x" * 1_000_000},
+                        inputs={"large": "x" * 1_000_000})
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert len(json.dumps(events)) < 4096
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("BEGIN EXCLUSIVE")
+        snapshot = {"complete": True}
+        started = time.monotonic()
+        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert time.monotonic() - started < 1.0
+        assert snapshot["complete"] is False
+
+
+def test_activity_truncated_active_snapshot_is_not_authoritative(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    for index in range(12):
+        _activity_execution(handlers.WORKFLOW_DB, str(index))
+    snapshot = {"complete": True}
+    assert len(handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)) <= 20
+    assert snapshot["complete"] is False
+
+
+def test_activity_does_not_substitute_execution_id_for_missing_alert_id(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "batch", inputs={
+        "alerts": [{"threat_name": "scan", "sip": "192.0.2.1"}],
+    })
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["eventId"] == "workflow-execution:batch"
+    assert event["alert"]["id"] == ""
+
+
+def test_activity_old_sqlite_omits_payloads_instead_of_using_unsafe_length(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "old-sqlite", inputs={
+        "alerts": [{"threat_name": "must not read this"}],
+    })
+    original_connect = sqlite3.connect
+    queries = []
+
+    class OldSQLiteConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            queries.append(sql)
+            if sql == "SELECT octet_length('')":
+                raise sqlite3.OperationalError("no such function: octet_length")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(handlers.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=OldSQLiteConnection))
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert events[0]["status"] == "running"
+    assert "must not read this" not in json.dumps(events)
+    assert not any("CASE WHEN" in query or "length(payload)" in query for query in queries)
+
+
+def test_activity_reader_does_not_wait_or_open_another_db_when_busy(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "active")
+    with handlers._workflow_activity_read_lock:
+        with monkeypatch.context() as patch:
+            def unexpected_connect(*args, **kwargs):
+                raise AssertionError("contending reader must not open SQLite")
+            patch.setattr(handlers.sqlite3, "connect", unexpected_connect)
+            snapshot = {"complete": True, "available": True}
+            assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+            assert snapshot == {"complete": False, "available": False}
+    assert handlers._get_workflow_recent_events("stream_alert_denoise")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_keeps_activity_read_slot_until_worker_exits(monkeypatch):
+    handlers = _load_dashboard_handlers()
+    entered, release = Event(), Event()
+
+    def blocked_read(*args):
+        entered.set()
+        assert release.wait(3), "test must release its worker"
+        return []
+
+    monkeypatch.setattr(handlers, "_read_workflow_recent_events", blocked_read)
+    request = asyncio.create_task(asyncio.to_thread(handlers._get_workflow_recent_events, "stream_alert_denoise"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert handlers._workflow_activity_read_lock.locked()
+        snapshot = {"complete": True, "available": True}
+        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert snapshot == {"complete": False, "available": False}
+    finally:
+        release.set()
+        assert await asyncio.to_thread(handlers._workflow_activity_read_lock.acquire, True, 3)
+        handlers._workflow_activity_read_lock.release()
+
+
+def test_activity_preview_limit_counts_utf8_bytes_not_characters(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "unicode")
+    inputs = json.dumps({"padding": "中" * 100_000, "alerts": [{"threat_name": "oversized-preview"}]}, ensure_ascii=False)
+    assert len(inputs) < 262144 < len(inputs.encode("utf-8"))
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET input_params = ?", (inputs,))
+    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert events[0]["status"] == "running"
+    assert "oversized-preview" not in json.dumps(events)
+
+
+def test_activity_deadline_is_checked_even_without_sqlite_progress_callback(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "active")
+    ticks = iter([100.0, 101.0])
+    monkeypatch.setattr(handlers, "time", SimpleNamespace(monotonic=lambda: next(ticks, 101.0)))
+    snapshot = {"complete": True, "available": True}
+    assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+    assert snapshot == {"complete": False, "available": False}
+    # Errors must release the worker-owned lock as well.
+    assert handlers._workflow_activity_read_lock.acquire(blocking=False)
+    handlers._workflow_activity_read_lock.release()
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="native RSS via resource is Unix-only")
+def test_activity_large_text_is_not_materialized_in_native_sqlite_memory(tmp_path):
+    handlers = _load_dashboard_handlers()
+    db = _activity_workflow_db(tmp_path)
+    _activity_execution(db, "old-large-running", payload={"padding": "x" * (32 * 1024 * 1024)})
+    for index in range(12):
+        _activity_execution(db, f"new-done-{index}", status="success", started=2000 + index)
+    # A fresh process excludes fixture allocations; tracemalloc alone cannot
+    # see SQLite's native buffers. Do not start the application or touch user DBs.
+    script = '''
+import importlib.util, json, resource, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("soc_native_rss_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+module.WORKFLOW_DB = Path(sys.argv[2])
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+events = module._get_workflow_recent_events("stream_alert_denoise")
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+scale = 1024**2 if sys.platform == "darwin" else 1024
+print(json.dumps({"growth_mib": (after - before) / scale, "events": len(events)}))
+'''
+    result = subprocess.run([sys.executable, "-B", "-c", script, handlers.__file__, str(db)],
+                            check=True, text=True, capture_output=True, timeout=20)
+    measurement = json.loads(result.stdout)
+    assert measurement["events"] == 11
+    assert measurement["growth_mib"] < 16, measurement
+
+
+def test_activity_repeated_projection_does_not_retain_payloads(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    for index in range(12):
+        _activity_execution(handlers.WORKFLOW_DB, str(index), inputs={
+            "_soc_alert_preview": {"threat_name": "scan", "sip": "192.0.2.1"},
+            "padding": "x" * 20000,
+        })
+    tracemalloc.start(1)
+    try:
+        for _ in range(10):
+            handlers._get_workflow_recent_events("stream_alert_denoise")
+        gc.collect()
+        before, _ = tracemalloc.get_traced_memory()
+        for _ in range(200):
+            events = handlers._get_workflow_recent_events("stream_alert_denoise")
+            assert len(events) <= 20
+            assert len(json.dumps(events)) < 20000
+        gc.collect()
+        after, peak = tracemalloc.get_traced_memory()
+        assert after - before < 1_000_000
+        assert peak < 8_000_000
+    finally:
+        tracemalloc.stop()
 
 
 def _load_dashboard_handlers():
@@ -706,704 +984,6 @@ def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_
     assert "error" not in payload
     assert payload["workflowEvents"][0]["alert"]["threatName"] == "Mock 研判"
     assert payload["workflowEvents"][0]["sessionId"] == "session-1"
-
-
-def test_soc_dashboard_ai_tasks_use_authoritative_active_status(tmp_path: Path):
-    workflow_db = tmp_path / "workflow.db"
-    now_ms = int(datetime.now().timestamp() * 1000)
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            """
-            CREATE TABLE workflow_executions (
-                id TEXT PRIMARY KEY,
-                workflow_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                current_phase TEXT,
-                current_step_index INTEGER,
-                step_count INTEGER,
-                input_params TEXT NOT NULL DEFAULT '{}',
-                output_results TEXT NOT NULL DEFAULT '{}',
-                error_message TEXT,
-                started_at INTEGER NOT NULL,
-                finished_at INTEGER,
-                updated_at INTEGER,
-                payload TEXT NOT NULL DEFAULT '{}'
-            )
-            """
-        )
-        rows = [
-            (
-                "triage-running", "stream_alert_triage", "running", "analysis", 2, 3,
-                "{}", json.dumps({"triage_results": [{"alert_name": "SSRF盲打探测"}]}), "",
-                now_ms - 2_000, None, now_ms, "{}",
-            ),
-            (
-                "denoise-queued", "stream_alert_denoise", "queued", "queued", 0, 7,
-                json.dumps({"raw_alerts": [{"id": "a"}, {"id": "b"}]}), "{}", "",
-                now_ms - 1_000, None, 0, "{}",
-            ),
-            (
-                "denoise-empty-completed", "stream_alert_denoise", "success", "completed", 7, 7,
-                "{}",
-                json.dumps({"stats": {"raw_count": 0, "normalized_count": 0, "after_filter_count": 0, "after_dedup_count": 0}}),
-                "", now_ms - 3_000, now_ms - 2_500, now_ms - 2_500, "{}",
-            ),
-            (
-                "denoise-stale", "stream_alert_denoise", "running", "dedup", 3, 7,
-                "{}", "{}", "", now_ms - 3 * 60 * 60 * 1000, None,
-                now_ms - 3 * 60 * 60 * 1000, "{}",
-            ),
-        ]
-        conn.executemany(
-            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-
-    payload = handlers._get_ai_tasks()
-
-    assert payload["connection"] == "online"
-    assert payload["summary"] == {
-        "active": 2,
-        "running": 1,
-        "waiting": 1,
-        "stale": 1,
-        "disabled": 0,
-        "returned": 2,
-        "truncated": False,
-    }
-    assert [task["executionId"] for task in payload["tasks"]] == [
-        "triage-running",
-        "denoise-queued",
-    ]
-    assert payload["tasks"][0]["progress"]["label"] == "第 2/4 步"
-    assert payload["tasks"][1]["dataQuality"] == "pending"
-    assert payload["tasks"][1]["counts"]["raw"] == 2
-    assert payload["tasks"][1]["rawCountSource"] == "workflow_input"
-    assert all(task["executionId"] != "denoise-empty-completed" for task in payload["tasks"])
-
-
-def test_soc_dashboard_ai_tasks_report_missing_workflow_database(tmp_path: Path):
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = tmp_path / "missing.db"
-
-    payload = handlers._get_ai_tasks()
-
-    assert payload["connection"] == "unavailable"
-    assert payload["reason"] == "workflow_db_missing"
-    assert payload["tasks"] == []
-
-
-def test_soc_dashboard_ai_task_input_count_supports_compacted_batches_and_empty_input():
-    handlers = _load_dashboard_handlers()
-
-    assert handlers._workflow_task_input_count(
-        {"alerts": {"_type": "list", "count": 2500}}
-    ) == 2500
-    assert handlers._workflow_task_input_count({"_raw_alerts_count": 4000}) == 4000
-    assert handlers._workflow_task_input_count({"alerts": []}) == 0
-    assert handlers._workflow_task_input_count(
-        {"syslog_message": {"message": "not-json"}}
-    ) is None
-    assert handlers._workflow_task_input_count(
-        {"syslog_message": {"message": "[]"}}
-    ) is None
-    assert handlers._workflow_task_input_count(
-        {
-            "syslog_message": {"message": json.dumps({"id": "syslog-alert"})},
-            "alerts": [{"id": index} for index in range(5)],
-        }
-    ) == 1
-    assert handlers._workflow_task_input_count(
-        {"_alerts_count": 0, "alert_list": [{"id": "shadowed"}]}
-    ) == 0
-    assert handlers._workflow_task_input_count(
-        {"_alerts_count": 0, "alerts": [{"id": "materialized"}]}
-    ) == 1
-
-
-def test_soc_dashboard_ai_task_reconciles_zero_initialized_output_with_input():
-    handlers = _load_dashboard_handlers()
-    row = {
-        "id": "running-zero-output",
-        "output_results": json.dumps(
-            {
-                "stats": {
-                    "raw_count": 0,
-                    "normalized_count": 0,
-                    "after_filter_count": 0,
-                    "after_dedup_count": 0,
-                }
-            }
-        ),
-        "input_params": json.dumps({"alerts": [{"id": "real-alert"}]}),
-        "started_at": 1,
-        "updated_at": 1,
-        "finished_at": 0,
-        "current_phase": "receive",
-        "current_step_index": 1,
-        "step_count": 5,
-        "payload": "{}",
-        "error_message": "",
-    }
-
-    task = handlers._workflow_task_row(
-        row,
-        "stream_alert_denoise",
-        "running",
-    )
-
-    assert task["counts"]["raw"] == 1
-    assert task["rawCountSource"] == "workflow_input"
-    assert task["dataQuality"] == "pending"
-    assert task["emptyBatch"] is False
-    assert task["emptyInput"] is False
-
-    empty_row = {
-        **row,
-        "id": "running-empty-input",
-        "input_params": json.dumps({"alerts": []}),
-    }
-    empty_task = handlers._workflow_task_row(
-        empty_row,
-        "stream_alert_denoise",
-        "running",
-    )
-    assert empty_task["counts"]["raw"] == 0
-    assert empty_task["rawCountSource"] == "workflow_input"
-    assert empty_task["dataQuality"] == "empty-input"
-    assert empty_task["emptyBatch"] is True
-    assert empty_task["emptyInput"] is True
-
-
-def test_soc_dashboard_ai_task_rejects_impossible_stage_counts():
-    handlers = _load_dashboard_handlers()
-    output = json.dumps(
-        {
-            "stats": {
-                "raw_count": 1,
-                "normalized_count": 2,
-                "after_filter_count": 3,
-                "after_dedup_count": 4,
-            }
-        }
-    )
-
-    _, running_quality = handlers._workflow_task_metrics(output, "running")
-    _, completed_quality = handlers._workflow_task_metrics(output, "completed")
-
-    assert running_quality == "pending"
-    assert completed_quality == "invalid"
-
-
-def test_soc_dashboard_marks_missing_workflow_metrics_as_unavailable(tmp_path: Path):
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = tmp_path / "missing-workflow.db"
-
-    stats = handlers._get_workflow_denoise_stats(
-        "stream_alert_denoise",
-        1_800_000,
-        1_803_600,
-        force=True,
-    )
-
-    assert stats["dataAvailable"] is False
-    assert stats["metricsAvailable"] is False
-    assert stats["dataQuality"] == "unavailable"
-    assert stats["unavailableReason"] == "workflow_db_missing"
-    assert stats["rawCount"] is None
-    assert stats["callCount"] is None
-
-
-def test_soc_dashboard_does_not_serve_fresh_cache_after_workflow_db_disappears(
-    tmp_path: Path,
-):
-    workflow_db = tmp_path / "workflow.db"
-    start_time = 1_800_000
-    start_ms = start_time * 1000
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            "CREATE TABLE workflow_metric_meta "
-            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE workflow_metric_rollups (
-                workflow_id TEXT, bucket_start INTEGER, raw_count INTEGER,
-                normalized_count INTEGER, after_filter_count INTEGER, unique_count INTEGER,
-                filter_removed_count INTEGER, duplicate_count INTEGER, source_counts TEXT,
-                source_covered_count INTEGER, success_count INTEGER, error_count INTEGER,
-                invalid_count INTEGER, schema_version INTEGER, updated_at INTEGER,
-                PRIMARY KEY (workflow_id, bucket_start)
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
-            ("stream_alert_denoise", start_ms, start_ms),
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "stream_alert_denoise", start_ms, 1, 1, 1, 1, 0, 0,
-                '{"tdp": 1}', 1, 1, 0, 0, 3, start_ms,
-            ),
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-    handlers._workflow_stats_cache.clear()
-    assert handlers._get_workflow_denoise_stats(
-        "stream_alert_denoise", start_time, start_time + 60, force=True
-    )["dataQuality"] == "complete"
-
-    workflow_db.unlink()
-    stats = handlers._get_workflow_denoise_stats(
-        "stream_alert_denoise", start_time, start_time + 60
-    )
-
-    assert stats["dataAvailable"] is False
-    assert stats["dataQuality"] == "unavailable"
-    assert stats["rawCount"] is None
-
-
-def test_soc_dashboard_unbounded_rollup_requires_proven_history_start(tmp_path: Path):
-    workflow_db = tmp_path / "workflow.db"
-    bucket_ms = 2_000_000_000_000
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            "CREATE TABLE workflow_metric_meta "
-            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE workflow_metric_rollups (
-                workflow_id TEXT, bucket_start INTEGER, raw_count INTEGER,
-                normalized_count INTEGER, after_filter_count INTEGER, unique_count INTEGER,
-                filter_removed_count INTEGER, duplicate_count INTEGER, source_counts TEXT,
-                source_covered_count INTEGER, success_count INTEGER, error_count INTEGER,
-                invalid_count INTEGER, schema_version INTEGER, updated_at INTEGER,
-                PRIMARY KEY (workflow_id, bucket_start)
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
-            ("stream_alert_denoise", bucket_ms, bucket_ms),
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "stream_alert_denoise", bucket_ms, 7, 7, 6, 5, 1, 1,
-                '{"tdp": 7}', 7, 1, 0, 0, 3, bucket_ms,
-            ),
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-
-    stats = handlers._get_workflow_metric_rollups("stream_alert_denoise", 0, 0)
-
-    assert stats["coverageComplete"] is False
-    assert stats["dataQuality"] == "partial"
-
-
-def test_soc_dashboard_hides_triage_metrics_when_soc_database_is_missing(tmp_path: Path):
-    workflow_db = tmp_path / "workflow.db"
-    start_time = 1_788_739_200
-    start_ms = start_time * 1000
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            "CREATE TABLE workflow_metric_meta "
-            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE workflow_metric_rollups (
-                workflow_id TEXT, bucket_start INTEGER, raw_count INTEGER,
-                normalized_count INTEGER, after_filter_count INTEGER, unique_count INTEGER,
-                filter_removed_count INTEGER, duplicate_count INTEGER, source_counts TEXT,
-                source_covered_count INTEGER, success_count INTEGER, error_count INTEGER,
-                invalid_count INTEGER, schema_version INTEGER, updated_at INTEGER,
-                PRIMARY KEY (workflow_id, bucket_start)
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
-            ("stream_alert_denoise", start_ms - 60_000, start_ms),
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "stream_alert_denoise", start_ms, 10, 10, 8, 4, 2, 4,
-                '{"tdp": 10}', 10, 1, 0, 0, 3, start_ms,
-            ),
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-    handlers.DEFAULT_SQLITE_DB = tmp_path / "missing-soc.db"
-    handlers.USAGE_DB = tmp_path / "missing-usage.db"
-    handlers._schema_ready.clear()
-    handlers._stats_response_cache.clear()
-    handlers._workflow_stats_cache.clear()
-
-    stats = handlers._get_stats(
-        {
-            "startTime": str(start_time),
-            "endTime": str(start_time + 3600),
-            "force": "true",
-        }
-    )
-
-    assert stats["sourceStatus"]["metricQuality"]["status"] == "complete"
-    assert stats["denoise"]["totalRaw"] == 10
-    assert stats["sourceStatus"]["triageQuality"] == {
-        "status": "unavailable",
-        "dataAvailable": False,
-        "metricsAvailable": False,
-        "unavailableReason": "soc_db_missing",
-        "recordCount": None,
-        "dataSource": "unavailable",
-    }
-    assert stats["triage"]["totalRecords"] is None
-    assert stats["triage"]["attackTotal"] is None
-    assert stats["closedLoop"]["resolutionRate"] is None
-    assert stats["pipeline"]["attackRate"] is None
-    assert stats["timeline"]["triageTotal"] == []
-    assert stats["sourceStatus"]["missing"][0]["reason"] == "soc_db_missing"
-
-
-def test_soc_dashboard_keeps_real_zero_for_healthy_empty_soc_database(tmp_path: Path):
-    soc_db = tmp_path / "soc.db"
-    with sqlite3.connect(soc_db) as conn:
-        conn.execute(
-            """
-            CREATE TABLE alert_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                record_json TEXT NOT NULL,
-                asset_date TEXT NOT NULL,
-                event_time INTEGER NOT NULL
-            )
-            """
-        )
-        conn.commit()
-    handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = soc_db
-    handlers.WORKFLOW_DB = tmp_path / "missing-workflow.db"
-    handlers.USAGE_DB = tmp_path / "missing-usage.db"
-    handlers._schema_ready.clear()
-    handlers._stats_response_cache.clear()
-    handlers._workflow_stats_cache.clear()
-
-    stats = handlers._get_stats(
-        {"startDate": "2026-09-07", "endDate": "2026-09-07", "force": "true"}
-    )
-
-    assert stats["sourceStatus"]["triageQuality"]["status"] == "complete"
-    assert stats["sourceStatus"]["triageQuality"]["metricsAvailable"] is True
-    assert stats["triage"]["totalRecords"] == 0
-    assert stats["triage"]["attackTotal"] == 0
-    assert stats["closedLoop"]["resolutionRate"] == 0
-
-    soc_db.unlink()
-    refreshed = handlers._get_stats(
-        {"startDate": "2026-09-07", "endDate": "2026-09-07"}
-    )
-    assert refreshed["cacheHit"] is False
-    assert refreshed["sourceStatus"]["triageQuality"]["status"] == "unavailable"
-    assert refreshed["triage"]["totalRecords"] is None
-
-
-def test_soc_dashboard_rejects_incomplete_soc_fact_schema(tmp_path: Path):
-    soc_db = tmp_path / "soc.db"
-    with sqlite3.connect(soc_db) as conn:
-        conn.execute(
-            "CREATE TABLE alert_records "
-            "(asset_date TEXT, event_time INTEGER, record_json TEXT)"
-        )
-        conn.execute(
-            "CREATE TABLE soc_dashboard_alert_facts "
-            "(asset_date TEXT, event_time INTEGER)"
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = soc_db
-
-    sources, quality = handlers._find_sqlite_sources_with_quality(
-        "2026-09-01",
-        "2026-09-07",
-    )
-
-    assert sources == []
-    assert quality["metricsAvailable"] is False
-    assert quality["unavailableReason"] == "soc_dashboard_schema_unavailable"
-
-
-def test_soc_dashboard_reads_persisted_denoise_metric_rollups(tmp_path: Path):
-    workflow_db = tmp_path / "workflow.db"
-    start_time = 1_800_000
-    end_time = start_time + 3600
-    start_ms = start_time * 1000
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            "CREATE TABLE workflow_metric_meta "
-            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE workflow_metric_rollups (
-                workflow_id TEXT,
-                bucket_start INTEGER,
-                raw_count INTEGER,
-                normalized_count INTEGER,
-                after_filter_count INTEGER,
-                unique_count INTEGER,
-                filter_removed_count INTEGER,
-                duplicate_count INTEGER,
-                source_counts TEXT,
-                source_covered_count INTEGER,
-                success_count INTEGER,
-                error_count INTEGER,
-                invalid_count INTEGER,
-                schema_version INTEGER,
-                updated_at INTEGER,
-                PRIMARY KEY (workflow_id, bucket_start)
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
-            ("stream_alert_denoise", start_ms - 60_000, start_ms + 120_000),
-        )
-        conn.executemany(
-            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                # Pre-v3 rows were not reconciled with input volume and must
-                # not contaminate authoritative dashboard totals.
-                ("stream_alert_denoise", start_ms + 120_000, 999, 999, 999, 999, 0, 0, '{"tdp": 999}', 999, 1, 0, 0, 2, start_ms + 120_000),
-                ("stream_alert_denoise", start_ms, 10, 10, 8, 3, 2, 5, '{"tdp": 10}', 10, 1, 0, 0, 3, start_ms),
-                ("stream_alert_denoise", start_ms + 60_000, 4, 4, 4, 1, 0, 3, '{"skyeye": 4}', 4, 1, 0, 0, 3, start_ms + 60_000),
-            ],
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-
-    stats = handlers._get_workflow_denoise_stats(
-        "stream_alert_denoise",
-        start_time,
-        end_time,
-        force=True,
-    )
-
-    assert stats["metricsAvailable"] is True
-    assert stats["sourceMetricsAvailable"] is True
-    assert stats["dataQuality"] == "complete"
-    assert stats["rawCount"] == 14
-    assert stats["normalizedCount"] == 14
-    assert stats["afterFilterCount"] == 12
-    assert stats["uniqueCount"] == 4
-    assert stats["filterRemovedCount"] == 2
-    assert stats["duplicateCount"] == 8
-    assert stats["sourceCounts"] == {"tdp": 10, "skyeye": 4}
-    assert stats["sourceCoverageRate"] == 1
-    assert sum(stats["seriesRaw"]) == 14
-    assert sum(stats["seriesUnique"]) == 4
-
-
-def test_soc_dashboard_separates_core_metric_and_source_coverage_quality(tmp_path: Path):
-    workflow_db = tmp_path / "workflow.db"
-    start_time = 1_800_000
-    end_time = start_time + 3600
-    start_ms = start_time * 1000
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            "CREATE TABLE workflow_metric_meta "
-            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE workflow_metric_rollups (
-                workflow_id TEXT, bucket_start INTEGER, raw_count INTEGER,
-                normalized_count INTEGER, after_filter_count INTEGER, unique_count INTEGER,
-                filter_removed_count INTEGER, duplicate_count INTEGER, source_counts TEXT,
-                source_covered_count INTEGER, success_count INTEGER, error_count INTEGER,
-                invalid_count INTEGER, schema_version INTEGER, updated_at INTEGER,
-                PRIMARY KEY (workflow_id, bucket_start)
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
-            ("stream_alert_denoise", start_ms - 60_000, start_ms),
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "stream_alert_denoise", start_ms, 10, 6, 5, 4, 1, 1,
-                '{"tdp": 6}', 6, 1, 0, 0, 3, start_ms,
-            ),
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-
-    stats = handlers._get_workflow_denoise_stats(
-        "stream_alert_denoise", start_time, end_time, force=True
-    )
-
-    assert stats["metricsAvailable"] is True
-    assert stats["sourceMetricsAvailable"] is False
-    assert stats["dataQuality"] == "partial"
-    assert stats["sourceCoverageRate"] == 0.6
-    assert stats["unprocessedInputCount"] == 4
-
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            "UPDATE workflow_metric_rollups SET error_count = 1 "
-            "WHERE workflow_id = ?",
-            ("stream_alert_denoise",),
-        )
-        conn.commit()
-
-    failed_stats = handlers._get_workflow_denoise_stats(
-        "stream_alert_denoise", start_time, end_time, force=True
-    )
-
-    assert failed_stats["metricsAvailable"] is False
-    assert failed_stats["dataQuality"] == "partial"
-
-
-def test_soc_dashboard_activity_cursor_tracks_actual_poll_window():
-    handlers = _load_dashboard_handlers()
-
-    encoded = handlers._encode_activity_cursor(12, 34, 5_000)
-    decoded = handlers._decode_activity_cursor(encoded)
-
-    assert decoded == {"lastRowId": 12, "lastActivityId": 34, "polledAt": 5_000}
-
-
-def test_soc_dashboard_activity_rate_uses_actual_poll_window():
-    handlers = _load_dashboard_handlers()
-    settings = {
-        "table": "alerts",
-        "activity_table": "activity",
-        "record_column": "record_json",
-        "event_time_column": "event_time",
-    }
-    with sqlite3.connect(":memory:") as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE alerts (record_json TEXT, event_time INTEGER)")
-        conn.execute(
-            "CREATE TABLE activity "
-            "(activity_id INTEGER PRIMARY KEY, alert_row_id INTEGER, event_time INTEGER, record_json TEXT)"
-        )
-        conn.executemany(
-            "INSERT INTO alerts VALUES (?, ?)",
-            [(json.dumps({"id": index}), 100 + index) for index in range(4)],
-        )
-
-        _, _, batch = handlers._activity_rows(
-            conn,
-            settings,
-            last_row_id=0,
-            last_activity_id=0,
-            latest_row_id=4,
-            latest_activity_id=0,
-            limit=10,
-            window_ms=8_000,
-        )
-
-    assert batch["receivedCount"] == 4
-    assert batch["windowMs"] == 8_000
-    assert batch["ratePerSecond"] == 0.5
-
-
-def test_soc_dashboard_does_not_replace_full_window_with_partial_rollup(tmp_path: Path):
-    workflow_db = tmp_path / "workflow.db"
-    start_time = 1_800_000
-    end_time = start_time + 3600
-    start_ms = start_time * 1000
-    coverage_ms = start_ms + 180_000
-    with sqlite3.connect(workflow_db) as conn:
-        conn.execute(
-            "CREATE TABLE workflow_metric_meta "
-            "(workflow_id TEXT PRIMARY KEY, coverage_started_at INTEGER, updated_at INTEGER)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE workflow_metric_rollups (
-                workflow_id TEXT,
-                bucket_start INTEGER,
-                raw_count INTEGER,
-                normalized_count INTEGER,
-                after_filter_count INTEGER,
-                unique_count INTEGER,
-                filter_removed_count INTEGER,
-                duplicate_count INTEGER,
-                source_counts TEXT,
-                source_covered_count INTEGER,
-                success_count INTEGER,
-                error_count INTEGER,
-                invalid_count INTEGER,
-                schema_version INTEGER,
-                updated_at INTEGER,
-                PRIMARY KEY (workflow_id, bucket_start)
-            )
-            """
-        )
-        conn.execute(
-            "CREATE TABLE workflow_executions "
-            "(workflow_id TEXT, status TEXT, started_at INTEGER)"
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_meta VALUES (?, ?, ?)",
-            ("stream_alert_denoise", coverage_ms, coverage_ms),
-        )
-        conn.execute(
-            "INSERT INTO workflow_metric_rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "stream_alert_denoise", coverage_ms, 2, 2, 2, 1, 0, 1,
-                '{"tdp": 2}', 2, 1, 0, 0, 3, coverage_ms,
-            ),
-        )
-        conn.executemany(
-            "INSERT INTO workflow_executions VALUES (?, ?, ?)",
-            [
-                ("stream_alert_denoise", "success", start_ms + offset)
-                for offset in (60_000, 120_000, 180_000)
-            ],
-        )
-        conn.commit()
-
-    handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-
-    stats = handlers._get_workflow_denoise_stats(
-        "stream_alert_denoise",
-        start_time,
-        end_time,
-        force=True,
-    )
-
-    assert stats["metricsAvailable"] is False
-    assert stats["dataQuality"] == "legacy-partial"
-    assert stats["coverageComplete"] is False
-    assert stats["coverageStartedAt"] == coverage_ms
-    assert stats["callCount"] == 3
-    assert stats["rawCount"] == 3
-    assert stats["shadowMetricsAvailable"] is True
 
 
 def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path, monkeypatch):
@@ -2586,7 +2166,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     }
     assert [event["alert"]["threatName"] for event in activity["workflowEvents"]] == [
         "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
+        "降噪批次 · 数量未提供",
     ]
 
     events = handlers._get_workflow_recent_events(
@@ -2596,7 +2176,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     )
     assert [event["alert"]["threatName"] for event in events] == [
         "Syslog duplicate",
-        "降噪批次 · 原始 1 条",
+        "降噪批次 · 数量未提供",
     ]
     assert events[0]["result"]["rawCount"] == 1
     assert events[0]["result"]["uniqueCount"] == 0

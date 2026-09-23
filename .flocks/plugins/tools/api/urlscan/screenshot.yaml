@@ -1,4 +1,5 @@
 name: urlscan_screenshot
+group: 威胁情报
 description: >
   Retrieve the screenshot for a URLScan scan in PNG format.
   Use the scan UUID to retrieve the screenshot once the scan has finished.

@@ -1,4 +1,5 @@
 name: fofa_stats
+group: 网络测绘
 description: >
   Get statistical aggregation of FOFA search results - count by protocol, port, country, etc.
   Use for attack surface analysis and understanding asset distribution.

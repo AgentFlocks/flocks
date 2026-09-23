@@ -14,7 +14,7 @@ import { getApiBase } from '@/api/client';
 import { webuiContractPagesAPI } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
-import { installWebUIContractPageRuntime, loadWebUIContractPageBundle } from './runtime';
+import { loadWebUIContractPageBundle } from './runtime';
 
 interface WebUIContractPageErrorBoundaryProps {
   children: ReactNode;
@@ -79,10 +79,10 @@ export default function PageRuntimeHost({ pageId, initialBuildHash }: PageRuntim
 
   const loadBundle = useCallback(async (hash: string) => {
     if (!pageId || !hash) return;
-    installWebUIContractPageRuntime(pageId);
     const base = getApiBase();
     const url = `${base}/api/contracts/webui/pages/${encodeURIComponent(pageId)}/bundle.js?v=${encodeURIComponent(hash)}`;
-    const component = await loadWebUIContractPageBundle(url, tr('host.bundleMissingExport'));
+    // The runtime is installed right before the bundle evaluates, inside the loader.
+    const component = await loadWebUIContractPageBundle(url, tr('host.bundleMissingExport'), pageId);
     setPageComponent(() => component);
     setError(null);
   }, [pageId, tr]);

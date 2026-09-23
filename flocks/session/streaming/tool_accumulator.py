@@ -51,6 +51,21 @@ class StreamToolArgumentsTruncatedError(RuntimeError):
         )
 
 
+def _looks_truncated(accumulated_args: str) -> bool:
+    """True when the arguments are valid JSON that simply stops early.
+
+    Closing the open strings / brackets makes it parse, which is the signature
+    of a stream that was cut mid-argument. Text that stays unparseable after
+    that is malformed for some other reason and keeps going down the existing
+    invalid-tool path.
+    """
+    repaired = repair_truncated_json(accumulated_args)
+    if repaired == accumulated_args:
+        return False
+    _, repaired_ok = _parse_json_robust(repaired)
+    return repaired_ok
+
+
 class ToolCallAccumulator:
     """Accumulates streamed tool-call JSON fragments and dispatches execution.
 
@@ -195,6 +210,45 @@ class ToolCallAccumulator:
                 continue
 
             arguments, ok = _parse_json_robust(accumulated_args)
+            if not ok and _looks_truncated(accumulated_args):
+                # The JSON has an unterminated string or unclosed bracket, i.e.
+                # the stream stopped mid-argument. Providers only sometimes say
+                # so via finish_reason ("stop" or None is common when a gateway
+                # drops the connection, and the Anthropic SDK path never reports
+                # "length" at all), so the shape of the JSON is the reliable
+                # signal. Repairing it and executing anyway silently wrote half
+                # a file and reported success.
+                detail = (
+                    f"Tool arguments for '{tool_name}' stopped mid-value at "
+                    f"{len(accumulated_args)} chars (unterminated JSON)."
+                )
+                error_msg = (
+                    f"Output was truncated (finish_reason={stream_finish_reason!r}). "
+                    f"{detail} The tool was not executed."
+                )
+                await self._processor.process_event(
+                    ToolInputErrorEvent(
+                        id=tc_id,
+                        tool_name=tool_name,
+                        input={
+                            "tool": tool_name,
+                            "arguments_preview": accumulated_args[:500],
+                            "finish_reason": stream_finish_reason,
+                        },
+                        error=error_msg,
+                    )
+                )
+                tc_data["failed"] = True
+                if truncation_error is None:
+                    truncation_error = StreamToolArgumentsTruncatedError(
+                        tool_call_id=tc_id,
+                        tool_name=tool_name,
+                        finish_reason=str(stream_finish_reason),
+                        arguments_len=len(accumulated_args),
+                        arguments_preview=accumulated_args[:500],
+                    )
+                continue
+
             if ok:
                 if not tc_data.get("input_started"):
                     await self._processor.process_event(
@@ -264,11 +318,14 @@ class ToolCallAccumulator:
         accumulated_args: str,
         tc_data: dict[str, Any],
     ) -> bool:
-        """Attempt multiple repair strategies. Return True if repaired."""
-        repaired_json = repair_truncated_json(accumulated_args)
+        """Attempt multiple repair strategies. Return True if repaired.
+
+        Only the tool *name* is repaired here. Padding truncated JSON back into
+        shape and executing it is what let a cut-off ``write`` land on disk as a
+        half file; ``flush_remaining`` now routes that case to the truncation
+        path before this method is reached.
+        """
         jsons_to_try = [accumulated_args]
-        if repaired_json != accumulated_args:
-            jsons_to_try.append(repaired_json)
 
         async def _try_exec(candidate: str, variants: list[str]) -> bool:
             for v in variants:
@@ -291,24 +348,6 @@ class ToolCallAccumulator:
                     })
                     return True
             return False
-
-        # Strategy 0: truncated JSON repair with original name
-        if repaired_json != accumulated_args:
-            args, ok = _parse_json_robust(repaired_json)
-            if ok:
-                schema = ToolRegistry.get_schema(tool_name)
-                missing = [p for p in schema.required if p not in args] if schema else []
-                if not missing:
-                    if not tc_data.get("input_started"):
-                        await self._processor.process_event(
-                            ToolInputStartEvent(id=tc_id, tool_name=tool_name)
-                        )
-                    await self._processor.process_event(
-                        ToolCallEvent(
-                            tool_call_id=tc_id, tool_name=tool_name, input=args,
-                        )
-                    )
-                    return True
 
         # Strategy 1: case sensitivity
         lower = tool_name.lower()

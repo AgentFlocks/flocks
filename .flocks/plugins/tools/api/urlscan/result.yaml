@@ -1,4 +1,5 @@
 name: urlscan_result
+group: 威胁情报
 description: >
   Retrieve the scan result from URLScan.io using the UUID returned from a scan.
   Returns detailed information including page content, screenshots, DOM snapshot,

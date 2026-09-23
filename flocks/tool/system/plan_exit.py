@@ -64,6 +64,7 @@ async def _turn_model_and_variant(
 
 @ToolRegistry.register_function(
     name="plan_exit",
+    group="任务与工作流",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=[],

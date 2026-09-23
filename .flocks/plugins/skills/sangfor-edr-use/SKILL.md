@@ -1,5 +1,6 @@
 ---
 name: sangfor-edr-use
+group: 平台集成
 description: 深信服 EDR 登录态管理、首页仪表盘、威胁资产分析、资产清点和高级威胁 API 采集。用户提到深信服 EDR、EDR、资产清点、高级威胁或 sangfor EDR 时必须先加载本 skill。
 ---
 

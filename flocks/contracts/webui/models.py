@@ -130,6 +130,12 @@ class WebUIWorkspaceListItem(BaseModel):
     defaultPageId: Optional[str] = Field(None, alias="defaultPageId")
     sections: list[WebUIWorkspaceSectionManifest] = Field(default_factory=list)
     pages: list[WebUIPageListItem] = Field(default_factory=list)
+    # Scene suite (hub component) that ships this workspace; None for a
+    # workspace no suite in the catalog knows about.
+    suiteId: Optional[str] = Field(None, alias="suiteId")
+    # Checked into the project (<project>/.flocks/plugins/contracts/webui)
+    # rather than installed into the user root.
+    native: bool = False
 
 
 class WebUIPageDetail(BaseModel):

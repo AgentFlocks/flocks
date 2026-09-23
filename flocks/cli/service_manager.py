@@ -435,16 +435,73 @@ def read_pid(pid_file: Path) -> int | None:
     return record.pid if record else None
 
 
+def _run_ps(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run ``ps`` for best-effort process inspection.
+
+    Minimal images (containers without procps) have no ``ps`` at all; report that
+    like a failed call instead of crashing the CLI, callers fall back to ``/proc``.
+    """
+    try:
+        return subprocess.run(args, check=False, capture_output=True, text=True)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(args, 127, "", "")
+
+
+# ``/proc`` fallbacks for hosts without procps (minimal containers): stopping the
+# service must still find the supervisor / backend processes it has to signal.
+_PROC_ROOT = Path("/proc")
+
+
+def _proc_available() -> bool:
+    return sys.platform.startswith("linux") and (_PROC_ROOT / "self").exists()
+
+
+def _use_proc_instead(completed: subprocess.CompletedProcess[str]) -> bool:
+    """Whether a ``ps`` call should be answered from ``/proc`` instead.
+
+    Not only when the binary is missing (127): BusyBox / minimal ``ps`` implementations
+    exist but reject the ``-p`` / ``-eo`` options used here, so any failure counts.
+    """
+    return completed.returncode != 0 and _proc_available()
+
+
+def _proc_pids() -> list[int]:
+    try:
+        return sorted(int(name) for name in os.listdir(_PROC_ROOT) if name.isdigit())
+    except OSError:
+        return []
+
+
+def _proc_stat_fields(pid: int) -> tuple[str, int, int] | None:
+    """Return (state, ppid, pgid) from ``/proc/<pid>/stat``."""
+    try:
+        raw = (_PROC_ROOT / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # the command name is in parentheses and may contain spaces; parse after the last ')'
+    _, _, rest = raw.rpartition(")")
+    fields = rest.split()
+    if len(fields) < 3 or not fields[1].lstrip("-").isdigit() or not fields[2].lstrip("-").isdigit():
+        return None
+    return fields[0], int(fields[1]), int(fields[2])
+
+
+def _proc_command_line(pid: int) -> str:
+    try:
+        raw = (_PROC_ROOT / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return ""
+    return " ".join(part.decode("utf-8", "replace") for part in raw.split(b"\0") if part)
+
+
 def _unix_process_stat(pid: int) -> str | None:
     """Return the Unix process status code for a pid, if available."""
     if sys.platform == "win32" or pid <= 0:
         return None
-    completed = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-o", "stat=", "-p", str(pid)])
+    if _use_proc_instead(completed):
+        fields = _proc_stat_fields(pid)
+        return fields[0] if fields else None
     if completed.returncode != 0:
         return None
     lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
@@ -661,12 +718,14 @@ def _process_group_member_pids(pgid: int) -> list[int]:
         )
         return [int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()]
 
-    completed = subprocess.run(
-        ["ps", "-eo", "pid=,pgid="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-eo", "pid=,pgid="])
+    if _use_proc_instead(completed):
+        result = []
+        for candidate in _proc_pids():
+            fields = _proc_stat_fields(candidate)
+            if fields and fields[2] == pgid:
+                result.append(candidate)
+        return result
     result: list[int] = []
     for line in completed.stdout.splitlines():
         parts = line.split()
@@ -798,12 +857,9 @@ def _process_command_line(pid: int) -> str:
     if sys.platform == "win32":
         snapshot = _windows_process_snapshot(pid)
         return str(snapshot.get("command_line") or "") if snapshot else ""
-    completed = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "command="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-p", str(pid), "-o", "command="])
+    if _use_proc_instead(completed):
+        return _proc_command_line(pid)
     return completed.stdout.strip()
 
 
@@ -896,12 +952,9 @@ def _process_list_pids() -> list[int]:
             errors="replace",
         )
     else:
-        completed = subprocess.run(
-            ["ps", "-eo", "pid="],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        completed = _run_ps(["ps", "-eo", "pid="])
+        if _use_proc_instead(completed):
+            return _proc_pids()
     if completed.returncode != 0:
         return []
     pids = []
@@ -1958,12 +2011,14 @@ def child_pids(pid: int) -> list[int]:
         )
         return [int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()]
 
-    completed = subprocess.run(
-        ["ps", "-eo", "pid=,ppid="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_ps(["ps", "-eo", "pid=,ppid="])
+    if _use_proc_instead(completed):
+        result = []
+        for candidate in _proc_pids():
+            fields = _proc_stat_fields(candidate)
+            if fields and fields[1] == pid:
+                result.append(candidate)
+        return result
     result: list[int] = []
     for line in completed.stdout.splitlines():
         parts = line.split()

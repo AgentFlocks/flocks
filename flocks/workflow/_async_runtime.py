@@ -140,16 +140,25 @@ def run_sync_cancellable(
     _assert_not_workflow_loop(coro, loop)
 
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    while True:
-        if cancel_checker():
-            future.cancel()
-            raise asyncio.CancelledError()
-        try:
-            return future.result(timeout=poll_interval_s)
-        except concurrent.futures.TimeoutError:
-            continue
-        except concurrent.futures.CancelledError as exc:
-            raise asyncio.CancelledError() from exc
+    try:
+        while True:
+            if cancel_checker():
+                future.cancel()
+                raise asyncio.CancelledError()
+            try:
+                return future.result(timeout=poll_interval_s)
+            except concurrent.futures.TimeoutError:
+                # A completed coroutine can itself raise TimeoutError (also
+                # used by asyncio.wait_for). It is indistinguishable by type
+                # from an unfinished Future's polling timeout. Retrying a
+                # failed Future spins without waiting and keeps extending the
+                # same exception's traceback, consuming unbounded memory.
+                if future.done():
+                    # Resolve outside the polling try/except. This also handles
+                    # success or cancellation racing the timed-out wait.
+                    return future.result()
+    except concurrent.futures.CancelledError as exc:
+        raise asyncio.CancelledError() from exc
 
 
 def _get_loop_for_testing() -> tuple[asyncio.AbstractEventLoop | None, threading.Thread | None]:

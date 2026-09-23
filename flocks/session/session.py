@@ -10,6 +10,7 @@ import contextvars
 import re
 import weakref
 from contextlib import AsyncExitStack, asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, List, Dict, Any, Optional, TypeVar
 from datetime import datetime
@@ -227,8 +228,16 @@ class Session:
             ]
 
     @classmethod
-    def invalidate_cache(cls) -> None:
-        """Clear in-memory indexes when the underlying storage changes."""
+    def invalidate_cache(cls, session_id: Optional[str] = None) -> None:
+        """Clear in-memory indexes when the underlying storage changes.
+
+        With ``session_id`` only that session leaves the id index and the
+        list cache; without it (database swap / full clear) everything resets.
+        """
+        if session_id:
+            cls._id_index.pop(session_id, None)
+            cls._remove_from_list_cache(session_id)
+            return
         cls._id_index.clear()
         cls._all_sessions_cache = None
 
@@ -913,6 +922,31 @@ class Session:
         await Storage.set(storage_key, updated_session, "session")
         cls._id_index[session_id] = storage_key
         cls._sync_list_cache(updated_session)
+        return updated_session
+
+    @classmethod
+    async def mutate_metadata(
+        cls,
+        project_id: str,
+        session_id: str,
+        mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Optional[SessionInfo]:
+        """Atomically update metadata while preserving dedicated-agent policy."""
+        async with cls.lifecycle_lock(session_id):
+            if cls.is_lifecycle_transitioning(session_id):
+                return None
+            session = await cls.get(project_id, session_id)
+            if not session or session.status != "active":
+                return None
+            metadata = mutator(deepcopy(session.metadata or {}))
+            updated_session = await cls._update_locked(
+                project_id, session_id, metadata=metadata,
+            )
+        if updated_session is not None:
+            log.info("session.metadata.updated", {
+                "id": session_id,
+                "project_id": project_id,
+            })
         return updated_session
 
     @classmethod

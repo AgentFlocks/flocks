@@ -52,6 +52,35 @@
       "THREATBOOK_CN_LLM_API_KEY"
     ],
     "models": {
+      "deepseek-v4.1-flash": {
+        "name": "deepseek-v4.1-flash",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "high",
+            "max": "max"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_input_tokens": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 1.0,
+          "output": 4.0,
+          "cache_read": 0.1,
+          "currency": "CNY"
+        }
+      },
       "deepseek-v4-flash-0731": {
         "name": "deepseek-v4-flash-0731",
         "family": "deepseek-v4",
@@ -348,6 +377,35 @@
       "THREATBOOK_IO_LLM_API_KEY"
     ],
     "models": {
+      "deepseek-v4.1-flash": {
+        "name": "deepseek-v4.1-flash",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "high",
+            "max": "max"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_input_tokens": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 1.0,
+          "output": 4.0,
+          "cache_read": 0.1,
+          "currency": "CNY"
+        }
+      },
       "deepseek-v4-flash-0731": {
         "name": "deepseek-v4-flash-0731",
         "family": "deepseek-v4",

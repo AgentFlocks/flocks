@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "ai-redteam-workspace",
+  "type": "component",
+  "name": "AI Redteam Workspace Component",
+  "nameCn": "AI 红队场景套件",
+  "description": "Composite installer for the Flocks AI redteam workspace.",
+  "descriptionCn": "Flocks AI 红队工作区场景套件安装器。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "integration"
+  ],
+  "useCases": [
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "official",
+  "edition": "pro",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/components/ai-redteam-workspace"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "component.json"
+  ],
+  "components": [
+    {
+      "type": "webui",
+      "id": "ai_redteam_ui"
+    }
+  ],
+  "checksums": {}
+}

@@ -56,6 +56,7 @@ from flocks.session.llm_hook_utils import (
     serialize_chat_message,
     stream_text_replacements_from_hook_output,
 )
+from flocks.session.streaming.model_activity import ModelActivity
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.streaming.stream_events import (
     StartEvent,
@@ -3600,9 +3601,12 @@ class SessionRunner:
         if turn_plan_file is None:
             turn_plan_file = session_plan_file(self.session)
         allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
+
+        model_activity = ModelActivity(self.session.id, assistant_msg.id, self.callbacks.event_publish_callback)
         processor = StreamProcessor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
+            model_activity=model_activity,
             agent=agent,
             abort_event=self._external_abort or self._abort,
             permission_callback=self._handle_permission,
@@ -3887,6 +3891,7 @@ class SessionRunner:
             "local_endpoint": stream_timeouts.is_local,
         })
         try:
+            await model_activity.start()
             async for chunk in _iter_with_chunk_timeout(
                 provider.chat_stream(
                     model_id=self.model_id,
@@ -4055,11 +4060,13 @@ class SessionRunner:
                     for tc in chunk_tool_calls:
                         await tool_accumulator.feed_chunk(tc)
         except asyncio.CancelledError:
+            await model_activity.stop()
             # Foreground delegate tasks own child sessions. Let their
             # cancellation/finalization finish before unwinding this step.
             await processor.drain_parallel_tool_calls()
             raise
         except Exception as exc:
+            await model_activity.stop()
             # A foreground delegate may already be running when the provider
             # stream fails. Drain first so the retry layer observes the tool
             # side-effect fence and cannot dispatch the same work twice.
@@ -4087,6 +4094,8 @@ class SessionRunner:
                 except Exception as hook_exc:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
             raise
+        finally:
+            await model_activity.stop()
         
         self.execution_activity.update(state="processing", last_activity_at=time.time())
         log.debug("runner.stream.summary", {

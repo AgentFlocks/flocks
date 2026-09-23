@@ -1313,3 +1313,74 @@ async def test_storage_init_raises_when_quarantine_fails_on_invalid_header(tmp_p
     assert db_path.exists()
     assert db_path.with_name("garbage.db-wal").exists()
     assert db_path.with_name("garbage.db-wal").read_bytes() == b"wal payload"
+
+
+@pytest.mark.asyncio
+async def test_runtime_cache_invalidation_is_scoped_to_the_affected_session(storage, monkeypatch):
+    """Row-level deletes evict one session; only root/project prefixes reset everything."""
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    session_calls: list = []
+    message_calls: list = []
+    monkeypatch.setattr(
+        Session,
+        "invalidate_cache",
+        classmethod(lambda cls, session_id=None: session_calls.append(session_id)),
+    )
+    monkeypatch.setattr(
+        Message,
+        "invalidate_cache",
+        classmethod(
+            lambda cls, session_id=None, **kwargs: message_calls.append(
+                (session_id, kwargs.get("discard_lock", True))
+            )
+        ),
+    )
+
+    await storage.mutate_many(
+        delete_keys=[
+            "session:proj:ses_a",
+            "message:ses_a",
+            "message_parts:ses_a",
+            "message_parts:ses_a:msg_1",
+            "todo:ses_a",
+        ],
+        delete_prefixes=["message_parts:ses_a:", "message_diff:ses_a:"],
+    )
+    assert session_calls == ["ses_a"]
+    assert message_calls == [("ses_a", False)] * 4
+
+    # Prefixes that may span several sessions still fall back to a global reset.
+    session_calls.clear()
+    message_calls.clear()
+    await storage.mutate_many(delete_prefixes=["session:proj:", "message_parts:ses_a"])
+    assert session_calls == [None]
+    assert message_calls == [(None, True)]
+
+    session_calls.clear()
+    message_calls.clear()
+    await storage.clear("session:")
+    await storage.clear("message:")
+    await storage.clear("message_parts:")
+    await storage.clear()
+    assert session_calls == [None, None]
+    assert message_calls == [(None, True), (None, True), (None, True)]
+
+
+@pytest.mark.asyncio
+async def test_mutate_many_can_skip_runtime_cache_invalidation(storage, monkeypatch):
+    from flocks.session.message import Message
+
+    message_calls: list = []
+    monkeypatch.setattr(
+        Message,
+        "invalidate_cache",
+        classmethod(lambda cls, session_id=None, **kwargs: message_calls.append(session_id)),
+    )
+
+    await storage.mutate_many(
+        delete_keys=["message_parts:ses_a:msg_1"],
+        invalidate_caches=False,
+    )
+    assert message_calls == []

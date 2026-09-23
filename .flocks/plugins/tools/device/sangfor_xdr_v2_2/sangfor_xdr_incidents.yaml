@@ -1,4 +1,5 @@
 name: sangfor_xdr_incidents
+group: XDR
 description: >
   Manage Sangfor XDR security incidents. Query incidents by time range,
   update disposition status, retrieve incident proof and related entities

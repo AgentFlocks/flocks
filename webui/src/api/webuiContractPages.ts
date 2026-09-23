@@ -41,6 +41,8 @@ export interface WebUIContractWorkspaceListItem {
   defaultPageId?: string | null;
   sections?: WebUIContractWorkspaceSection[];
   pages: WebUIContractPageListItem[];
+  /** Scene suite that ships the workspace; the API only lists scenes that have one. */
+  suiteId?: string | null;
 }
 
 export interface WebUIContractPageManifest {
@@ -92,6 +94,12 @@ export const webuiContractPagesAPI = {
     client.get<WebUIContractWorkspaceListItem[]>('/api/contracts/webui/workspaces', {
       params: enabledOnly ? { enabledOnly: true } : undefined,
     }),
+
+  setWorkspaceEnabled: (workspaceId: string, enabled: boolean) =>
+    client.patch<WebUIContractWorkspaceListItem>(
+      `/api/contracts/webui/workspaces/${workspaceId}`,
+      { enabled },
+    ),
 
   create: (payload: WebUIContractPageCreateRequest) =>
     client.post<WebUIContractPageDetail>('/api/contracts/webui/pages', payload),

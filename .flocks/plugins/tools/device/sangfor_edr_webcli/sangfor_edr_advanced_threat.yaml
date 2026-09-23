@@ -1,4 +1,5 @@
 name: sangfor_edr_advanced_threat
+group: EDR/HIDS
 description: >
   Collect Sangfor EDR advanced-threat warning-mode and incident-mode lists
   through authenticated HTTP APIs using one verified cookie/login_token pair.

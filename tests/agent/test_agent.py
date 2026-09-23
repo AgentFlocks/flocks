@@ -18,7 +18,7 @@ from flocks.session.prompt_strings import PROMPT_COMPACTION, PROMPT_TITLE, PROMP
 BUILTIN_AGENTS = [
     "rex", "hephaestus", "explore",
     "oracle", "librarian", "prometheus", "multimodal-looker",
-    "rex-junior", "host-forensics", "host-forensics-fast",
+    "rex-junior", "self-improve", "host-forensics", "host-forensics-fast",
 ]
 
 
@@ -39,8 +39,8 @@ class TestAgentDefinitions:
 
     @pytest.mark.asyncio
     async def test_no_legacy_agents(self):
-        """general / compaction / title / summary are no longer registered agents."""
-        for name in ["general", "compaction", "title", "summary"]:
+        """Retired agents stay absent; planning is provided by Prometheus."""
+        for name in ["general", "plan", "compaction", "title", "summary"]:
             agent = await Agent.get(name)
             assert agent is None, f"Legacy agent '{name}' should not exist"
 
@@ -56,14 +56,19 @@ class TestPrimaryAgents:
         assert agent.hidden is False
         assert agent.delegatable is False
 
+
+class TestInternalAgents:
+
     @pytest.mark.asyncio
-    async def test_plan_agent(self):
-        agent = await Agent.get("plan")
+    async def test_self_improve_agent(self):
+        """The Dream worker is an internal agent, not a delegation target."""
+        agent = await Agent.get("self-improve")
         assert agent is not None
         assert agent.mode == "subagent"
         assert agent.native is True
         assert agent.hidden is True
         assert agent.delegatable is False
+        assert "evolution" in agent.tags
 
 
 class TestSubagents:
@@ -83,7 +88,8 @@ class TestSubagents:
         agent = await Agent.get("hephaestus")
         assert agent is not None
         assert agent.mode == "subagent"
-        assert agent.delegatable is True
+        # Visible subagent mode does not imply eligibility for delegation.
+        assert agent.delegatable is False
         assert agent.hidden is False
 
     @pytest.mark.asyncio
@@ -91,7 +97,8 @@ class TestSubagents:
         agent = await Agent.get("rex-junior")
         assert agent is not None
         assert agent.mode == "subagent"
-        assert agent.delegatable is False
+        assert agent.delegatable is True
+        assert agent.hidden is False
 
     @pytest.mark.asyncio
     async def test_prometheus_agent(self):
@@ -131,14 +138,17 @@ class TestAgentListing:
         assert "rex" in names
         assert "explore" in names
         assert "hephaestus" in names
-        # plan is hidden
-        assert "plan" not in names
+        # The internal Dream worker stays out of user-facing agent lists.
+        assert "self-improve" not in names
+        assert all(not agent.hidden for agent in visible)
 
     @pytest.mark.asyncio
     async def test_list_hidden(self):
         hidden = await Agent.list_hidden()
         names = [a.name for a in hidden]
-        assert "plan" in names
+        assert "self-improve" in names
+        assert "plan" not in names
+        assert all(agent.hidden for agent in hidden)
 
     @pytest.mark.asyncio
     async def test_list_subagents(self):
@@ -149,8 +159,9 @@ class TestAgentListing:
         assert "oracle" in names
         # rex is primary, not subagent
         assert "rex" not in names
-        # hidden agents excluded
-        assert "plan" not in names
+        # Hidden subagents are excluded even though their mode matches.
+        assert "self-improve" not in names
+        assert all(agent.mode == "subagent" and not agent.hidden for agent in subagents)
 
     @pytest.mark.asyncio
     async def test_list_primary(self):
@@ -161,7 +172,8 @@ class TestAgentListing:
 
     @pytest.mark.asyncio
     async def test_is_hidden(self):
-        assert await Agent.is_hidden("plan") is True
+        assert await Agent.is_hidden("self-improve") is True
+        assert await Agent.is_hidden("plan") is False  # Retired, not a hidden agent.
         assert await Agent.is_hidden("explore") is False
         assert await Agent.is_hidden("rex") is False
         assert await Agent.is_hidden("nonexistent") is False
@@ -173,11 +185,13 @@ class TestAgentListing:
             return bool(agent.delegatable) if agent else False
 
         assert await delegatable("rex") is False
+        assert await delegatable("self-improve") is False
         assert await delegatable("plan") is False
-        assert await delegatable("rex-junior") is False
+        assert await delegatable("rex-junior") is True
         assert await delegatable("explore") is True
-        assert await delegatable("hephaestus") is True
+        assert await delegatable("hephaestus") is False
         assert await delegatable("oracle") is True
+        assert await delegatable("prometheus") is True
 
     @pytest.mark.asyncio
     async def test_is_delegatable_respects_sidecar_override(self, tmp_path, monkeypatch):
@@ -187,14 +201,17 @@ class TestAgentListing:
         import flocks.agent.delegatable_settings as delegatable_settings
         from flocks.agent.registry import Agent as AgentRegistry, is_delegatable
 
-        AgentRegistry._delegatable_settings_mtime = 0.0
+        monkeypatch.setattr(AgentRegistry, "_delegatable_settings_mtime", 0.0)
         delegatable_settings.set_override("explore", False)
         AgentRegistry.invalidate_cache()
-
-        agent = await AgentRegistry.get("explore")
-        assert agent is not None
-        assert agent.delegatable is False
-        assert is_delegatable("explore") is False
+        try:
+            agent = await AgentRegistry.get("explore")
+            assert agent is not None
+            assert agent.delegatable is False
+            assert is_delegatable("explore") is False
+        finally:
+            # Do not leak the overridden cached definition into later tests.
+            AgentRegistry.invalidate_cache()
 
     @pytest.mark.asyncio
     async def test_list_names(self):
@@ -211,16 +228,15 @@ class TestAgentPermissions:
 
     @pytest.mark.asyncio
     async def test_explore_tools(self):
-        """explore agent only allows declared read/search tools."""
-        assert await Agent.has_tool("explore", "grep") is True
-        assert await Agent.has_tool("explore", "glob") is True
-        assert await Agent.has_tool("explore", "list") is True
-        assert await Agent.has_tool("explore", "read") is True
-        assert await Agent.has_tool("explore", "websearch") is True
-        # write tools denied
-        assert await Agent.has_tool("explore", "write") is False
-        assert await Agent.has_tool("explore", "edit") is False
-        assert await Agent.has_tool("explore", "bash") is True
+        """Explore declares discovery tools, not the retired list or editing tools."""
+        agent = await Agent.get("explore")
+        assert agent is not None
+        declared = {"grep", "glob", "bash", "webfetch", "websearch", "read"}
+        assert set(agent.tools) == declared
+        for tool_name in declared:
+            assert await Agent.has_tool("explore", tool_name) is True
+        for tool_name in ("list", "write", "edit", "apply_patch"):
+            assert await Agent.has_tool("explore", tool_name) is False
 
     @pytest.mark.asyncio
     async def test_nonexistent_agent_has_no_tool(self):
@@ -286,10 +302,13 @@ class TestAgentRegistration:
         assert agents.get("temp_agent") is None
 
     @pytest.mark.asyncio
-    async def test_cannot_unregister_native_agent(self):
-        result = Agent.unregister("plan")
-        assert result is False
-        assert await Agent.get("plan") is not None
+    @pytest.mark.parametrize("name", ["rex", "explore", "self-improve"])
+    async def test_cannot_unregister_native_agent(self, name):
+        agent = await Agent.get(name)
+        assert agent is not None and agent.native is True
+        assert Agent.unregister(name) is False
+        reloaded = await Agent.refresh()
+        assert reloaded[name].native is True
 
     @pytest.mark.asyncio
     async def test_unregister_nonexistent_agent(self):
@@ -310,8 +329,9 @@ class TestAgentModel:
 
     @pytest.mark.asyncio
     async def test_builtin_agents_no_custom_model(self):
-        assert await Agent.get_model_config("plan") is None
-        assert await Agent.get_model_config("explore") is None
+        for name in ("rex", "explore", "self-improve"):
+            assert await Agent.get(name) is not None
+            assert await Agent.get_model_config(name) is None
         assert await Agent.get_model_config("nonexistent") is None
 
     @pytest.mark.asyncio

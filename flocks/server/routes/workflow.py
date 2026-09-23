@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
 from fastapi import APIRouter, Body, HTTPException, Request, status, Query
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 import uuid
 
 from flocks.workflow.models import Workflow, Node, Edge
@@ -45,6 +45,10 @@ from flocks.workflow.fs_store import (
     read_workflow_dir as _read_workflow_dir,
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
+    normalize_workflow_group,
+    patch_workflow_metadata,
+    resolve_workflow_from_fs,
+    is_system_workflow_definition,
 )
 from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
 from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
@@ -160,6 +164,9 @@ class WorkflowCreateRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_workflow_group)
+
     name: str = Field(..., description="Workflow name")
     name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
@@ -176,6 +183,9 @@ class WorkflowUpdateRequest(BaseModel):
     """Request to update a workflow"""
 
     model_config = ConfigDict(populate_by_name=True)
+
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_workflow_group)
 
     name: Optional[str] = Field(None, description="Workflow name")
     name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
@@ -228,6 +238,8 @@ class WorkflowResponse(BaseModel):
 
     id: str = Field(..., description="Workflow ID")
     name: str = Field(..., description="Workflow name")
+    group: Optional[str] = None
+    group_readonly: bool = False
     nameI18n: Optional[Dict[str, str]] = Field(None, description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Description")
     markdownContent: Optional[str] = Field(None, description="Workflow markdown documentation content")
@@ -251,6 +263,8 @@ class WorkflowSummaryResponse(BaseModel):
 
     id: str
     name: str
+    group: Optional[str] = None
+    group_readonly: bool = False
     nameI18n: Optional[Dict[str, str]] = None
     description: Optional[str] = None
     category: str = "default"
@@ -362,7 +376,7 @@ def _existing_workflow_dir(workflow_id: str) -> Optional[Path]:
     result: Optional[Path] = None
     for root, _source in _all_scan_dirs():
         wf_dir = root / workflow_id
-        if (wf_dir / "workflow.json").is_file():
+        if _read_workflow_dir(wf_dir, workflow_id, _source) is not None:
             result = wf_dir
     return result
 
@@ -424,35 +438,59 @@ def _write_workflow_to_fs(
     edit_markdown_content: Optional[str] = None,
     *,
     global_store: bool = False,
+    target_dir: Optional[Path] = None,
+    create_only: bool = False,
 ) -> None:
     """Write workflow definition and metadata to the filesystem.
 
     When *global_store* is True the workflow is written under
     ``~/.flocks/plugins/workflows/<id>/`` instead of the project directory.
     """
-    wf_dir = _global_workflow_dir(workflow_id) if global_store else _workflow_dir(workflow_id)
-    wf_dir.mkdir(parents=True, exist_ok=True)
+    if create_only and target_dir is None:
+        raise ValueError("Create-only migration requires an explicit destination")
+    wf_dir = target_dir or _existing_workflow_dir(workflow_id) or (
+        _global_workflow_dir(workflow_id) if global_store else _workflow_dir(workflow_id)
+    )
+    meta = dict(meta)
+    if is_system_workflow_definition(wf_dir):
+        meta_path = wf_dir / "meta.json"
+        native_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+        native_group = normalize_workflow_group(native_meta.get("group"))
+        transport = workflow_json.get("metadata")
+        for values in (meta, transport if isinstance(transport, dict) else {}):
+            if "group" in values and normalize_workflow_group(values["group"]) != native_group:
+                raise ValueError("System workflow group is read-only")
+        meta["group"] = native_group
+    # Claim the migration destination atomically. Never redirect a migration to
+    # an existing definition, nor clobber files created by another worker.
+    wf_dir.mkdir(parents=True, exist_ok=not create_only)
+    write_mode = "x" if create_only else "w"
 
-    with open(wf_dir / "workflow.json", "w", encoding="utf-8") as f:
+    # The local group authority is meta.json, never the execution definition.
+    workflow_json = dict(workflow_json)
+    if isinstance(workflow_json.get("metadata"), dict):
+        workflow_json["metadata"] = dict(workflow_json["metadata"])
+        workflow_json["metadata"].pop("group", None)
+    with open(wf_dir / "workflow.json", write_mode, encoding="utf-8") as f:
         json.dump(workflow_json, f, ensure_ascii=False, indent=2)
 
     meta_to_save = {
         k: v
         for k, v in meta.items()
-        if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
+        if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source", "group_readonly")
     }
-    with open(wf_dir / "meta.json", "w", encoding="utf-8") as f:
+    with open(wf_dir / "meta.json", write_mode, encoding="utf-8") as f:
         json.dump(meta_to_save, f, ensure_ascii=False, indent=2)
 
     if markdown_content is None and edit_markdown_content is not None:
         markdown_content = edit_markdown_content
 
     if markdown_content is not None:
-        with open(wf_dir / "workflow.md", "w", encoding="utf-8") as f:
+        with open(wf_dir / "workflow.md", write_mode, encoding="utf-8") as f:
             f.write(markdown_content)
 
     legacy_edit_file = wf_dir / "workflow.edit.md"
-    if legacy_edit_file.exists():
+    if not create_only and legacy_edit_file.exists():
         legacy_edit_file.unlink()
 
 
@@ -640,13 +678,21 @@ async def _migrate_storage_to_filesystem() -> None:
             if not workflow_id:
                 continue
 
-            wf_dir = _workflow_dir(workflow_id)
-            if (wf_dir / "workflow.json").is_file():
-                continue  # already on the filesystem
+            def already_on_disk() -> bool:
+                return any(
+                    (root / workflow_id / filename).is_file()
+                    for root, _source in _all_scan_dirs()
+                    for filename in ("workflow.json", "workflow.md", "workflow.edit.md")
+                )
 
+            if already_on_disk():
+                continue
+            # Migration has a fixed create-only destination. Ordinary updates
+            # alone may resolve the highest-priority existing directory.
+            wf_dir = _workflow_dir(workflow_id)
             try:
                 data = await Storage.read(key)
-                if not data:
+                if not data or already_on_disk():
                     continue
                 workflow_json = data.get("workflowJson", {})
                 meta = {
@@ -659,8 +705,13 @@ async def _migrate_storage_to_filesystem() -> None:
                     "createdAt": data.get("createdAt", int(time.time() * 1000)),
                     "updatedAt": data.get("updatedAt", int(time.time() * 1000)),
                 }
+                if "group" in data:
+                    meta["group"] = normalize_workflow_group(data["group"])
                 markdown_content = data.get("markdownContent")
-                _write_workflow_to_fs(workflow_id, workflow_json, meta, markdown_content)
+                _write_workflow_to_fs(
+                    workflow_id, workflow_json, meta, markdown_content,
+                    target_dir=wf_dir, create_only=True,
+                )
                 migrated += 1
                 log.info("workflow.migration.migrated", {"id": workflow_id})
             except Exception as exc:
@@ -1425,6 +1476,8 @@ async def list_workflow_summaries(
                 return WorkflowSummaryResponse(
                     id=workflow_id,
                     name=data.get("name") or workflow_id,
+                    group=data.get("group"),
+                    group_readonly=data.get("group_readonly", False),
                     nameI18n=data.get("nameI18n"),
                     description=data.get("description"),
                     category=data.get("category") or "default",
@@ -1460,6 +1513,10 @@ async def create_workflow(req: WorkflowCreateRequest):
     try:
         workflow_json = _apply_new_workflow_runtime_defaults(req.workflow_json)
         try:
+            group = normalize_workflow_group(
+                req.group if "group" in req.model_fields_set else workflow_json["metadata"].get("group")
+            )
+            workflow_json["metadata"].pop("group", None)
             workflow_model = Workflow.from_dict(workflow_json)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
@@ -1483,6 +1540,7 @@ async def create_workflow(req: WorkflowCreateRequest):
         meta = {
             "id": workflow_id,
             "name": req.name,
+            "group": group,
             "nameI18n": req.name_i18n,
             "description": req.description,
             "category": req.category or "default",
@@ -1543,18 +1601,38 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
     """
     Update workflow
 
-    Reads from the filesystem, applies changes, and writes back. Both the
-    workflow definition (workflow.json) and metadata (meta.json) are updated
-    atomically within the same directory.
+    Reads from the filesystem, applies changes, and writes back to the selected
+    native directory. Metadata-only updates touch only meta.json, so organizing
+    a Markdown draft never creates an executable workflow.json.
     """
     try:
-        data = _read_workflow_from_fs(workflow_id)
-        if not data:
+        selected = resolve_workflow_from_fs(workflow_id)
+        if selected is None:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+        wf_dir, data = selected
+
+        # Guard both edit surfaces before writing metadata, graph, or Markdown.
+        if data["group_readonly"]:
+            fixed_group = normalize_workflow_group(data.get("group"))
+            transport = (req.workflow_json or {}).get("metadata")
+            group_updates = []
+            if "group" in req.model_fields_set:
+                group_updates.append(req.group)
+            if isinstance(transport, dict) and "group" in transport:
+                group_updates.append(transport["group"])
+            for group in group_updates:
+                try:
+                    unchanged = normalize_workflow_group(group) == fixed_group
+                except ValueError:
+                    unchanged = False
+                if not unchanged:
+                    raise HTTPException(status_code=403, detail="System workflow group is read-only")
 
         workflow_json = data["workflowJson"]
         markdown_content = data.get("markdownContent")
 
+        if "group" in req.model_fields_set:
+            data["group"] = req.group
         if req.name is not None:
             data["name"] = req.name
         if req.name_i18n is not None:
@@ -1580,7 +1658,10 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                         status_code=400,
                         detail=(f"Workflow schema lint failed: {schema_errors[:5]}"),
                     )
-                workflow_json = req.workflow_json
+                workflow_json = dict(req.workflow_json)
+                if isinstance(workflow_json.get("metadata"), dict):
+                    workflow_json["metadata"] = dict(workflow_json["metadata"])
+                    workflow_json["metadata"].pop("group", None)
             except Exception as e:
                 if isinstance(e, HTTPException):
                     raise
@@ -1591,14 +1672,23 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
             markdown_content = req.edit_markdown_content
         data["updatedAt"] = int(time.time() * 1000)
 
-        is_global = data.get("source") == "global"
-        _write_workflow_to_fs(
-            workflow_id,
-            workflow_json,
-            data,
-            markdown_content,
-            global_store=is_global,
-        )
+        if req.workflow_json is None and req.markdown_content is None and req.edit_markdown_content is None:
+            metadata_updates = req.model_dump(
+                include={"group", "name", "name_i18n", "description", "category", "status"},
+                exclude_unset=True,
+                exclude_none=True,
+                by_alias=True,
+            )
+            metadata_updates["updatedAt"] = data["updatedAt"]
+            patch_workflow_metadata(wf_dir, metadata_updates, workflow_data=data)
+        else:
+            _write_workflow_to_fs(
+                workflow_id,
+                workflow_json,
+                data,
+                markdown_content,
+                target_dir=wf_dir,
+            )
 
         stats = await _get_workflow_stats(workflow_id)
         data["workflowJson"] = workflow_json
@@ -2195,9 +2285,16 @@ async def import_workflow(workflow_json: Dict[str, Any]):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
 
+        workflow_json = dict(workflow_json)
+        metadata = dict(workflow_json.get("metadata") or {})
+        try:
+            group = normalize_workflow_group(metadata.pop("group", None))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        workflow_json["metadata"] = metadata
         name = workflow_json.get("name", "Imported Workflow")
-        description = workflow_json.get("metadata", {}).get("description")
-        category = workflow_json.get("metadata", {}).get("category", "default")
+        description = metadata.get("description")
+        category = metadata.get("category", "default")
 
         workflow_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
@@ -2205,6 +2302,7 @@ async def import_workflow(workflow_json: Dict[str, Any]):
         meta = {
             "id": workflow_id,
             "name": name,
+            "group": group,
             "description": description,
             "category": category,
             "status": "draft",
@@ -2247,10 +2345,9 @@ async def export_workflow(workflow_id: str):
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-        workflow_json = data["workflowJson"]
-
-        if "metadata" not in workflow_json:
-            workflow_json["metadata"] = {}
+        workflow_json = dict(data["workflowJson"])
+        workflow_json["metadata"] = dict(workflow_json.get("metadata") or {})
+        workflow_json["metadata"]["group"] = normalize_workflow_group(data.get("group"))
         workflow_json["metadata"]["exportedFrom"] = "flocks"
         workflow_json["metadata"]["exportedAt"] = int(time.time() * 1000)
         workflow_json["name"] = data["name"]
@@ -3810,7 +3907,7 @@ async def save_sample_inputs(workflow_id: str, req: SampleInputsRequest):
         meta = {
             k: v
             for k, v in data.items()
-            if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
+            if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source", "group_readonly")
         }
         meta["updatedAt"] = int(time.time() * 1000)
         markdown_content = data.get("markdownContent")

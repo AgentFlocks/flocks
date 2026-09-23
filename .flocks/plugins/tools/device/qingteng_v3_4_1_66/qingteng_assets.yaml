@@ -1,4 +1,5 @@
 name: qingteng_assets
+group: EDR/HIDS
 description: >
   青藤资产清点分组工具。通过 `action` 参数访问资产查询、资产刷新、刷新状态和资产侧扩展操作。
   适用于主机、进程、账号、端口、Web 应用、数据库、安装包等资产域接口。

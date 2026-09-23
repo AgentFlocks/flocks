@@ -8,9 +8,10 @@
     <script>
       (function () {
         try {
-          var theme = localStorage.getItem('flocks_theme');
+          // Mirrors ThemeContext: an explicit choice wins, otherwise follow the OS.
+          var mode = localStorage.getItem('flocks_theme_mode');
           var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-          if (theme === 'dark' || (!theme && prefersDark)) {
+          if (mode === 'dark' || (mode !== 'light' && prefersDark)) {
             document.documentElement.classList.add('dark');
             document.documentElement.style.colorScheme = 'dark';
           } else {

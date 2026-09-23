@@ -1,4 +1,5 @@
 name: sangfor_sip_risk
+group: SIEM
 description: >
   Query Sangfor SIP risk data. Use the `action` parameter to select:
   - `risk_business` – 风险业务（GET /sangforinter/v1/data/riskbusiness）

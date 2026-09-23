@@ -1,5 +1,6 @@
 ---
 name: device-integration-guide
+group: 平台集成
 description: 指导 Flocks 新建、添加和接入安全设备。Use when the user asks to create, add, onboard, or connect a new security device.
 ---
 

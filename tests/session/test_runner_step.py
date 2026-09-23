@@ -2967,7 +2967,7 @@ async def test_process_step_persists_visible_error_when_model_returns_empty_stre
     assert "returned an empty response" in visible_text
     assert any(
         event_name == "message.part.updated"
-        and "returned an empty response" in _payload["part"]["text"]
+        and "returned an empty response" in _payload["part"].get("text", "")
         for event_name, _payload in events
     )
 

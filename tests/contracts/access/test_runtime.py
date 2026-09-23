@@ -350,6 +350,137 @@ def test_query_can_filter_sqlite_json_driver_by_event_time(tmp_path: Path, monke
     assert [item["id"] for item in response.body["items"]] == ["middle"]
 
 
+@pytest.mark.parametrize("store_state", ["missing_file", "empty_database", "other_table_only"])
+def test_query_sqlite_json_driver_treats_unwritten_store_as_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store_state: str
+):
+    """The SOC alert store only appears with the first ingested alert: until then the
+    list must come back as an ordinary empty response, not a 404/500."""
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    if store_state == "empty_database":
+        db_path.write_bytes(b"")
+    elif store_state == "other_table_only":
+        connection = sqlite3.connect(db_path)
+        connection.execute("CREATE TABLE unrelated (id TEXT PRIMARY KEY)")
+        connection.commit()
+        connection.close()
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={
+                    "table": "records",
+                    "recordColumn": "record_json",
+                    "dateColumn": "record_date",
+                },
+            ),
+        ),
+    )
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"limit": 10}},
+        principal=AuthUser(id="u1", username="alice", role="admin"),
+    )
+
+    assert response.body["summary"] == {"totalRaw": 0, "filteredUnique": 0, "closed": 0}
+    assert response.body["items"] == []
+    assert response.body["meta"]["sourcePageId"] == SOURCE_PAGE_ID
+
+
+def test_query_sqlite_json_driver_leaves_name_resolution_to_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """SQLite table names are case-insensitive; a configured name in another
+    case is a real source and the empty-store shortcut must not swallow it."""
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    _write_contract_sqlite(db_path, [_contract_record(id="present")])
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={"table": "Records", "recordColumn": "record_json", "dateColumn": "record_date"},
+            ),
+        ),
+    )
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"limit": 10}},
+        principal=AuthUser(id="u1", username="alice", role="admin"),
+    )
+
+    assert [item["id"] for item in response.body["items"]] == ["present"]
+
+
+def test_query_sqlite_json_driver_reports_a_misconfigured_column(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Only a missing table is an empty store; any other query failure (here a
+    wrong record column) is still a 500 so a bad config does not look like
+    "no alerts yet"."""
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    _write_contract_sqlite(db_path, [_contract_record(id="present")])
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={"table": "records", "recordColumn": "nope", "dateColumn": "record_date"},
+            ),
+        ),
+    )
+
+    with pytest.raises(ContractRuntimeError) as exc_info:
+        runtime.execute(
+            page_id=PAGE_ID,
+            contract_id=CONTRACT_ID,
+            operation_name="list",
+            payload={"params": {"limit": 10}},
+            principal=AuthUser(id="u1", username="alice", role="admin"),
+        )
+
+    assert exc_info.value.code == "data_source_unavailable"
+    assert exc_info.value.status_code == 500
+    assert "no such column" in exc_info.value.admin_message
+
+
+def test_query_sqlite_json_driver_still_reports_a_broken_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    db_path.write_text("this is not a sqlite file, just enough bytes to fail the header check", encoding="utf-8")
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={"table": "records", "recordColumn": "record_json", "dateColumn": "record_date"},
+            ),
+        ),
+    )
+
+    with pytest.raises(ContractRuntimeError) as exc_info:
+        runtime.execute(
+            page_id=PAGE_ID,
+            contract_id=CONTRACT_ID,
+            operation_name="list",
+            payload={"params": {"limit": 10}},
+            principal=AuthUser(id="u1", username="alice", role="admin"),
+        )
+
+    assert exc_info.value.code == "data_source_unavailable"
+    assert exc_info.value.status_code == 500
+
+
 def test_query_rejects_page_supplied_binding_or_idempotency_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
     _write_contract_assets(store, [_contract_record()])

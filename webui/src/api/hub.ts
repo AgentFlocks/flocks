@@ -137,7 +137,28 @@ export interface HubCatalogPageResponse {
   facets: HubCatalogFacets;
 }
 
+export interface HubSceneSuite {
+  id: string;
+  name: string;
+  nameCn?: string | null;
+  description: string;
+  descriptionCn?: string | null;
+  version: string;
+  installedVersion?: string | null;
+  edition: 'oss' | 'pro';
+  state: HubPluginState | 'partial';
+  workspaceId?: string | null;
+  workspaceTitle?: string | null;
+  workspaceRoute?: string | null;
+  workspaceEnabled?: boolean | null;
+  /** Installed / latest version of the suite's page package (can lag behind the suite). */
+  workspaceVersion?: string | null;
+  workspaceLatestVersion?: string | null;
+}
+
 export const hubAPI = {
+  sceneSuites: () => client.get<HubSceneSuite[]>('/api/hub/scene-suites'),
+
   catalog: (params?: HubCatalogParams) =>
     client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),
 
@@ -171,12 +192,14 @@ export const hubAPI = {
       fetch(`${getApiBase()}/api/hub/plugins/${type}/${id}/install/stream`, {
         method: 'POST',
         credentials: 'include',
+        signal: AbortSignal.timeout(15 * 60_000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scope }),
       })
-        .then((res) => {
+        .then(async (res) => {
           if (!res.ok || !res.body) {
-            reject(new Error(`HTTP ${res.status}`));
+            const payload = await res.json().catch(() => null) as { detail?: unknown } | null;
+            reject(new Error(typeof payload?.detail === 'string' ? payload.detail : `HTTP ${res.status}`));
             return;
           }
 

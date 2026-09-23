@@ -54,19 +54,17 @@ class SqliteJsonDriverExecutor:
     def execute(self, plan: QueryPlan) -> DriverResult:
         db_path = plan.binding.source_root
         self._assert_allowed(db_path, plan.binding.driver_allowlist_roots)
-        if not db_path.is_file():
-            raise ContractRuntimeError(
-                "data_source_unavailable",
-                status_code=404,
-                user_message="WebUI contract SQLite database is not available.",
-                admin_message=f"SQLite source does not exist: {db_path}",
-            )
 
         options = plan.binding.driver_options
         table = _sqlite_identifier(options.get("table"), "records")
         record_column = _sqlite_identifier(options.get("recordColumn"), "record_json")
         date_column = _sqlite_identifier(options.get("dateColumn"), "record_date")
         event_time_column = _sqlite_identifier_optional(options.get("eventTimeColumn"))
+        # A store nobody has written to yet (no file, or an empty database
+        # without the table) is an empty data source, not a broken one: the
+        # SOC alert pages are opened before the first alert is ingested.
+        if not db_path.is_file():
+            return _empty_sqlite_result(db_path)
         query = f"SELECT {record_column} FROM {table}"
         conditions: list[str] = []
         query_params: list[Any] = []
@@ -91,9 +89,23 @@ class SqliteJsonDriverExecutor:
         parse_errors = 0
         try:
             connection = sqlite3.connect(db_path)
-            cursor = connection.execute(query, query_params)
-            raw_records = cursor.fetchall()
-            connection.close()
+            try:
+                cursor = connection.execute(query, query_params)
+                raw_records = cursor.fetchall()
+            finally:
+                connection.close()
+        except sqlite3.OperationalError as exc:
+            # Let SQLite resolve the table name itself (case-insensitive; views
+            # are not a supported source, the query orders by rowid) and only
+            # treat "the table is not there yet" as an empty store.
+            if _is_missing_table_error(exc):
+                return _empty_sqlite_result(db_path)
+            raise ContractRuntimeError(
+                "data_source_unavailable",
+                status_code=500,
+                user_message="WebUI contract SQLite database cannot be queried.",
+                admin_message=f"SQLite query failed for {db_path}: {exc}",
+            ) from exc
         except sqlite3.Error as exc:
             raise ContractRuntimeError(
                 "data_source_unavailable",
@@ -406,6 +418,22 @@ def _normalize_compare(value: Any) -> str:
 
 def _read_string(value: Any, fallback: str) -> str:
     return value if isinstance(value, str) and value else fallback
+
+
+def _is_missing_table_error(exc: sqlite3.OperationalError) -> bool:
+    return str(exc).lower().startswith("no such table")
+
+
+def _empty_sqlite_result(db_path: Path) -> DriverResult:
+    return DriverResult(
+        rows=[],
+        source_files=(db_path,),
+        total_raw=0,
+        total_unique=0,
+        duplicates=0,
+        filtered_unique=0,
+        parse_errors=0,
+    )
 
 
 def _sqlite_identifier(value: Any, fallback: str) -> str:

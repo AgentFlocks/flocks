@@ -1,4 +1,5 @@
 name: device-inspector
+group: 平台集成
 name_cn: 设备巡检智能体
 description: >-
   Generic device inspection agent for connected security devices. Discovers enabled

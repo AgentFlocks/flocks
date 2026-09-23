@@ -1,4 +1,5 @@
 name: ngsoc_vuls
+group: SIEM
 description: >
   NGSOC vulnerability management grouped tool. Use the `action` parameter
   to fetch per-asset vulnerabilities, per-asset configuration-check

@@ -229,6 +229,7 @@ SUBAGENT_TYPE is required for new tasks. Omit it only when session_id continues 
 
 @ToolRegistry.register_function(
     name="delegate_task",
+    group="代理协作",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     native=True,

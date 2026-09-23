@@ -32,6 +32,7 @@ sibling tool calls in one assistant turn for parallel work.
 
 @ToolRegistry.register_function(
     name="task",
+    group="代理协作",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     native=False,

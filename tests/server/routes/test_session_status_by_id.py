@@ -41,6 +41,7 @@ async def test_status_by_id_returns_explicit_idle(client, session_id: str) -> No
     assert response.headers["cache-control"] == "no-store"
     payload = response.json()
     assert payload["sessionID"] == session_id
+    assert payload["webUrl"] == f"/sessions/{session_id}"
     assert payload["lifecycleStatus"] == "active"
     assert payload["status"] == {"type": "idle"}
     assert payload["isProcessing"] is False
@@ -306,3 +307,22 @@ async def test_status_by_id_enforces_read_access(client, session_id: str, monkey
     response = await client.get(f"/api/session/{session_id}/status")
 
     assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_detail_has_stable_url_without_changing_archive_access(client, session_id: str) -> None:
+    detail = await client.get(f"/api/session/{session_id}")
+    assert detail.status_code == 200
+    assert detail.json()["webUrl"] == f"/sessions/{session_id}"
+    await client.patch(f"/api/session/{session_id}", json={"title": "Renamed"})
+    renamed = await client.get(f"/api/session/{session_id}")
+    assert renamed.json()["webUrl"] == detail.json()["webUrl"]
+    archived = await client.post(f"/api/session/{session_id}/archive")
+    assert archived.status_code == 200
+    assert (await client.get(f"/api/session/{session_id}")).status_code == 404
+    state = await client.get(f"/api/session/{session_id}/status")
+    assert state.json()["webUrl"] == detail.json()["webUrl"]
+
+
+def test_session_web_url_encodes_one_path_segment() -> None:
+    assert session_routes._session_web_url("ses/a?b#c") == "/sessions/ses%2Fa%3Fb%23c"

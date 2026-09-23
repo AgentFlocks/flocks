@@ -58,6 +58,40 @@ def _reset_env(monkeypatch, tmp_path):
     return home, data, project
 
 
+def test_template_group_follows_selected_definition_not_catalog_native_label(monkeypatch, tmp_path):
+    from flocks.config.api_versioning import ApiServiceDescriptor
+    from flocks.tool import registry
+    from flocks.tool.device import plugin_index
+
+    _reset_env(monkeypatch, tmp_path)
+    installation = tmp_path / "installation"
+    monkeypatch.setattr(registry, "__file__", str(installation / "flocks/tool/registry.py"))
+    shipped = installation / ".flocks/plugins/tools/device/device_v1"
+    user = tmp_path / "project/.flocks/plugins/tools/device/device_v1"
+    provider = {"name": "Demo", "service_id": "demo_api", "version": "1", "integration_type": "device", "group": "Canonical"}
+    _write_provider(shipped, provider)
+    _write_provider(user, {**provider, "group": "Editable project"})
+    entry = SimpleNamespace(
+        id="device_v1", name="Demo", version="1", installedVersion=None,
+        description=None, descriptionCn=None, state="installed", source="system", installPath=str(shipped),
+    )
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda **kw: [entry])
+    monkeypatch.setattr(plugin_index, "_device_tool_counts", lambda: {})
+    descriptor = ApiServiceDescriptor(service_id="demo_api", version="1", storage_key="demo_api_v1", provider_yaml=shipped / "_provider.yaml")
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [descriptor])
+    plugin_index.clear_device_template_cache()
+    template = plugin_index.list_device_templates()[0]
+    assert template.group == "Canonical" and template.group_readonly is True
+
+    selected = ApiServiceDescriptor(service_id="demo_api", version="1", storage_key="demo_api_v1", provider_yaml=user / "_provider.yaml")
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [selected])
+    plugin_index.clear_device_template_cache()
+    template = plugin_index.list_device_templates()[0]
+    assert template.group == "Editable project" and template.group_readonly is False
+    assert yaml.safe_load((shipped / "_provider.yaml").read_text())["group"] == "Canonical"
+    plugin_index.clear_device_template_cache()
+
+
 def test_device_plugin_index_filters_and_shapes_templates(monkeypatch, tmp_path):
     from flocks.tool.device import plugin_index
 

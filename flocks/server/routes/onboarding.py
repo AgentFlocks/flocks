@@ -7,6 +7,7 @@ regions and orchestrates validation + apply flows across LLM, API, and MCP.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -172,6 +173,8 @@ def _llm_provider_has_usable_credentials(provider_id: str) -> bool:
 
 
 ONBOARDING_REGION_PRESETS = THREATBOOK_REGION_PRESETS
+# Cross-region detection is optional and must not consume the UI request timeout.
+_THREATBOOK_REGION_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 async def _api_service_has_credentials(service_id: str) -> bool:
@@ -493,6 +496,40 @@ async def _test_mcp_with_temp_key(region: Region, api_key: str) -> Dict[str, Any
     return await test_mcp_connection(request)
 
 
+def _non_auth_validation_failure(
+    result: ResourceValidationResult,
+    resource_results: Dict[str, ResourceValidationResult],
+    *,
+    region_probe: bool = False,
+) -> Optional[Dict[str, Any]]:
+    failures = {
+        "no_models_available": ("model_configuration_error", "模型配置尚未初始化，未能验证 ThreatBook key。"),
+        "invalid_model": ("model_configuration_error", "验证所需的模型不在当前配置中，未能验证 ThreatBook key。"),
+        "model_configuration_error": ("model_configuration_error", "模型配置加载失败，未能验证 ThreatBook key。"),
+        "connection_timeout": ("connection_timeout", "ThreatBook 服务连接超时，请稍后重试。"),
+        "connection_error": ("connection_error", "无法连接 ThreatBook 服务，请检查网络或服务地址。"),
+        "permission_denied": ("permission_denied", "当前 Key 没有访问该模型的权限，请检查模型访问权限。"),
+        "rate_limited": ("rate_limited", "ThreatBook 服务限流或额度不足，请检查额度或稍后重试。"),
+        "upstream_error": ("upstream_error", "ThreatBook 服务暂时异常，请稍后重试。"),
+        "provider_test_failed": ("provider_test_failed", "ThreatBook 模型调用失败，请查看详细错误。"),
+    }
+    failure = failures.get(result.code) if not result.success else None
+    if failure is None:
+        return None
+    code, message = failure
+    if region_probe:
+        message = f"另一地区验证未完成：{message}"
+    return {
+        "success": False,
+        "key_valid": None,
+        "region_match": None,
+        "resource_results": resource_results,
+        "error_code": code,
+        "message": message,
+        "suggested_region": None,
+    }
+
+
 async def _validate_threatbook_resources(
     region: Region,
     threatbook_api_key: str,
@@ -539,20 +576,34 @@ async def _validate_threatbook_resources(
             "suggested_region": None,
         }
 
+    # Local setup and transport failures cannot establish key validity or region.
+    for result in resource_results.values():
+        failure = _non_auth_validation_failure(result, resource_results)
+        if failure is not None:
+            return failure
+
     other_region: Region = "global" if region == "cn" else "cn"
     other_preset = ONBOARDING_REGION_PRESETS[other_region]
-    if include_services:
-        fallback_api_result = await _test_provider_or_service_with_temp_credentials(
-            other_preset["threatbook_api_service_id"],
-            threatbook_api_key,
-            service=True,
-        )
-    else:
-        fallback_api_result = await _test_provider_or_service_with_temp_credentials(
-            other_preset["threatbook_llm_provider_id"],
-            threatbook_api_key,
-            model_id=other_preset["threatbook_default_model_id"],
-        )
+    try:
+        async with asyncio.timeout(_THREATBOOK_REGION_PROBE_TIMEOUT_SECONDS):
+            if include_services:
+                fallback_api_result = await _test_provider_or_service_with_temp_credentials(
+                    other_preset["threatbook_api_service_id"],
+                    threatbook_api_key,
+                    service=True,
+                )
+            else:
+                fallback_api_result = await _test_provider_or_service_with_temp_credentials(
+                    other_preset["threatbook_llm_provider_id"],
+                    threatbook_api_key,
+                    model_id=other_preset["threatbook_default_model_id"],
+                )
+    except TimeoutError:
+        fallback_api_result = {
+            "success": False,
+            "code": "connection_timeout",
+            "message": "ThreatBook 地区探测超时。",
+        }
     fallback_api = _normalize_test_result(
         fallback_api_result,
         fallback_code="region_probe_failed",
@@ -570,6 +621,24 @@ async def _validate_threatbook_resources(
             "suggested_region": other_region,
             "probe": fallback_api.model_dump(),
         }
+
+    failure = _non_auth_validation_failure(
+        fallback_api, resource_results, region_probe=True,
+    )
+    if failure is not None:
+        # A secondary probe cannot replace an explicit primary authentication
+        # failure. Keep overall key validity unknown while the region is unverified.
+        if any(
+            result.enabled and result.success is False
+            and result.code == "authentication_failed"
+            for result in resource_results.values()
+        ):
+            failure["error_code"] = "authentication_failed"
+            failure["message"] = (
+                "当前区域 ThreatBook Key 认证失败，请检查 Key 是否有效或所属区域。"
+                + failure["message"]
+            )
+        return {**failure, "probe": fallback_api.model_dump()}
 
     partial_success = any(result.success is True for result in resource_results.values())
     return {
@@ -653,7 +722,9 @@ async def _validate_onboarding_request(
             include_llm=request.use_threatbook_model,
             include_services=include_threatbook_services,
         )
-        threatbook_key_valid = bool(threatbook_validation["success"])
+        threatbook_key_valid = threatbook_validation.get(
+            "key_valid", bool(threatbook_validation["success"]),
+        )
         threatbook_region_match = threatbook_validation["region_match"]
         suggested_region = threatbook_validation["suggested_region"]
         error_code = threatbook_validation["error_code"]

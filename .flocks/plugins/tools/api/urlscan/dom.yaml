@@ -1,4 +1,5 @@
 name: urlscan_dom
+group: 威胁情报
 description: >
   Retrieve the DOM snapshot for a URLScan scan.
   Use the scan UUID to retrieve the DOM snapshot once the scan has finished.

@@ -40,6 +40,7 @@ Use this when:
 
 @ToolRegistry.register_function(
     name="list_providers",
+    group="系统管理",
     description=LIST_PROVIDERS_DESC,
     category=ToolCategory.SYSTEM,
     native=False,
@@ -128,6 +129,7 @@ Example: add a provider named "MyLLM" with base_url "https://api.myllm.com/v1"
 
 @ToolRegistry.register_function(
     name="add_provider",
+    group="系统管理",
     description=ADD_PROVIDER_DESC,
     category=ToolCategory.SYSTEM,
     requires_confirmation=True,
@@ -248,6 +250,7 @@ Examples:
 
 @ToolRegistry.register_function(
     name="add_model",
+    group="系统管理",
     description=ADD_MODEL_DESC,
     category=ToolCategory.SYSTEM,
     requires_confirmation=True,

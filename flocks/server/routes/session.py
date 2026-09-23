@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple, cast
 from fastapi import APIRouter, HTTPException, status, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -279,6 +281,14 @@ class SessionResponse(BaseModel):
     goal: Optional[SessionGoalResponse] = Field(None, description="Persisted session goal state")
 
 
+def _session_web_url(session_id: str) -> str:
+    return f"/sessions/{quote(session_id, safe='')}"
+
+
+class SessionDetailResponse(SessionResponse):
+    webUrl: str = Field(..., description="Relative WebUI path; browser access requires session read permission")
+
+
 class SessionListItem(BaseModel):
     """Lightweight session row for the session manager sidebar."""
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
@@ -311,6 +321,7 @@ class SessionRuntimeStatusResponse(BaseModel):
     """Runtime status snapshot for one session."""
 
     sessionID: str = Field(..., description="Session ID")
+    webUrl: str = Field(..., description="Relative WebUI path; archived sessions may not be viewable")
     lifecycleStatus: Literal["active", "archived"] = Field(
         ...,
         description="Persisted session lifecycle status",
@@ -865,6 +876,7 @@ async def _build_session_runtime_status(session: SessionModel) -> SessionRuntime
 
     return SessionRuntimeStatusResponse(
         sessionID=session.id,
+        webUrl=_session_web_url(session.id),
         lifecycleStatus=cast(Literal["active", "archived"], session.status),
         status=runtime_status,
         isProcessing=runtime_status.type != "idle",
@@ -1269,11 +1281,11 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
 
 @router.get(
     "/{sessionID}",
-    response_model=SessionResponse,
+    response_model=SessionDetailResponse,
     summary="Get session",
     description="Get session by ID",
 )
-async def get_session(sessionID: str, request: Request) -> SessionResponse:
+async def get_session(sessionID: str, request: Request) -> SessionDetailResponse:
     """Get session by ID"""
     _current_user = require_user(request)
     session = await _get_session_by_id_unfiltered(sessionID)
@@ -1289,7 +1301,8 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    return await _session_to_response_with_goal(session)
+    response = await _session_to_response_with_goal(session)
+    return SessionDetailResponse(**response.model_dump(), webUrl=_session_web_url(session.id))
 
 
 @router.get(
@@ -1409,6 +1422,295 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
     except Exception as e:
         log.error("session.todo.write_error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ContextFolderCreateRequest(BaseModel):
+    """Add one read-only folder to the Session Context UI."""
+
+    path: str
+    display_name: Optional[str] = Field(None, alias="displayName")
+
+
+async def _load_context_session(session_id: str, request: Request, *, write: bool = False):
+    current_user = require_user(request)
+    session = await _get_session_by_id_unfiltered(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    if write:
+        _require_session_write_access(session, current_user)
+    else:
+        _require_session_read_access(session, current_user)
+    return session, current_user
+
+
+def _require_context_root_owner(session, current_user: AuthUser) -> None:
+    if not SessionPolicy.is_owner(session, current_user):
+        raise HTTPException(status_code=403, detail="Context folders are only available to the Session owner")
+
+
+@router.get("/{sessionID}/context", summary="Get Session Context")
+async def get_session_context(
+    sessionID: str,
+    request: Request,
+    before: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+):
+    from flocks.session.files import build_session_context
+
+    session, current_user = await _load_context_session(sessionID, request)
+    try:
+        return await build_session_context(
+            session,
+            include_roots=SessionPolicy.is_owner(session, current_user),
+            before=before,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _resolve_context_file(sessionID: str, resourceID: str, request: Request):
+    from flocks.session.files import resolve_session_resource
+
+    session, _current_user = await _load_context_session(sessionID, request)
+    try:
+        resource = await resolve_session_resource(session, resourceID)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not resource.path.exists() or not resource.path.is_file():
+        raise HTTPException(status_code=404, detail="Session file no longer exists")
+    return resource
+
+
+@router.get("/{sessionID}/context/files/{resourceID}/metadata", summary="Get Session Context file metadata")
+async def get_session_context_file(sessionID: str, resourceID: str, request: Request):
+    from flocks.session.files import session_resource_metadata
+
+    resource = await _resolve_context_file(sessionID, resourceID, request)
+    return session_resource_metadata(resource)
+
+
+@router.get("/{sessionID}/context/files/{resourceID}/content", summary="Read Session Context text file")
+async def read_session_context_file(sessionID: str, resourceID: str, request: Request):
+    from flocks.server.routes.workspace import _max_read_bytes, _read_text_preview_sync
+    from flocks.workspace.manager import WorkspaceManager
+
+    resource = await _resolve_context_file(sessionID, resourceID, request)
+    if not WorkspaceManager.is_text_file(resource.path):
+        raise HTTPException(status_code=415, detail="File type is not supported for text preview")
+    max_bytes = _max_read_bytes()
+    content, truncated = await asyncio.to_thread(
+        _read_text_preview_sync,
+        resource.path,
+        max_bytes,
+    )
+    return {
+        "resourceID": resource.resource_id,
+        "content": content,
+        "truncated": truncated,
+        "size": resource.path.stat().st_size,
+        "previewLimitBytes": max_bytes,
+    }
+
+
+@router.get("/{sessionID}/context/files/{resourceID}/preview", summary="Preview Session Context file")
+async def preview_session_context_file(sessionID: str, resourceID: str, request: Request):
+    from flocks.server.routes.workspace import _inline_preview_response
+
+    resource = await _resolve_context_file(sessionID, resourceID, request)
+    return _inline_preview_response(resource.path)
+
+
+@router.get("/{sessionID}/context/files/{resourceID}/download", summary="Download Session Context file")
+async def download_session_context_file(sessionID: str, resourceID: str, request: Request):
+    from flocks.server.routes.workspace import _download_response
+
+    resource = await _resolve_context_file(sessionID, resourceID, request)
+    return _download_response(resource.path, filename=resource.filename)
+
+
+@router.post("/{sessionID}/context/folders", summary="Add Session Context folder")
+async def add_session_context_folder(
+    sessionID: str,
+    payload: ContextFolderCreateRequest,
+    request: Request,
+):
+    from flocks.server.routes.event import publish_event
+    from flocks.session.files import (
+        context_folder_entries_from_metadata,
+        validate_context_folder,
+    )
+    from flocks.utils.id import Identifier
+
+    session, current_user = await _load_context_session(sessionID, request, write=True)
+    _require_context_root_owner(session, current_user)
+    try:
+        normalized_path = validate_context_folder(payload.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    added_entry = {
+        "id": Identifier.ascending("part"),
+        "path": normalized_path,
+        "displayName": payload.display_name or Path(normalized_path).name or normalized_path,
+        "createdAt": int(time.time() * 1000),
+    }
+    result_entry: dict[str, Any] = added_entry
+
+    def add_folder(metadata: Dict[str, Any]) -> Dict[str, Any]:
+        nonlocal result_entry
+        entries = context_folder_entries_from_metadata(metadata)
+        existing = next((item for item in entries if item["path"] == normalized_path), None)
+        if existing is not None:
+            result_entry = existing
+        else:
+            entries.append(added_entry)
+        metadata["contextFolders"] = entries
+        return metadata
+
+    updated = await Session.mutate_metadata(
+        session.project_id,
+        session.id,
+        add_folder,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Session {sessionID} not found")
+    await publish_event("session.context.updated", {"sessionID": sessionID})
+    return {
+        "id": result_entry["id"],
+        "kind": "folder",
+        "displayName": result_entry["displayName"],
+        "status": "available",
+    }
+
+
+@router.delete("/{sessionID}/context/folders/{rootID}", summary="Remove Session Context folder")
+async def remove_session_context_folder(sessionID: str, rootID: str, request: Request):
+    from flocks.server.routes.event import publish_event
+    from flocks.session.files import context_folder_entries_from_metadata
+
+    session, current_user = await _load_context_session(sessionID, request, write=True)
+    _require_context_root_owner(session, current_user)
+
+    def remove_folder(metadata: Dict[str, Any]) -> Dict[str, Any]:
+        entries = context_folder_entries_from_metadata(metadata)
+        next_entries = [item for item in entries if item["id"] != rootID]
+        if len(next_entries) == len(entries):
+            raise KeyError(rootID)
+        metadata["contextFolders"] = next_entries
+        return metadata
+
+    try:
+        updated = await Session.mutate_metadata(
+            session.project_id,
+            session.id,
+            remove_folder,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Context folder not found") from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Session {sessionID} not found")
+    await publish_event("session.context.updated", {"sessionID": sessionID})
+    return {"removed": True, "id": rootID}
+
+
+async def _resolve_context_root_file(
+    sessionID: str,
+    rootID: str,
+    relative_path: str,
+    request: Request,
+):
+    from flocks.session.files import resolve_context_root_path
+
+    session, current_user = await _load_context_session(sessionID, request)
+    _require_context_root_owner(session, current_user)
+    try:
+        target = resolve_context_root_path(session, rootID, relative_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Context path not found")
+    return target
+
+
+@router.get("/{sessionID}/context/roots/{rootID}/list", summary="List Session Context folder")
+async def list_session_context_folder(
+    sessionID: str,
+    rootID: str,
+    request: Request,
+    path: str = Query(""),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+):
+    from flocks.session.files import list_context_root
+
+    session, current_user = await _load_context_session(sessionID, request)
+    _require_context_root_owner(session, current_user)
+    try:
+        page = await asyncio.to_thread(
+            list_context_root, session, rootID, path, offset=offset, limit=limit,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"rootID": rootID, "path": path, **page}
+
+
+@router.get("/{sessionID}/context/roots/{rootID}/content", summary="Read Session Context folder text file")
+async def read_session_context_root_file(
+    sessionID: str,
+    rootID: str,
+    request: Request,
+    path: str = Query(...),
+):
+    from flocks.server.routes.workspace import _max_read_bytes, _read_text_preview_sync
+    from flocks.workspace.manager import WorkspaceManager
+
+    target = await _resolve_context_root_file(sessionID, rootID, path, request)
+    if not target.is_file() or not WorkspaceManager.is_text_file(target):
+        raise HTTPException(status_code=415, detail="File type is not supported for text preview")
+    max_bytes = _max_read_bytes()
+    content, truncated = await asyncio.to_thread(_read_text_preview_sync, target, max_bytes)
+    return {
+        "path": path,
+        "content": content,
+        "truncated": truncated,
+        "size": target.stat().st_size,
+        "previewLimitBytes": max_bytes,
+    }
+
+
+@router.get("/{sessionID}/context/roots/{rootID}/preview", summary="Preview Session Context folder file")
+async def preview_session_context_root_file(
+    sessionID: str,
+    rootID: str,
+    request: Request,
+    path: str = Query(...),
+):
+    from flocks.server.routes.workspace import _inline_preview_response
+
+    target = await _resolve_context_root_file(sessionID, rootID, path, request)
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Context path is not a file")
+    return _inline_preview_response(target)
+
+
+@router.get("/{sessionID}/context/roots/{rootID}/download", summary="Download Session Context folder file")
+async def download_session_context_root_file(
+    sessionID: str,
+    rootID: str,
+    request: Request,
+    path: str = Query(...),
+):
+    from flocks.server.routes.workspace import _download_response
+
+    target = await _resolve_context_root_file(sessionID, rootID, path, request)
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Context path is not a file")
+    return _download_response(target)
 
 
 @router.post(
@@ -2365,6 +2667,7 @@ class MessagePartInfo(BaseModel):
     url: Optional[str] = None
     mime: Optional[str] = None
     filename: Optional[str] = None
+    resourceID: Optional[str] = None
 
 
 class MessageWithParts(BaseModel):
@@ -2409,7 +2712,19 @@ def _part_to_response_info(
     else:
         time_value = None
 
+    resource_id = None
     url_value = getattr(part, "url", None) if part.type == "file" else None
+    if part.type == "file":
+        from flocks.session.files import public_resource_id, session_upload_part_path
+
+        # Only a file uploaded into this Session resolves as a context
+        # resource. Channel media keeps its file:// URL: the WebUI turns that
+        # into /api/file/download, which allows the data directory, whereas
+        # the context preview route would answer 404 for it.
+        if session_upload_part_path(session_id, part) is not None:
+            resource_id = public_resource_id(message_id, str(part.id))
+            if isinstance(url_value, str) and url_value.startswith("file:"):
+                url_value = f"/api/session/{session_id}/context/files/{resource_id}/preview"
 
     state_value = None
     if part.type == "tool":
@@ -2418,7 +2733,18 @@ def _part_to_response_info(
             if hasattr(raw_state, "model_dump"):
                 state_value = raw_state.model_dump()
             elif isinstance(raw_state, dict):
-                state_value = raw_state
+                state_value = dict(raw_state)
+        if isinstance(state_value, dict):
+            from flocks.session.files import output_file_attachments, public_resource_id
+
+            attachments = output_file_attachments(
+                str(getattr(part, "tool", "") or ""),
+                state_value.get("attachments"),
+            ) if state_value.get("status") == "completed" else None
+            state_value["attachments"] = [
+                {**attachment, "resourceID": public_resource_id(message_id, attachment["id"])}
+                for attachment in attachments
+            ] if attachments else None
 
     return MessagePartInfo(
         id=part.id if hasattr(part, "id") else f"{message_id}_part_{index}",
@@ -2435,6 +2761,7 @@ def _part_to_response_info(
         url=url_value,
         mime=getattr(part, "mime", None) if part.type == "file" else None,
         filename=getattr(part, "filename", None) if part.type == "file" else None,
+        resourceID=resource_id,
     )
 
 
@@ -2717,14 +3044,35 @@ async def update_message_part(
         )
     _require_session_write_access(session, current_user)
 
+    message = await Message.get_with_parts_lazy(sessionID, messageID)
+    existing = next((part for part in message.parts if part.id == partID), None) if message else None
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Message part not found")
+    if body.type != existing.type or (
+        existing.type == "tool" and body.tool != existing.tool
+    ):
+        raise HTTPException(status_code=400, detail="Message part type and tool are immutable")
+    if existing.type == "tool" and existing.tool == "write":
+        # Tool output provenance is server-owned. In particular, accepting a
+        # stale running write state could erase a binding completed concurrently.
+        # Tool state PATCHes are not needed by the text-editing API.
+        if "state" in body.model_fields_set:
+            raise HTTPException(status_code=400, detail="Tool state is server-managed")
+
     try:
-        await Message.update_part(sessionID, messageID, partID, **body.model_dump())
+        updated = await Message.update_part(
+            sessionID, messageID, partID, **body.model_dump(exclude_unset=True),
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Message part not found")
         log.info("message.part.updated", {
             "sessionID": sessionID,
             "messageID": messageID,
             "partID": partID,
         })
-        return body
+        return _part_to_response_info(updated, session_id=sessionID, message_id=messageID)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("message.part.update.error", {"error": str(e)})
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -2804,7 +3152,7 @@ def _schedule_background_coro(
     *,
     session_id: Optional[str] = None,
     action: str = "session.background",
-) -> None:
+) -> "asyncio.Task[Any]":
     """Schedule a background coroutine with its opaque execution context."""
     import asyncio
     from flocks.hooks.execution import current_execution_context, execution_context_scope
@@ -2844,6 +3192,7 @@ def _schedule_background_coro(
 
     task = asyncio.get_running_loop().create_task(_guarded_coro())
     _track_background_task(task, session_id=session_id)
+    return task
 
 
 async def _prepare_replay_runtime(
@@ -3310,6 +3659,7 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
                 request,
                 working_directory,
                 lifecycle_generation=lifecycle_generation,
+                uploader_user_id=current_user.id,
             )
         )
         log.info("session.message.send.complete", {"sessionID": sessionID})
@@ -3606,6 +3956,23 @@ def _check_session_aborted(sessionID: str, checkpoint: str, step: int, **extra_c
     return False
 
 
+def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], parts: List[Dict[str, Any]]) -> None:
+    from flocks.session.files import resolve_chat_upload
+
+    for part in parts:
+        upload_id = str(part.get("uploadID") or "").strip()
+        if not upload_id:
+            continue
+        if not owner_id:
+            raise HTTPException(status_code=400, detail="Chat upload owner is unavailable")
+        if part.get("type") != "file" or not isinstance(part.get("mime"), str) or not part["mime"]:
+            raise HTTPException(status_code=400, detail="Chat upload requires a file part and MIME type")
+        try:
+            resolve_chat_upload(session_id, owner_id, upload_id)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 async def _process_session_message(
     sessionID: str,
     session,
@@ -3613,6 +3980,30 @@ async def _process_session_message(
     working_directory: str,
     *,
     lifecycle_generation: Optional[int] = None,
+    uploader_user_id: Optional[str] = None,
+):
+    from flocks.session.interaction_queue import InteractionQueue
+
+    _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts or [])
+    hold = InteractionQueue.hold_uploads(sessionID, uploader_user_id or "", request.parts or [])
+    try:
+        return await _process_session_message_impl(
+            sessionID, session, request, working_directory,
+            lifecycle_generation=lifecycle_generation,
+            uploader_user_id=uploader_user_id,
+        )
+    finally:
+        InteractionQueue.release_uploads(hold)
+
+
+async def _process_session_message_impl(
+    sessionID: str,
+    session,
+    request: PromptRequest,
+    working_directory: str,
+    *,
+    lifecycle_generation: Optional[int] = None,
+    uploader_user_id: Optional[str] = None,
 ):
     """
     Process session message within Instance context.
@@ -3739,7 +4130,7 @@ async def _process_session_message(
         )
     
     ToolRegistry.init()
-    
+
     # ------------------------------------------------------------------
     # 3. Create user message and publish SSE events
     # ------------------------------------------------------------------
@@ -3818,9 +4209,11 @@ async def _process_session_message(
         if part_type == "text":
             continue  # Already stored as the message's TextPart above
         if part_type == "file":
+            upload_id = str(raw_part.get("uploadID") or "").strip()
             url = raw_part.get("url") or ""
             mime = raw_part.get("mime") or ""
-            if not url or not mime:
+            source = raw_part.get("source") if isinstance(raw_part.get("source"), dict) else None
+            if (not url and not upload_id) or not mime:
                 log.warn("session.message.file_part.skipped", {
                     "sessionID": sessionID,
                     "reason": "missing url or mime",
@@ -3835,20 +4228,59 @@ async def _process_session_message(
                     raw_part.get("filename"),
                     failure_event="session.message.file_part.materialize_failed",
                 )
-            file_part_id = raw_part.get("id") or Identifier.create("part")
-            file_part = FilePart(
-                id=file_part_id,
-                sessionID=sessionID,
-                messageID=user_message_id,
-                mime=mime,
-                filename=raw_part.get("filename"),
-                url=url,
-            )
-            await _persist_active_session_write(
-                sessionID,
-                lambda: Message.add_part(sessionID, user_message_id, file_part),
-                expected_generation=lifecycle_generation,
-            )
+            file_part_id = raw_part.get("id") or upload_id or Identifier.create("part")
+            async def persist_file_part():
+                nonlocal url, source
+                from flocks.session.files import bind_staged_chat_upload, resolve_chat_upload, restore_chat_upload
+
+                original = None
+                target = None
+                try:
+                    if upload_id:
+                        original = resolve_chat_upload(sessionID, uploader_user_id or "", upload_id)
+                        target = bind_staged_chat_upload(sessionID, uploader_user_id or "", upload_id)
+                        url = target.as_uri()
+                        source = {"root": "session-upload", "path": target.name}
+                    file_part = FilePart(
+                        id=file_part_id,
+                        sessionID=sessionID,
+                        messageID=user_message_id,
+                        mime=mime,
+                        filename=raw_part.get("filename"),
+                        url=url,
+                        source=source,
+                    )
+                    await Message.add_part(sessionID, user_message_id, file_part)
+                except BaseException:
+                    if original is not None and target is not None and original != target:
+                        # Message.add_part can fail after changing its cache or
+                        # storage. A referenced file must remain retryable.
+                        stored = await Message.get_with_parts_lazy(sessionID, user_message_id)
+                        referenced = stored and any(
+                            part.type == "file" and part.url == target.as_uri()
+                            for part in stored.parts
+                        )
+                        if not referenced:
+                            restore_chat_upload(original, target)
+                    raise
+
+            try:
+                await _persist_active_session_write(
+                    sessionID,
+                    persist_file_part,
+                    expected_generation=lifecycle_generation,
+                )
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            from flocks.session.files import public_resource_id, session_upload_part_path
+
+            # Same criterion as the history serializer: only a part stored in
+            # this Session's uploads directory is a context resource.
+            resource_id = None
+            public_url = url
+            if session_upload_part_path(sessionID, SimpleNamespace(url=url)) is not None:
+                resource_id = public_resource_id(user_message_id, str(file_part_id))
+                public_url = f"/api/session/{sessionID}/context/files/{resource_id}/preview"
             await publish_event("message.part.updated", {
                 "part": {
                     "id": file_part_id,
@@ -3857,7 +4289,8 @@ async def _process_session_message(
                     "type": "file",
                     "mime": mime,
                     "filename": raw_part.get("filename"),
-                    "url": url,
+                    "url": public_url,
+                    "resourceID": resource_id,
                     "time": {"start": now_ms},
                 }
             })
@@ -4359,6 +4792,12 @@ def _event_from_queued_prompt(item, working_directory: str):
         variant=item.variant,
         metadata={
             "_sessionLifecycleGeneration": Session.lifecycle_generation(item.sessionID),
+            **(
+                {"_uploaderUserID": item.execution_context.get("_uploaderUserID")}
+                if isinstance(item.execution_context, dict)
+                and item.execution_context.get("_uploaderUserID")
+                else {}
+            ),
         },
         display_text=item.display_text,
         messageID=item.messageID,
@@ -4387,34 +4826,39 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
             await _publish_prompt_queue(session_id)
             return True
 
-        await _publish_prompt_queue(session_id)
-        session = await Session.get_by_id(session_id)
-        if not session:
-            log.warn("session.prompt_queue.session_missing", {"sessionID": session_id, "queueID": item.id})
-            continue
+        owner_id = str((item.execution_context or {}).get("_uploaderUserID") or "")
+        hold = InteractionQueue.hold_uploads(session_id, owner_id, item.parts)
+        try:
+            await _publish_prompt_queue(session_id)
+            session = await Session.get_by_id(session_id)
+            if not session:
+                log.warn("session.prompt_queue.session_missing", {"sessionID": session_id, "queueID": item.id})
+                continue
 
-        event = _event_from_queued_prompt(item, working_directory)
-        session, _ = await _prepare_session_agent_before_bootstrap(
-            session,
-            event.agent,
-        )
-        item_working_directory = await _resolve_session_working_directory(session)
-        event.working_directory = item_working_directory
-        log.info("session.prompt_queue.dispatch", {
-            "sessionID": session_id,
-            "queueID": item.id,
-        })
-        # A queue item may be dispatched by a different worker task than the
-        # request that submitted it. Restore the item's captured context (e.g.
-        # trusted identity transfer) and never inherit unrelated worker state.
-        with execution_context_scope(item.execution_context or {}, inherit=False):
-            await Instance.provide(
-                directory=item_working_directory,
-                init=instance_bootstrap,
-                fn=lambda: _dispatch_sse_input(
-                    session_id, session, event, item_working_directory
-                ),
+            event = _event_from_queued_prompt(item, working_directory)
+            session, _ = await _prepare_session_agent_before_bootstrap(
+                session,
+                event.agent,
             )
+            item_working_directory = await _resolve_session_working_directory(session)
+            event.working_directory = item_working_directory
+            log.info("session.prompt_queue.dispatch", {
+                "sessionID": session_id,
+                "queueID": item.id,
+            })
+            # A queue item may be dispatched by a different worker task than the
+            # request that submitted it. Restore the item's captured context (e.g.
+            # trusted identity transfer) and never inherit unrelated worker state.
+            with execution_context_scope(item.execution_context or {}, inherit=False):
+                await Instance.provide(
+                    directory=item_working_directory,
+                    init=instance_bootstrap,
+                    fn=lambda: _dispatch_sse_input(
+                        session_id, session, event, item_working_directory
+                    ),
+                )
+        finally:
+            InteractionQueue.release_uploads(hold)
 
 
 async def _run_prompt_event_chain(session_id: str, session, event, working_directory: str) -> None:
@@ -4678,6 +5122,9 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             request,
             working_directory,
             lifecycle_generation=lifecycle_generation,
+            uploader_user_id=(
+                str(event.metadata.get("_uploaderUserID") or "").strip() or None
+            ),
         )
 
     async def _clear_history() -> None:
@@ -4753,36 +5200,44 @@ async def _enqueue_prompt_request(
     request: PromptRequest,
     *,
     expected_generation: Optional[int] = None,
+    uploader_user_id: Optional[str] = None,
 ):
     from flocks.session.interaction_queue import InteractionQueue
     from flocks.hooks.execution import current_execution_context
 
     _validate_execution_mode_request(request)
-    if expected_generation is None:
-        expected_generation = Session.lifecycle_generation(session_id)
-    await _require_agent_usable_for_chat(request.agent)
-    model = request.model.model_dump(by_alias=True) if request.model else None
-    parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
-    execution_context = current_execution_context()
-    return await _persist_active_session_write(
-        session_id,
-        lambda: InteractionQueue.enqueue(
+    _validate_chat_upload_parts(session_id, uploader_user_id, request.parts)
+    hold = InteractionQueue.hold_uploads(session_id, uploader_user_id or "", request.parts)
+    try:
+        if expected_generation is None:
+            expected_generation = Session.lifecycle_generation(session_id)
+        await _require_agent_usable_for_chat(request.agent)
+        model = request.model.model_dump(by_alias=True) if request.model else None
+        parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
+        execution_context = current_execution_context()
+        if uploader_user_id:
+            execution_context = {**execution_context, "_uploaderUserID": uploader_user_id}
+        return await _persist_active_session_write(
             session_id,
-            parts=parts,
-            agent=request.agent,
-            model=model,
-            variant=request.variant,
-            display_text=request.display_text,
-            message_id=request.messageID,
-            no_reply=request.noReply,
-            mock_reply=request.mockReply,
-            tools=request.tools,
-            system=request.system,
-            execution_mode=request.execution_mode,
-            execution_context=execution_context,
-        ),
-        expected_generation=expected_generation,
-    )
+            lambda: InteractionQueue.enqueue(
+                session_id,
+                parts=parts,
+                agent=request.agent,
+                model=model,
+                variant=request.variant,
+                display_text=request.display_text,
+                message_id=request.messageID,
+                no_reply=request.noReply,
+                mock_reply=request.mockReply,
+                tools=request.tools,
+                system=request.system,
+                execution_mode=request.execution_mode,
+                execution_context=execution_context,
+            ),
+            expected_generation=expected_generation,
+        )
+    finally:
+        InteractionQueue.release_uploads(hold)
 
 
 @router.get(
@@ -4790,15 +5245,17 @@ async def _enqueue_prompt_request(
     summary="List queued prompts",
     description="List pending non-blocking prompts for a session",
 )
-async def list_prompt_queue(sessionID: str) -> Dict[str, Any]:
+async def list_prompt_queue(sessionID: str, request: Request) -> Dict[str, Any]:
     from flocks.session.interaction_queue import InteractionQueue
 
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    current_user = require_user(request)
+    _require_session_read_access(session, current_user)
     items = await InteractionQueue.list(sessionID)
     return {"sessionID": sessionID, "items": [item.model_dump() for item in items]}
 
@@ -4809,18 +5266,28 @@ async def list_prompt_queue(sessionID: str) -> Dict[str, Any]:
     summary="Queue prompt",
     description="Queue a prompt without writing it to the formal message history",
 )
-async def enqueue_prompt(sessionID: str, request: PromptRequest) -> Dict[str, Any]:
+async def enqueue_prompt(
+    sessionID: str,
+    request: PromptRequest,
+    http_request: Request,
+) -> Dict[str, Any]:
     from flocks.session.interaction_queue import QueueFullError
 
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    current_user = require_user(http_request)
+    _require_session_write_access(session, current_user)
     await _require_agent_usable_for_chat(request.agent)
     try:
-        item = await _enqueue_prompt_request(sessionID, request)
+        item = await _enqueue_prompt_request(
+            sessionID,
+            request,
+            uploader_user_id=current_user.id,
+        )
     except QueueFullError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await _publish_prompt_queue(sessionID)
@@ -4836,9 +5303,15 @@ async def update_prompt_queue_item(
     sessionID: str,
     queueID: str,
     request: PromptQueueUpdateRequest,
+    http_request: Request,
 ) -> Dict[str, Any]:
     from flocks.session.interaction_queue import InteractionQueue, QueueItemNotFoundError
 
+    _session, _current_user = await _load_context_session(
+        sessionID,
+        http_request,
+        write=True,
+    )
     text = request.text.strip()
     if not text:
         raise HTTPException(
@@ -4858,13 +5331,30 @@ async def update_prompt_queue_item(
     summary="Remove queued prompt",
     description="Remove a queued prompt before it executes",
 )
-async def remove_prompt_queue_item(sessionID: str, queueID: str) -> Dict[str, Any]:
+async def remove_prompt_queue_item(
+    sessionID: str,
+    queueID: str,
+    request: Request,
+) -> Dict[str, Any]:
     from flocks.session.interaction_queue import InteractionQueue, QueueItemNotFoundError
 
+    await _load_context_session(sessionID, request, write=True)
     try:
-        await InteractionQueue.remove(sessionID, queueID)
+        removed_item = await InteractionQueue.remove(sessionID, queueID)
     except QueueItemNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    uploader_user_id = (
+        str((removed_item.execution_context or {}).get("_uploaderUserID") or "").strip()
+        if isinstance(removed_item.execution_context, dict)
+        else ""
+    )
+    if uploader_user_id:
+        from flocks.session.files import remove_staged_chat_uploads_from_parts
+
+        remove_staged_chat_uploads_from_parts(
+            uploader_user_id,
+            removed_item.parts,
+        )
     await _publish_prompt_queue(sessionID)
     return {"status": "removed", "sessionID": sessionID, "queueID": queueID}
 
@@ -4875,18 +5365,24 @@ async def remove_prompt_queue_item(sessionID: str, queueID: str) -> Dict[str, An
     summary="Run queued prompt now",
     description="Abort the current prompt and run the selected queued prompt next",
 )
-async def run_prompt_queue_item_now(sessionID: str, queueID: str) -> Dict[str, Any]:
+async def run_prompt_queue_item_now(
+    sessionID: str,
+    queueID: str,
+    request: Request,
+) -> Dict[str, Any]:
     import os
 
     from flocks.session.interaction_queue import InteractionQueue, QueueItemNotFoundError
     from flocks.session.session_loop import SessionLoop
 
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    current_user = require_user(request)
+    _require_session_write_access(session, current_user)
     working_directory = await _resolve_session_working_directory(session)
     try:
         await InteractionQueue.promote(sessionID, queueID)
@@ -4925,9 +5421,11 @@ async def send_session_message_async(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
+    uploader_user_id: Optional[str] = None
     if http_request is not None:
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
+        uploader_user_id = current_user.id
     lifecycle_generation = Session.lifecycle_generation(sessionID)
     
     session, _ = await _prepare_session_agent_before_bootstrap(
@@ -4961,7 +5459,10 @@ async def send_session_message_async(
         agent=request.agent,
         model=request.model.model_dump(by_alias=True) if request.model else None,
         variant=request.variant,
-        metadata={"_sessionLifecycleGeneration": lifecycle_generation},
+        metadata={
+            "_sessionLifecycleGeneration": lifecycle_generation,
+            **({"_uploaderUserID": uploader_user_id} if uploader_user_id else {}),
+        },
         display_text=event_display_text,
         messageID=request.messageID,
         noReply=request.noReply,
@@ -4972,28 +5473,39 @@ async def send_session_message_async(
         working_directory=working_directory,
     )
 
-    existing_queue = await InteractionQueue.list(sessionID)
-    if SessionLoop.is_running(sessionID) or existing_queue or _is_prompt_chain_active(sessionID):
-        try:
-            item = await _enqueue_prompt_request(
-                sessionID,
-                request,
-                expected_generation=lifecycle_generation,
-            )
-        except QueueFullError as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        await _publish_prompt_queue(sessionID)
-        if not SessionLoop.is_running(sessionID):
-            await _schedule_prompt_queue_drain(sessionID, working_directory)
-        return {"status": "queued", "sessionID": sessionID, "queueID": item.id}
+    _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts)
+    hold = InteractionQueue.hold_uploads(sessionID, uploader_user_id or "", request.parts)
+    try:
+        existing_queue = await InteractionQueue.list(sessionID)
+        if SessionLoop.is_running(sessionID) or existing_queue or _is_prompt_chain_active(sessionID):
+            try:
+                item = await _enqueue_prompt_request(
+                    sessionID,
+                    request,
+                    expected_generation=lifecycle_generation,
+                    uploader_user_id=uploader_user_id,
+                )
+            except QueueFullError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            await _publish_prompt_queue(sessionID)
+            if not SessionLoop.is_running(sessionID):
+                await _schedule_prompt_queue_drain(sessionID, working_directory)
+            return {"status": "queued", "sessionID": sessionID, "queueID": item.id}
 
-    _set_prompt_chain_active(sessionID, True)
-    _schedule_background_coro(
-        _run_prompt_event_chain(sessionID, session, event, working_directory),
-        session_id=sessionID,
-        action="session.prompt_async",
-    )
-    return {"status": "accepted", "sessionID": sessionID}
+        _set_prompt_chain_active(sessionID, True)
+        task = _schedule_background_coro(
+            _run_prompt_event_chain(sessionID, session, event, working_directory),
+            session_id=sessionID,
+            action="session.prompt_async",
+        )
+        if hold:
+            # A done callback also releases requests cancelled before dispatch
+            # enters its coroutine and therefore before its finally can run.
+            task.add_done_callback(lambda _task, token=hold: InteractionQueue.release_uploads(token))
+            hold = ""
+        return {"status": "accepted", "sessionID": sessionID}
+    finally:
+        InteractionQueue.release_uploads(hold)
 
 
 class CommandRequest(BaseModel):
