@@ -12,6 +12,7 @@ import SuiteInstallProgressPanel, {
 import { webuiContractPagesAPI } from '@/api/webuiContractPages';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useToast } from '@/components/common/Toast';
+import { useProtectedHubUpdate } from '@/components/hub/useProtectedHubUpdate';
 import { notifySceneSuitesChanged, useSceneSuiteUpdates } from '@/hooks/useSceneSuiteUpdates';
 import { sceneSuiteErrorMessage } from '@/utils/sceneSuites';
 
@@ -149,6 +150,7 @@ export default function SceneSuitesPage() {
   const targetCardRef = useRef<HTMLElement | null>(null);
   const { suites, loading, error, refetch } = useSceneSuiteUpdates();
   const [busyId, setBusyId] = useState<string | null>(null);
+  const protectedUpdate = useProtectedHubUpdate();
   const [hasPro, setHasPro] = useState(false);
   // Installing a suite pulls in its pages, tool and workflows one by one; show
   // the same per-component progress the hub used to show.
@@ -190,10 +192,15 @@ export default function SceneSuitesPage() {
     };
     try {
       if (action === 'install') {
-        setInstallProgress(createSuiteInstallProgressState(progressEntry(suite)));
-        await hubAPI.installStream('component', suite.id, (event: HubInstallProgressEvent) => {
-          setInstallProgress((current) => applySuiteInstallProgressEvent(current, event));
-        });
+        const preview = (await hubAPI.previewUpdate('component', suite.id)).data;
+        if (preview.requiresConfirmation) {
+          if (!await protectedUpdate.update('component', suite.id, preview)) return;
+        } else {
+          setInstallProgress(createSuiteInstallProgressState(progressEntry(suite)));
+          await hubAPI.installStream('component', suite.id, (event: HubInstallProgressEvent) => {
+            setInstallProgress((current) => applySuiteInstallProgressEvent(current, event));
+          });
+        }
         installed = true;
         changed = true;
         await enableSuiteWorkspace();
@@ -201,7 +208,7 @@ export default function SceneSuitesPage() {
       // Updating the suite carries its pages along (the installer updates an
       // outdated child), so one call is enough.
       if (action === 'update') {
-        await hubAPI.update('component', suite.id);
+        if (!await protectedUpdate.update('component', suite.id)) return;
         updated = true;
         changed = true;
         await enableSuiteWorkspace();
@@ -240,7 +247,7 @@ export default function SceneSuitesPage() {
       if (changed) await notifySceneSuitesChanged();
       setBusyId(null);
     }
-  }, [refetch, setSearchParams, text, toast, zh]);
+  }, [refetch, setSearchParams, text, toast, zh, protectedUpdate.update]);
 
   const stateLabel = useMemo(() => ({
     installed: text.installed,
@@ -262,6 +269,7 @@ export default function SceneSuitesPage() {
 
   return (
     <div className="mx-auto w-full max-w-4xl">
+      {protectedUpdate.dialog}
       {installProgress && (
         <div className="mb-4">
           <SuiteInstallProgressPanel

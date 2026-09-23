@@ -4,6 +4,7 @@ export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' |
 export type HubPluginState =
   | 'available'
   | 'installed'
+  | 'partial'
   | 'updateAvailable'
   | 'localOnly'
   | 'broken'
@@ -146,7 +147,7 @@ export interface HubSceneSuite {
   version: string;
   installedVersion?: string | null;
   edition: 'oss' | 'pro';
-  state: HubPluginState | 'partial';
+  state: HubPluginState;
   workspaceId?: string | null;
   workspaceTitle?: string | null;
   workspaceRoute?: string | null;
@@ -154,6 +155,20 @@ export interface HubSceneSuite {
   /** Installed / latest version of the suite's page package (can lag behind the suite). */
   workspaceVersion?: string | null;
   workspaceLatestVersion?: string | null;
+}
+
+export interface HubUpdatePlan {
+  type: HubPluginType;
+  id: string;
+  scope: string;
+  token: string;
+  requiresConfirmation: boolean;
+  items: Array<{
+    type: HubPluginType;
+    id: string;
+    name: string;
+    requiresConfirmation: boolean;
+  }>;
 }
 
 export const hubAPI = {
@@ -241,8 +256,11 @@ export const hubAPI = {
     });
   },
 
-  update: (type: HubPluginType, id: string, scope = 'global') =>
-    client.post(`/api/hub/plugins/${type}/${id}/update`, { scope }),
+  previewUpdate: (type: HubPluginType, id: string, scope = 'global') =>
+    client.post<HubUpdatePlan>(`/api/hub/plugins/${type}/${id}/update/preview`, { scope }),
+
+  update: (type: HubPluginType, id: string, scope = 'global', confirmation?: { confirmationToken: string; confirmChanges: boolean }) =>
+    client.post<{ backupPath?: string | null }>(`/api/hub/plugins/${type}/${id}/update`, { scope, ...confirmation }),
 
   uninstall: (type: HubPluginType, id: string) =>
     client.delete(`/api/hub/plugins/${type}/${id}`),
