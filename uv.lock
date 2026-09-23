@@ -553,7 +553,7 @@ wheels = [
 
 [[package]]
 name = "flocks"
-version = "2026.9.14"
+version = "2026.9.23"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
