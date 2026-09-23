@@ -52,6 +52,77 @@ def _write_agent_dir(tmp_path: Path, yaml_text: str, prompt_text: str | None = N
 # _parse_prompt_metadata
 # ===========================================================================
 
+class TestSystemAgentGroups:
+    def test_all_discoverable_shipped_agents_have_native_nonempty_group(self, monkeypatch):
+        monkeypatch.setattr(_factory_module, "resolve_agent_initial_tools", lambda *args, **kwargs: ([], []))
+        loaded = []
+        for root in _factory_module._SYSTEM_AGENT_ROOTS:
+            for folder in _factory_module._iter_agent_dirs(root):
+                agent = load_agent(folder)
+                if agent is None:
+                    continue
+                loaded.append(agent)
+                assert agent.group, folder
+                assert agent.group_readonly is True, folder
+        assert len(loaded) >= 18
+
+    def test_native_flag_and_yaml_cannot_grant_or_remove_group_lock(self, tmp_path, monkeypatch):
+        folder = _write_agent_dir(tmp_path, "name: custom\ngroup: Custom\ngroup_readonly: true\n")
+        assert load_agent(folder, native=True).group_readonly is False
+        assert yaml_to_agent_info({"name": "custom", "group_readonly": True}, folder / "agent.yaml").group_readonly is False
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (tmp_path,))
+        (folder / "agent.yaml").write_text("name: shipped\ngroup: Fixed\ngroup_readonly: false\n")
+        assert load_agent(folder, native=False).group_readonly is True
+        assert yaml_to_agent_info({"name": "shipped", "group_readonly": False}, folder / "agent.yaml").group_readonly is True
+
+    def test_source_anchor_does_not_follow_cwd_or_discovery_directory(self, tmp_path, monkeypatch):
+        folder = _write_agent_dir(tmp_path, "name: custom\ngroup: Custom\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_factory_module, "_BUILTIN_AGENTS_DIR", tmp_path)
+        assert load_agent(folder, native=True).group_readonly is False
+        package_root = Path(_factory_module.__file__).resolve().parent / "agents"
+        actual = next(package_root.glob("*/agent.yaml"))
+        assert _factory_module.is_system_agent_definition(actual) is True
+
+    def test_selected_user_definition_remains_writable_over_shipped_bundle(self, tmp_path, monkeypatch):
+        project = tmp_path / "installation"
+        shipped = project / ".flocks" / "plugins" / "agents"
+        user = tmp_path / "user-agents"
+        for root in (shipped, user):
+            folder = root / "shared"
+            folder.mkdir(parents=True)
+            (folder / "agent.yaml").write_text("name: shared\ngroup: Original\n")
+        monkeypatch.setattr(_factory_module, "_BUILTIN_AGENTS_DIR", tmp_path / "absent")
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", user)
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (shipped,))
+        monkeypatch.chdir(project)
+        assert scan_and_load()["shared"].group_readonly is False
+        (user / "shared" / "agent.yaml").unlink()
+        assert scan_and_load()["shared"].group_readonly is True
+
+    @pytest.mark.parametrize("group", ["Changed", "", None])
+    def test_yaml_writer_rejects_locked_group_before_prompt_side_effect(self, tmp_path, monkeypatch, group):
+        folder = _write_agent_dir(tmp_path, "name: test_agent\ngroup: Fixed\n", "Original prompt")
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", tmp_path)
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (tmp_path,))
+        before = {path: path.read_bytes() for path in folder.iterdir()}
+        assert update_yaml_agent("test_agent", {"group": group, "prompt": "Must not write"}) is False
+        assert {path: path.read_bytes() for path in folder.iterdir()} == before
+        assert update_yaml_agent("test_agent", {"group": "Fixed", "description": "Ordinary edit"}) is True
+        assert read_yaml_agent("test_agent")["group"] == "Fixed"
+        assert read_yaml_agent("test_agent")["description"] == "Ordinary edit"
+
+    def test_symlinked_external_source_is_not_shipped(self, tmp_path, monkeypatch):
+        shipped = tmp_path / "shipped"
+        folder = shipped / "alias"
+        folder.mkdir(parents=True)
+        source = tmp_path / "user.yaml"
+        source.write_text("name: custom\ngroup: Custom\n")
+        (folder / "agent.yaml").symlink_to(source)
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (shipped,))
+        assert load_agent(folder, native=True).group_readonly is False
+
+
 class TestParsePromptMetadata:
 
     def test_returns_none_when_missing(self):
@@ -497,13 +568,28 @@ class TestInjectDynamicPrompts:
             assert agent.prompt is not None, f"{name} should have a prompt.md"
             assert len(agent.prompt) > 20
 
-    @pytest.mark.asyncio
-    async def test_plan_agent_has_no_prompt(self):
-        """plan agent has neither prompt.md nor prompt_builder.py."""
-        from flocks.agent.registry import Agent
-        agent = await Agent.get("plan")
+    @pytest.mark.parametrize("native", [False, True])
+    def test_agent_without_prompt_sources_stays_promptless(self, tmp_path, native):
+        """Promptless definitions are valid without relying on the retired plan agent."""
+        agent_dir = _write_agent_dir(tmp_path, "name: promptless\ntools: []\n")
+        agent = load_agent(agent_dir, native=native)
         assert agent is not None
-        assert agent.prompt is None, "Agent 'plan' should NOT have a prompt"
+        assert agent.prompt is None
+        assert agent.prompt_builder is None
+        inject_dynamic_prompts({agent.name: agent}, [], [], [])
+        assert agent.prompt is None
+
+    @pytest.mark.asyncio
+    async def test_self_improve_gets_dream_prompt(self):
+        """The hidden Dream worker must receive its dedicated dynamic prompt."""
+        from flocks.agent.registry import Agent
+        from flocks.memory.evolution.dream import DREAM_SYSTEM_PROMPT
+
+        agent = await Agent.get("self-improve")
+        assert agent is not None
+        assert agent.prompt == DREAM_SYSTEM_PROMPT
+        assert agent.prompt
+        assert agent.prompt_builder == "flocks.agent.agents.self_improve.prompt_builder:inject"
 
 
 # ===========================================================================

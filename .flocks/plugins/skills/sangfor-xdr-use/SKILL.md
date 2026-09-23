@@ -1,5 +1,6 @@
 ---
 name: sangfor-xdr-use
+group: 平台集成
 description: 用于处理深信服 XDR（扩展检测与响应）相关任务，支持通过 API 或者结合浏览器操作。只要用户提到 深信服 XDR、XDR、sangfor XDR 等需求时，必须先加载本 skill。本 skill 是 XDR 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `sangfor_xdr_*` tool 或使用 browser-use skill。
 ---
 

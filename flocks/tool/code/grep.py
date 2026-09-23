@@ -209,6 +209,7 @@ async def ripgrep_search(
 
 @ToolRegistry.register_function(
     name="grep",
+    group="检索",
     description=DESCRIPTION,
     category=ToolCategory.SEARCH,
     parameters=[

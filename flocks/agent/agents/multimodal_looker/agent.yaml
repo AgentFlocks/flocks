@@ -1,4 +1,5 @@
 name: multimodal-looker
+group: 系统辅助
 name_cn: 多模态分析智能体
 description: >-
   Analyze media files (PDFs, images, diagrams) that require interpretation

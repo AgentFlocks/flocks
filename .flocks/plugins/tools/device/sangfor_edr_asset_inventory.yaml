@@ -1,4 +1,5 @@
 name: sangfor_edr_asset_inventory
+group: EDR/HIDS
 description: >
   Collect Sangfor EDR asset-inventory classification counts through authenticated HTTP APIs.
 description_cn: >

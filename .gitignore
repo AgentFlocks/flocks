@@ -123,6 +123,7 @@ webui/.vite/deps/_metadata.json
 
 # Windows packaging outputs
 packaging/windows/Output/
+packaging/linux/Output/
 
 .flocks/.storage_migrated
 artifacts/

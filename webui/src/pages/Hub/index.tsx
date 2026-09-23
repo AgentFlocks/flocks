@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { useProtectedHubUpdate } from '@/components/hub/useProtectedHubUpdate';
 import { useToast } from '@/components/common/Toast';
 import { extractErrorMessage } from '@/utils/error';
 import SuiteInstallProgressPanel, {
@@ -164,10 +165,11 @@ const HUB_TEXT = {
     trust: '信任等级',
     workflowDiagram: 'Workflow 可视化流程图',
     selectFile: '点击左侧文件查看详情',
-    actions: { install: '安装', update: '更新', uninstall: '卸载' },
+    actions: { install: '安装', repair: '补全安装', update: '更新', uninstall: '卸载' },
     states: {
       available: '可安装',
       installed: '已安装',
+      partial: '待补全',
       updateAvailable: '可更新',
       incompatible: '不兼容',
       broken: '异常',
@@ -225,10 +227,11 @@ const HUB_TEXT = {
     trust: 'Trust',
     workflowDiagram: 'Workflow diagram',
     selectFile: 'Select a file on the left to preview it',
-    actions: { install: 'Install', update: 'Update', uninstall: 'Uninstall' },
+    actions: { install: 'Install', repair: 'Complete installation', update: 'Update', uninstall: 'Uninstall' },
     states: {
       available: 'Available',
       installed: 'Installed',
+      partial: 'Incomplete',
       updateAvailable: 'Update available',
       incompatible: 'Incompatible',
       broken: 'Broken',
@@ -332,6 +335,7 @@ export default function HubPage() {
   currentCatalogRequestKeyRef.current = catalogRequestKey;
   currentTreeRequestKeyRef.current = treeRequestKey;
   const canManageHub = user?.role === 'admin';
+  const protectedUpdate = useProtectedHubUpdate();
 
   const fetchCatalog = useCallback(async (silent = false, propagateError = false) => {
     const requestKey = catalogRequestKey;
@@ -491,13 +495,22 @@ export default function HubPage() {
     const key = `${entry.type}:${entry.id}:${action}`;
     setActionId(key);
     try {
-      if (action === 'install' && entry.type === 'component') {
+      const installPreview = action === 'install' ? (await hubAPI.previewUpdate(entry.type, entry.id)).data : null;
+      if (installPreview?.requiresConfirmation) {
+        if (!await protectedUpdate.update(entry.type, entry.id, installPreview)) {
+          setActionId(null);
+          return;
+        }
+      } else if (action === 'install' && entry.type === 'component') {
         setSuiteInstallProgress(createSuiteInstallProgressState(entry));
         await hubAPI.installStream(entry.type, entry.id, handleSuiteInstallProgress);
       } else if (action === 'install') {
         await hubAPI.install(entry.type, entry.id);
       }
-      if (action === 'update') await hubAPI.update(entry.type, entry.id);
+      if (action === 'update' && !await protectedUpdate.update(entry.type, entry.id)) {
+        setActionId(null);
+        return;
+      }
       if (action === 'uninstall') await hubAPI.uninstall(entry.type, entry.id);
     } catch (error) {
       if (action === 'install' && entry.type === 'component') {
@@ -567,6 +580,7 @@ export default function HubPage() {
 
   return (
     <div className="h-full min-h-0 flex flex-col" aria-busy={loading}>
+      {protectedUpdate.dialog}
       <PageHeader
         title={hubTitle}
         description={hubDescription}
@@ -672,7 +686,7 @@ export default function HubPage() {
                 }}
                 options={[
                   { value: '', label: text.all },
-                  ...(['available', 'installed', 'updateAvailable', 'incompatible'] as const).map(state => ({
+                  ...(['available', 'installed', 'partial', 'updateAvailable', 'incompatible'] as const).map(state => ({
                     value: state,
                     label: text.states[state],
                     count: facetCounts.state[state] ?? 0,
@@ -1240,6 +1254,7 @@ function ActionButtons({ item, actionId, text, onAction, compact = false }: {
   if (user?.role !== 'admin') return null;
   if (item.native && item.state === 'installed') return null;
   if (item.state === 'available') return <button className={buttonClass} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.install}</button>;
+  if (item.state === 'partial') return <button className={buttonClass} title={text.actions.repair} aria-label={text.actions.repair} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.repair}</button>;
   if (item.state === 'updateAvailable') return <button className={buttonClass} onClick={() => onAction(item, 'update')}><RefreshCw className="w-3.5 h-3.5" />{!compact && text.actions.update}</button>;
   if (item.state === 'installed') {
     return (

@@ -348,6 +348,116 @@ class TestConfigWriterModelSettings:
         assert "mcp" in data
 
 
+class TestConfigWriterAgentGroups:
+    def test_group_only_write_preserves_raw_references_and_other_fields(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        raw = {
+            "plugin": ["example.external.plugin"],
+            "provider": {"example": {"options": {"apiKey": "{secret:example_key}"}}},
+            "mcp": {"example": {"url": "{env:MCP_URL}", "enabled": False}},
+            "agent": {
+                "editable": {"prompt": "{file:prompts/custom.md}", "temperature": 0.7, "group": "Before"},
+                "other": {"model": "{env:MODEL_ALIAS}", "group": "Other"},
+            },
+            "future_key": {"nested": [1, {"keep": True}]},
+        }
+        path = temp_project / "flocks.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        ConfigWriter.set_agent_group("editable", "Operations")
+
+        raw["agent"]["editable"]["group"] = "Operations"
+        assert json.loads(path.read_text(encoding="utf-8")) == raw
+
+    @pytest.mark.parametrize("group", [None, ""])
+    def test_explicit_clear_writes_only_empty_group(self, temp_project, group):
+        from flocks.config.config_writer import ConfigWriter
+
+        ConfigWriter.set_agent_group("custom-runtime", group)
+
+        assert ConfigWriter._read_raw()["agent"] == {"custom-runtime": {"group": ""}}
+
+    def test_uses_existing_jsonc_without_touching_json(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        original_json = (temp_project / "flocks.json").read_bytes()
+        path = temp_project / "flocks.jsonc"
+        path.write_text('{/* references stay raw */ "plugin":["custom.plugin"],'
+                        '"agent":{"editable":{"prompt":"{file:prompt.md}"}}}', encoding="utf-8")
+
+        ConfigWriter.set_agent_group("editable", "Ops")
+
+        assert json.loads(path.read_text(encoding="utf-8")) == {
+            "plugin": ["custom.plugin"],
+            "agent": {"editable": {"prompt": "{file:prompt.md}", "group": "Ops"}},
+        }
+        assert (temp_project / "flocks.json").read_bytes() == original_json
+
+    @pytest.mark.parametrize("content", ['{"agent":', '[]', '{"agent":[]}', '{"agent":{"editable":false}}'])
+    def test_malformed_config_is_not_overwritten(self, temp_project, content):
+        from flocks.config.config_writer import ConfigWriter
+
+        path = temp_project / "flocks.json"
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(ValueError):
+            ConfigWriter.set_agent_group("editable", "Ops")
+        assert path.read_text(encoding="utf-8") == content
+
+
+class TestConfigWriterMcpGroups:
+    @pytest.mark.parametrize("group", ["Operations", "", None])
+    def test_replacement_preserves_omitted_group_without_mutating_input(self, temp_project, group):
+        from flocks.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw["mcp"]["custom-server"] = {
+            "type": "local", "command": ["old-command"], "group": group,
+        }
+        ConfigWriter._write_raw(raw)
+        incoming = {"type": "remote", "url": "{env:MCP_URL}", "enabled": False}
+
+        ConfigWriter.add_mcp_server("custom-server", incoming)
+
+        assert ConfigWriter.get_mcp_server("custom-server") == {**incoming, "group": group or ""}
+        assert "group" not in incoming
+        assert ConfigWriter._read_raw()["provider"] == raw["provider"]
+
+    @pytest.mark.parametrize("group", [None, ""])
+    def test_replacement_honors_explicit_clear(self, temp_project, group):
+        from flocks.config.config_writer import ConfigWriter
+
+        ConfigWriter.add_mcp_server("custom-server", {"type": "remote", "group": "Old"})
+        ConfigWriter.add_mcp_server("custom-server", {"type": "remote", "group": group})
+
+        assert ConfigWriter.get_mcp_server("custom-server")["group"] == ""
+
+    def test_first_save_does_not_invent_group(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        incoming = {"type": "remote", "url": "http://127.0.0.1:9/unused", "enabled": False}
+        ConfigWriter.add_mcp_server("custom-server", incoming)
+        assert ConfigWriter.get_mcp_server("custom-server") == incoming
+
+    def test_single_field_clear_preserves_connection(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        ConfigWriter.add_mcp_server("custom-server", {"type": "remote", "group": "Old", "url": "{env:MCP_URL}"})
+        assert ConfigWriter.update_mcp_server_field("custom-server", "group", None)
+        assert ConfigWriter.get_mcp_server("custom-server") == {
+            "type": "remote", "group": "", "url": "{env:MCP_URL}",
+        }
+
+    def test_corrupt_config_aborts_without_replacement(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        path = temp_project / "flocks.json"
+        path.write_text('{"mcp":', encoding="utf-8")
+        with pytest.raises(ValueError):
+            ConfigWriter.add_mcp_server("custom-server", {"type": "remote"})
+        assert path.read_text(encoding="utf-8") == '{"mcp":'
+
+
 class TestConfigWriterToolSettings:
     """Test tool_settings section CRUD (user-level overlay for plugin tools)."""
 
@@ -395,6 +505,32 @@ class TestConfigWriterToolSettings:
     def test_delete_missing_returns_false(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
         assert ConfigWriter.delete_tool_setting("not_set") is False
+
+    def test_group_change_on_core_tool_is_rejected_before_other_fields(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        path = temp_project / "flocks.json"
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="read.only"):
+            ConfigWriter.set_tool_setting("get_time", {"group": "User changed", "enabled": False})
+        assert path.read_bytes() == original
+
+    def test_custom_group_clear_preserves_enable_override(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        ConfigWriter.set_tool_setting("user-only-tool", {"enabled": False, "group": "Ops"})
+        ConfigWriter.set_tool_setting("user-only-tool", {"group": None})
+        assert ConfigWriter.get_tool_setting("user-only-tool") == {"enabled": False, "group": ""}
+
+    @pytest.mark.parametrize("content", ['{"tool_settings":', '[]', '{"tool_settings":[]}', '{"tool_settings":{"user-only-tool":false}}'])
+    def test_group_update_does_not_overwrite_corrupt_config(self, temp_project, content):
+        from flocks.config.config_writer import ConfigWriter
+
+        path = temp_project / "flocks.json"
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(ValueError):
+            ConfigWriter.set_tool_setting("user-only-tool", {"group": "Ops"})
+        assert path.read_text(encoding="utf-8") == content
 
     def test_set_empty_name_raises(self, temp_project):
         from flocks.config.config_writer import ConfigWriter

@@ -214,6 +214,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pro-bundle-manifest-path")
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
+    parser.add_argument("--prebuilt", action="store_true")
+    parser.add_argument("--dependency-wheels-dir")
     parser.add_argument("--prepare-handover", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -237,6 +239,10 @@ def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
                 ),
                 bundle_sha256=args.bundle_sha256,
                 sync_timeout=args.sync_timeout,
+                prebuilt=bool(getattr(args, "prebuilt", False)),
+                dependency_wheels_dir=(
+                    Path(args.dependency_wheels_dir) if getattr(args, "dependency_wheels_dir", None) else None
+                ),
             )
         )
     except RuntimeError as exc:

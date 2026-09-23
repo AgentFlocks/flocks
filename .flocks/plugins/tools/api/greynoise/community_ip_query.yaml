@@ -1,4 +1,5 @@
 name: greynoise_community_ip_query
+group: 威胁情报
 description: >
   FREE GreyNoise Community API - Query IP threat intelligence for basic classification.
   Returns whether the IP is malicious/benign, RIOT status, and last seen date.

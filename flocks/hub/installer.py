@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import json
+import re
 import shutil
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from flocks.config.config import Config
 from flocks.hub import local
-from flocks.hub.catalog import clear_catalog_caches, load_manifest
+from flocks.hub.catalog import _catalog_install_state, clear_catalog_caches, load_manifest
 from flocks.hub.files import plugin_root
 from flocks.hub.models import (
     HubComponentRef,
@@ -22,10 +27,60 @@ from flocks.hub.models import (
     PluginType,
 )
 from flocks.hub.security import SKIP_NAMES, validate_package
+from flocks.hub.update_protection import (
+    UpdateConfirmationRequired,
+    build_plan,
+    create_backup,
+    mutation_lock,
+    payload_hashes,
+    public_plan,
+    tree_hashes,
+)
 
 
 _TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
 InstallProgressCallback = Callable[[HubInstallProgressEvent], Awaitable[None]]
+
+
+def _validate_uninstall_plugin_id(plugin_id: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", plugin_id) or plugin_id.endswith("."):
+        raise ValueError("Invalid Hub plugin id: expected a single plugin name without path separators")
+
+
+def _validate_uninstall_target(plugin_type: PluginType, plugin_id: str, path: Path, scope: str) -> None:
+    """Accept only the exact managed payload locations for this plugin id."""
+    _validate_uninstall_plugin_id(plugin_id)
+    if _is_project_install_path(plugin_type, path):
+        # A stale project record may be reconciled without touching its payload
+        # or attached contracts. Existing project payloads remain immutable here.
+        if scope != "project" or path.exists():
+            raise ValueError("Built-in project Hub plugins cannot be removed")
+    elif scope == "project":
+        raise ValueError("Project plugin path escapes its managed location")
+    base = local.install_root(plugin_type, scope).resolve()
+    allowed = {base / plugin_id}
+    if plugin_type == "tool":
+        allowed.update(base / group / plugin_id for group in _TOOL_TYPE_DIRS)
+        allowed.update(
+            parent / f"{plugin_id}{suffix}"
+            for parent in (base, *(base / group for group in _TOOL_TYPE_DIRS))
+            for suffix in (".yaml", ".yml", ".py")
+        )
+    elif plugin_type == "device":
+        allowed.add(local.install_root("tool", scope).resolve() / plugin_id)
+    if path.is_symlink() or path.resolve() not in allowed:
+        raise ValueError("Only this plugin's exact user-managed install location can be removed")
+
+
+def _validate_access_uninstall_target(plugin_id: str, scope: str) -> Path:
+    _validate_uninstall_plugin_id(plugin_id)
+    if scope != "global":
+        raise ValueError("Built-in project Hub plugins cannot be removed")
+    access_root = local.install_root("webui", scope).resolve().parent / "access"
+    access_path = access_root / plugin_id
+    if access_path.resolve() != access_path:
+        raise ValueError("Access contract path escapes this plugin's managed location")
+    return access_path
 
 
 def _copytree_skip_caches(src: Path, dst: Path) -> None:
@@ -99,19 +154,31 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
-def _purge_stale_scratch(parent: Path, name: str) -> None:
-    """Remove leftover ``.<name>.<rand>`` / ``.<name>.bak`` staging dirs.
+def _ensure_no_pending_backup(dst: Path) -> None:
+    backup = dst.parent / f".{dst.name}.bak"
+    if backup.exists() or backup.is_symlink():
+        raise RuntimeError(
+            f"Plugin recovery is required before retrying: original data remains at {backup}; "
+            f"current installation is at {dst}. Recover the previous installation before continuing."
+        )
 
-    A failed atomic swap (see :func:`_replace_prepared_path`) can leave
-    scratch and backup dirs behind next to *parent*/*name*. They are never
-    valid installs, but on Windows a lingering ``.<name>.bak`` blocks the
-    next swap, so we clear both before staging a fresh copy.
+
+def _purge_stale_scratch(parent: Path, name: str) -> None:
+    """Discard prepared trees only after ruling out an unfinished rollback.
+
+    A .bak directory may be the sole old copy when retaining the replacement
+    failed (for example across filesystems). Never classify it as scratch,
+    even when the runtime failure has cleared on a later attempt.
     """
+    _ensure_no_pending_backup(parent / name)
     if not parent.is_dir():
         return
     for entry in parent.iterdir():
-        stale = entry.name.startswith(f".{name}.") or entry.name == f".{name}.bak"
-        if not stale:
+        prefix = f".{name}."
+        suffix = entry.name[len(prefix):] if entry.name.startswith(prefix) else ""
+        # mkdtemp adds one suffix without dots. A dotted remainder may belong
+        # to another legal plugin ID (e.g. .plugin.extra.bak), not this install.
+        if not suffix or "." in suffix or suffix == "bak":
             continue
         try:
             if entry.is_dir() and not entry.is_symlink():
@@ -146,12 +213,29 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
             delay = min(delay * 2, 1.0)
 
 
-def _replace_prepared_path(prepared: Path, dst: Path) -> Path | None:
+def _replace_prepared_path(
+    prepared: Path, dst: Path, *, backup_destination: Path | None = None,
+) -> Path | None:
+    _ensure_no_pending_backup(dst)
     backup: Path | None = None
     if dst.exists() or dst.is_symlink():
-        backup = dst.parent / f".{dst.name}.bak"
-        _remove_path(backup)
-        _replace_with_retry(dst, backup)
+        backup = backup_destination if backup_destination is not None else dst.parent / f".{dst.name}.bak"
+        if backup_destination is not None:
+            backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if backup.exists() or backup.is_symlink():
+                raise FileExistsError(f"Retained original already exists: {backup}")
+        # Keep the original inode tree, including writes made after the last
+        # hash check or through already-open file handles. Never copy/delete
+        # as a cross-device fallback: failed retention must stop replacement.
+        try:
+            _replace_with_retry(dst, backup)
+        except OSError as exc:
+            if backup_destination is not None and exc.errno == errno.EXDEV:
+                raise RuntimeError(
+                    "Cannot retain original directory across filesystems; "
+                    "keep the Hub backup directory and plugin on the same filesystem, then retry"
+                ) from exc
+            raise
     try:
         _replace_with_retry(prepared, dst)
     except Exception:
@@ -170,21 +254,62 @@ def _commit_replacement(backup: Path | None) -> None:
         pass
 
 
-def _rollback_replacement(dst: Path, backup: Path | None) -> None:
-    _remove_path(dst)
-    if backup is not None and (backup.exists() or backup.is_symlink()):
-        _replace_with_retry(backup, dst)
+def _new_recovery_root() -> Path:
+    return Config.get_data_path() / "hub" / "backups" / ("rollback-" + uuid.uuid4().hex) / "failed"
 
 
-def _copy_package(src: Path, dst: Path, *, retain_backup: bool = False) -> Path | None:
+def _rollback_replacement(
+    dst: Path, backup: Path | None, *, recovery_root: Path | None = None,
+) -> None:
+    if backup is not None and not (backup.exists() or backup.is_symlink()):
+        raise RuntimeError(f"Rollback stopped: original directory is missing at {backup}; kept {dst}")
+    preserved = None
+    if dst.exists() or dst.is_symlink():
+        root = recovery_root if recovery_root is not None else _new_recovery_root()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Unique containers avoid replacing an earlier recovery attempt. The
+        # metadata is written before moving anything; failures leave dst intact.
+        container = Path(tempfile.mkdtemp(prefix="tree-", dir=root))
+        preserved = container / "content"
+        (container / "recovery.json").write_text(
+            json.dumps({"installPath": str(dst), "originalBackup": str(backup) if backup else None}, indent=2),
+            encoding="utf-8",
+        )
+        try:
+            _replace_with_retry(dst, preserved)
+        except OSError as exc:
+            raise RuntimeError(f"Rollback stopped; kept current directory at {dst}: {exc}") from exc
+    if backup is not None:
+        try:
+            _replace_with_retry(backup, dst)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Rollback restore failed; current content preserved at {preserved}; "
+                f"original directory remains at {backup}: {exc}"
+            ) from exc
+
+
+def _copy_package(
+    src: Path,
+    dst: Path,
+    *,
+    retain_backup: bool = False,
+    plugin_type: PluginType | None = None,
+    scope: str = "global",
+    before_replace: Callable[[], None] | None = None,
+    backup_destination: Path | None = None,
+) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
     _purge_stale_scratch(parent, dst.name)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
-        backup = _replace_prepared_path(tmp, dst)
-        if not retain_backup:
+        _preserve_native_group_metadata(plugin_type, dst, tmp, scope=scope)
+        if before_replace is not None:
+            before_replace()
+        backup = _replace_prepared_path(tmp, dst, backup_destination=backup_destination)
+        if not retain_backup and backup_destination is None:
             _commit_replacement(backup)
             return None
         return backup
@@ -205,6 +330,165 @@ def _copy_package_contents(src: Path, dst: Path) -> None:
             shutil.copy2(item, target)
 
 
+def _preserve_native_group_metadata(
+    plugin_type: PluginType | None, previous: Path, prepared: Path, *, scope: str,
+) -> None:
+    """Retain one editable native attribute in the existing package staging step.
+
+    Configuration-backed groups and Device instance records are outside package
+    replacement. No group inventory or membership data is created here.
+    """
+    if plugin_type == "skill":
+        from flocks.skill.skill import Skill
+
+        new_file = prepared / "SKILL.md"
+        if new_file.is_file():
+            content = new_file.read_bytes().decode("utf-8")
+            preserved = Skill.preserve_install_group(
+                previous / "SKILL.md", content, scope=scope, name=previous.name,
+            )
+            if preserved != content:
+                new_file.write_bytes(preserved.encode("utf-8"))
+        return
+
+    if plugin_type == "workflow":
+        from flocks.workflow.fs_store import (
+            is_system_workflow_definition, normalize_workflow_group, patch_workflow_metadata,
+        )
+
+        if is_system_workflow_definition(previous):
+            current = json.loads((previous / "meta.json").read_text(encoding="utf-8"))
+            fixed_group = normalize_workflow_group(current.get("group"))
+            for path in (prepared / "meta.json", prepared / "workflow.json"):
+                if not path.is_file():
+                    continue
+                incoming = json.loads(path.read_text(encoding="utf-8"))
+                if path.name == "workflow.json":
+                    incoming = incoming.get("metadata", {})
+                if "group" in incoming and normalize_workflow_group(incoming["group"]) != fixed_group:
+                    raise ValueError("System workflow group is read-only")
+            patch_workflow_metadata(prepared, {"group": fixed_group}, workflow_id=previous.name)
+            return
+        if previous.is_symlink():
+            return
+        old_meta = previous / "meta.json"
+        if old_meta.is_file() and not old_meta.is_symlink():
+            metadata = json.loads(old_meta.read_text(encoding="utf-8"))
+            if isinstance(metadata, dict) and "group" in metadata:
+                patch_workflow_metadata(prepared, {"group": metadata["group"]}, workflow_id=previous.name)
+                return
+        # Package interchange may carry the default in workflow JSON. Once
+        # installed, meta.json remains the sole locally editable authority.
+        new_meta = prepared / "meta.json"
+        if new_meta.is_file():
+            metadata = json.loads(new_meta.read_text(encoding="utf-8"))
+            if isinstance(metadata, dict) and "group" in metadata:
+                return
+        definition = prepared / "workflow.json"
+        if definition.is_file():
+            metadata = json.loads(definition.read_text(encoding="utf-8")).get("metadata", {})
+            if isinstance(metadata, dict) and "group" in metadata:
+                patch_workflow_metadata(prepared, {"group": metadata["group"]}, workflow_id=previous.name)
+        return
+
+    if plugin_type not in {"agent", "tool"}:
+        return
+    import yaml
+
+    if plugin_type == "agent":
+        from flocks.agent.agent import normalize_agent_group
+        from flocks.agent.agent_factory import is_system_agent_definition
+
+        old_file, new_file = previous / "agent.yaml", prepared / "agent.yaml"
+        if not old_file.is_file() or not new_file.is_file():
+            return
+        protected = is_system_agent_definition(old_file)
+        if not protected and (previous.is_symlink() or old_file.is_symlink()):
+            return
+        old_data = yaml.safe_load(old_file.read_text(encoding="utf-8"))
+        if not isinstance(old_data, dict) or "group" not in old_data:
+            return
+        new_data = yaml.safe_load(new_file.read_text(encoding="utf-8"))
+        if not isinstance(new_data, dict):
+            raise ValueError("Expected native agent metadata")
+        try:
+            value = normalize_agent_group(old_data["group"])
+        except ValueError as exc:
+            raise ValueError("Invalid group metadata in agent.yaml") from exc
+        if protected and "group" in new_data and normalize_agent_group(new_data["group"]) != value:
+            raise ValueError("System agent group is read-only")
+        new_data["group"] = value
+        new_file.write_text(yaml.safe_dump(new_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        return
+
+    from flocks.tool.registry import is_shipped_tool_path, normalize_tool_group
+
+    old_tools = _native_yaml_tools(previous, previous, scope=scope)
+    new_tools = _native_yaml_tools(prepared, previous, scope=scope)
+    for name, (old_file, old_data) in old_tools.items():
+        protected = is_shipped_tool_path(old_file)
+        if name not in new_tools:
+            if protected:
+                raise ValueError(f"System tool '{name}' cannot be removed by installation")
+            continue
+        if "group" not in old_data or (previous.is_symlink() and not protected):
+            continue
+        new_file, new_data = new_tools[name]
+        value = normalize_tool_group(old_data["group"])
+        if protected and "group" in new_data and normalize_tool_group(new_data["group"]) != value:
+            raise ValueError(f"System tool '{name}' group is read-only")
+        new_data["group"] = value
+        new_file.write_text(yaml.safe_dump(new_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def _native_yaml_tools(package: Path, destination: Path, *, scope: str) -> dict[str, tuple[Path, dict]]:
+    """Read only discoverable YAML tool identities, without importing handlers.
+
+    Native discovery scans tools/ at depth two, so an api/provider install has
+    no remaining child depth while a flat package has one. Staging directory
+    names do not change that budget or the top-level subsystem exclusions.
+    """
+    import yaml
+    from flocks.plugin.loader import scan_directory
+
+    try:
+        relative = destination.resolve().relative_to(local.install_root("tool", scope).resolve())
+    except ValueError:
+        # Direct package-copy callers may specify another project's native
+        # target rather than the active request's install root.
+        native_root = next((
+            parent for parent in destination.parents
+            if parent.name == "tools" and parent.parent.name == "plugins" and parent.parent.parent.name == ".flocks"
+        ), None)
+        if native_root is not None:
+            relative = destination.relative_to(native_root)
+        else:
+            relative = Path(destination.parent.name, destination.name) if destination.parent.name in _TOOL_TYPE_DIRS else Path(destination.name)
+    if any(part.startswith("_") for part in relative.parts) or (relative.parts and relative.parts[0] in {"mcp", "generated"}):
+        return {}
+    depth = 2 - len(relative.parts)
+    if depth < 0:
+        return {}
+    tools: dict[str, tuple[Path, dict]] = {}
+    for filename in scan_directory(
+        package, recursive=True, max_depth=depth,
+        exclude_subdirs={"mcp", "generated"} if not relative.parts else set(),
+    ):
+        path = Path(filename)
+        if path.suffix not in {".yaml", ".yml"} or path.is_symlink() or not path.resolve().is_relative_to(package.resolve()):
+            continue
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue  # Invalid YAML is not loaded as a native tool either.
+        if not isinstance(data, dict) or not isinstance(data.get("name"), str) or not data["name"]:
+            continue
+        if not any(isinstance(data.get(key), dict) and data[key] for key in ("handler", "execution")):
+            continue  # Config/provider/fixture YAML is not tool metadata.
+        tools.setdefault(data["name"], (path, data))  # Native duplicate rule: first wins.
+    return tools
+
+
 def _contracts_access_dir(plugin_id: str, scope: str) -> Path:
     return local.install_root("webui", scope).parent / "access" / plugin_id
 
@@ -216,6 +500,8 @@ def _copy_attached_access_contracts(
     scope: str,
     *,
     retain_backup: bool = False,
+    before_replace: Callable[[], None] | None = None,
+    backup_destination: Path | None = None,
 ) -> tuple[Path, Path | None] | None:
     if plugin_type != "webui":
         return None
@@ -223,18 +509,28 @@ def _copy_attached_access_contracts(
     if not access_src.is_dir():
         return None
     access_dst = _contracts_access_dir(plugin_id, scope)
-    backup = _copy_package(access_src, access_dst, retain_backup=retain_backup)
+    backup = _copy_package(
+        access_src, access_dst, retain_backup=retain_backup,
+        before_replace=before_replace, backup_destination=backup_destination,
+    )
     return access_dst, backup
 
 
-def _remove_attached_access_contracts(plugin_type: PluginType, plugin_id: str, scope: str) -> None:
+def _remove_attached_access_contracts(
+    plugin_type: PluginType, plugin_id: str, scope: str, *, recovery_root: Path | None = None,
+) -> bool:
     if plugin_type != "webui":
-        return
-    access_dst = _contracts_access_dir(plugin_id, scope)
-    if access_dst.is_dir():
+        return False
+    access_dst = _validate_access_uninstall_target(plugin_id, scope)
+    if recovery_root is not None and (access_dst.exists() or access_dst.is_symlink()):
+        _rollback_replacement(access_dst, None, recovery_root=recovery_root / "access")
+    elif access_dst.is_dir():
         shutil.rmtree(access_dst)
     elif access_dst.exists():
         access_dst.unlink()
+    else:
+        return False
+    return True
 
 
 def _build_webui_pages(plugin_id: str, install_dir: Path) -> None:
@@ -265,6 +561,8 @@ def _copy_webui_package_with_build(
     dst: Path,
     *,
     retain_backup: bool = False,
+    before_replace: Callable[[], None] | None = None,
+    backup_destination: Path | None = None,
 ) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -273,8 +571,10 @@ def _copy_webui_package_with_build(
     try:
         _copy_package_contents(src, tmp)
         _build_webui_pages(plugin_id, tmp)
-        backup = _replace_prepared_path(tmp, dst)
-        if not retain_backup:
+        if before_replace is not None:
+            before_replace()
+        backup = _replace_prepared_path(tmp, dst, backup_destination=backup_destination)
+        if not retain_backup and backup_destination is None:
             _commit_replacement(backup)
             return None
         return backup
@@ -410,7 +710,10 @@ async def _emit_component_progress(
 async def _rollback_component_ref_installs(
     refs: list[tuple[PluginType, str]],
     component_key: str,
+    *, recovery_root: Path | None = None,
 ) -> None:
+    recovery_root = recovery_root if recovery_root is not None else _new_recovery_root()
+    errors: list[str] = []
     seen: set[tuple[PluginType, str]] = set()
     for plugin_type, plugin_id in reversed(refs):
         key = (plugin_type, plugin_id)
@@ -421,11 +724,13 @@ async def _rollback_component_ref_installs(
         if record is None or record.installedBy != component_key:
             continue
         try:
-            await uninstall_plugin(plugin_type, plugin_id)
-        except FileNotFoundError:
-            local.remove_installed_record(plugin_type, plugin_id)
-        except Exception:
-            continue
+            await _uninstall_plugin(
+                plugin_type, plugin_id, recovery_root=recovery_root / plugin_type / plugin_id,
+            )
+        except Exception as exc:
+            errors.append(f"{plugin_type}/{plugin_id}: {exc}")
+    if errors:
+        raise RuntimeError("Dependency rollback incomplete; " + "; ".join(errors))
 
 
 def _is_project_install_path(plugin_type: PluginType, install_path: Path) -> bool:
@@ -464,11 +769,26 @@ def _can_adopt_existing_ref(
     return record.source == _bundled_source_for_ref(ref)
 
 
+def _component_ref_is_outdated(
+    ref: HubComponentRef,
+    install_path: Path,
+    record: InstalledPluginRecord | None,
+) -> bool:
+    """Use the catalog's update decision, including unversioned legacy installs."""
+    try:
+        available = load_manifest(ref.type, ref.id).version
+    except Exception:
+        return False
+    state, _ = _catalog_install_state(ref.type, install_path, record, available)
+    return state == "updateAvailable"
+
+
 async def _install_component_refs(
     manifest: HubPluginManifest,
     *,
     scope: str,
     progress: InstallProgressCallback | None = None,
+    protection_plan: dict | None = None,
 ) -> list[tuple[PluginType, str]]:
     seen: set[tuple[PluginType, str]] = set()
     component_key = f"component:{manifest.id}"
@@ -492,6 +812,28 @@ async def _install_component_refs(
             existing_path = local.infer_local_install(ref.type, ref.id)
             if existing_path is not None:
                 existing_record = local.get_record(ref.type, ref.id)
+                # Installing or updating the suite has to bring an outdated
+                # child along, otherwise the suite reads as current while its
+                # pages stay on the old version.
+                if _component_ref_is_outdated(ref, existing_path, existing_record):
+                    item.status = "installing"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    try:
+                        await _install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key, protection_plan=protection_plan)
+                    except Exception as exc:
+                        if ref.optional:
+                            item.status = "skipped"
+                            item.message = f"Optional dependency failed to update: {exc}"
+                            await _emit_component_progress(progress, manifest, "item", item=item)
+                            continue
+                        item.status = "failed"
+                        item.message = str(exc) or "Update failed"
+                        await _emit_component_progress(progress, manifest, "item", item=item)
+                        raise
+                    item.status = "installed"
+                    item.message = "Updated by component"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
                 if existing_record is not None and _can_adopt_existing_ref(ref, existing_record, component_key, existing_path):
                     adopted_records.append(existing_record)
                     local.save_installed_record(existing_record.model_copy(update={"installedBy": component_key}))
@@ -505,11 +847,23 @@ async def _install_component_refs(
                 continue
             item.status = "installing"
             await _emit_component_progress(progress, manifest, "item", item=item)
-            rollback_refs.append(key)
             try:
-                await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
+                source = plugin_root(ref.type, ref.id, prefer_bundled=True)
+                target = _resolve_install_destination(ref.type, ref.id, source, scope)
+                access = _contracts_access_dir(ref.id, scope) if ref.type == "webui" else None
+                # infer_local_install can miss damaged payloads. Only truly
+                # new dependencies belong to the suite's uninstall rollback.
+                had_previous_state = (
+                    local.get_record(ref.type, ref.id) is not None
+                    or target.exists() or target.is_symlink()
+                    or (access is not None and (access.exists() or access.is_symlink()))
+                )
+                await _install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key, protection_plan=protection_plan)
+                if not had_previous_state:
+                    rollback_refs.append(key)
             except Exception as exc:
-                await _rollback_component_ref_installs([key], component_key)
+                # _install_plugin has already restored its previous payload
+                # and record. Uninstalling here would delete that restoration.
                 if ref.optional:
                     item.status = "skipped"
                     item.message = f"Optional dependency failed to install: {exc}"
@@ -524,7 +878,9 @@ async def _install_component_refs(
     except Exception:
         for original_record in reversed(adopted_records):
             local.save_installed_record(original_record)
-        await _rollback_component_ref_installs(rollback_refs, component_key)
+        await _rollback_component_ref_installs(
+            rollback_refs, component_key, recovery_root=(protection_plan or {}).get("_recoveryRoot"),
+        )
         raise
     return rollback_refs
 
@@ -549,13 +905,16 @@ async def _uninstall_component_refs(manifest: HubPluginManifest) -> bool:
                 continue
         removed = True
         try:
-            await uninstall_plugin(ref.type, ref.id)
+            await _uninstall_plugin(ref.type, ref.id)
         except FileNotFoundError:
             local.remove_installed_record(ref.type, ref.id)
-        except Exception:
+        except Exception as exc:
             if ref.optional:
                 continue
-            raise
+            raise RuntimeError(
+                f"Cannot uninstall scene suite {manifest.id}: required component "
+                f"{ref.type}/{ref.id} could not be removed: {exc}"
+            ) from exc
     return removed
 
 
@@ -577,11 +936,89 @@ async def install_plugin(
     scope: str = "global",
     installed_by: str | None = None,
     progress: InstallProgressCallback | None = None,
+    confirmation_token: str | None = None,
+    confirm_changes: bool = False,
+) -> InstalledPluginRecord:
+    async with mutation_lock():
+        plan = build_plan(plugin_type, plugin_id, scope)
+        # Block the whole operation before replacing any suite child when an
+        # earlier failure left an unresolved original in a temporary backup.
+        for item in plan["items"]:
+            for target in item["_roots"].values():
+                _ensure_no_pending_backup(Path(target))
+        if (confirmation_token is not None and confirmation_token != plan["token"]) or (
+            plan["requiresConfirmation"] and (not confirm_changes or confirmation_token != plan["token"])
+        ):
+            raise UpdateConfirmationRequired(public_plan(plan))
+        try:
+            backup = await asyncio.to_thread(create_backup, plan) if plan["requiresConfirmation"] else None
+        except Exception as exc:
+            raise RuntimeError(f"Backup failed; update cancelled: {exc}") from exc
+        recovery_root = backup / "failed" if backup is not None else _new_recovery_root()
+        plan["_recoveryRoot"] = recovery_root
+        try:
+            refreshed = build_plan(plugin_type, plugin_id, scope)
+            if refreshed["token"] != plan["token"]:
+                if backup is not None:
+                    raise RuntimeError("Files changed after backup; retry the update")
+                raise UpdateConfirmationRequired(public_plan(refreshed))
+            if backup is not None:
+                for index, item in enumerate(plan["items"]):
+                    item["_retainedRoots"] = {
+                        label: backup / "replaced" / str(index) / label for label in item["_roots"]
+                    }
+            record = await _install_plugin(
+                plugin_type, plugin_id, scope=scope, installed_by=installed_by,
+                progress=progress, protection_plan=plan,
+            )
+            if backup is not None:
+                record = record.model_copy(update={"backupPath": str(backup)})
+                local.save_installed_record(record)
+            return record
+        except Exception as exc:
+            saved_backup = backup if backup is not None else recovery_root.parent if recovery_root.exists() else None
+            if saved_backup is not None:
+                raise RuntimeError(f"Update failed; backup preserved at {saved_backup}: {exc}") from exc
+            raise
+
+
+async def _install_plugin(
+    plugin_type: PluginType,
+    plugin_id: str,
+    *,
+    scope: str = "global",
+    installed_by: str | None = None,
+    progress: InstallProgressCallback | None = None,
+    protection_plan: dict | None = None,
 ) -> InstalledPluginRecord:
     manifest = load_manifest(plugin_type, plugin_id)
-    src = plugin_root(plugin_type, plugin_id)
+    # Match the official manifest with its own payload. The preview resolver
+    # prefers project overrides and can otherwise reinstall old/custom files
+    # while recording the official release's new version.
+    src = plugin_root(plugin_type, plugin_id, prefer_bundled=True)
     validate_package(src, manifest)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
+    access_dst = _contracts_access_dir(plugin_id, scope) if plugin_type == "webui" and (src / "access").is_dir() else None
+    expected = None
+    if protection_plan is not None:
+        expected = next(item for item in protection_plan["items"] if (item["type"], item["id"]) == (plugin_type, plugin_id))
+        if payload_hashes(plugin_type, dst, access_dst) != expected["_current"]:
+            raise RuntimeError(f"Plugin files changed during update: {plugin_type}/{plugin_id}; retry the update")
+
+    def verify_root(label: str, target: Path) -> None:
+        if expected is None:
+            return
+        current = {label + "/" + key: value for key, value in tree_hashes(
+            target, webui=plugin_type == "webui" and label == "package",
+        ).items()}
+        baseline = {key: value for key, value in expected["_current"].items() if key.startswith(label + "/")}
+        if current != baseline:
+            raise RuntimeError(f"Plugin files changed during update: {plugin_type}/{plugin_id}; retry the update")
+        if payload_hashes(plugin_type, src, src / "access" if access_dst else None, source=True) != expected["_official"]:
+            raise RuntimeError("Official package changed during update; retry the update")
+
+    retained_roots = expected.get("_retainedRoots", {}) if expected is not None else {}
+    recovery_root = (protection_plan or {}).get("_recoveryRoot") or _new_recovery_root()
     component_key = f"component:{plugin_id}"
     component_ref_installs: list[tuple[PluginType, str]] = []
     previous_record = local.get_record(plugin_type, plugin_id)
@@ -590,16 +1027,22 @@ async def install_plugin(
     access_replacement: tuple[Path, Path | None] | None = None
     try:
         if plugin_type == "component":
-            component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress)
+            component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress, protection_plan=protection_plan)
         if plugin_type == "webui":
             package_backup = _copy_webui_package_with_build(
                 plugin_id,
                 src,
                 dst,
                 retain_backup=True,
+                before_replace=lambda: verify_root("package", dst),
+                backup_destination=retained_roots.get("package"),
             )
         else:
-            package_backup = _copy_package(src, dst, retain_backup=True)
+            package_backup = _copy_package(
+                src, dst, retain_backup=True, plugin_type=plugin_type, scope=scope,
+                before_replace=lambda: verify_root("package", dst),
+                backup_destination=retained_roots.get("package"),
+            )
         package_replaced = True
         access_replacement = _copy_attached_access_contracts(
             plugin_type,
@@ -607,6 +1050,8 @@ async def install_plugin(
             src,
             scope,
             retain_backup=True,
+            before_replace=lambda: verify_root("access", access_dst),
+            backup_destination=retained_roots.get("access"),
         )
         record = local.make_record(
             plugin_type=plugin_type,
@@ -623,22 +1068,29 @@ async def install_plugin(
         await _refresh_runtime(plugin_type, dst)
         if plugin_type == "component":
             await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
-        if access_replacement is not None:
+        if access_replacement is not None and "access" not in retained_roots:
             _commit_replacement(access_replacement[1])
-        _commit_replacement(package_backup)
+        if "package" not in retained_roots:
+            _commit_replacement(package_backup)
         return record
     except Exception:
         if access_replacement is not None:
-            _rollback_replacement(*access_replacement)
+            _rollback_replacement(
+                *access_replacement, recovery_root=recovery_root / plugin_type / plugin_id / "access",
+            )
         if package_replaced:
-            _rollback_replacement(dst, package_backup)
+            _rollback_replacement(
+                dst, package_backup, recovery_root=recovery_root / plugin_type / plugin_id / "package",
+            )
         if previous_record is None:
             local.remove_installed_record(plugin_type, plugin_id)
         else:
             local.save_installed_record(previous_record)
         clear_catalog_caches()
         if plugin_type == "component":
-            await _rollback_component_ref_installs(component_ref_installs, component_key)
+            await _rollback_component_ref_installs(
+                component_ref_installs, component_key, recovery_root=recovery_root,
+            )
         if package_replaced:
             try:
                 await _refresh_runtime(plugin_type, dst)
@@ -647,8 +1099,14 @@ async def install_plugin(
         raise
 
 
-async def update_plugin(plugin_type: PluginType, plugin_id: str, *, scope: str = "global") -> InstalledPluginRecord:
-    return await install_plugin(plugin_type, plugin_id, scope=scope)
+async def update_plugin(
+    plugin_type: PluginType, plugin_id: str, *, scope: str = "global",
+    confirmation_token: str | None = None, confirm_changes: bool = False,
+) -> InstalledPluginRecord:
+    previous_record = local.get_record(plugin_type, plugin_id)
+    installed_by = previous_record.installedBy if previous_record and previous_record.scope == scope else None
+    return await install_plugin(plugin_type, plugin_id, scope=scope, installed_by=installed_by,
+                                confirmation_token=confirmation_token, confirm_changes=confirm_changes)
 
 
 def _collect_storage_keys(install_path: Path) -> list[str]:
@@ -697,9 +1155,22 @@ def _cleanup_orphan_api_services(storage_keys: list[str]) -> None:
 
 
 async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
+    async with mutation_lock():
+        return await _uninstall_plugin(plugin_type, plugin_id)
+
+
+async def _uninstall_plugin(
+    plugin_type: PluginType, plugin_id: str, *, recovery_root: Path | None = None,
+) -> bool:
+    _validate_uninstall_plugin_id(plugin_id)
     manifest = load_manifest(plugin_type, plugin_id) if plugin_type == "component" else None
     record = local.get_record(plugin_type, plugin_id)
     install_path = Path(record.installPath) if record and record.installPath else local.infer_local_install(plugin_type, plugin_id)
+    scope = record.scope if record else "global"
+    if install_path is not None:
+        await asyncio.to_thread(_validate_uninstall_target, plugin_type, plugin_id, install_path, scope)
+    if plugin_type == "webui" and scope != "project":
+        await asyncio.to_thread(_validate_access_uninstall_target, plugin_id, scope)
     if install_path is None or not install_path.exists():
         changed_path = install_path
         if changed_path is None and record is not None:
@@ -714,18 +1185,19 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
                 changed_path = local.install_dir(plugin_type, plugin_id, record.scope)
         children_removed = await _uninstall_component_refs(manifest) if manifest is not None else False
         had_record = record is not None
+        # A missing page payload can still leave its access contracts behind.
+        # Keep project-managed contracts protected even when their pages vanished.
+        access_removed = False
+        if plugin_type == "webui" and (record is None or record.scope != "project"):
+            access_removed = await asyncio.to_thread(
+                _remove_attached_access_contracts, plugin_type, plugin_id, "global", recovery_root=recovery_root,
+            )
         local.remove_installed_record(plugin_type, plugin_id)
         clear_catalog_caches()
         _clear_device_template_cache_if_needed(plugin_type)
-        if children_removed or had_record:
+        if children_removed or had_record or access_removed:
             await _refresh_runtime(plugin_type, changed_path)
-        return children_removed or had_record
-    project_root = local.install_root(plugin_type, "project").resolve()
-    resolved_install_path = install_path.resolve()
-    if resolved_install_path == project_root or project_root in resolved_install_path.parents:
-        raise ValueError("Built-in project Hub plugins cannot be removed")
-    if ".flocks/plugins" not in install_path.as_posix():
-        raise ValueError("Only user-managed Hub plugin installs can be removed")
+        return children_removed or had_record or access_removed
     # Capture provider metadata BEFORE rmtree — once the dir is gone we
     # can't read its ``_provider.yaml`` to know which api_services keys
     # were derived from it. ``device`` plugins reuse the same provider
@@ -738,11 +1210,15 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     )
     if manifest is not None:
         await _uninstall_component_refs(manifest)
-    if install_path.is_dir():
+    if recovery_root is not None:
+        _rollback_replacement(install_path, None, recovery_root=recovery_root / "package")
+    elif install_path.is_dir():
         shutil.rmtree(install_path)
     else:
         install_path.unlink()
-    _remove_attached_access_contracts(plugin_type, plugin_id, record.scope if record else "global")
+    _remove_attached_access_contracts(
+        plugin_type, plugin_id, record.scope if record else "global", recovery_root=recovery_root,
+    )
     local.remove_installed_record(plugin_type, plugin_id)
     clear_catalog_caches()
     _cleanup_orphan_api_services(orphan_keys)

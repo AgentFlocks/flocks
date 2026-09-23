@@ -5,6 +5,7 @@ Provides a framework for registering, discovering, and executing tools.
 Compatible with Flocks's TypeScript Tool system.
 """
 
+import ast
 import asyncio
 import importlib
 import json
@@ -19,7 +20,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.utils.log import Log
 
@@ -92,6 +94,37 @@ class ToolSchema(BaseModel):
         return schema
 
 
+def normalize_tool_group(value: Optional[str]) -> Optional[str]:
+    """Validate native tool grouping metadata (not a runtime parameter)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group cannot contain control characters")
+    return value
+
+
+def is_shipped_tool_path(path: Path) -> bool:
+    """Whether the resolved definition belongs to the installation's native tools.
+
+    Deliberately independent of cwd, Instance, ``native`` and plugin names.
+    User/Hub copies (and symlinks pointing outside the installation) stay editable.
+    """
+    root = Path(__file__).resolve().parents[2] / ".flocks" / "plugins" / "tools"
+    return Path(path).resolve().is_relative_to(root.resolve())
+
+
+def validate_tool_definition_group(path: Path, current: Mapping[str, Any], updates: Mapping[str, Any]) -> None:
+    """Preflight a partial native definition update before writing other fields."""
+    if "group" in updates and is_shipped_tool_path(path):
+        if normalize_tool_group(updates["group"]) != normalize_tool_group(current.get("group")):
+            raise ValueError("System tool group is read-only")
+
+
 class ToolInfo(BaseModel):
     """Tool information"""
     name: str = Field(..., description="Tool name (unique identifier)")
@@ -132,6 +165,11 @@ class ToolInfo(BaseModel):
             "'sangfor', 'qingteng'. None for non-device tools."
         ),
     )
+
+    group: Optional[str] = Field(None, description="Optional plugin group")
+    group_readonly: bool = Field(False, description="Computed from the actual system definition source")
+
+    _validate_group = field_validator("group", mode="before")(normalize_tool_group)
 
     def get_schema(self) -> ToolSchema:
         """Generate JSON Schema for this tool."""
@@ -199,7 +237,7 @@ class ToolResult(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
     title: Optional[str] = Field(None, description="Result title for display")
     truncated: bool = Field(False, description="Whether output was truncated")
-    attachments: Optional[List[Dict[str, Any]]] = Field(None, description="File attachments (images, PDFs)")
+    attachments: Optional[List[Dict[str, Any]]] = Field(None, description="File attachments")
 
 
 @dataclass
@@ -802,6 +840,51 @@ class ToolRegistry:
     Compatible with Flocks's Tool Registry pattern.
     """
 
+    _builtin_module_groups = [
+        # file/ — filesystem operations
+        (
+            "flocks.tool.file",
+            [
+                "read",
+                "write",
+                "edit",
+                "apply_patch",
+                "glob",
+                "doc_parser",
+                "delete",
+                "move",
+                "copy",
+                "mkdir",
+            ],
+        ),
+        # code/ — code analysis + terminal
+        ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
+        # web/ — internet access
+        ("flocks.tool.web", ["webfetch", "websearch"]),
+        # agent/ — agent delegation/coordination
+        ("flocks.tool.agent", ["delegate_task", "task"]),
+        # task/ — task/workflow
+        ("flocks.tool.task", [
+            "schedule_task_center",
+            "todo",
+            "run_workflow",
+            "run_workflow_node",
+            "workflow_config_manage",
+        ]),
+        # security/ — SSH forensics + threat intelligence (optional: asyncssh)
+        ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
+        # system/ — questions, model config, memory, MCP management, session management, slash commands
+        ("flocks.tool.system", ["question", "plan_exit", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+        # skill/ — skill management (search, install, status, deps, remove, load)
+        ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
+        # device/ — security device asset context and status probes
+        ("flocks.tool.device", ["manage_tool"]),
+        # channel/ — IM platform messaging
+        ("flocks.tool.channel", ["channel_message", "im_send_message"]),
+        # wecom/ — 企业微信 MCP（文档、智能表格）
+        ("flocks.tool.wecom", ["wecom_mcp"]),
+    ]
+
     _tools: Dict[str, Tool] = {}
     _initialized: bool = False
     _dynamic_modules: Dict[str, str] = {}
@@ -837,8 +920,79 @@ class ToolRegistry:
     _enabled_defaults: Dict[str, bool] = {}
 
     @classmethod
+    def _core_definition_paths(cls) -> List[Path]:
+        package_root = Path(__file__).resolve().parents[1]
+        return [
+            package_root.joinpath(*package.split(".")[1:], f"{module}.py").resolve()
+            for package, modules in cls._builtin_module_groups
+            for module in modules
+        ] + [Path(__file__).resolve()]
+
+    @classmethod
+    def _is_core_handler(cls, handler: Callable) -> bool:
+        code = getattr(handler, "__code__", None)
+        return code is not None and Path(code.co_filename).resolve() in cls._core_definition_paths()
+
+    @classmethod
+    def _definition_group_readonly(cls, tool: Tool) -> bool:
+        definition = getattr(tool, "_yaml_path", None) or getattr(tool, "_definition_path", None)
+        if definition is not None:
+            return is_shipped_tool_path(definition)
+        if cls._is_core_handler(tool.handler):
+            return True
+        code = getattr(tool.handler, "__code__", None)
+        return code is not None and is_shipped_tool_path(Path(code.co_filename))
+
+    @classmethod
+    def validate_group_settings(cls, settings: Mapping[str, Any]) -> None:
+        """Preflight incoming tool_settings without loading plugins or config.
+
+        Safe inside ConfigWriter and generic config preflight: enabled-only
+        entries do nothing, and even a cold registry uses metadata-only reads.
+        No bootstrap, config overlay, plugin execution or ConfigWriter calls.
+        """
+        for name, entry in settings.items():
+            if not isinstance(entry, Mapping) or "group" not in entry:
+                continue
+            desired = normalize_tool_group(entry["group"])
+            tool = cls._tools.get(name)
+            if tool is not None:
+                readonly = cls._definition_group_readonly(tool)
+                group = tool.info.group
+            else:
+                readonly, group = cls._unloaded_definition_group(name)
+            if readonly and desired != normalize_tool_group(group):
+                raise ValueError(f"System tool group is read-only: {name}")
+
+    @classmethod
+    def _unloaded_definition_group(cls, name: str) -> tuple[bool, Optional[str]]:
+        # Core registration wins over plugin discovery, including modules
+        # imported before init and intentionally non-native core tools.
+        for path in cls._core_definition_paths():
+            if not path.is_file():
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr != "register_function":
+                    continue
+                fields = {kw.arg: kw.value for kw in node.keywords}
+                name_node = fields.get("name")
+                if isinstance(name_node, ast.Constant) and name_node.value == name:
+                    group_node = fields.get("group")
+                    group = ast.literal_eval(group_node) if group_node is not None else None
+                    return True, normalize_tool_group(group)
+        from flocks.tool.tool_loader import find_yaml_tool, _read_yaml_raw
+
+        path = find_yaml_tool(name)
+        if path is not None and is_shipped_tool_path(path):
+            return True, normalize_tool_group(_read_yaml_raw(path).get("group"))
+        return False, None
+
+    @classmethod
     def register(cls, tool: Tool) -> None:
         """Register a tool"""
+        tool.info.group_readonly = cls._definition_group_readonly(tool)
         try:
             from flocks.tool.catalog import apply_tool_catalog_defaults
 
@@ -960,6 +1114,7 @@ class ToolRegistry:
         always_load: Optional[bool] = None,
         tags: Optional[List[str]] = None,
         enabled: bool = True,
+        group: Optional[str] = None,
     ) -> Callable[[ToolHandler], ToolHandler]:
         """
         Decorator to register a function as a tool.
@@ -990,6 +1145,7 @@ class ToolRegistry:
                 "always_load": always_load,
                 "tags": list(tags or []),
                 "enabled": enabled,
+                "group": group,
             }
             if native is not None:
                 info_kwargs["native"] = native
@@ -1788,12 +1944,16 @@ class ToolRegistry:
                 info = ToolInfo(
                     name=name,
                     description=spec.get("description", ""),
+                    group=spec.get("group"),
                     category=category,
                     parameters=params,
                     source="plugin_py",
                     native=is_native,
                 )
-                cls.register(Tool(info=info, handler=handler))
+                tool = Tool(info=info, handler=handler)
+                if Path(source).is_file():
+                    tool._definition_path = Path(source)
+                cls.register(tool)
             return errors
 
         def _dedup_key(item: Any) -> str:
@@ -1819,59 +1979,12 @@ class ToolRegistry:
     def _register_builtin_tools(cls) -> None:
         """Register built-in tools by importing tool modules.
 
-        All tools registered during these imports are marked ``native=True``
-        after the fact.  Using a post-import bulk update means individual
-        ``@register_function`` call sites don't need to pass ``native=True``
-        explicitly, and user plugin Python files that also use
-        ``@register_function`` won't accidentally inherit native status.
+        Reconcile actual core handlers, including previously imported modules.
+        Implicit native flags default to True; explicit False remains meaningful
+        for discovery/search. Group ownership is independent of that flag, and
+        imported user plugins never inherit core status from the import delta.
         """
-        before = set(cls._tools.keys())
-
-        _tool_groups = [
-            # file/ — filesystem operations
-            (
-                "flocks.tool.file",
-                [
-                    "read",
-                    "write",
-                    "edit",
-                    "apply_patch",
-                    "glob",
-                    "doc_parser",
-                    "delete",
-                    "move",
-                    "copy",
-                    "mkdir",
-                ],
-            ),
-            # code/ — code analysis + terminal
-            ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
-            # web/ — internet access
-            ("flocks.tool.web", ["webfetch", "websearch"]),
-            # agent/ — agent delegation/coordination
-            ("flocks.tool.agent", ["delegate_task", "task"]),
-            # task/ — task/workflow
-            ("flocks.tool.task", [
-                "schedule_task_center",
-                "todo",
-                "run_workflow",
-                "run_workflow_node",
-                "workflow_config_manage",
-            ]),
-            # security/ — SSH forensics + threat intelligence (optional: asyncssh)
-            ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — questions, model config, memory, MCP management, session management, slash commands
-            ("flocks.tool.system", ["question", "plan_exit", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
-            # skill/ — skill management (search, install, status, deps, remove, load)
-            ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
-            # device/ — security device asset context and status probes
-            ("flocks.tool.device", ["manage_tool"]),
-            # channel/ — IM platform messaging
-            ("flocks.tool.channel", ["channel_message", "im_send_message"]),
-            # wecom/ — 企业微信 MCP（文档、智能表格）
-            ("flocks.tool.wecom", ["wecom_mcp"]),
-        ]
-        for package, modules in _tool_groups:
+        for package, modules in cls._builtin_module_groups:
             for mod_name in modules:
                 try:
                     importlib.import_module(f"{package}.{mod_name}")
@@ -1882,8 +1995,12 @@ class ToolRegistry:
         # explicitly declare native. This keeps the default convenient for
         # built-ins while preserving native=False for management tools that
         # should be discovered through tool_search.
-        for name in set(cls._tools.keys()) - before:
-            tool = cls._tools[name]
+        for tool in cls._tools.values():
+            if getattr(tool, "_yaml_path", None) or getattr(tool, "_definition_path", None):
+                continue
+            if not cls._is_core_handler(tool.handler):
+                continue
+            tool.info.group_readonly = True
             fields_set = getattr(tool.info, "model_fields_set", None)
             if fields_set is None:
                 fields_set = getattr(tool.info, "__fields_set__", set())
@@ -1895,6 +2012,7 @@ class ToolRegistry:
         if "get_time" not in cls._tools:
             @cls.register_function(
                 name="get_time",
+                group="系统管理",
                 description="Get current date and time in ISO 8601 or Unix timestamp format",
                 category=ToolCategory.SYSTEM,
                 native=True,

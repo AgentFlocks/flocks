@@ -23,8 +23,9 @@ _SESSION_BACKFILL_KEY = "history-v1"
 _reconcile_locks: dict[str, asyncio.Lock] = {}
 
 _SESSION_SEARCH_UNAVAILABLE_MESSAGE = (
-    "Session search is unavailable because this SQLite runtime does not "
-    "support FTS5. Session messages will continue to be stored normally."
+    "Session search is unavailable because this SQLite runtime cannot provide "
+    "the session search index (FTS5 missing, or an index it cannot open). "
+    "Session messages will continue to be stored normally."
 )
 
 
@@ -76,9 +77,26 @@ CREATE INDEX IF NOT EXISTS idx_session_transcript_state_project_created
 
 CREATE VIRTUAL TABLE IF NOT EXISTS session_transcript_fts USING fts5(
     text,
-    tokenize = 'unicode61 remove_diacritics 2'
+    tokenize = '{tokenizer}'
 );
 """
+
+# Preferred first. ``remove_diacritics 2`` needs SQLite >= 3.27; distro
+# Pythons still ship 3.26 (Alibaba Cloud Linux 3 / RHEL 8), where the FTS5
+# module loads but this option fails with "error in tokenizer constructor".
+FTS5_TOKENIZER_CANDIDATES = (
+    "unicode61 remove_diacritics 2",
+    "unicode61 remove_diacritics 1",
+    "unicode61",
+)
+
+
+def session_search_schema_sql(tokenizer: str = FTS5_TOKENIZER_CANDIDATES[0]) -> str:
+    return SESSION_SEARCH_SCHEMA_SQL.replace("{tokenizer}", tokenizer)
+
+
+def _is_tokenizer_error(error: BaseException) -> bool:
+    return isinstance(error, sqlite3.OperationalError) and "tokenizer" in str(error).casefold()
 
 
 SESSION_SEARCH_META_SCHEMA_SQL = """
@@ -158,16 +176,9 @@ async def ensure_session_search_tables(db_path: Path) -> bool:
     """
     async with Storage.connect(db_path) as db:
         await db.executescript(SESSION_SEARCH_META_SCHEMA_SQL)
+        tokenizer = FTS5_TOKENIZER_CANDIDATES[0]
         try:
-            await db.execute(
-                """
-                CREATE VIRTUAL TABLE temp._flocks_session_fts5_probe
-                USING fts5(text)
-                """
-            )
-            await db.execute(
-                "DROP TABLE temp._flocks_session_fts5_probe"
-            )
+            tokenizer = await _probe_fts5_tokenizer(db)
         except sqlite3.OperationalError as exc:
             if _is_fts5_unavailable_error(exc):
                 # Messages may be created, updated, or deleted while Session
@@ -192,7 +203,25 @@ async def ensure_session_search_tables(db_path: Path) -> bool:
             """
         )
         existing_tables = {row[0] for row in await cursor.fetchall()}
-        await db.executescript(SESSION_SEARCH_SCHEMA_SQL)
+        await db.executescript(session_search_schema_sql(tokenizer))
+        # A database created on a newer SQLite keeps the tokenizer it was built
+        # with; if this runtime cannot open that table every message write
+        # would fail inside the FTS sync hook. Turn search off instead.
+        try:
+            await db.execute("SELECT rowid FROM session_transcript_fts LIMIT 0")
+        except sqlite3.OperationalError as exc:
+            if not _is_tokenizer_error(exc):
+                raise
+            log.warning(
+                "session_search.existing_index_unsupported",
+                {"sqlite": sqlite3.sqlite_version, "error": str(exc)},
+            )
+            await db.execute(
+                "DELETE FROM session_transcript_meta WHERE key = ?",
+                (_SESSION_BACKFILL_KEY,),
+            )
+            await db.commit()
+            return False
         if existing_tables != {
             "session_transcript_index_state",
             "session_transcript_fts",
@@ -203,6 +232,36 @@ async def ensure_session_search_tables(db_path: Path) -> bool:
             )
         await db.commit()
     return True
+
+
+async def _probe_fts5_tokenizer(db: Any) -> str:
+    """Return the first tokenizer spec this SQLite accepts.
+
+    Raises the FTS5-missing error untouched so the caller can disable search;
+    an older SQLite that has FTS5 but rejects a tokenizer option just gets the
+    next candidate.
+    """
+    last_error: Optional[sqlite3.OperationalError] = None
+    for candidate in FTS5_TOKENIZER_CANDIDATES:
+        try:
+            await db.execute(
+                "CREATE VIRTUAL TABLE temp._flocks_session_fts5_probe "
+                f"USING fts5(text, tokenize = '{candidate}')"
+            )
+            await db.execute("DROP TABLE temp._flocks_session_fts5_probe")
+        except sqlite3.OperationalError as exc:
+            if _is_fts5_unavailable_error(exc) or not _is_tokenizer_error(exc):
+                raise
+            last_error = exc
+            continue
+        if candidate != FTS5_TOKENIZER_CANDIDATES[0]:
+            log.warning(
+                "session_search.tokenizer_fallback",
+                {"tokenizer": candidate, "sqlite": sqlite3.sqlite_version, "error": str(last_error)},
+            )
+        return candidate
+    assert last_error is not None
+    raise last_error
 
 
 def _reconcile_lock(db_path: Path) -> asyncio.Lock:

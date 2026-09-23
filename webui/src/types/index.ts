@@ -136,6 +136,7 @@ export interface MessagePart {
   mime?: string;
   filename?: string;
   url?: string;
+  resourceID?: string;
   // Legacy support
   toolCall?: ToolCall;
   toolResult?: ToolResult;
@@ -158,6 +159,17 @@ export interface ToolState {
   error?: string;
   title?: string;
   metadata?: Record<string, any>;
+  attachments?: Array<{
+    id: string;
+    resourceID?: string;
+    type?: 'file';
+    mime?: string;
+    filename?: string;
+    size?: number;
+    modifiedAt?: number;
+    origin?: string;
+    source?: { root?: string; path?: string };
+  }>;
   time?: {
     start: number;
     end?: number;
@@ -210,6 +222,8 @@ export interface ToolParameter {
 export type ToolSource = 'builtin' | 'mcp' | 'api' | 'device' | 'custom' | 'plugin_py' | 'plugin_yaml';
 
 export interface Tool {
+  group_readonly?: boolean;
+  group?: string | null;
   name: string;
   description: string;
   description_cn?: string;
@@ -227,6 +241,8 @@ export interface Tool {
 }
 
 export interface MCPServer {
+  group_readonly?: boolean;
+  group?: string | null;
   name: string;
   url?: string;
   status: 'connected' | 'disconnected' | 'error' | 'connecting' | 'failed' | 'needs_auth' | 'disabled';
@@ -240,6 +256,9 @@ export interface MCPServer {
 }
 
 export interface APIServiceSummary {
+  /** True only for fixed definitions, not configured service instances. */
+  group_readonly?: boolean;
+  group?: string | null;
   id: string;
   name: string;
   /** Provider/service version, e.g. "9.2", sourced from _provider.yaml */
@@ -276,6 +295,8 @@ export interface APIServiceCredentialField {
 }
 
 export interface APIServiceMetadata {
+  group_readonly?: boolean;
+  group?: string | null;
   name: string;
   version?: string;
   description?: string;
@@ -296,6 +317,7 @@ export interface APIServiceMetadata {
 export type CustomDeviceAccessMode = 'api' | 'webcli' | 'workflow';
 
 export interface MCPServerConfig {
+  group?: string | null;
   type: 'stdio' | 'sse';
   url?: string;
   command?: string | string[];
@@ -314,6 +336,8 @@ export interface MCPServerConfig {
 }
 
 export interface MCPServerDetail {
+  group_readonly?: boolean;
+  group?: string | null;
   name: string;
   status: {
     status: string;
@@ -374,6 +398,8 @@ export interface MCPCatalogInstall {
 }
 
 export interface MCPCatalogEntry {
+  group_readonly?: boolean;
+  group?: string | null;
   id: string;
   name: string;
   description: string;

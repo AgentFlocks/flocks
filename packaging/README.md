@@ -1,6 +1,9 @@
 # 打包说明
 
-本目录包含 **Windows 安装包（Inno Setup）** 相关脚本与配置。产物为 **`FlocksSetup.exe`**（安装向导），不是 PyInstaller 等单文件可执行程序。
+本目录包含两部分：
+
+- `windows/`：**Windows 安装包（Inno Setup）** 相关脚本与配置。产物为 **`FlocksSetup.exe`**（安装向导），不是 PyInstaller 等单文件可执行程序。下文均指这一部分。
+- `egress-proxy/`：给 **CentOS 9 / RHEL 9 x86_64** 客户机房交付的出网接管包。跑 flocks 的内网机器 A 上一条命令 `sudo bash flocks-egress-proxy-<版本>-linux-x86_64.run [代理IP:端口]`（自解压单文件；不给地址就用机器上 dnf / 环境变量里现成的代理设置，再没有就在终端里问；tar.gz 版是 `sudo bash setup-a.sh install …`）——mihomo + nftables 做整机透明代理：目标是内网 IP 的直连、公网的经客户已有的 HTTP / HTTPS / SOCKS5 代理，本机进程和 Docker bridge 容器都接管，引擎不在时默认直连兜底（`ENGINE_DOWN=reject` 可改成公网立刻被拒），flocks 零改动，客户代理那台机器什么都不用装。`setup-a.py` 只用 Python 标准库（install / check / status / reconfigure / rollback）。客户文档 `egress-proxy/README.md`（只有安装 / 使用 / 排障），机制与验证记录在 `egress-proxy/INTERNALS.md`。打包 `egress-proxy/tools/fetch-mihomo.sh && egress-proxy/tools/make-bundle.sh`（交付用的 x86_64 包到 `dist/`，同时出 `.tar.gz` 和 `.run`；`--arch arm64` 只是开发机测试用），测试 `egress-proxy/tests/e2e-centos9.sh`（四容器）与 `tests/test_setup_a.py`（pytest）。
 
 ## 目录结构
 

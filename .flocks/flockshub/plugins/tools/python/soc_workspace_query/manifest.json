@@ -5,7 +5,7 @@
   "name": "Flocks SOC Workspace Query",
   "description": "Query information from Flocks own SOC workspace pages, including dashboard, overview, alert lists, alert details, triage reports, and workflow status.",
   "descriptionCn": "查询 Flocks 自身 SOC 工作区里的信息，包括 dashboard、overview、告警调查列表、告警详情、研判报告和工作流状态。",
-  "version": "1.0.0",
+  "version": "1.1.9",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",

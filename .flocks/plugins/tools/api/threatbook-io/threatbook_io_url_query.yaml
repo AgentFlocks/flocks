@@ -1,4 +1,5 @@
 name: threatbook_io_url_query
+group: 威胁情报
 description: >
   Query URL threat intelligence including scan engine detection results,
   sandbox analysis reports, and downloaded file analysis. Use when analyzing

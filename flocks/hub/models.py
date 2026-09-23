@@ -8,9 +8,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 PluginType = Literal["skill", "agent", "tool", "device", "workflow", "webui", "component"]
+# Which edition may install a plugin. Pro-only suites stay visible in the
+# catalog so the operator can see what an upgrade unlocks.
+PluginEdition = Literal["oss", "pro"]
+
 PluginState = Literal[
     "available",
     "installed",
+    "partial",
     "updateAvailable",
     "localOnly",
     "broken",
@@ -75,6 +80,7 @@ class HubPluginManifest(BaseModel):
     domains: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     trust: Literal["official", "verified", "community", "experimental", "deprecated"] = "community"
+    edition: PluginEdition = "oss"
     source: HubSource = Field(default_factory=HubSource)
     compatibility: HubCompatibility = Field(default_factory=HubCompatibility)
     dependencies: HubDependencies = Field(default_factory=HubDependencies)
@@ -98,6 +104,7 @@ class HubIndexEntry(BaseModel):
     useCases: list[str] = Field(default_factory=list)
     trust: str = "community"
     riskLevel: str = "low"
+    edition: PluginEdition = "oss"
     manifestPath: str
 
 
@@ -119,6 +126,9 @@ class InstalledPluginRecord(BaseModel):
     scope: Literal["global", "project"] = "global"
     checksum: Optional[str] = None
     installPath: Optional[str] = None
+    # Legacy field retained for record compatibility; never used to waive backup.
+    fileHashes: Optional[dict[str, str]] = None
+    backupPath: Optional[str] = None
 
 
 HubInstallProgressStatus = Literal["pending", "installing", "installed", "skipped", "failed", "completed"]
@@ -162,6 +172,7 @@ class HubCatalogEntry(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     trust: str = "community"
     riskLevel: str = "low"
+    edition: PluginEdition = "oss"
     state: PluginState = "available"
     installedVersion: Optional[str] = None
     source: str = "bundled"

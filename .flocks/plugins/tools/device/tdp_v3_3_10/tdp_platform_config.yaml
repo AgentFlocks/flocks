@@ -1,4 +1,5 @@
 name: tdp_platform_config
+group: NDR
 description: >
   管理 TDP 平台配置相关接口，覆盖资产配置、白名单过滤、级联平台管理和自定义规则。
   通过 action 可切换到资产列表、资产增删改、白名单搜索与维护、子节点列表、自定义规则和处置日志等子接口；

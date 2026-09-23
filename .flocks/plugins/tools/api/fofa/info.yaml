@@ -1,4 +1,5 @@
 name: fofa_info
+group: 网络测绘
 description: >
   Get FOFA account information including user stats, VIP level, and API usage quota.
   Use to check account status and available API credits.

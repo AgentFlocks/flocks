@@ -20,7 +20,7 @@ from flocks.config.api_versioning import (
 from flocks.hub import catalog as hub_catalog
 from flocks.hub import local as hub_local
 from flocks.tool.device.models import CustomDeviceTemplateCreate, DeviceTemplate
-from flocks.tool.registry import ToolRegistry
+from flocks.tool.registry import ToolRegistry, is_shipped_tool_path, normalize_tool_group
 from flocks.tool.schema.api_service_schema import _build_api_service_credential_schema
 from flocks.tool.tool_loader import TOOL_TYPE_DEVICE, extract_provider_version
 from flocks.utils.log import Log
@@ -92,6 +92,12 @@ def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
         if _integration_type(provider) != "device":
             continue
         if descriptor.storage_key in by_key:
+            # Runtime descriptor discovery decides which same-key definition
+            # was selected; Hub display state must not lock an editable copy.
+            by_key[descriptor.storage_key] = by_key[descriptor.storage_key].model_copy(update={
+                "group": normalize_tool_group(provider.get("group")),
+                "group_readonly": is_shipped_tool_path(descriptor.provider_yaml),
+            })
             continue
         plugin_id = root.name
         source = _source_from_path(root)
@@ -226,6 +232,8 @@ def _template_from_descriptor(
     description = _optional_str(provider.get("description")) or fallback_description
     description_cn = _optional_str(provider.get("description_cn")) or fallback_description_cn
     return DeviceTemplate(
+        group=normalize_tool_group(provider.get("group")),
+        group_readonly=is_shipped_tool_path(descriptor.provider_yaml),
         plugin_id=plugin_id,
         storage_key=descriptor.storage_key,
         service_id=descriptor.service_id,

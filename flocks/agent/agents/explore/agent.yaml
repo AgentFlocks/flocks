@@ -1,4 +1,5 @@
 name: explore
+group: 系统辅助
 name_cn: 代码探索智能体
 description: >-
   Fast agent specialized for exploring codebases. Use this when you need to

@@ -588,3 +588,44 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
         await call_task
 
     assert provider_error_waited_for_delegate is True
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+async def test_model_timing_closes_on_every_stream_exit(monkeypatch, outcome):
+    runner = _make_runner("ses_model_timing")
+    assistant_msg = SimpleNamespace(id="msg_model_timing")
+    saved = []
+    now = [1.0]
+
+    async def store(_session, _message, part):
+        saved.append(part.model_dump(mode="json"))
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(runner_mod.Message, "store_part", store)
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    monkeypatch.setattr("flocks.session.streaming.model_activity.time.time", lambda: now[0])
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            assert saved[0]["time"]["start"] == 1000  # Before first response.
+            for _ in range(100):
+                yield SimpleNamespace(delta="a", reasoning=None, tool_calls=None)
+            now[0] = 11.0
+            if outcome == "error":
+                raise RuntimeError("provider failed")
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+
+    call = runner._call_llm(
+        provider=Provider(), messages=[ChatMessage(role="user", content="test")],
+        tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=assistant_msg,
+    )
+    if outcome == "success":
+        await call
+    else:
+        with pytest.raises(RuntimeError if outcome == "error" else asyncio.CancelledError):
+            await call
+    assert len(saved) == 2  # No per-token writes.
+    assert saved[-1]["time"]["end"] == 11000
+    assert saved[-1]["id"] == saved[0]["id"]

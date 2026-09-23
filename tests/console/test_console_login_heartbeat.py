@@ -321,3 +321,18 @@ def test_report_pending_pro_bundle_downgrade_receipt_posts_and_deletes(tmp_path,
     assert payload["license_id"] == "lic_downgrade_pending"
     assert payload["install_result"] == "downgraded"
     assert payload["runtime_edition"] == "oss"
+
+
+def test_heartbeat_payload_omits_channel_unless_pinned(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_UPDATE_CHANNEL", raising=False)
+    monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.9.14"))
+    session = {"console_session_token": "cs", "fingerprint": "fp", "install_id": "inst"}
+
+    assert "channel" not in ConsoleLoginService.heartbeat_payload(session)
+    assert ConsoleLoginService.update_channel() == ""
+
+    monkeypatch.setenv("FLOCKS_UPDATE_CHANNEL", " flockspro-offline-2026.9.14 ")
+    payload = ConsoleLoginService.heartbeat_payload(session)
+    assert payload["channel"] == "flockspro-offline-2026.9.14"
+    assert payload["edition"] == "oss"

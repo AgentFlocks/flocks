@@ -11,6 +11,7 @@ from flocks.updater.models import VersionInfo, UpdateProgress, UpdateStage
 from flocks.updater.updater import (
     build_updated_frontend,
     check_update,
+    describe_pro_bundle,
     get_current_version,
     get_latest_release,
     install_or_repair_source,
@@ -27,6 +28,7 @@ __all__ = [
     "UpdateStage",
     "build_updated_frontend",
     "check_update",
+    "describe_pro_bundle",
     "get_current_version",
     "get_latest_release",
     "install_or_repair_source",

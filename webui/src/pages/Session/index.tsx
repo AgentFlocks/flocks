@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
+import { memo, useContext, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   Plus, Trash2, Archive,
   ChevronDown, ChevronLeft, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
@@ -9,12 +9,17 @@ import {
   Hammer, ClipboardList, Target, UserRound, UsersRound,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
+import { useLocation, useNavigate, useSearchParams, useParams } from 'react-router-dom';
+import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
+import { sessionPath } from '@/utils/sessionUrl';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
+import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionContextPanel from './SessionContextPanel';
+import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import { useSSE } from '@/hooks/useSSE';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
@@ -22,7 +27,7 @@ import SuiteInstallProgressPanel, {
   failSuiteInstallProgress,
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
-import { sessionApi } from '@/api/session';
+import { sessionApi, type SessionContextFile, type SessionContextSnapshot } from '@/api/session';
 import {
   flocksproPolicyApi,
   isSessionExecutionSettingsUnsupported,
@@ -44,13 +49,14 @@ import {
 } from '@/hooks/useChatModelResources';
 import client, { getApiBase } from '@/api/client';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
-import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
+import { buildPromptParts, type FilePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import type { Message, ModelDefinitionV2, Session } from '@/types';
 import { createMessageId } from '@/utils/messageId';
+import { extractErrorMessage } from '@/utils/error';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   DEFAULT_SESSION_EXECUTION_MODE,
@@ -655,6 +661,64 @@ function SessionChatSkeleton() {
   );
 }
 
+function mergeSessionContext(
+  current: SessionContextSnapshot | null,
+  incoming: SessionContextSnapshot,
+  older: boolean,
+): SessionContextSnapshot {
+  const newest = older && current ? current : incoming;
+  const previous = older ? incoming : current;
+  const incomingIDs = new Set(incoming.messageIDs);
+  const incomingFiles = [...incoming.outputs, ...incoming.contextFiles];
+  // A fetched page replaces descriptors for its messages, including deletions.
+  // A complete head is authoritative for the whole Session, even when empty.
+  const retainedFiles = current && (older || incoming.hasMore)
+    ? [...current.outputs, ...current.contextFiles].filter((file) => !incomingIDs.has(file.sourceMessageID))
+    : [];
+  const filesByKey = new Map<string, SessionContextFile>();
+  for (const file of (older ? [...retainedFiles, ...incomingFiles] : [...incomingFiles, ...retainedFiles])) {
+    const key = file.fileKey || file.resourceID;
+    const existing = filesByKey.get(key);
+    // A page filling a gap can be newer than retained historical descriptors.
+    if (!existing || (
+      typeof file.createdAt === 'number' && typeof existing.createdAt === 'number'
+      && file.createdAt > existing.createdAt
+    )) filesByKey.set(key, file);
+  }
+  const files = [...filesByKey.values()];
+  const outputs = files.filter((file) => file.section === 'outputs');
+  const contextFiles = files.filter((file) => file.section === 'context');
+  const progressSource = (newest.progressKnown ?? newest.progress.length > 0) ? newest : previous;
+  const progress = progressSource?.progress ?? [];
+  const progressKnown = progressSource?.progressKnown ?? progress.length > 0;
+  const progressCount = Number(progress.length > 0);
+  const skills = [...new Map([
+    ...(previous?.skills ?? []).map((skill) => [skill.name, skill] as const),
+    ...newest.skills.map((skill) => [skill.name, skill] as const),
+  ]).values()];
+  // Retain the old boundary only for an overlapping partial head; otherwise
+  // use the fetched page's boundary to fill gaps or finish a complete refresh.
+  const overlapsHead = current?.messageIDs?.some((id) => incomingIDs.has(id));
+  const pagination = older || !current || !incoming.hasMore || !overlapsHead ? incoming : current;
+  return {
+    ...newest,
+    outputs,
+    contextFiles,
+    progress,
+    progressKnown,
+    skills,
+    hasMore: pagination.hasMore,
+    nextBefore: pagination.nextBefore ?? null,
+    counts: {
+      total: outputs.length + contextFiles.length + newest.roots.length + progressCount,
+      outputs: outputs.length,
+      contextFiles: contextFiles.length,
+      roots: newest.roots.length,
+      progress: progressCount,
+    },
+  };
+}
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const { user } = useAuth();
@@ -663,8 +727,44 @@ export default function SessionPage() {
   const projectsSectionCollapsedStorageKey = `flocks:sessions:projects-section-collapsed:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const { sessionId: routeSessionId } = useParams();
+  const selectedSessionId = routeSessionId || searchParams.get('session') || null;
+  const navigationRef = useRef({ key: location.key, sessionId: selectedSessionId });
+  navigationRef.current = { key: location.key, sessionId: selectedSessionId };
+  const mountedRef = useRef(false);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // Once this page leaves the route, its pending mutations may finish,
+      // but must not navigate or overwrite the next page's selection.
+      mountedRef.current = false;
+    };
+  }, []);
+  // Inside the layout this page lives in a keep-alive pane: switching tabs
+  // hides it instead of unmounting it, and its location stays pinned, so the
+  // unmount / location-key guards above never fire. A hidden pane must not
+  // navigate either, or a finishing create/archive would drag the whole app
+  // back to the session it belongs to.
+  const paneActive = useContext(PaneActiveContext);
+  const paneActiveRef = useRef(paneActive);
+  paneActiveRef.current = paneActive;
+  const restoreAttemptRef = useRef<string | null>(null);
+  const legacyNavigationRef = useRef<string | null>(null);
+  const previousActionSessionRef = useRef(selectedSessionId);
+  const [sessionLoadError, setSessionLoadError] = useState<{ sessionId: string; kind: 'unavailable' | 'forbidden' | 'failed' } | null>(null);
+  const [sessionLoadAttempt, setSessionLoadAttempt] = useState(0);
+  const [pendingInitialSessionId, setPendingInitialSessionId] = useState<string | null>(null);
+  const selectSession = useCallback((id: string | null, replace = false) => {
+    if (!mountedRef.current || !paneActiveRef.current) return;
+    if (!id) writeLastSelectedSessionId(null);
+    if (id && navigationRef.current.sessionId === id) return;
+    navigate(id ? sessionPath(id) : '/sessions', {
+      replace,
+      state: id ? null : { skipLastSelectedSessionRestore: true },
+    });
+  }, [navigate]);
+  const legacyNavigationPending = Boolean(selectedSessionId) && (searchParams.has('session') || searchParams.has('message') || searchParams.has('display'));
   const [pendingFocusMessageId, setPendingFocusMessageId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
@@ -678,6 +778,7 @@ export default function SessionPage() {
     () => readSessionExecutionMode(null),
   );
   const [showExecutionModeOptions, setShowExecutionModeOptions] = useState(false);
+  const executionModeSelectorRef = useRef<HTMLDivElement>(null);
   const executionModeHandoffRef = useRef<{
     sessionId: string;
     mode: SessionExecutionMode;
@@ -686,8 +787,8 @@ export default function SessionPage() {
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
-  const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
   const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
+  const permissionModeSelectorRef = useRef<HTMLDivElement>(null);
   const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
   const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
@@ -708,6 +809,30 @@ export default function SessionPage() {
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
   const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
+  const [contextPanelOpen, setContextPanelOpen] = useState(false);
+  const [contextPanelWidth, setContextPanelWidth] = useState(() => getInitialSidePanelWidth());
+  const [contextSnapshot, setContextSnapshot] = useState<SessionContextSnapshot | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextLoadingMore, setContextLoadingMore] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [contextResetVersion, setContextResetVersion] = useState(0);
+  const contextScope = useMemo(() => ({
+    sessionId: selectedSessionId,
+    open: contextPanelOpen,
+    resetVersion: contextResetVersion,
+    active: false,
+    skillSignatures: new Map<string, string>(),
+  }), [selectedSessionId, contextPanelOpen, contextResetVersion]);
+  const contextScopeRef = useRef(contextScope);
+  contextScopeRef.current = contextScope;
+  const contextSnapshotRef = useRef<SessionContextSnapshot | null>(null);
+  const contextFlightRef = useRef<{
+    scope: typeof contextScope;
+    controller: AbortController;
+    dirty: boolean;
+    promise: Promise<void>;
+  } | null>(null);
+  const [requestedContextResource, setRequestedContextResource] = useState<{ sessionId: string | null; resourceID: string } | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -756,20 +881,16 @@ export default function SessionPage() {
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
-  const updateModelMenuLeftOffset = useCallback(() => {
-    const selector = modelSelectorRef.current;
-    if (!selector) return;
-    setModelMenuLeftOffset(getAnchoredMenuLeftOffset(
-      selector.getBoundingClientRect().left,
-      window.innerWidth,
-    ));
-  }, []);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
   const folderBrowserRequestIdRef = useRef(0);
   const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  const contextRefetchTimerRef = useRef<number | null>(null);
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  selectedSessionIdRef.current = selectedSessionId;
+  const previousSseStatusRef = useRef<SSEConnectionStatus | null>(null);
   const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
   const composerResourcesLoadedRef = useRef(false);
@@ -931,8 +1052,9 @@ export default function SessionPage() {
   );
   const selectedSession = listedSelectedSession
     ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
-  const activeChatSessionId = selectedSession ? selectedSessionId : null;
-  const resolvingSelectedSession = Boolean(selectedSessionId && !selectedSession);
+  const activeSessionError = sessionLoadError?.sessionId === selectedSessionId ? sessionLoadError : null;
+  const activeChatSessionId = selectedSession && !activeSessionError ? selectedSessionId : null;
+  const resolvingSelectedSession = legacyNavigationPending || Boolean(selectedSessionId && !selectedSession && !activeSessionError);
   const pinnedModelKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
     ? makeModelKey(selectedSession.provider, selectedSession.model)
     : null;
@@ -1159,6 +1281,76 @@ export default function SessionPage() {
     }
   }, []);
 
+  const fetchSessionContext = useCallback((older = false): Promise<void> => {
+    const { sessionId, open } = contextScope;
+    // A stale callback must not invalidate another session, including A -> B -> A.
+    if (contextScopeRef.current !== contextScope || !contextScope.active || !sessionId || !open) return Promise.resolve();
+    if (!older && contextRefetchTimerRef.current !== null) {
+      window.clearTimeout(contextRefetchTimerRef.current);
+      contextRefetchTimerRef.current = null;
+    }
+    const existing = contextFlightRef.current;
+    if (existing?.scope === contextScope) {
+      if (!older) existing.dirty = true;
+      return existing.promise;
+    }
+    const snapshot = contextSnapshotRef.current;
+    let before = older ? snapshot?.nextBefore : undefined;
+    if (older && (!snapshot?.hasMore || !before)) return Promise.resolve();
+    const flight = {
+      scope: contextScope,
+      controller: new AbortController(),
+      dirty: false,
+      promise: Promise.resolve(),
+    };
+    const isCurrent = () => contextScopeRef.current === contextScope
+      && contextFlightRef.current === flight && !flight.controller.signal.aborted;
+    contextFlightRef.current = flight;
+    setContextLoading(true);
+    setContextLoadingMore(older);
+    flight.promise = (async () => {
+      try {
+        do {
+          flight.dirty = false;
+          try {
+            const page = await sessionApi.getContext(sessionId, before ? { before } : {}, flight.controller.signal);
+            if (!isCurrent()) return;
+            const merged = mergeSessionContext(contextSnapshotRef.current, page, Boolean(before));
+            contextSnapshotRef.current = merged;
+            setContextSnapshot(merged);
+            setContextError(null);
+          } catch (error) {
+            if (!isCurrent()) return;
+            setContextError(extractErrorMessage(error, 'Failed to load Session Context'));
+          }
+          // All refreshes received during this flight coalesce into one trailing head read.
+          before = undefined;
+          if (isCurrent()) setContextLoadingMore(false);
+        } while (isCurrent() && flight.dirty);
+      } finally {
+        if (isCurrent()) {
+          contextFlightRef.current = null;
+          setContextLoading(false);
+          setContextLoadingMore(false);
+        }
+      }
+    })();
+    return flight.promise;
+  }, [contextScope]);
+
+  const scheduleContextRefetch = useCallback(() => {
+    if (contextScopeRef.current !== contextScope || !contextScope.active || !contextScope.open || !contextScope.sessionId) return;
+    if (contextFlightRef.current?.scope === contextScope) {
+      void fetchSessionContext();
+      return;
+    }
+    if (contextRefetchTimerRef.current !== null) return;
+    contextRefetchTimerRef.current = window.setTimeout(() => {
+      contextRefetchTimerRef.current = null;
+      void fetchSessionContext();
+    }, 250);
+  }, [contextScope, fetchSessionContext]);
+
   const scheduleSessionListRefetch = useCallback(() => {
     if (sessionUpdateRefetchTimerRef.current !== null) return;
     sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
@@ -1175,9 +1367,77 @@ export default function SessionPage() {
       window.clearTimeout(sessionUpdateRefetchTimerRef.current);
       sessionUpdateRefetchTimerRef.current = null;
     }
+    if (contextRefetchTimerRef.current !== null) {
+      window.clearTimeout(contextRefetchTimerRef.current);
+      contextRefetchTimerRef.current = null;
+    }
   }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    const eventSessionId = event.properties?.sessionID
+      || event.properties?.part?.sessionID
+      || event.properties?.info?.sessionID;
+    if (
+      event.type === 'session.cleared'
+      && contextScopeRef.current === contextScope
+      && contextScope.active
+      && eventSessionId === contextScope.sessionId
+    ) {
+      // Clearing history invalidates every message-backed resource, even when
+      // the panel is closed. Stop old reads before starting a fresh scope.
+      contextScope.active = false;
+      if (contextRefetchTimerRef.current !== null) {
+        window.clearTimeout(contextRefetchTimerRef.current);
+        contextRefetchTimerRef.current = null;
+      }
+      contextFlightRef.current?.controller.abort();
+      contextFlightRef.current = null;
+      contextScope.skillSignatures.clear();
+      contextSnapshotRef.current = null;
+      setContextSnapshot(null);
+      setContextError(null);
+      setRequestedContextResource(null);
+      // Remount the panel to cancel previews/folder navigation and clear local
+      // errors. The scope effect reloads retained roots if the panel is open.
+      setContextResetVersion((version) => version + 1);
+      return;
+    }
+    if (
+      contextScopeRef.current === contextScope
+      && contextScope.active
+      && contextScope.open
+      && eventSessionId === contextScope.sessionId
+    ) {
+      const updatedPart = event.properties?.part;
+      let contextPartUpdated = event.type === 'message.part.updated' && (
+        updatedPart?.type === 'file'
+        || (
+          updatedPart?.type === 'tool'
+          && updatedPart?.tool === 'write'
+          && (updatedPart?.state?.status === 'completed' || updatedPart?.state?.status === 'error')
+        )
+      );
+      if (
+        event.type === 'message.part.updated'
+        && updatedPart?.type === 'tool'
+        && (updatedPart.tool === 'skill_load' || updatedPart.tool === 'load_skill')
+        && ['pending', 'running', 'completed', 'error'].includes(updatedPart.state?.status)
+      ) {
+        const { input, status, error } = updatedPart.state;
+        const partID = updatedPart.id || event.properties?.partID;
+        const key = JSON.stringify([updatedPart.messageID || event.properties?.messageID, partID]);
+        const signature = JSON.stringify([input?.name || input?.skill || null, status, error ?? null]);
+        // Only descriptor changes matter, not streamed output. Keep this cache
+        // inside the open/session scope so closed, foreign, or stale events cannot seed it.
+        if (!partID || contextScope.skillSignatures.get(key) !== signature) {
+          if (partID) contextScope.skillSignatures.set(key, signature);
+          contextPartUpdated = true;
+        }
+      }
+      if (contextPartUpdated || event.type === 'todo.updated' || event.type === 'session.context.updated') {
+        scheduleContextRefetch();
+      }
+    }
     if (
       event.type === 'session.execution_mode.changed'
       && event.properties?.sessionID === selectedSessionId
@@ -1211,12 +1471,56 @@ export default function SessionPage() {
       scheduleSessionListRefetch();
     }
   }, [
+    contextScope,
+    scheduleContextRefetch,
     scheduleSessionListRefetch,
     selectedSessionId,
     t,
     toast,
     updateSessionTitle,
   ]);
+
+  useEffect(() => {
+    // Opening the panel must not consume the resource ID set by the message card.
+    setRequestedContextResource(null);
+    contextSnapshotRef.current = null;
+    setContextSnapshot(null);
+    setContextError(null);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    contextScope.active = true;
+    setContextLoading(false);
+    setContextLoadingMore(false);
+    if (contextScope.open && contextScope.sessionId) void fetchSessionContext();
+    return () => {
+      contextScope.active = false;
+      contextScope.skillSignatures.clear();
+      if (contextRefetchTimerRef.current !== null) {
+        window.clearTimeout(contextRefetchTimerRef.current);
+        contextRefetchTimerRef.current = null;
+      }
+      const flight = contextFlightRef.current;
+      if (flight?.scope === contextScope) {
+        flight.controller.abort();
+        contextFlightRef.current = null;
+      }
+    };
+  }, [contextScope, fetchSessionContext]);
+
+  useEffect(() => {
+    const previous = previousSseStatusRef.current;
+    previousSseStatusRef.current = sseStatus;
+    if (
+      contextPanelOpen
+      && previous
+      && previous !== 'connected'
+      && sseStatus === 'connected'
+      && selectedSessionId
+    ) {
+      void fetchSessionContext();
+    }
+  }, [contextPanelOpen, fetchSessionContext, selectedSessionId, sseStatus]);
 
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);
@@ -1278,48 +1582,55 @@ export default function SessionPage() {
     return () => window.removeEventListener('click', closeMenu);
   }, [openProjectMenuId]);
 
-  // Keep the selected session in sync with URL query params (e.g. onboarding
-  // or other in-app navigation to `/sessions?session=...`). Clear the params
-  // after consuming them so refreshes don't re-send the initial message.
+  // A pending action belongs only to its original session. Clear it before
+  // consuming a new legacy navigation; canonicalization keeps the same ID.
   useEffect(() => {
-    const sessionParam = searchParams.get('session');
-    const messageParam = searchParams.get('message');
-    const focusMessageParam = searchParams.get('focusMessage');
-    const displayParam = searchParams.get('display');
-    if (!sessionParam) return;
-
-    if (sessionParam !== selectedSessionId) {
-      setSelectedSessionId(sessionParam);
-    }
-    if (sessionParam) {
-      if (messageParam) {
-        setPendingInitialMessage(messageParam);
-        setPendingInitialDisplayText(displayParam ? buildInstructionDisplayText(displayParam) : null);
-      } else {
-        setPendingInitialMessage(null);
-        setPendingInitialDisplayText(null);
-      }
-      setPendingFocusMessageId(focusMessageParam || null);
-      setSearchParams({}, { replace: true });
-    }
-  }, [searchParams, selectedSessionId, setSearchParams]);
+    if (previousActionSessionRef.current === selectedSessionId) return;
+    previousActionSessionRef.current = selectedSessionId;
+    setPendingInitialMessage(null);
+    setPendingInitialDisplayText(null);
+    setPendingInitialSessionId(null);
+  }, [selectedSessionId]);
 
   useEffect(() => {
-    if (loadingSessions) return;
+    if (!selectedSessionId || !legacyNavigationPending || legacyNavigationRef.current === location.key) return;
+    legacyNavigationRef.current = location.key;
+    const legacyId = searchParams.get('session');
+    const conflictingTarget = Boolean(routeSessionId && legacyId && routeSessionId !== legacyId);
+    const message = searchParams.get('message');
+    if (message && !conflictingTarget) {
+      setPendingInitialSessionId(selectedSessionId);
+      setPendingInitialMessage(message);
+      const display = searchParams.get('display');
+      setPendingInitialDisplayText(display ? buildInstructionDisplayText(display) : null);
+    }
+    if (!message || conflictingTarget) {
+      setPendingInitialSessionId(null);
+      setPendingInitialMessage(null);
+      setPendingInitialDisplayText(null);
+    }
+    if (conflictingTarget) toast.error(t('linkTargetMismatch'));
+    const next = new URLSearchParams(searchParams);
+    next.delete('session');
+    next.delete('message');
+    next.delete('display');
+    navigate({ pathname: sessionPath(selectedSessionId), search: next.toString(), hash: location.hash }, { replace: true });
+  }, [legacyNavigationPending, location.key, location.hash, navigate, routeSessionId, searchParams, selectedSessionId, t, toast]);
 
+  useEffect(() => {
+    setPendingFocusMessageId(searchParams.get('focusMessage'));
+  }, [selectedSessionId, searchParams]);
+
+  useEffect(() => {
+    // A hidden pane waits: the restore runs once the tab is back on screen.
+    if (!paneActive || loadingSessions || restoreAttemptRef.current === location.key) return;
+    restoreAttemptRef.current = location.key;
     const alreadyVisited = hasVisitedSessionPage();
     markSessionPageVisited();
-
-    if (selectedSessionId) return;
-    if (searchParams.get('session')) return;
-    if (!alreadyVisited) return;
-    if (shouldSkipLastSelectedSessionRestore(location.state)) return;
-
+    if (selectedSessionId || !alreadyVisited || shouldSkipLastSelectedSessionRestore(location.state)) return;
     const lastSelectedSessionId = readLastSelectedSessionId();
-    if (lastSelectedSessionId) {
-      setSelectedSessionId(lastSelectedSessionId);
-    }
-  }, [loadingSessions, location.state, searchParams, selectedSessionId]);
+    if (lastSelectedSessionId) selectSession(lastSelectedSessionId, true);
+  }, [loadingSessions, location.key, location.state, paneActive, selectedSessionId, selectSession]);
 
   useEffect(() => {
     if (!selectedSessionId || selectedSession?.id !== selectedSessionId) return;
@@ -1337,38 +1648,40 @@ export default function SessionPage() {
   }, [selectedSessionId]);
 
   useEffect(() => {
-    if (!selectedSessionId) {
-      setSelectedSessionFallback(null);
-      return;
-    }
+    // Do not reuse a list-external detail after leaving its route (it may
+    // have been archived or its sharing permissions may have changed).
+    setSelectedSessionFallback(current => current?.id === selectedSessionId ? current : null);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    setSessionLoadError(null);
+    // Keep a newly created session cached while React commits navigation.
+    // Clearing it on the old route can discard the creation handoff.
+    if (!selectedSessionId) return;
     if (listedSelectedSession) {
-      setSelectedSessionFallback(null);
+      if (selectedSessionFallback?.id === selectedSessionId) setSelectedSessionFallback(null);
       return;
     }
     if (selectedSessionFallback?.id === selectedSessionId) return;
-    if (loadingSessions) return;
-
+    // Direct links must not wait for a failed/slow sidebar request.
     let cancelled = false;
     sessionApi.get(selectedSessionId)
       .then((session) => {
         if (cancelled) return;
+        if (session.id !== selectedSessionId) throw new Error('Unexpected session response');
         setSelectedSessionFallback(session as unknown as Session);
       })
       .catch((err: any) => {
         if (cancelled) return;
-        const statusCode = err?.response?.status ?? err?.status;
-        if (statusCode === 403 || statusCode === 404) {
-          setSelectedSessionId((current) => (current === selectedSessionId ? null : current));
-          setSelectedSessionFallback(null);
-          setPendingInitialMessage(null);
-          setPendingInitialDisplayText(null);
-          writeLastSelectedSessionId(null);
-        }
+        const status = err?.response?.status ?? err?.status;
+        setSelectedSessionFallback(null);
+        setSessionLoadError({ sessionId: selectedSessionId, kind: status === 403 ? 'forbidden' : status === 404 ? 'unavailable' : 'failed' });
+        setPendingInitialMessage(null);
+        setPendingInitialDisplayText(null);
+        if (status === 403 || status === 404) writeLastSelectedSessionId(null);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [listedSelectedSession, loadingSessions, selectedSessionFallback?.id, selectedSessionId]);
+    return () => { cancelled = true; };
+  }, [listedSelectedSession, selectedSessionId, selectedSessionFallback?.id, sessionLoadAttempt]);
 
   // Close agent dropdown on outside click
   useEffect(() => {
@@ -1412,13 +1725,6 @@ export default function SessionPage() {
 
   useEffect(() => {
     if (!showModelOptions) return;
-    updateModelMenuLeftOffset();
-    window.addEventListener('resize', updateModelMenuLeftOffset);
-    return () => window.removeEventListener('resize', updateModelMenuLeftOffset);
-  }, [showModelOptions, updateModelMenuLeftOffset]);
-
-  useEffect(() => {
-    if (!showModelOptions) return;
     const handle = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest('[data-model-selector]')) setShowModelOptions(false);
@@ -1453,8 +1759,10 @@ export default function SessionPage() {
       setSessionExecutionRevision(null);
       return;
     }
+    let cancelled = false;
     void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
       .then((result) => {
+        if (cancelled) return;
         setSessionPermissionMode(result.permissionMode);
         setSessionRuntimeMode(result.runtimeMode);
         setSessionNetworkMode(result.networkMode);
@@ -1464,6 +1772,7 @@ export default function SessionPage() {
         setSessionExecutionRevision(result.revision);
       })
       .catch(() => {
+        if (cancelled) return;
         setSessionPermissionMode(null);
         setSessionRuntimeMode(null);
         setSessionNetworkMode(null);
@@ -1472,6 +1781,7 @@ export default function SessionPage() {
         setSessionEntry('unknown');
         setSessionExecutionRevision(null);
       });
+    return () => { cancelled = true; };
   }, [proPolicyEnabled, selectedSessionId]);
 
   const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
@@ -1736,25 +2046,58 @@ export default function SessionPage() {
     );
   }, [selectedSessionId]);
 
+  const handleOpenContextFile = useCallback((resourceId: string) => {
+    setRequestedContextResource({ sessionId: selectedSessionIdRef.current, resourceID: resourceId });
+    setContextPanelOpen(true);
+  }, []);
+
+  const handleResizeContextPanel = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (window.innerWidth < 1024) return;
+    const startX = event.clientX;
+    const startWidth = contextPanelWidth;
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const onMove = (moveEvent: PointerEvent) => {
+      const next = startWidth + startX - moveEvent.clientX;
+      setContextPanelWidth(Math.min(getMaxSidePanelWidth(), Math.max(SIDE_PANEL_MIN_WIDTH, next)));
+    };
+    const onEnd = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd, { once: true });
+  }, [contextPanelWidth]);
+
   const handleStartNewSession = useCallback(() => {
     writeLastSelectedSessionId(null);
-    setSelectedSessionId(null);
+    selectSession(null);
     setSelectedSessionFallback(null);
     setPendingInitialMessage(null);
     setPendingInitialDisplayText(null);
+    setContextPanelOpen(false);
+    setContextSnapshot(null);
+    setRequestedContextResource(null);
     setSelectedAgent('rex');
-    setSelectedModelKey(null);
+    // Starting another blank draft keeps the session ID null, so the model
+    // initialization effect will not run again. Restore the default explicitly.
+    setSelectedModelKey(resolvedDefaultModelInitialized ? defaultSelectionKey : null);
     setSseStatus('disconnected');
     setShowAgentOptions(false);
     setShowModelOptions(false);
     setShowProjectOptions(false);
-  }, []);
+  }, [defaultSelectionKey, resolvedDefaultModelInitialized, selectSession]);
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
     const targetGroupId = projectIdOverride ?? selectedProjectId ?? TASK_SESSION_GROUP_ID;
     const projectID = targetGroupId === TASK_SESSION_GROUP_ID ? null : targetGroupId;
     const carryAutoSelection = !selectedSessionId && selectedModelAuto;
+    const navigationKey = navigationRef.current.key;
     setCreating(true);
     try {
       const response = await client.post('/api/session', {
@@ -1764,6 +2107,7 @@ export default function SessionPage() {
       });
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       setSelectedProjectId(targetGroupId);
       setCollapsedProjectIds(prev => {
@@ -1784,13 +2128,13 @@ export default function SessionPage() {
       setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
       setShowExecutionModeOptions(false);
       setSelectedModelKey(carryAutoSelection ? AUTO_MODEL_KEY : null);
-      setSelectedSessionId(response.data.id);
+      selectSession(response.data.id);
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     } finally {
       setCreating(false);
     }
-  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
+  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t, selectSession]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -1837,12 +2181,13 @@ export default function SessionPage() {
 
   const handleCreateAndSend = useCallback(async (
     text: string,
-    imageParts?: ImagePartData[],
+    fileParts?: FilePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
     executionModeOverride?: SessionExecutionMode,
   ) => {
+    const navigationKey = navigationRef.current.key;
     try {
       const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
@@ -1862,18 +2207,18 @@ export default function SessionPage() {
           ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
         });
       }
-      imageParts?.forEach((image, index) => {
+      fileParts?.forEach((file, index) => {
         optimisticParts.push({
-          id: `temp-${messageId}-img-${index}`,
+          id: file.id || `temp-${messageId}-file-${index}`,
           type: 'file',
-          url: image.url,
-          mime: image.mime,
-          filename: image.filename,
+          url: file.url,
+          mime: file.mime,
+          filename: file.filename,
         });
       });
 
       const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
+        parts: buildPromptParts(text, fileParts),
         messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
@@ -1888,13 +2233,15 @@ export default function SessionPage() {
             runtimeMode: draftRuntimeMode,
             networkMode: draftNetworkMode,
           });
-          setSessionPermissionMode(updated.permissionMode);
-          setSessionRuntimeMode(updated.runtimeMode);
-          setSessionNetworkMode(updated.networkMode);
-          setSessionNetworkModeDefault(updated.networkModeDefault);
-          setSessionNetworkModeOverridden(updated.networkModeOverridden);
-          setSessionEntry(updated.entry);
-          setSessionExecutionRevision(updated.revision);
+          if (mountedRef.current && navigationRef.current.key === navigationKey) {
+            setSessionPermissionMode(updated.permissionMode);
+            setSessionRuntimeMode(updated.runtimeMode);
+            setSessionNetworkMode(updated.networkMode);
+            setSessionNetworkModeDefault(updated.networkModeDefault);
+            setSessionNetworkModeOverridden(updated.networkModeOverridden);
+            setSessionEntry(updated.entry);
+            setSessionExecutionRevision(updated.revision);
+          }
         } catch (error: unknown) {
           if (isSessionExecutionSettingsUnsupported(error)) {
             // Backward compatibility: older backends may not expose execution-settings yet.
@@ -1910,6 +2257,7 @@ export default function SessionPage() {
 
       addSession(response.data);
       void fetchProjects(undefined, searchQuery).catch(() => {});
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1938,7 +2286,7 @@ export default function SessionPage() {
         timestamp: Date.now(),
         agent: effectiveAgent,
       });
-      setSelectedSessionId(newSessionId);
+      selectSession(newSessionId);
       if (effectiveExecutionMode === 'goal') {
         setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
         writeSessionExecutionMode(
@@ -1951,6 +2299,7 @@ export default function SessionPage() {
       throw err;
     }
   }, [
+    selectSession,
     addSession,
     fetchProjects,
     searchQuery,
@@ -2042,7 +2391,8 @@ export default function SessionPage() {
     }
     // The mutation is complete. A secondary project-count refresh must not
     // turn a successful archive into an error or re-enable the removed row.
-    if (selectedSessionId === sessionId) setSelectedSessionId(null);
+    if (navigationRef.current.sessionId === sessionId) selectSession(null, true);
+    setSelectedSessionFallback(current => current?.id === sessionId ? null : current);
     removeSession(sessionId);
     toast.success(t('archiveSuccess'));
     try {
@@ -2050,7 +2400,7 @@ export default function SessionPage() {
     } catch {
       // SSE/reconnect refreshes will reconcile project counts later.
     }
-  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t]);
+  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t, selectSession]);
 
   const handleStartRename = useCallback((sessionId: string, currentTitle: string) => {
     setOpenMenuSessionId(null);
@@ -2398,9 +2748,9 @@ export default function SessionPage() {
     if (selectMode) {
       handleToggleCheck(sessionId);
     } else {
-      setSelectedSessionId(sessionId);
+      selectSession(sessionId);
     }
-  }, [handleToggleCheck, selectMode]);
+  }, [handleToggleCheck, selectMode, selectSession]);
   const handleCloseSessionSearch = useCallback(() => {
     setSessionSearchOpen(false);
     setSearchQuery('');
@@ -2447,9 +2797,10 @@ export default function SessionPage() {
         }
       }));
       if (succeeded.length > 0) {
+        setSelectedSessionFallback(current => current && succeeded.includes(current.id) ? null : current);
         removeSessions(succeeded);
-        if (selectedSessionId && succeeded.includes(selectedSessionId)) {
-          setSelectedSessionId(null);
+        if (navigationRef.current.sessionId && succeeded.includes(navigationRef.current.sessionId)) {
+          selectSession(null, true);
         }
         try {
           await fetchProjects(undefined, searchQuery);
@@ -2467,12 +2818,12 @@ export default function SessionPage() {
     } finally {
       setBatchArchiving(false);
     }
-  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
+  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t, selectSession]);
 
   const renderSessionListItem = (session: Session) => (
     <div
       key={session.id}
-      onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
+      onClick={() => selectMode ? handleToggleCheck(session.id) : selectSession(session.id)}
       className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
         !selectMode && selectedSessionId === session.id
           ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
@@ -3105,13 +3456,49 @@ export default function SessionPage() {
             </h2>
           </div>
 
+          {selectedSessionId && selectedSession && !activeSessionError && (
+            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} />
+          )}
+
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
           )}
+
+          <div className="ml-auto flex items-center">
+            <button
+              type="button"
+              disabled={!activeChatSessionId}
+              onClick={() => setContextPanelOpen((open) => !open)}
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                contextPanelOpen
+                  ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200'
+                  : 'text-[#7b8087] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white'
+              }`}
+              aria-label={t('context.title')}
+              title={t('context.title')}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>{t('context.title')}</span>
+              {(contextSnapshot?.counts.total || 0) > 0 && (
+                <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[10px]">
+                  {contextSnapshot!.counts.total}
+                </span>
+              )}
+            </button>
+          </div>
         </header>
 
+        <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Chat — powered by unified SessionChat */}
-        {resolvingSelectedSession ? (
+        {activeSessionError ? (
+          <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
+            <p>{t(`sessionAccess.${activeSessionError.kind}`)}</p>
+            <div className="flex gap-4">
+              <button onClick={() => { setSessionLoadError(null); setSessionLoadAttempt(value => value + 1); }}>{t('sessionAccess.retry')}</button>
+              <button onClick={() => selectSession(null)}>{t('sessionAccess.back')}</button>
+            </div>
+          </div>
+        ) : resolvingSelectedSession ? (
           <SessionChatSkeleton />
         ) : (
           <SessionChat
@@ -3134,11 +3521,13 @@ export default function SessionPage() {
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
           composerTextareaMinHeight={56}
-          initialMessage={pendingInitialMessage}
-          initialDisplayText={pendingInitialDisplayText}
+          initialMessage={pendingInitialSessionId === activeChatSessionId && selectedSession?.canWrite !== false ? pendingInitialMessage : null}
+          initialDisplayText={pendingInitialSessionId === activeChatSessionId ? pendingInitialDisplayText : null}
           initialOptimisticMessage={pendingOptimisticMessage}
           focusMessageId={pendingFocusMessageId}
           onFocusMessageConsumed={() => setPendingFocusMessageId(null)}
+          onOpenContextFile={handleOpenContextFile}
+          onOpenContext={() => setContextPanelOpen(true)}
           onInitialMessageConsumed={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
@@ -3356,7 +3745,7 @@ export default function SessionPage() {
           )}
           toolbarSlot={
             <div className="flex min-w-0 items-center gap-0.5">
-              <div className="relative" data-execution-mode-selector>
+              <div ref={executionModeSelectorRef} className="relative" data-execution-mode-selector>
                 <button
                   type="button"
                   onClick={() => {
@@ -3378,58 +3767,32 @@ export default function SessionPage() {
                   <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showExecutionModeOptions && (
-                  <div
+                  <SessionComposerMenu
+                    anchorRef={executionModeSelectorRef}
+                    data-execution-mode-selector
                     role="menu"
                     aria-label={t('executionMode.title')}
-                    className="absolute bottom-full left-0 z-50 mb-2 w-64 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+                    header={(
+                      <SessionComposerMenuHeader
+                        title={t('executionMode.title')}
+                        hint={t('executionMode.hint')}
+                      />
+                    )}
+                    contentClassName="space-y-0.5 p-1.5"
                   >
-                    <div className="border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
-                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">
-                        {t('executionMode.title')}
-                      </div>
-                      <div className="mt-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">
-                        {t('executionMode.hint')}
-                      </div>
-                    </div>
-                    <div className="space-y-0.5 p-1.5">
-                      {SESSION_EXECUTION_MODES.map((mode) => {
-                        const selected = selectedExecutionMode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            onClick={() => handleSelectExecutionMode(mode)}
-                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                              selected
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                            }`}
-                          >
-                            <div className="flex w-20 shrink-0 items-center gap-1.5 text-sm font-medium">
-                              <ExecutionModeIcon
-                                mode={mode}
-                                className={`h-3.5 w-3.5 shrink-0 ${
-                                  selected
-                                    ? 'text-zinc-700 dark:text-zinc-100'
-                                    : 'text-zinc-400 dark:text-zinc-500'
-                                }`}
-                              />
-                              <span>{t(`executionMode.options.${mode}.label`)}</span>
-                            </div>
-                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                              selected ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-500 dark:text-zinc-400'
-                            }`}
-                            >
-                              {t(`executionMode.options.${mode}.description`)}
-                            </div>
-                            {selected && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                    {SESSION_EXECUTION_MODES.map((mode) => (
+                      <SessionModeOption
+                        key={mode}
+                        role="menuitemradio"
+                        aria-checked={selectedExecutionMode === mode}
+                        selected={selectedExecutionMode === mode}
+                        label={t(`executionMode.options.${mode}.label`)}
+                        description={t(`executionMode.options.${mode}.description`)}
+                        icon={<ExecutionModeIcon mode={mode} className="h-3.5 w-3.5 shrink-0" />}
+                        onClick={() => handleSelectExecutionMode(mode)}
+                      />
+                    ))}
+                  </SessionComposerMenu>
                 )}
               </div>
               {!activeChatSessionId && (
@@ -3521,7 +3884,6 @@ export default function SessionPage() {
               <button
                 type="button"
                 onClick={() => {
-                  if (!showModelOptions) updateModelMenuLeftOffset();
                   setShowModelOptions(!showModelOptions);
                   setShowExecutionModeOptions(false);
                   setShowProjectOptions(false);
@@ -3546,15 +3908,34 @@ export default function SessionPage() {
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
-                <div
-                  className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
-                  style={{ transform: `translateX(${modelMenuLeftOffset}px)` }}
+                <SessionComposerMenu
+                  anchorRef={modelSelectorRef}
+                  data-model-selector
+                  aria-label={t('modelPicker.title')}
+                  header={(
+                    <SessionComposerMenuHeader
+                      title={t('modelPicker.title')}
+                      hint={t('modelPicker.hint')}
+                    />
+                  )}
+                  contentClassName="p-1.5"
+                  footer={(
+                    <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowModelOptions(false);
+                          setSelectorTooltip(null);
+                          navigate('/models');
+                        }}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                      >
+                        <Plus className="h-3 w-3" />
+                        {t('modelPicker.addModel')}
+                      </button>
+                    </div>
+                  )}
                 >
-                  <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
-                    <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
-                    <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>
-                  </div>
-                  <div className="h-[15.5rem] overflow-y-auto p-1.5">
                     {loadingProviders || loadingEnabledModels ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
                     ) : (
@@ -3563,6 +3944,7 @@ export default function SessionPage() {
                           <button
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
+                            title={`${t('modelPicker.auto')}\n${autoStatusLabel}`}
                             disabled={!canSelectAuto}
                             className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                               selectedModelAuto
@@ -3587,14 +3969,14 @@ export default function SessionPage() {
                               >
                                 <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                               </span>
-                              {selectedModelAuto && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              <Check aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelAuto ? '' : 'invisible'}`} />
                             </div>
                           </button>
                         </div>
                         {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
                           <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
-                            <span className="truncate">{group.providerName}</span>
+                            <span className="min-w-0 truncate" title={group.providerName}>{group.providerName}</span>
                             <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                               {t('modelPicker.count', { count: group.models.length })}
                             </span>
@@ -3605,7 +3987,8 @@ export default function SessionPage() {
                                 key={option.key}
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
-                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
+                                title={`${option.label}\n${option.providerName} / ${option.modelID}\n${option.pricingLabel}\n${option.contextLabel}`}
+                                className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
                                     ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
                                     : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
@@ -3633,7 +4016,7 @@ export default function SessionPage() {
                                       <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                     </span>
                                   </div>
-                                  {selectedModelOption?.key === option.key && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                                  <Check aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelOption?.key === option.key ? '' : 'invisible'}`} />
                                 </div>
                               </button>
                             ))}
@@ -3644,26 +4027,11 @@ export default function SessionPage() {
                         )}
                       </>
                     )}
-                  </div>
-                  <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowModelOptions(false);
-                        setSelectorTooltip(null);
-                        navigate('/models');
-                      }}
-                      className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-                    >
-                      <Plus className="h-3 w-3" />
-                      {t('modelPicker.addModel')}
-                    </button>
-                  </div>
-                </div>
+                </SessionComposerMenu>
               )}
               </div>
               {proPolicyEnabled && (
-                <div className="relative" data-permission-mode-selector>
+                <div ref={permissionModeSelectorRef} className="relative" data-permission-mode-selector>
                   <button
                     type="button"
                     onClick={() => setShowPermissionModeOptions((open) => !open)}
@@ -3677,11 +4045,18 @@ export default function SessionPage() {
                     <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
-                    <div className="absolute bottom-full left-0 z-50 mb-2 w-[520px] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                      <div className="space-y-3 p-2">
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                        <div className="flex items-center justify-between px-1">
-                          <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                    <SessionComposerMenu
+                      anchorRef={permissionModeSelectorRef}
+                      data-permission-mode-selector
+                      aria-label={t('permissionMode.executionControlTitle')}
+                      contentClassName="space-y-3 p-1.5"
+                    >
+                      <section>
+                        <div className="flex min-w-0 items-center justify-between gap-3 px-2.5 py-1.5">
+                          <div
+                            className="min-w-0 truncate text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                            title={t('permissionMode.runtimeTitle', '平台开发模式')}
+                          >
                             {t('permissionMode.runtimeTitle', '平台开发模式')}
                           </div>
                           <button
@@ -3690,108 +4065,71 @@ export default function SessionPage() {
                               setShowPermissionModeOptions(false);
                               navigate('/settings/security-config');
                             }}
-                            className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                            className="shrink-0 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
                           >
                             {t('permissionMode.viewDetails')}
                           </button>
                         </div>
-                        <div className="mt-1 space-y-1">
-                        {runtimeModeOptions.map(({ value: mode, label, description }) => (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => {
-                              void handleRuntimeModeChange(mode);
-                              setShowPermissionModeOptions(false);
-                            }}
-                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                              currentRuntimeMode === mode
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                            }`}
-                          >
-                            <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                              currentRuntimeMode === mode
-                                ? 'text-zinc-700 dark:text-zinc-200'
-                                : 'text-zinc-500 dark:text-zinc-400'
-                            }`}
-                            >
-                              {description}
-                            </div>
-                            {currentRuntimeMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                          </button>
-                        ))}
+                        <div className="space-y-0.5">
+                          {runtimeModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentRuntimeMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handleRuntimeModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
                         </div>
-                        </section>
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.networkTitle', '网络访问模式')}
-                          </div>
-                          <div className="mt-1 space-y-1">
-                            {networkModeOptions.map(({ value: mode, label, description }) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => {
-                                  void handleNetworkModeChange(mode);
-                                  setShowPermissionModeOptions(false);
-                                }}
-                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                                  currentNetworkMode === mode
-                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                                }`}
-                              >
-                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                                  currentNetworkMode === mode
-                                    ? 'text-zinc-700 dark:text-zinc-200'
-                                    : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                                >
-                                  {description}
-                                </div>
-                                {currentNetworkMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                              </button>
-                            ))}
-                          </div>
-                        </section>
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.title')}
-                          </div>
-                          <div className="mt-1 space-y-1">
-                            {permissionModeOptions.map(({ value: mode, label, description }) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => {
-                                  void handlePermissionModeChange(mode);
-                                  setShowPermissionModeOptions(false);
-                                }}
-                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                                  currentPermissionMode === mode
-                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                                }`}
-                              >
-                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                                  currentPermissionMode === mode
-                                    ? 'text-zinc-700 dark:text-zinc-200'
-                                    : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                                >
-                                  {description}
-                                </div>
-                                {currentPermissionMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                              </button>
-                            ))}
-                          </div>
-                        </section>
-                      </div>
-                    </div>
+                      </section>
+                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                        <div
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          title={t('permissionMode.networkTitle', '网络访问模式')}
+                        >
+                          {t('permissionMode.networkTitle', '网络访问模式')}
+                        </div>
+                        <div className="space-y-0.5">
+                          {networkModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentNetworkMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handleNetworkModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                        <div
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          title={t('permissionMode.title')}
+                        >
+                          {t('permissionMode.title')}
+                        </div>
+                        <div className="space-y-0.5">
+                          {permissionModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentPermissionMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handlePermissionModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    </SessionComposerMenu>
                   )}
                 </div>
               )}
@@ -3799,6 +4137,39 @@ export default function SessionPage() {
           }
           />
         )}
+        {contextPanelOpen && activeChatSessionId && (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              onPointerDown={handleResizeContextPanel}
+              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-zinc-200/70 transition-colors hover:bg-violet-300 lg:block dark:bg-zinc-700 dark:hover:bg-violet-500"
+            />
+            <aside
+              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-zinc-200 lg:static lg:z-auto lg:w-[var(--session-context-width)] dark:border-zinc-700"
+              style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
+            >
+              <SessionContextPanel
+                key={`${activeChatSessionId}:${contextResetVersion}`}
+                sessionId={activeChatSessionId}
+                snapshot={contextSnapshot?.sessionID === activeChatSessionId ? contextSnapshot : null}
+                loading={contextLoading}
+                loadingMore={contextLoadingMore}
+                error={contextError}
+                requestedResourceID={requestedContextResource?.sessionId === activeChatSessionId ? requestedContextResource.resourceID : null}
+                onRequestedResourceConsumed={() => setRequestedContextResource(null)}
+                onClose={() => {
+                  setContextPanelOpen(false);
+                  setRequestedContextResource(null);
+                }}
+                onRefresh={() => fetchSessionContext()}
+                onLoadMore={() => fetchSessionContext(true)}
+                onFocusMessage={(messageId) => setPendingFocusMessageId(messageId)}
+              />
+            </aside>
+          </>
+        )}
+        </div>
       </div>
 
       {projectDialogMode && (
@@ -3993,6 +4364,7 @@ export default function SessionPage() {
 
       {selectorTooltip && (
         <div
+          role="tooltip"
           className="pointer-events-none fixed z-[80] w-56 -translate-x-full -translate-y-1/2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-700 shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-xl dark:shadow-black/30"
           style={{ left: selectorTooltip.x, top: selectorTooltip.y }}
         >

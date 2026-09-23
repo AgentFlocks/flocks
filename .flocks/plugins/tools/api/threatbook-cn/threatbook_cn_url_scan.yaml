@@ -1,4 +1,5 @@
 name: threatbook_cn_url_scan
+group: 威胁情报
 description: >
   Submit a URL to ThreatBook for scanning by 11 URL scanning engines and URL/domain blacklists.
   Also analyzes files downloaded from the URL. Use when analyzing suspicious URLs from emails, 

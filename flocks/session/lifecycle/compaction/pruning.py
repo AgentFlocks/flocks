@@ -68,12 +68,8 @@ async def prune(
     pruned = 0
     to_prune = []
     user_turns_seen = 0
-    hit_compacted = False
 
     for msg in reversed(messages):
-        if hit_compacted:
-            break
-
         role = msg.role.value if hasattr(msg.role, 'value') else msg.role
 
         if role == "user":
@@ -102,10 +98,14 @@ async def prune(
                     if user_turns_seen < tool_keep_turns:
                         continue
 
+                    # Already compacted (by an earlier prune, boundary cleanup
+                    # or the runner's per-turn budget).  Runner marks are not
+                    # contiguous with age — a marked part can sit in front of
+                    # older, still-unmarked outputs — so keep walking instead
+                    # of treating the first mark as "everything older is done".
                     time_info = getattr(state, 'time', None) or {}
                     if isinstance(time_info, dict) and time_info.get("compacted"):
-                        hit_compacted = True
-                        break
+                        continue
 
                     output = getattr(state, 'output', "")
                     if not isinstance(output, str):

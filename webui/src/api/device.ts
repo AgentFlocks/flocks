@@ -33,6 +33,8 @@ export interface DeviceGroupUpdate {
 // ---------------------------------------------------------------------------
 
 export interface DeviceIntegration {
+  /** Business group, independent of the room group_id. */
+  group?: string | null;
   id: string;
   group_id: string;
   name: string;
@@ -75,6 +77,7 @@ export interface DeviceIntegrationCreate {
 }
 
 export interface DeviceIntegrationUpdate {
+  group?: string | null;
   name?: string;
   group_id?: string;
   enabled?: boolean;
@@ -101,6 +104,8 @@ export interface DeviceTestRequest {
 }
 
 export interface DeviceTemplate {
+  group?: string | null;
+  group_readonly?: boolean;
   plugin_id: string;
   storage_key: string;
   service_id: string;

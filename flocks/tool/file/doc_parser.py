@@ -648,6 +648,7 @@ def _run_extractors(file_path: Path) -> tuple[str, str, list[str]]:
 
 @ToolRegistry.register_function(
     name="doc_parser",
+    group="文件操作",
     description=(
         "Parse a PDF, Office, or HTML document into Markdown and write the "
         "result to an .md file. If output_path is omitted, the markdown file "

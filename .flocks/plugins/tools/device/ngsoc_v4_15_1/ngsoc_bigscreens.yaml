@@ -1,4 +1,5 @@
 name: ngsoc_bigscreens
+group: SIEM
 description: >
   NGSOC situational-dashboard grouped tool. Use the `action` parameter to
   fetch the dashboard widgets the executive screens consume: TOP-N

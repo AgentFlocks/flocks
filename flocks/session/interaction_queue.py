@@ -49,6 +49,38 @@ class InteractionQueue:
     _queues: Dict[str, List[QueuedPrompt]] = {}
     _locks: Dict[str, asyncio.Lock] = {}
     _paused: set[str] = set()
+    # Accepted requests outlive the Composer and may leave the pending queue
+    # before their files are bound. Keep those short-lived references here too.
+    _upload_holds: Dict[str, tuple[str, str, frozenset[str]]] = {}
+
+    @classmethod
+    def hold_uploads(cls, session_id: str, owner_id: str, parts: List[Dict[str, Any]]) -> str:
+        upload_ids = frozenset(
+            str(part.get("uploadID") or "").strip() for part in parts if part.get("uploadID")
+        )
+        if not owner_id or not upload_ids:
+            return ""
+        token = Identifier.create("part")
+        cls._upload_holds[token] = (session_id, owner_id, upload_ids)
+        return token
+
+    @classmethod
+    def release_uploads(cls, token: str) -> None:
+        cls._upload_holds.pop(token, None)
+
+    @classmethod
+    def references_upload(cls, owner_id: str, upload_id: str) -> bool:
+        if any(
+            uploader == owner_id and upload_id in upload_ids
+            for _session, uploader, upload_ids in cls._upload_holds.values()
+        ):
+            return True
+        return any(
+            (item.execution_context or {}).get("_uploaderUserID") == owner_id
+            and any(str(part.get("uploadID") or "").strip() == upload_id for part in item.parts)
+            for queue in cls._queues.values()
+            for item in queue
+        )
 
     @classmethod
     def _lock_for(cls, session_id: str) -> asyncio.Lock:
@@ -172,8 +204,16 @@ class InteractionQueue:
     @classmethod
     async def clear(cls, session_id: str) -> None:
         async with cls._lock_for(session_id):
-            cls._queues.pop(session_id, None)
+            items = cls._queues.pop(session_id, [])
             cls._paused.discard(session_id)
+
+        from flocks.session.files import remove_staged_chat_uploads_from_parts
+
+        for item in items:
+            execution_context = item.execution_context or {}
+            owner_id = str(execution_context.get("_uploaderUserID") or "").strip()
+            if owner_id:
+                remove_staged_chat_uploads_from_parts(owner_id, item.parts)
 
     @classmethod
     async def pause(cls, session_id: str) -> None:
