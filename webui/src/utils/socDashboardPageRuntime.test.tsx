@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -568,5 +568,162 @@ describe('SOC dashboard contract page runtime', () => {
     }));
 
     expect(await screen.findByText('自定义 SOC 态势中心')).toBeInTheDocument();
+  });
+});
+
+// The posture page owns its title setting (it used to be a sidebar entry in the host).
+describe('SOC dashboard page settings', () => {
+  const DEFAULT_TITLE = 'Flocks AI 智能告警态势中心';
+  const TITLE_KEY = 'soc-dashboard-custom-title-v1';
+  const TITLE_EVENT = 'soc-dashboard:title-changed';
+  let titleEvents: Array<{ title: string | null }> = [];
+  const recordTitleEvent = (event: Event) => titleEvents.push((event as CustomEvent).detail);
+
+  beforeEach(() => {
+    installContractSdk();
+    window.localStorage.clear();
+    titleEvents = [];
+    window.addEventListener(TITLE_EVENT, recordTitleEvent);
+    pageGetMock.mockImplementation((path: string) => {
+      if (path === '/stats') return Promise.resolve({ data: {} });
+      if (path === '/activity') {
+        return Promise.resolve({ data: { cursor: 'c', events: [], recentEvents: [], workflowEvents: [], batch: {},
+          workflowStats: { callCount: 0, latestStartedAt: 0 } } });
+      }
+      if (path === '/task-center') return Promise.resolve({ data: { scheduledTasks: [], workflows: [] } });
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+  });
+
+  afterEach(() => {
+    window.removeEventListener(TITLE_EVENT, recordTitleEvent);
+    delete (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__;
+    pageGetMock.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  async function renderPage() {
+    const utils = render(<Page />);
+    await waitFor(() => expect(pageGetMock).toHaveBeenCalledWith('/stats', expect.anything()));
+    return utils;
+  }
+  const headline = (container: HTMLElement) => container.querySelector('.command-brand strong')!.textContent;
+  const gear = () => screen.getByRole('button', { name: '页面设置' });
+  const panel = () => screen.queryByRole('dialog', { name: '页面设置' });
+
+  it('puts the settings gear between refresh and the clock', async () => {
+    const { container } = await renderPage();
+    const order = Array.from(container.querySelector('.command-tools')!.children).map((el) => el.className);
+    expect(order).toEqual(['command-time-filter', 'command-refresh', 'command-settings', 'command-clock']);
+    expect(gear()).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(gear()).toHaveAttribute('aria-expanded', 'false');
+    expect(panel()).toBeNull();
+  });
+
+  it('opens with the current title, focused and capped at 64 characters', async () => {
+    window.localStorage.setItem(TITLE_KEY, '自定义标题A');
+    const user = userEvent.setup();
+    const { container } = await renderPage();
+    expect(headline(container)).toBe('自定义标题A');
+    await user.click(gear());
+    const input = within(panel()!).getByRole('textbox') as HTMLInputElement;
+    expect(input.value).toBe('自定义标题A');
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute('placeholder', DEFAULT_TITLE);
+    expect(input.maxLength).toBe(64);
+    expect(within(panel()!).getByText('只修改告警态势页的大标题，保存在当前浏览器。')).toBeInTheDocument();
+    expect(within(panel()!).getAllByRole('button').map((el) => el.textContent)).toEqual(['恢复默认', '取消', '保存']);
+  });
+
+  it('saves the trimmed title on Enter, updates the heading in place and announces it', async () => {
+    const user = userEvent.setup();
+    const { container } = await renderPage();
+    const header = container.querySelector('.command-header');
+    await user.click(gear());
+    await user.type(within(panel()!).getByRole('textbox'), '  新的态势大屏  {Enter}');
+    expect(panel()).toBeNull();
+    expect(headline(container)).toBe('新的态势大屏');
+    expect(window.localStorage.getItem(TITLE_KEY)).toBe('新的态势大屏');
+    expect(titleEvents).toEqual([{ title: '新的态势大屏' }]);
+    // No reload: the same header stays mounted.
+    expect(container.querySelector('.command-header')).toBe(header);
+    expect(gear()).toHaveFocus();
+  });
+
+  it('treats a blank title and 恢复默认 as the default title', async () => {
+    window.localStorage.setItem(TITLE_KEY, '旧标题');
+    const user = userEvent.setup();
+    const { container } = await renderPage();
+    await user.click(gear());
+    const input = within(panel()!).getByRole('textbox');
+    await user.clear(input);
+    await user.type(input, '   ');
+    await user.click(within(panel()!).getByRole('button', { name: '保存' }));
+    expect(window.localStorage.getItem(TITLE_KEY)).toBeNull();
+    expect(headline(container)).toBe(DEFAULT_TITLE);
+
+    window.localStorage.setItem(TITLE_KEY, '又一个标题');
+    await user.click(gear());
+    await user.click(within(panel()!).getByRole('button', { name: '恢复默认' }));
+    expect(panel()).toBeNull();
+    expect(window.localStorage.getItem(TITLE_KEY)).toBeNull();
+    expect(headline(container)).toBe(DEFAULT_TITLE);
+    expect(titleEvents).toEqual([{ title: null }, { title: null }]);
+  });
+
+  it('leaves the title alone on 取消, Escape and a press outside', async () => {
+    window.localStorage.setItem(TITLE_KEY, '旧标题');
+    const user = userEvent.setup();
+    const { container } = await renderPage();
+    await user.click(gear());
+    await user.type(within(panel()!).getByRole('textbox'), '改了一半');
+    await user.click(within(panel()!).getByRole('button', { name: '取消' }));
+    expect(panel()).toBeNull();
+
+    await user.click(gear());
+    expect((within(panel()!).getByRole('textbox') as HTMLInputElement).value).toBe('旧标题');
+    await user.type(within(panel()!).getByRole('textbox'), 'x');
+    await user.keyboard('{Escape}');
+    expect(panel()).toBeNull();
+    expect(gear()).toHaveFocus();
+
+    await user.click(gear());
+    // An Escape that only ends an IME composition keeps the panel open.
+    fireEvent.keyDown(within(panel()!).getByRole('textbox'), { key: 'Escape', isComposing: true });
+    expect(panel()).not.toBeNull();
+    await user.click(within(panel()!).getByText('页面标题'));
+    expect(panel()).not.toBeNull();
+    await user.click(container.querySelector('.command-brand')!);
+    expect(panel()).toBeNull();
+
+    expect(headline(container)).toBe('旧标题');
+    expect(window.localStorage.getItem(TITLE_KEY)).toBe('旧标题');
+    expect(titleEvents).toEqual([]);
+  });
+
+  it('never keeps the time filter and page settings open together', async () => {
+    const user = userEvent.setup();
+    const { container } = await renderPage();
+    const timeTrigger = container.querySelector('.command-time-trigger') as HTMLElement;
+    await user.click(timeTrigger);
+    expect(container.querySelector('.command-time-panel')).not.toBeNull();
+    await user.click(gear());
+    expect(container.querySelector('.command-time-panel')).toBeNull();
+    expect(panel()).not.toBeNull();
+    await user.click(timeTrigger);
+    expect(panel()).toBeNull();
+    expect(container.querySelector('.command-time-panel')).not.toBeNull();
+  });
+
+  it('still applies the title when storage is unavailable', async () => {
+    const storage = (window.localStorage instanceof Storage ? Storage.prototype : window.localStorage) as any;
+    vi.spyOn(storage, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
+    const user = userEvent.setup();
+    const { container } = await renderPage();
+    await user.click(gear());
+    await user.type(within(panel()!).getByRole('textbox'), '离线标题{Enter}');
+    expect(panel()).toBeNull();
+    expect(headline(container)).toBe('离线标题');
+    expect(titleEvents).toEqual([{ title: '离线标题' }]);
   });
 });
