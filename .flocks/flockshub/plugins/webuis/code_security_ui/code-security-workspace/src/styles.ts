@@ -2162,6 +2162,44 @@ const styles = String.raw`
 
 .cs-snapshot-stats.cs-dynamic-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 @media(max-width:767px) { .cs-snapshot-stats.cs-dynamic-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Display groups preserve the original phase records and session selection. */
+.cs-phase-navigation-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 12px 14px; }
+.cs-context-rail .cs-phase-navigation-heading h3 { margin: 0; }
+.cs-phase-navigation-heading small { color: var(--cs-text-secondary); font-size: 12px; }
+.cs-phase-groups { display: grid; gap: 6px; }
+.cs-phase-group { min-width: 0; border-radius: 8px; }
+.cs-phase-group.is-open { background: var(--cs-surface); }
+.cs-phase-group.is-auxiliary { border-top: 1px solid var(--cs-border); margin-top: 12px; padding-top: 12px; }
+.cs-phase-group-heading { display: grid; grid-template-columns: 22px minmax(0, 1fr) 16px; align-items: center; gap: 8px; width: 100%; padding: 14px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--cs-text); text-align: left; font: inherit; cursor: pointer; }
+.cs-phase-group-heading:hover { background: var(--cs-surface-subtle); }
+.cs-phase-group-heading strong { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.cs-phase-group-heading small { grid-column: 2 / -1; color: var(--cs-text-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.cs-phase-group-number { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--cs-text-secondary); }
+.cs-phase-group-heading > svg { width: 16px; height: 16px; transform: rotate(-90deg); }
+.cs-phase-group.is-open > .cs-phase-group-heading > svg { transform: none; }
+.cs-phase-group.is-open > .cs-phase-group-heading > strong { color: var(--cs-primary); }
+.cs-phase-group.is-auxiliary .cs-phase-group-heading { grid-template-columns: minmax(0, 1fr) 16px; }
+.cs-phase-group.is-auxiliary .cs-phase-group-heading small { grid-column: 1 / -1; }
+.cs-phase-group-heading:focus-visible,.cs-phase-groups .cs-phase-step:focus-visible { outline: 2px solid var(--cs-focus); outline-offset: 2px; }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-rail { width: auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; overflow: visible; margin: 0 10px 12px 22px; padding: 0 0 0 8px; border-left: 1px solid var(--cs-border); }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px; min-height: 64px; padding: 10px 12px; border: 0; border-radius: 5px; box-shadow: none; background: transparent; }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step::before { content: none; }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step > strong { grid-column: 1; grid-row: 1; font-size: 13px; }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step > .cs-status { grid-column: 2; grid-row: 1; font-size: 12px; }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step > span:last-child { grid-column: 1 / -1; grid-row: 2; font-size: 12px; text-align: left; overflow-wrap: anywhere; }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step:hover { background: var(--cs-surface-subtle); }
+.cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step.is-selected { background: var(--cs-surface-selected); box-shadow: inset 2px 0 var(--cs-primary); }
+.cs-phase-group-empty { margin: 0; padding: 0 16px 16px 42px; color: var(--cs-text-secondary); font-size: 12px; }
+@media(max-width:1000px) {
+  .cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step { grid-template-columns: minmax(0, 1fr); }
+  .cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step > .cs-status { grid-column: 1; grid-row: 2; }
+  .cs-workbench .cs-context-rail .cs-phase-groups .cs-phase-step > span:last-child { grid-row: 3; }
+}
+@media(max-width:700px) {
+  .cs-workbench.cs-task-view .cs-context-rail { grid-column: 1; grid-row: 1; }
+  .cs-workbench.cs-task-view .cs-stage-session { grid-column: 1; grid-row: 2; }
+}
 `;
 
 export default styles;

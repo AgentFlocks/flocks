@@ -1,6 +1,6 @@
 import { GeneratedReport } from "./GeneratedReport";
 import { NativePhaseSessions } from "./AuditConversation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { readApiFailure } from "../api";
 import { useAuditApi } from "../BatchContext";
@@ -9,7 +9,6 @@ import {
   formatDuration,
   formatFileSize,
   formatTime,
-  phaseLabel,
   phaseStatusLabels,
   roleLabels,
   shortId,
@@ -23,6 +22,7 @@ import type {
   WorkerRun,
 } from "../types";
 import { Icon } from "../icons";
+import { isCyberGymValidation, phaseDisplayLabel, phaseGroupId, phaseGroups, preferredPhase } from "../phaseGroups";
 
 import { ElapsedTime } from "./ElapsedTime";
 import { StatusBadge } from "./StatusBadge";
@@ -111,26 +111,25 @@ export function PhaseWorkspace({
 }) {
   const { language, t } = useCodeSecurityI18n();
   const sorted = useMemo(
-    () =>
-      phases.filter((phase) => phase.status !== "skipped").sort((a, b) => {
+    () => {
+      const order = (phase: PhaseRun) => isCyberGymValidation(phase, detail)
+        ? PHASE_ORDER.indexOf("poc_generation") + 0.5
+        : PHASE_ORDER.includes(phase.phase) ? PHASE_ORDER.indexOf(phase.phase) : PHASE_ORDER.length;
+      return phases.filter((phase) => phase.status !== "skipped").sort((a, b) => {
         const byTime = (a.started_at || a.created_at || "").localeCompare(
           b.started_at || b.created_at || "",
         );
         return (
           byTime ||
-          (PHASE_ORDER.includes(a.phase)
-            ? PHASE_ORDER.indexOf(a.phase)
-            : PHASE_ORDER.length) -
-            (PHASE_ORDER.includes(b.phase)
-              ? PHASE_ORDER.indexOf(b.phase)
-              : PHASE_ORDER.length) ||
+          order(a) - order(b) ||
           a.ordinal - b.ordinal
         );
-      }),
-    [phases],
+      });
+    },
+    [phases, detail],
   );
   const phaseTitle = (phase: PhaseRun) => {
-    const label = t(phaseLabel(phase.phase));
+    const label = t(phaseDisplayLabel(phase, detail));
     const round =
       phase.phase === "adjudication"
         ? (numberValue(phase.summary?.adjudication_round) ?? phase.ordinal)
@@ -149,13 +148,34 @@ export function PhaseWorkspace({
     [...sorted].reverse().find((phase) => phase.status !== "pending")
       ?.phase_run_id ||
     sorted[0]?.phase_run_id;
-  const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
+  const panelId = useId();
+  const [selection, setSelection] = useState<{ groupId: string; phaseId?: string } | null>(null);
+  const [collapsedGroupId, setCollapsedGroupId] = useState<string | null>(null);
+  const appliedRequest = useRef<typeof requestedPhase>(undefined);
   useEffect(() => {
-    if (requestedPhase) setSelectedId(requestedPhase.id);
-  }, [requestedPhase]);
-  const selected =
-    sorted.find((phase) => phase.phase_run_id === selectedId) ||
-    sorted.find((phase) => phase.phase_run_id === defaultId);
+    if (!requestedPhase || appliedRequest.current === requestedPhase) return;
+    const phase = sorted.find(item => item.phase_run_id === requestedPhase?.id);
+    if (phase) {
+      appliedRequest.current = requestedPhase;
+      setCollapsedGroupId(null);
+      setSelection({ groupId: phaseGroupId(phase, detail), phaseId: phase.phase_run_id });
+    }
+  }, [requestedPhase, sorted, detail]);
+  const groups = [
+    ...phaseGroups,
+    ...(["cleanup", "other"] as const).filter(id => sorted.some(phase => phaseGroupId(phase, detail) === id))
+      .map(id => ({ id, label: id === "cleanup" ? "执行清理" : "其他执行记录" })),
+  ].map(group => ({ ...group, phases: sorted.filter(phase => phaseGroupId(phase, detail) === group.id) }));
+  const defaultPhase = sorted.find(phase => phase.phase_run_id === defaultId);
+  const requestedSelection = sorted.find(phase => phase.phase_run_id === selection?.phaseId);
+  const selectedGroup = groups.find(group => group.id === (requestedSelection ? phaseGroupId(requestedSelection, detail) : selection?.groupId || (defaultPhase && phaseGroupId(defaultPhase, detail)))) || groups[0];
+  const selected = selectedGroup.phases.find(phase => phase.phase_run_id === selection?.phaseId)
+    || preferredPhase(selectedGroup.phases);
+  const selectPhase = (phase: PhaseRun) => setSelection({ groupId: phaseGroupId(phase, detail), phaseId: phase.phase_run_id });
+  const displayStatus = (phase: PhaseRun) => phase.phase === "dynamic_validation"
+    && phase.status === "completed" && dynamicValidationStatus === "not_runnable"
+    && sorted.filter(item => item.phase === phase.phase).at(-1)?.phase_run_id === phase.phase_run_id
+    ? "not_runnable" : phase.status;
   const sealedArtifactCount =
     artifactBundle?.artifacts.filter((artifact) => artifact.state === "sealed")
       .length || 0;
@@ -178,66 +198,67 @@ export function PhaseWorkspace({
   return (
     <section className="cs-execution" aria-label={t("审计阶段")}>
       <aside className="cs-context-rail">
-        <h3>{t("审计阶段")}</h3>
-        <div
-          className="cs-phase-rail"
-          role="tablist"
-          aria-label={t("审计阶段")}
-        >
-          {sorted.map((phase) => {
-            const displayStatus =
-              phase.phase === "dynamic_validation" &&
-              dynamicValidationStatus === "not_runnable"
-                ? "not_runnable"
-                : phase.status;
-            const workerDone = phase.worker_status_counts?.completed || 0;
-            const workerTotal =
-              phase.worker_count ||
-              Object.values(phase.worker_status_counts || {}).reduce(
-                (sum, value) => sum + value,
-                0,
-              );
+        <div className="cs-phase-navigation-heading">
+          <h3>{t("审计阶段")}</h3><small>{t("5 个分组")}</small>
+        </div>
+        <nav className="cs-phase-groups" aria-label={t("审计阶段分组")}>
+          {groups.map((group, index) => {
+            const open = selectedGroup.id === group.id && collapsedGroupId !== group.id;
+            const running = [...group.phases].reverse().find(phase => phase.status === "running");
+            const completed = group.phases.filter(phase => phase.status === "completed").length;
+            const groupId = `${panelId}-${group.id}`;
             return (
-              <button
-                key={phase.phase_run_id}
-                type="button"
-                role="tab"
-                aria-selected={selected?.phase_run_id === phase.phase_run_id}
-                className={`cs-phase-step${selected?.phase_run_id === phase.phase_run_id ? " is-selected" : ""}`}
-                onClick={() => setSelectedId(phase.phase_run_id)}
-              >
-                <StatusBadge
-                  status={displayStatus}
-                  context={t("{{phase}}阶段", {
-                    phase: phaseTitle(phase),
-                  })}
-                />
-                <strong>{phaseTitle(phase)}</strong>
-                <span className="cs-tabular">
-                  {workerTotal
-                    ? t("{{done}}/{{total}} 个工作单元 · ", {
-                        done: workerDone,
-                        total: workerTotal,
-                      })
-                    : ""}
-                  {phase.started_at ? (
-                    <ElapsedTime
-                      startedAt={phase.started_at}
-                      finishedAt={phase.finished_at}
-                      initialMs={phase.duration_ms || 0}
-                      running={phase.status === "running"}
-                      prefix=""
-                    />
-                  ) : (
-                    formatDuration(phase.duration_ms, t)
-                  )}
-                </span>
-              </button>
+              <section key={group.id} className={`cs-phase-group${open ? " is-open" : ""}${index >= 5 ? " is-auxiliary" : ""}`}>
+                <button type="button" className="cs-phase-group-heading" aria-expanded={open} aria-controls={groupId}
+                  onClick={() => {
+                    setCollapsedGroupId(open ? group.id : null);
+                    if (selectedGroup.id !== group.id) {
+                      setSelection({ groupId: group.id, phaseId: preferredPhase(group.phases)?.phase_run_id });
+                    }
+                  }}>
+                  {index < 5 && <span className="cs-phase-group-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>}
+                  <strong>{t(group.label)}</strong><Icon name="chevron" />
+                  <small>{running ? t("正在执行：{{phase}}", { phase: phaseTitle(running) }) : group.phases.length
+                    ? t("{{count}} 条记录 · {{completed}} 条已完成", { count: group.phases.length, completed }) : t("暂无执行记录")}</small>
+                </button>
+                <div id={groupId} hidden={!open}>
+                  {group.phases.length ? <div className="cs-phase-rail" role="tablist" aria-orientation="vertical" aria-label={t(group.label)}>
+                    {group.phases.map((phase, phaseIndex) => {
+                      const workerDone = phase.worker_status_counts?.completed || 0;
+                      const workerTotal = phase.worker_count || Object.values(phase.worker_status_counts || {}).reduce((sum, value) => sum + value, 0);
+                      const active = selected?.phase_run_id === phase.phase_run_id;
+                      return (
+                        <button key={phase.phase_run_id} id={`${panelId}-${phase.phase_run_id}`} type="button" role="tab"
+                          aria-selected={active} aria-controls={`${panelId}-content`} tabIndex={active ? 0 : -1}
+                          className={`cs-phase-step${active ? " is-selected" : ""}`}
+                          onClick={() => selectPhase(phase)}
+                          onKeyDown={event => {
+                            const next = event.key === "ArrowDown" ? (phaseIndex + 1) % group.phases.length
+                              : event.key === "ArrowUp" ? (phaseIndex + group.phases.length - 1) % group.phases.length
+                              : event.key === "Home" ? 0 : event.key === "End" ? group.phases.length - 1 : -1;
+                            if (next < 0) return;
+                            event.preventDefault();
+                            selectPhase(group.phases[next]);
+                            document.getElementById(`${panelId}-${group.phases[next].phase_run_id}`)?.focus();
+                          }}>
+                          <StatusBadge status={displayStatus(phase)} context={t("{{phase}}阶段", { phase: phaseTitle(phase) })} />
+                          <strong>{phaseTitle(phase)}</strong>
+                          <span className="cs-tabular">
+                            {workerTotal ? t("{{done}}/{{total}} 个工作单元 · ", { done: workerDone, total: workerTotal }) : ""}
+                            {phase.started_at ? <ElapsedTime startedAt={phase.started_at} finishedAt={phase.finished_at}
+                              initialMs={phase.duration_ms || 0} running={phase.status === "running"} prefix="" /> : formatDuration(phase.duration_ms, t)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div> : <p className="cs-phase-group-empty">{t("暂无执行记录")}</p>}
+                </div>
+              </section>
             );
           })}
-        </div>
+        </nav>
 
-        {artifactBundle && selected?.phase !== "finalization" && (
+        {artifactBundle && selected && selected.phase !== "finalization" && (
           <div className="cs-context-artifacts">
             <h3>{t("审计产物")}</h3>
             {stageArtifacts.map((artifact) => (
@@ -254,6 +275,7 @@ export function PhaseWorkspace({
                         verification_index: "静态验证",
                         adjudication: "主智能体裁决",
                         dynamic_validation: "动态验证",
+                        poc_generation: "PoC 生成",
                       } as Record<string, string>
                     )[artifact.kind] || artifact.kind,
                   )}
@@ -266,7 +288,7 @@ export function PhaseWorkspace({
             {stageArtifacts.length === 0 && <p className="cs-inline-empty">{t("该阶段暂无审计产物。")}</p>}
           </div>
         )}
-        <details className="cs-stage-details" key={selected?.phase_run_id}>
+        {(selected || (!sorted.length && workers.length > 0)) && <details className="cs-stage-details" key={selected?.phase_run_id}>
           <summary>{t("查看阶段详情与工作单元")}</summary>
           {selected && (
             <dl className="cs-metric-grid">
@@ -363,23 +385,20 @@ export function PhaseWorkspace({
                 )}
               </p>
             )}
-        </details>
+        </details>}
       </aside>
-      <div className="cs-stage-session">
+      <div className="cs-stage-session" id={`${panelId}-content`} role={selected ? "tabpanel" : "region"}
+        aria-labelledby={selected ? `${panelId}-${selected.phase_run_id}` : undefined}
+        aria-label={selected ? undefined : t(selectedGroup.label)}>
         {selected ? (selected.phase === "finalization" ? null :
-          <article className="cs-current-phase" role="tabpanel">
+          <article className="cs-current-phase">
             <div className="cs-current-phase__header">
               <div>
-                <span className="cs-kicker">{t("当前查看")}</span>
+                <span className="cs-kicker">{t("当前查看")} · {t(selectedGroup.label)}</span>
                 <h3>{phaseTitle(selected)}</h3>
               </div>
               <StatusBadge
-                status={
-                  selected.phase === "dynamic_validation" &&
-                  dynamicValidationStatus === "not_runnable"
-                    ? "not_runnable"
-                    : selected.status
-                }
+                status={displayStatus(selected)}
                 context={t("阶段状态")}
               />
             </div>
@@ -392,7 +411,8 @@ export function PhaseWorkspace({
           </article>
         ) : (
           <div className="cs-inline-empty">
-            {t("阶段信息将在快照创建后出现。")}
+            <h3>{t(selectedGroup.label)}</h3>
+            <p>{t("此分组暂无执行记录；触发后将在这里展示原始阶段与会话。")}</p>
           </div>
         )}
 

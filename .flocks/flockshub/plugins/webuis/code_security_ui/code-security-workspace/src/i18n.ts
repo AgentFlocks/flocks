@@ -7,6 +7,22 @@ interface ContractRuntime {
 }
 
 const englishMessages: Record<string, string> = {
+  "审计准备": "Audit preparation",
+  "代码分析": "Code analysis",
+  "漏洞确认": "Finding confirmation",
+  "5 个分组": "5 groups",
+  "审计阶段分组": "Audit stage groups",
+  "执行清理": "Execution cleanup",
+  "其他执行记录": "Other execution records",
+  "暂无执行记录": "No execution records",
+  "正在执行：{{phase}}": "Running: {{phase}}",
+  "{{count}} 条记录 · {{completed}} 条已完成": "{{count}} records \u00b7 {{completed}} completed",
+  "此分组暂无执行记录；触发后将在这里展示原始阶段与会话。": "No execution records in this group yet. Original stages and sessions will appear here when triggered.",
+  "当前执行": "Current execution",
+  "执行记录": "Execution records",
+  "包含子阶段与各轮记录": "Includes substages and all rounds",
+  "CyberGym 验证": "CyberGym validation",
+  "CyberGym 审计": "CyberGym audit",
   "该轮次未提供独立验证统计，请查看阶段详情或验证记录。": "Separate validation counts are unavailable for this run. See the stage details or validation records.",
   "已完成验证": "Completed validations",
   "动态验证概览": "Dynamic validation overview",

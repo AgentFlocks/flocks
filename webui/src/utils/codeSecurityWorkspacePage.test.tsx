@@ -1004,6 +1004,7 @@ describe("code security workspace contract page", () => {
       if (close) Object.defineProperty(HTMLDialogElement.prototype, "close", close);
       else delete (HTMLDialogElement.prototype as any).close;
     }
+    await userEvent.click(screen.getByRole("button", { name: /漏洞确认/ }));
     await userEvent.click(screen.getByRole("tab", { name: /静态验证阶段/ }));
     expect(document.querySelector(".cs-final-report")).toBeNull();
     expect(document.querySelector(".cs-context-rail .cs-context-artifacts")).not.toBeNull();
@@ -1094,6 +1095,7 @@ describe("code security workspace contract page", () => {
     expect(
       screen.queryByText("独立验证 Worker 已开始"),
     ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /审计准备/ }));
     await userEvent.click(
       screen.getByRole("tab", { name: /准备源码快照阶段/ }),
     );
@@ -2428,7 +2430,7 @@ describe("code security workspace contract page", () => {
     expect(apiPost).not.toHaveBeenCalled();
   });
 
-  it("orders repeated phase runs by execution time", () => {
+  it("orders repeated phase runs by execution time within each group", async () => {
     const phases: PhaseRun[] = [
       {
         phase_run_id: "phase_snapshot",
@@ -2473,12 +2475,11 @@ describe("code security workspace contract page", () => {
       screen
         .getAllByRole("tab")
         .map((tab) => tab.querySelector("strong")?.textContent),
-    ).toEqual([
-      "准备源码快照",
-      "静态验证 · 第 1 轮",
-      "定向复扫",
-      "静态验证 · 第 2 轮",
-    ]);
+    ).toEqual(["静态验证 · 第 1 轮", "静态验证 · 第 2 轮"]);
+    await userEvent.click(screen.getByRole("button", { name: /代码分析/ }));
+    expect(screen.getByRole("tab")).toHaveTextContent("定向复扫");
+    await userEvent.click(screen.getByRole("button", { name: /审计准备/ }));
+    expect(screen.getByRole("tab")).toHaveTextContent("准备源码快照");
   });
 
   it.each(
@@ -2490,7 +2491,7 @@ describe("code security workspace contract page", () => {
       ["verification", "静态验证", "Static validation"],
       ["poc_generation", "PoC 生成", "PoC generation"],
       ["probing", "动态探测", "Dynamic probing"],
-      ["cybergym_solving", "动态验证", "Dynamic validation"],
+      ["cybergym_solving", "CyberGym 验证", "CyberGym validation"],
       ["dynamic_validation", "动态验证", "Dynamic validation"],
       ["adjudication", "主智能体裁决", "Primary agent adjudication"],
       ["targeted_rescan", "定向复扫", "Targeted rescan"],

@@ -23,6 +23,7 @@ import { DeleteScanDialog } from "./components/DeleteScanDialog";
 import { ElapsedTime } from "./components/ElapsedTime";
 import { NewAuditDrawer } from "./components/NewAuditDrawer";
 import { PhaseWorkspace } from "./components/PhaseWorkspace";
+import { isCyberGymValidation, phaseDisplayLabel, phaseGroupId, phaseGroups } from "./phaseGroups";
 import { StatusBadge } from "./components/StatusBadge";
 import { Icon } from "./icons";
 import { useCodeSecurityI18n } from "./i18n";
@@ -953,6 +954,11 @@ function WorkspacePage() {
     projectId;
   const taskProject = projects.find((project) => project.id === taskProjectId);
   const finalFindingMetric = detail ? deriveFinalFindingMetric(detail) : null;
+  const executionPhase = { phase: detail?.scan.current_phase || "" };
+  const executionGroup = phaseGroups.find(group => group.id === phaseGroupId(executionPhase, detail ?? undefined));
+  const executionLabel = executionPhase.phase
+    ? `${executionGroup ? `${t(executionGroup.label)} / ` : ""}${t(phaseDisplayLabel(executionPhase, detail ?? undefined))}`
+    : t("等待阶段信息");
 
   return (
     <main
@@ -1144,17 +1150,14 @@ function WorkspacePage() {
                   </h1>
                   <StatusBadge status={detail.scan.lifecycle_status} />
                   <span className="cs-mode-tag">
-                    {detail.scan.dynamic_enabled
-                      ? t("动态审计")
-                      : t("静态审计")}
+                    {isCyberGymValidation({ phase: "dynamic_validation" }, detail)
+                      ? t("CyberGym 审计")
+                      : detail.scan.dynamic_enabled ? t("动态审计") : t("静态审计")}
                   </span>
                 </div>
                 <div className="cs-header-meta">
                   <span>
-                    {t(
-                      phaseLabels[detail.scan.current_phase || ""] ||
-                        "等待阶段信息",
-                    )}
+                    {t("当前执行")}：{executionLabel}
                   </span>
                   <ElapsedTime
                     startedAt={detail.scan.started_at}
@@ -1227,15 +1230,9 @@ function WorkspacePage() {
                 <small>{t("当前审计范围")}</small>
               </div>
               <div>
-                <span>{t("已完成阶段")}</span>
-                <strong>
-                  {
-                    detail.phaseRuns.filter((p) => p.status === "completed")
-                      .length
-                  }
-                  <small> / {detail.phaseRuns.filter((phase) => phase.status !== "skipped").length}</small>
-                </strong>
-                <small>{t("按实际执行阶段统计")}</small>
+                <span>{t("执行记录")}</span>
+                <strong>{detail.phaseRuns.filter(phase => phase.status !== "skipped").length}</strong>
+                <small>{t("包含子阶段与各轮记录")}</small>
               </div>
               <div>
                 <span>{t("覆盖状态")}</span>

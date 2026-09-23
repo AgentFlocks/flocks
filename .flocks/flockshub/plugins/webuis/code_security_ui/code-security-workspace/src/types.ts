@@ -155,6 +155,8 @@ export interface ScanDetail {
     coverage_status: string;
     coverage_policy?: string;
     dynamic_enabled: boolean;
+    scan_mode?: string;
+    dynamic_validator?: string | null;
     created_at: string;
     started_at: string;
     finished_at?: string | null;
