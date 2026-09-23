@@ -157,6 +157,16 @@ def _delete_shared_console_session() -> None:
         return
 
 
+def update_channel() -> str:
+    """Return the Console manifest channel pinned via FLOCKS_UPDATE_CHANNEL, if any.
+
+    Offline installations pin a frozen channel so Console can tell them apart from
+    the default ``flockspro`` channel. Online installations leave it unset and the
+    field is omitted from every payload.
+    """
+    return (os.getenv("FLOCKS_UPDATE_CHANNEL") or "").strip()
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -184,6 +194,10 @@ class ConsoleLoginService:
         install_id = await cls._get_install_id()
         raw = f"{platform.node()}|{platform.machine()}|{platform.system()}|{install_id}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def update_channel() -> str:
+        return update_channel()
 
     @staticmethod
     def console_base_url() -> str:
@@ -417,7 +431,7 @@ class ConsoleLoginService:
         pro_component_version: str | None = None,
     ) -> dict[str, Any]:
         version_payload = cls.runtime_version_payload(pro_component_version=pro_component_version)
-        return {
+        payload = {
             "fingerprint": session.get("fingerprint"),
             "install_id": session.get("install_id"),
             "console_login_id": session.get("console_login_id"),
@@ -426,6 +440,10 @@ class ConsoleLoginService:
             "license_id": license_id or None,
             **version_payload,
         }
+        channel = update_channel()
+        if channel:
+            payload["channel"] = channel
+        return payload
 
     @classmethod
     async def send_heartbeat_for_session(

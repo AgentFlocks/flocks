@@ -221,8 +221,16 @@ class Session:
             ]
 
     @classmethod
-    def invalidate_cache(cls) -> None:
-        """Clear in-memory indexes when the underlying storage changes."""
+    def invalidate_cache(cls, session_id: Optional[str] = None) -> None:
+        """Clear in-memory indexes when the underlying storage changes.
+
+        With ``session_id`` only that session leaves the id index and the
+        list cache; without it (database swap / full clear) everything resets.
+        """
+        if session_id:
+            cls._id_index.pop(session_id, None)
+            cls._remove_from_list_cache(session_id)
+            return
         cls._id_index.clear()
         cls._all_sessions_cache = None
 
@@ -794,6 +802,43 @@ class Session:
             "project_id": project_id,
         })
         
+        return updated_session
+
+    @classmethod
+    async def mutate_metadata(
+        cls,
+        project_id: str,
+        session_id: str,
+        mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Optional[SessionInfo]:
+        """Atomically update Session metadata under the lifecycle lock."""
+
+        async with cls.lifecycle_lock(session_id):
+            if cls.is_lifecycle_transitioning(session_id):
+                return None
+            session = await cls.get(project_id, session_id)
+            if not session or session.status != "active":
+                return None
+
+            metadata = mutator(dict(session.metadata or {}))
+            update_data = session.model_dump(by_alias=True)
+            update_data["metadata"] = metadata
+            update_data.setdefault("time", {})["updated"] = int(
+                datetime.now().timestamp() * 1000
+            )
+            updated_session = SessionInfo(**update_data)
+            await Storage.set(
+                f"session:{project_id}:{session_id}",
+                updated_session,
+                "session",
+            )
+            cls._id_index[session_id] = f"session:{project_id}:{session_id}"
+            cls._sync_list_cache(updated_session)
+
+        log.info("session.metadata.updated", {
+            "id": session_id,
+            "project_id": project_id,
+        })
         return updated_session
 
     @classmethod

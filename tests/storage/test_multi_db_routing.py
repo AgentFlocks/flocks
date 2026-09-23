@@ -121,11 +121,17 @@ async def test_workflow_prefix_clear_does_not_invalidate_session_caches(
     await Storage.write("workflow_execution_step/exec-1/00000001", {"ok": True})
     calls: list[str] = []
 
-    monkeypatch.setattr(Session, "invalidate_cache", lambda: calls.append("session"))
+    monkeypatch.setattr(
+        Session,
+        "invalidate_cache",
+        lambda session_id=None: calls.append(
+            "session" if session_id is None else f"session:{session_id}"
+        ),
+    )
     monkeypatch.setattr(
         Message,
         "invalidate_cache",
-        lambda session_id=None: calls.append(f"message:{session_id}"),
+        lambda session_id=None, **_kwargs: calls.append(f"message:{session_id}"),
     )
 
     assert await Storage.clear("workflow_execution_step/exec-1/") == 1
@@ -145,11 +151,17 @@ async def test_session_and_message_prefix_clear_invalidate_matching_runtime_cach
     await Storage.write("message_parts:ses-1/msg-1", [])
     calls: list[str] = []
 
-    monkeypatch.setattr(Session, "invalidate_cache", lambda: calls.append("session"))
+    monkeypatch.setattr(
+        Session,
+        "invalidate_cache",
+        lambda session_id=None: calls.append(
+            "session" if session_id is None else f"session:{session_id}"
+        ),
+    )
     monkeypatch.setattr(
         Message,
         "invalidate_cache",
-        lambda session_id=None: calls.append(f"message:{session_id}"),
+        lambda session_id=None, **_kwargs: calls.append(f"message:{session_id}"),
     )
 
     assert await Storage.clear("session:") == 1

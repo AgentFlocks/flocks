@@ -7,6 +7,7 @@ Writes files to the local filesystem with:
 - Directory creation as needed
 """
 
+import mimetypes
 import os
 from difflib import unified_diff
 from pathlib import Path
@@ -16,6 +17,7 @@ from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
 from flocks.tool.path_utils import resolve_tool_path
+from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 
 
@@ -152,6 +154,46 @@ async def _resolve_owner_username(ctx: ToolContext) -> Optional[str]:
     return None
 
 
+async def _build_output_attachment(
+    ctx: ToolContext,
+    filepath: str,
+) -> Optional[dict]:
+    """Describe a completed Workspace output without exposing its host path."""
+
+    try:
+        from flocks.workspace.manager import WorkspaceManager
+
+        owner_username = await _resolve_owner_username(ctx)
+        scope = WorkspaceManager.get_instance().resolve_output_scope(
+            filepath, username=owner_username,
+        )
+        if scope is None or not scope.path.is_file():
+            return None
+
+        target = scope.path
+        stat = target.stat()
+        attachment_id = Identifier.ascending("part")
+        return {
+            "id": attachment_id,
+            "sessionID": ctx.session_id,
+            "messageID": ctx.message_id,
+            "type": "file",
+            "mime": mimetypes.guess_type(target.name)[0] or "application/octet-stream",
+            "filename": target.name,
+            "size": stat.st_size,
+            "modifiedAt": int(stat.st_mtime * 1000),
+            "origin": "agent_output",
+            "source": {
+                "root": "workspace-output",
+                "path": scope.relative_path,
+                "username": scope.username,
+            },
+        }
+    except (OSError, RuntimeError, ValueError) as exc:
+        log.debug("write.output_attachment.failed", {"error": str(exc)})
+        return None
+
+
 async def _maybe_redirect_to_default_outputs(
     ctx: ToolContext,
     *,
@@ -245,14 +287,13 @@ def _existing_memory_write_error(filepath: str) -> Optional[str]:
             description=(
                 "The path to the file to write. It may be absolute, use `~`, or be relative to the current project directory.\n"
                 "\n"
-                "IMPORTANT — choose the correct directory from <env>:\n"
-                "- Project source file (source code, tests, configs that belong to the project)"
-                " → Source code directory\n"
-                "- Agent-generated output (scripts, reports, examples, analysis results, drafts"
-                " requested by user) → Workspace outputs directory\n"
+                "IMPORTANT:\n"
+                "- For Project source files (source code, tests, and configs), use the explicit Project path.\n"
+                "- For Agent-generated outputs requested by the user (reports, tables, examples, analysis, and drafts),"
+                " use a filename-only path unless the user specified a destination. The tool routes filename-only"
+                " writes to the current Session's dated Workspace outputs directory.\n"
                 "\n"
-                "Agent-generated outputs MUST go to the Workspace outputs directory."
-                " NEVER write them into the Source code directory."
+                "NEVER write Agent-generated outputs into the Project source directory."
             ),
             required=True
         ),
@@ -411,10 +452,11 @@ async def write_tool(
     
     # Build output
     output = "Wrote file successfully."
-    
+    output_attachment = await _build_output_attachment(ctx, filepath)
+
     # Note: LSP diagnostics integration would go here
     # For now we just return success
-    
+
     return ToolResult(
         success=True,
         output=output,
@@ -423,5 +465,6 @@ async def write_tool(
             "filepath": filepath,
             "exists": exists,
             "diagnostics": {}
-        }
+        },
+        attachments=[output_attachment] if output_attachment else None,
     )

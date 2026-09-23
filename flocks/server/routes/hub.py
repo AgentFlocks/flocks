@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from flocks.hub import local
 from flocks.hub.catalog import (
     category_counts,
     clear_catalog_caches,
@@ -19,6 +20,7 @@ from flocks.hub.catalog import (
     load_taxonomy,
 )
 from flocks.hub.files import file_tree, read_file_content
+from flocks.license import license_status
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.hub.models import (
     HubCatalogEntry,
@@ -29,7 +31,7 @@ from flocks.hub.models import (
     InstalledPluginRecord,
     PluginType,
 )
-from flocks.server.auth import require_admin
+from flocks.server.auth import require_admin, require_user
 from flocks.utils.log import Log
 
 
@@ -220,6 +222,144 @@ async def hub_plugin_file_content(plugin_type: PluginType, plugin_id: str, path:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class SceneSuiteEntry(BaseModel):
+    """A scene suite as the scene workspace shows it: catalog state + workspace state."""
+
+    id: str
+    name: str
+    nameCn: Optional[str] = None
+    description: str = ""
+    descriptionCn: Optional[str] = None
+    version: str = "0.0.0"
+    installedVersion: Optional[str] = None
+    edition: str = "oss"
+    state: str = "available"
+    workspaceId: Optional[str] = None
+    workspaceTitle: Optional[str] = None
+    workspaceRoute: Optional[str] = None
+    workspaceEnabled: Optional[bool] = None
+    # The suite's page package has its own version; an update can be pending
+    # there while the suite version itself has not moved.
+    workspaceVersion: Optional[str] = None
+    workspaceLatestVersion: Optional[str] = None
+
+
+def _suite_workspace_id(plugin_id: str) -> Optional[str]:
+    try:
+        manifest = load_manifest("component", plugin_id)
+    except Exception:
+        return None
+    for component in getattr(manifest, "components", []) or []:
+        if getattr(component, "type", None) == "webui":
+            return getattr(component, "id", None)
+    return None
+
+
+@router.get("/hub/scene-suites", response_model=list[SceneSuiteEntry])
+async def hub_scene_suites(_user: object = Depends(require_user)):
+    """Scene suites for the scene-workspace suite manager (Hub no longer lists them)."""
+    return await asyncio.to_thread(_load_scene_suites)
+
+
+def _load_scene_suites() -> list[SceneSuiteEntry]:
+    from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_workspace_route
+
+    catalog = list_catalog()
+    records = local.load_installed_records()
+    entries = [entry for entry in catalog if entry.type == "component"]
+    catalog_by_key = {(entry.type, entry.id): entry for entry in catalog}
+    installed_keys = {key for key, entry in catalog_by_key.items() if entry.installPath}
+    workspaces = {item.id: item for item in WebUIPagesStore().list_workspaces()}
+    suites: list[SceneSuiteEntry] = []
+    for entry in entries:
+        try:
+            refs = load_manifest("component", entry.id).components
+        except Exception:
+            refs = []
+        workspace_id = next((ref.id for ref in refs if ref.type == "webui"), None)
+        workspace = workspaces.get(workspace_id) if workspace_id else None
+        required_keys = {(ref.type, ref.id) for ref in refs if not ref.optional and ref.type != "component"}
+        owned_child_present = any(
+            (record := records.get(f"{ref.type}:{ref.id}")) is not None
+            and record.installedBy == f"component:{entry.id}"
+            and (
+                (ref.type, ref.id) in installed_keys
+                # Catalog keeps an otherwise missing WebUI's record only when
+                # its access contracts still need ownership-aware cleanup.
+                or (ref.type == "webui" and record.installPath is not None)
+            )
+            for ref in refs if ref.type != "component"
+        )
+        shell_present = ("component", entry.id) in installed_keys
+        # A leftover workspace or dependency is still a local installation to
+        # repair, even when the component shell or its record has disappeared.
+        # Required child checks reuse the catalog snapshot rather than rescanning
+        # each plugin's files. Optional children do not affect completeness.
+        state = entry.state
+        child = catalog_by_key.get(("webui", workspace_id)) if workspace_id else None
+        if (
+            (not shell_present and (workspace is not None or owned_child_present))
+            or (shell_present and not required_keys.issubset(installed_keys))
+        ):
+            state = "partial"
+        elif state == "installed" and child is not None and child.state == "updateAvailable":
+            state = "updateAvailable"
+        suites.append(
+            SceneSuiteEntry(
+                id=entry.id,
+                name=entry.name,
+                nameCn=entry.nameCn,
+                description=entry.description,
+                descriptionCn=entry.descriptionCn,
+                version=entry.version,
+                installedVersion=entry.installedVersion,
+                edition=entry.edition,
+                state=state,
+                workspaceId=workspace_id,
+                workspaceTitle=workspace.title if workspace else None,
+                workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,
+                workspaceEnabled=workspace.enabled if workspace else None,
+                workspaceVersion=child.installedVersion if child is not None else None,
+                workspaceLatestVersion=child.version if child is not None else None,
+            )
+        )
+    suites.sort(key=lambda item: (item.edition != "oss", item.id))
+    return suites
+
+
+async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str, action: str) -> None:
+    if plugin_type != "component":
+        return
+    from flocks.server.routes.event import publish_event
+
+    try:
+        await publish_event("hub.scene_suites.changed", {"suiteId": plugin_id, "action": action})
+    except Exception as exc:
+        # Notification failures must not hide the installer result or prevent
+        # streaming responses from closing after a failed installation.
+        log.warning("hub.scene_suites.notify_failed", {"id": plugin_id, "action": action, "error": str(exc)})
+
+
+async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> None:
+    """Pro-only suites stay listed in the catalog but only install under Pro."""
+    try:
+        manifest = load_manifest(plugin_type, plugin_id)
+    except Exception:
+        return
+    if getattr(manifest, "edition", "oss") != "pro":
+        return
+    try:
+        status_payload = await license_status()
+    except Exception:
+        status_payload = {}
+    edition = str(status_payload.get("status") or "").lower()
+    if edition == "oss" or not status_payload.get("active"):
+        raise HTTPException(
+            status_code=403,
+            detail="该套件需要 Flocks Pro 授权后才能安装，请先在系统设置中升级。",
+        )
+
+
 @router.post("/hub/plugins/{plugin_type}/{plugin_id}/install", response_model=InstalledPluginRecord)
 async def hub_install_plugin(
     plugin_type: PluginType,
@@ -228,11 +368,14 @@ async def hub_install_plugin(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    await _assert_edition_allowed(plugin_type, plugin_id)
     try:
         return await install_plugin(plugin_type, plugin_id, scope=req.scope)
     except Exception as exc:
         log.error("hub.install.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await _publish_scene_suites_changed(plugin_type, plugin_id, "install")
 
 
 @router.post("/hub/plugins/{plugin_type}/{plugin_id}/install/stream")
@@ -243,6 +386,7 @@ async def hub_install_plugin_stream(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    await _assert_edition_allowed(plugin_type, plugin_id)
     if plugin_type != "component":
         raise HTTPException(status_code=400, detail="Streaming install progress is only supported for components.")
     try:
@@ -273,6 +417,7 @@ async def hub_install_plugin_stream(
                     )
                 )
             finally:
+                await _publish_scene_suites_changed(plugin_type, plugin_id, "install")
                 await queue.put(None)
 
         task = asyncio.create_task(run_install())
@@ -302,6 +447,8 @@ async def hub_update_plugin(
     except Exception as exc:
         log.error("hub.update.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await _publish_scene_suites_changed(plugin_type, plugin_id, "update")
 
 
 @router.delete("/hub/plugins/{plugin_type}/{plugin_id}")
@@ -316,6 +463,8 @@ async def hub_uninstall_plugin(
         return {"removed": removed}
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await _publish_scene_suites_changed(plugin_type, plugin_id, "uninstall")
 
 
 @router.post("/hub/refresh")

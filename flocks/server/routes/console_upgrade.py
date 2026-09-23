@@ -972,6 +972,9 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
             "idempotency_key": request_id,
             "form_data": details,
         }
+        channel = ConsoleLoginService.update_channel()
+        if channel:
+            console_payload["channel"] = channel
         headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
         try:
             async with httpx.AsyncClient(timeout=10) as client:

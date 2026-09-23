@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SettingsPage from './index';
-import { ThemeContext, type Theme } from '@/contexts/ThemeContext';
+import { ThemeContext, type Theme, type ThemeMode } from '@/contexts/ThemeContext';
 import { ToastProvider } from '@/components/common/Toast';
 
 const { changeLanguage, flocksproUsersApi, setTheme, toolFailureConfigApi, useAuth } = vi.hoisted(() => ({
@@ -78,12 +78,13 @@ function LocationProbe() {
   return <div data-testid="location">{`${location.pathname}${location.search}${location.hash}`}</div>;
 }
 
-function renderSettings(path: string, theme: Theme = 'light', state?: Record<string, unknown>) {
+function renderSettings(path: string, theme: Theme = 'light', state?: Record<string, unknown>, mode: ThemeMode = theme) {
   return render(
     <ToastProvider>
       <ThemeContext.Provider
         value={{
           theme,
+          mode,
           effectiveTheme: theme,
           toggleTheme: vi.fn(),
           setTheme,
@@ -137,6 +138,22 @@ describe('SettingsPage', () => {
     expect(setTheme).toHaveBeenCalledWith('dark');
   });
 
+  it('marks "follow system" as the selected theme and lets the user pick it', async () => {
+    const user = userEvent.setup();
+
+    // Resolved dark (the OS is dark) but the stored choice is "system".
+    renderSettings('/settings/preferences', 'dark', undefined, 'system');
+
+    expect(screen.getByRole('button', { name: 'systemTheme' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'darkTheme' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'lightTheme' })).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(screen.getByRole('button', { name: 'lightTheme' }));
+    expect(setTheme).toHaveBeenCalledWith('light');
+    await user.click(screen.getByRole('button', { name: 'systemTheme' }));
+    expect(setTheme).toHaveBeenCalledWith('system');
+  });
+
   it('loads and updates repeated tool failure auto-disable', async () => {
     const user = userEvent.setup();
     toolFailureConfigApi.get.mockResolvedValue({ disableOnRepeatedFailure: false });
@@ -171,59 +188,27 @@ describe('SettingsPage', () => {
     expect(await screen.findByText('channels page')).toBeInTheDocument();
   });
 
-  it('returns to the page captured before opening settings', async () => {
-    const user = userEvent.setup();
-
-    renderSettings('/settings/system-logs', 'light', {
-      from: {
-        pathname: '/contracts/webui/workspaces/scene_workspace',
-        search: '?view=posture',
-        hash: '#top',
-      },
-    });
+  it('renders only the section content: the layout sidebar owns the settings menu', async () => {
+    const { container } = renderSettings('/settings/system-logs');
 
     expect(await screen.findByText('system logs page')).toBeInTheDocument();
-    await user.click(screen.getAllByRole('link', { name: 'accountManagement' })[0]);
-    expect(await screen.findByText('account page')).toBeInTheDocument();
-
-    await user.click(screen.getAllByRole('button', { name: 'settingsBack' })[0]);
-
-    expect(await screen.findByTestId('location')).toHaveTextContent(
-      '/contracts/webui/workspaces/scene_workspace?view=posture#top',
-    );
-  });
-
-  it('keeps return and section navigation available outside the desktop sidebar', async () => {
-    renderSettings('/settings/system-logs');
-
-    expect(await screen.findByText('system logs page')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'settingsBack' })).toHaveLength(2);
-
-    const mobileNav = screen.getByRole('navigation', { name: 'settingsTitle' });
-    expect(within(mobileNav).getByRole('link', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
-    expect(within(mobileNav).getByRole('link', { name: 'securityConfig' })).toHaveAttribute('href', '/settings/security-config');
-    expect(within(mobileNav).getByRole('link', { name: 'auditLogs' })).toHaveAttribute('href', '/settings/audit-logs');
-    expect(within(mobileNav).queryByRole('link', { name: 'models' })).not.toBeInTheDocument();
-    expect(within(mobileNav).queryByRole('link', { name: 'channels' })).not.toBeInTheDocument();
+    expect(container.querySelector('aside')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'settingsBack' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'settingsTitle' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'accountManagement' })).not.toBeInTheDocument();
   });
 
   it('renders security config in settings for Flocks Pro admins', async () => {
     renderSettings('/settings/security-config');
 
     expect(await screen.findByText('security config page')).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: 'securityConfig' })[0]).toHaveAttribute('href', '/settings/security-config');
-    const links = screen.getAllByRole('link');
-    const accountIndex = links.findIndex((item) => item.textContent === 'accountManagement');
-    const securityIndex = links.findIndex((item) => item.textContent === 'securityConfig');
-    expect(accountIndex).toBeGreaterThanOrEqual(0);
-    expect(securityIndex).toBeGreaterThan(accountIndex);
+    expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
   });
 
   it('renders audit logs in settings for Flocks Pro admins', async () => {
     renderSettings('/settings/audit-logs');
 
     expect(await screen.findByText('audit logs page')).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: 'auditLogs' })[0]).toHaveAttribute('href', '/settings/audit-logs');
     expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
   });
 
@@ -231,10 +216,6 @@ describe('SettingsPage', () => {
     renderSettings('/settings/archived-data');
 
     expect(await screen.findByText('archived data page')).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: 'archivedData' })[0]).toHaveAttribute(
-      'href',
-      '/settings/archived-data',
-    );
   });
 
   it('hides audit logs when Flocks Pro capability is unavailable', async () => {

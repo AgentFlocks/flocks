@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ from flocks.contracts.webui.models import (
     WebUIWorkspaceListItem,
 )
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
+from flocks.hub.catalog import scene_suite_workspace_owners
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
 
@@ -155,7 +157,64 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
 
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
 async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
-    return _store.list_workspaces(enabled_only=enabled_only)
+    # Directory scans plus the hub catalog signature: keep them off the event loop.
+    return await asyncio.to_thread(
+        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only))
+    )
+
+
+def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUIWorkspaceListItem]:
+    """Tag each workspace with the scene suite that ships it and drop
+    user-root scene workspaces no suite knows about.
+
+    Scenes reach the user root (~/.flocks/plugins/contracts/webui) only through
+    the suite manager, so a ``sceneWorkspace`` directory there without a suite
+    in the catalog is a leftover (typically from a build of another branch)
+    whose backend is not here; the navigation must not open it. Scenes checked
+    into the project root are development work and stay, as do workbench pages,
+    which are not scenes.
+    """
+    try:
+        owners = scene_suite_workspace_owners()
+    except Exception as exc:
+        # Without the catalog nothing can be verified; keep everything reachable.
+        log.warning("webui.workspaces.suite_lookup_failed", {"error": str(exc)})
+        return workspaces
+    result: list[WebUIWorkspaceListItem] = []
+    for workspace in workspaces:
+        suite_id = owners.get(workspace.id)
+        if suite_id is None and workspace.placement == "sceneWorkspace" and not workspace.native:
+            # The list is fetched on every navigation refresh; say it once.
+            if workspace.id not in _hidden_scene_workspaces_logged:
+                _hidden_scene_workspaces_logged.add(workspace.id)
+                log.info("webui.workspaces.unmanaged_scene_hidden", {"workspaceId": workspace.id})
+            continue
+        result.append(workspace.model_copy(update={"suiteId": suite_id}))
+    return result
+
+
+_hidden_scene_workspaces_logged: set[str] = set()
+
+
+class WebUIWorkspaceEnabledRequest(BaseModel):
+    enabled: bool = Field(..., description="Whether the workspace appears in navigation")
+
+
+@router.patch("/contracts/webui/workspaces/{workspace_id}", response_model=WebUIWorkspaceListItem)
+async def set_webui_workspace_enabled(
+    workspace_id: str,
+    req: WebUIWorkspaceEnabledRequest,
+    _admin: object = Depends(require_admin),
+):
+    """Turn a scene workspace off or back on without uninstalling its suite."""
+    try:
+        workspace = _store.set_workspace_enabled(workspace_id, req.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    await publish_event("contracts.webui.pages.nav_changed", {"workspaceId": workspace_id, "enabled": req.enabled})
+    return workspace
 
 
 @router.post("/contracts/webui/pages", response_model=WebUIPageDetail, status_code=status.HTTP_201_CREATED)

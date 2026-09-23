@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from flocks.hub import local
-from flocks.hub.catalog import clear_catalog_caches, load_manifest
+from flocks.hub.catalog import _version_tuple, clear_catalog_caches, load_manifest
 from flocks.hub.files import plugin_root
 from flocks.hub.models import (
     HubComponentRef,
@@ -27,6 +28,47 @@ from flocks.hub.security import SKIP_NAMES, validate_package
 
 _TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
 InstallProgressCallback = Callable[[HubInstallProgressEvent], Awaitable[None]]
+
+
+def _validate_uninstall_plugin_id(plugin_id: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", plugin_id) or plugin_id.endswith("."):
+        raise ValueError("Invalid Hub plugin id: expected a single plugin name without path separators")
+
+
+def _validate_uninstall_target(plugin_type: PluginType, plugin_id: str, path: Path, scope: str) -> None:
+    """Accept only the exact managed payload locations for this plugin id."""
+    _validate_uninstall_plugin_id(plugin_id)
+    if _is_project_install_path(plugin_type, path):
+        # A stale project record may be reconciled without touching its payload
+        # or attached contracts. Existing project payloads remain immutable here.
+        if scope != "project" or path.exists():
+            raise ValueError("Built-in project Hub plugins cannot be removed")
+    elif scope == "project":
+        raise ValueError("Project plugin path escapes its managed location")
+    base = local.install_root(plugin_type, scope).resolve()
+    allowed = {base / plugin_id}
+    if plugin_type == "tool":
+        allowed.update(base / group / plugin_id for group in _TOOL_TYPE_DIRS)
+        allowed.update(
+            parent / f"{plugin_id}{suffix}"
+            for parent in (base, *(base / group for group in _TOOL_TYPE_DIRS))
+            for suffix in (".yaml", ".yml", ".py")
+        )
+    elif plugin_type == "device":
+        allowed.add(local.install_root("tool", scope).resolve() / plugin_id)
+    if path.is_symlink() or path.resolve() not in allowed:
+        raise ValueError("Only this plugin's exact user-managed install location can be removed")
+
+
+def _validate_access_uninstall_target(plugin_id: str, scope: str) -> Path:
+    _validate_uninstall_plugin_id(plugin_id)
+    if scope != "global":
+        raise ValueError("Built-in project Hub plugins cannot be removed")
+    access_root = local.install_root("webui", scope).resolve().parent / "access"
+    access_path = access_root / plugin_id
+    if access_path.resolve() != access_path:
+        raise ValueError("Access contract path escapes this plugin's managed location")
+    return access_path
 
 
 def _copytree_skip_caches(src: Path, dst: Path) -> None:
@@ -395,14 +437,17 @@ def _copy_attached_access_contracts(
     return access_dst, backup
 
 
-def _remove_attached_access_contracts(plugin_type: PluginType, plugin_id: str, scope: str) -> None:
+def _remove_attached_access_contracts(plugin_type: PluginType, plugin_id: str, scope: str) -> bool:
     if plugin_type != "webui":
-        return
-    access_dst = _contracts_access_dir(plugin_id, scope)
+        return False
+    access_dst = _validate_access_uninstall_target(plugin_id, scope)
     if access_dst.is_dir():
         shutil.rmtree(access_dst)
     elif access_dst.exists():
         access_dst.unlink()
+    else:
+        return False
+    return True
 
 
 def _build_webui_pages(plugin_id: str, install_dir: Path) -> None:
@@ -632,6 +677,22 @@ def _can_adopt_existing_ref(
     return record.source == _bundled_source_for_ref(ref)
 
 
+def _component_ref_is_outdated(
+    ref: HubComponentRef,
+    install_path: Path,
+    record: Optional[InstalledPluginRecord],
+) -> bool:
+    """True when the installed child is older than the version this suite ships."""
+    try:
+        available = load_manifest(ref.type, ref.id).version
+    except Exception:
+        return False
+    installed = record.version if record is not None else local.installed_payload_version(ref.type, install_path)
+    if not installed:
+        return False
+    return _version_tuple(installed) < _version_tuple(available)
+
+
 async def _install_component_refs(
     manifest: HubPluginManifest,
     *,
@@ -660,6 +721,28 @@ async def _install_component_refs(
             existing_path = local.infer_local_install(ref.type, ref.id)
             if existing_path is not None:
                 existing_record = local.get_record(ref.type, ref.id)
+                # Installing or updating the suite has to bring an outdated
+                # child along, otherwise the suite reads as current while its
+                # pages stay on the old version.
+                if _component_ref_is_outdated(ref, existing_path, existing_record):
+                    item.status = "installing"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    try:
+                        await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
+                    except Exception as exc:
+                        if ref.optional:
+                            item.status = "skipped"
+                            item.message = f"Optional dependency failed to update: {exc}"
+                            await _emit_component_progress(progress, manifest, "item", item=item)
+                            continue
+                        item.status = "failed"
+                        item.message = str(exc) or "Update failed"
+                        await _emit_component_progress(progress, manifest, "item", item=item)
+                        raise
+                    item.status = "installed"
+                    item.message = "Updated by component"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
                 if existing_record is not None and _can_adopt_existing_ref(ref, existing_record, component_key, existing_path):
                     adopted_records.append(existing_record)
                     local.save_installed_record(existing_record.model_copy(update={"installedBy": component_key}))
@@ -720,10 +803,13 @@ async def _uninstall_component_refs(manifest: HubPluginManifest) -> bool:
             await uninstall_plugin(ref.type, ref.id)
         except FileNotFoundError:
             local.remove_installed_record(ref.type, ref.id)
-        except Exception:
+        except Exception as exc:
             if ref.optional:
                 continue
-            raise
+            raise RuntimeError(
+                f"Cannot uninstall scene suite {manifest.id}: required component "
+                f"{ref.type}/{ref.id} could not be removed: {exc}"
+            ) from exc
     return removed
 
 
@@ -865,9 +951,15 @@ def _cleanup_orphan_api_services(storage_keys: list[str]) -> None:
 
 
 async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
+    _validate_uninstall_plugin_id(plugin_id)
     manifest = load_manifest(plugin_type, plugin_id) if plugin_type == "component" else None
     record = local.get_record(plugin_type, plugin_id)
     install_path = Path(record.installPath) if record and record.installPath else local.infer_local_install(plugin_type, plugin_id)
+    scope = record.scope if record else "global"
+    if install_path is not None:
+        await asyncio.to_thread(_validate_uninstall_target, plugin_type, plugin_id, install_path, scope)
+    if plugin_type == "webui" and scope != "project":
+        await asyncio.to_thread(_validate_access_uninstall_target, plugin_id, scope)
     if install_path is None or not install_path.exists():
         changed_path = install_path
         if changed_path is None and record is not None:
@@ -882,18 +974,19 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
                 changed_path = local.install_dir(plugin_type, plugin_id, record.scope)
         children_removed = await _uninstall_component_refs(manifest) if manifest is not None else False
         had_record = record is not None
+        # A missing page payload can still leave its access contracts behind.
+        # Keep project-managed contracts protected even when their pages vanished.
+        access_removed = False
+        if plugin_type == "webui" and (record is None or record.scope != "project"):
+            access_removed = await asyncio.to_thread(
+                _remove_attached_access_contracts, plugin_type, plugin_id, "global"
+            )
         local.remove_installed_record(plugin_type, plugin_id)
         clear_catalog_caches()
         _clear_device_template_cache_if_needed(plugin_type)
-        if children_removed or had_record:
+        if children_removed or had_record or access_removed:
             await _refresh_runtime(plugin_type, changed_path)
-        return children_removed or had_record
-    project_root = local.install_root(plugin_type, "project").resolve()
-    resolved_install_path = install_path.resolve()
-    if resolved_install_path == project_root or project_root in resolved_install_path.parents:
-        raise ValueError("Built-in project Hub plugins cannot be removed")
-    if ".flocks/plugins" not in install_path.as_posix():
-        raise ValueError("Only user-managed Hub plugin installs can be removed")
+        return children_removed or had_record or access_removed
     # Capture provider metadata BEFORE rmtree — once the dir is gone we
     # can't read its ``_provider.yaml`` to know which api_services keys
     # were derived from it. ``device`` plugins reuse the same provider

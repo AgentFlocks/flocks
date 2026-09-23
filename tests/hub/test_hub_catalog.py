@@ -294,19 +294,20 @@ def test_catalog_uses_webui_workspace_version_for_inferred_installs(
     workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
     clear_catalog_caches()
 
+    bundled_version = load_manifest("webui", "soc_ui").version
     entry = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
-    assert entry.version == "1.1.7"
+    assert entry.version == bundled_version
     assert entry.state == "updateAvailable"
     assert entry.installedVersion == "1.0.0"
 
-    workspace["version"] = "1.1.7"
+    workspace["version"] = bundled_version
     workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
 
     refreshed = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
     assert refreshed.state == "installed"
-    assert refreshed.installedVersion == "1.1.7"
+    assert refreshed.installedVersion == bundled_version
 
 
 def test_pentest_agents_are_listed_in_agent_catalog():
@@ -846,6 +847,532 @@ async def test_hub_component_uninstall_cleans_orphan_children(isolated_hub_env, 
     assert not (home_plugins / "tools" / "python" / "soc_workspace_query").exists()
     assert not (home_plugins / "workflows" / "stream_alert_denoise").exists()
     assert not (home_plugins / "workflows" / "stream_alert_triage").exists()
+
+
+async def test_scene_suite_http_install_uninstall_is_repeatable(isolated_hub_env):
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.contracts.webui.builder import resolve_esbuild_bin
+    from flocks.contracts.webui.store import WebUIPagesStore
+    from flocks.server.auth import require_admin, require_user
+    from flocks.server.routes.hub import router
+
+    if resolve_esbuild_bin() is None:
+        pytest.skip("The real WebUI build requires webui/node_modules/.bin/esbuild")
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_user] = lambda: object()
+    endpoint = "/hub/plugins/component/soc-workspace"
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for _ in range(3):
+            installed = await client.post(f"{endpoint}/install", json={"scope": "global"}, timeout=30)
+            assert installed.status_code == 200, installed.text
+            workspace = next(item for item in WebUIPagesStore().list_workspaces() if item.id == "soc_ui")
+            assert workspace.enabled is True
+            assert workspace.pages
+            suites = await client.get("/hub/scene-suites", timeout=30)
+            suite = next(item for item in suites.json() if item["id"] == "soc-workspace")
+            assert suite["state"] == "installed"
+            assert suite["workspaceEnabled"] is True
+
+            removed = await client.delete(endpoint, timeout=30)
+            assert removed.status_code == 200, removed.text
+            assert removed.json() == {"removed": True}
+            assert not local.load_installed_records()
+            assert not WebUIPagesStore().list_workspaces()
+            assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+
+        repeated = await client.delete(endpoint, timeout=30)
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json() == {"removed": False}
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_state", "expected_enabled"),
+    [
+        ("complete", "installed", True),
+        ("missing_shell", "partial", True),
+        ("missing_webui", "partial", None),
+        ("disabled", "installed", False),
+        ("available", "available", None),
+        ("missing_records", "updateAvailable", True),
+        ("child_only", "partial", True),
+        ("missing_workflow", "partial", True),
+        ("missing_tool", "partial", True),
+        ("missing_optional_workflow", "installed", True),
+    ],
+)
+async def test_scene_suite_state_reflects_real_payload_completeness(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+    scenario: str, expected_state: str, expected_enabled: bool | None,
+):
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.contracts.webui.store import WebUIPagesStore
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.server.auth import require_user
+    from flocks.server.routes.hub import router
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    if scenario != "available":
+        await install_plugin("component", "soc-workspace")
+    preserved_tool = local.get_record("tool", "soc_workspace_query")
+    if scenario == "missing_shell":
+        shell = local.install_dir("component", "soc-workspace") / "component.json"
+        shell.rename(isolated_hub_env["home"] / "component-backup.json")
+    elif scenario == "missing_webui":
+        local.install_dir("webui", "soc_ui").rename(isolated_hub_env["home"] / "webui-backup")
+    elif scenario in {"missing_workflow", "missing_optional_workflow"}:
+        local.install_dir("workflow", "stream_alert_triage").rename(isolated_hub_env["home"] / "workflow-backup")
+        if scenario == "missing_optional_workflow":
+            def manifest_with_optional_workflow(plugin_type, plugin_id):
+                manifest = load_manifest(plugin_type, plugin_id)
+                if (plugin_type, plugin_id) == ("component", "soc-workspace"):
+                    return manifest.model_copy(update={"components": [
+                        ref.model_copy(update={"optional": True}) if ref.id == "stream_alert_triage" else ref
+                        for ref in manifest.components
+                    ]})
+                return manifest
+
+            monkeypatch.setattr("flocks.server.routes.hub.load_manifest", manifest_with_optional_workflow)
+    elif scenario == "missing_tool":
+        Path(preserved_tool.installPath).rename(isolated_hub_env["home"] / "tool-backup")
+    elif scenario == "disabled":
+        WebUIPagesStore().set_workspace_enabled("soc_ui", False)
+    elif scenario in {"missing_records", "child_only"}:
+        local._record_path().rename(isolated_hub_env["home"] / "installed-backup.json")
+        if scenario == "child_only":
+            local.install_dir("component", "soc-workspace").rename(isolated_hub_env["home"] / "component-backup")
+    clear_catalog_caches()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_user] = lambda: object()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/hub/scene-suites", timeout=30)
+        assert response.status_code == 200
+        suite = next(item for item in response.json() if item["id"] == "soc-workspace")
+        assert suite["state"] == expected_state
+        assert suite["workspaceEnabled"] is expected_enabled
+        if scenario in {"available", "missing_shell", "missing_records", "child_only"}:
+            assert suite["installedVersion"] is None
+        else:
+            assert suite["installedVersion"] == load_manifest("component", "soc-workspace").version
+
+        if expected_state == "partial":
+            await install_plugin("component", "soc-workspace")
+            repaired = await client.get("/hub/scene-suites", timeout=30)
+            repaired_suite = next(item for item in repaired.json() if item["id"] == "soc-workspace")
+            assert repaired_suite["state"] == "installed"
+            assert repaired_suite["workspaceEnabled"] is True
+            if scenario not in {"child_only", "missing_tool"}:
+                assert local.get_record("tool", "soc_workspace_query") == preserved_tool
+
+
+@pytest.mark.parametrize("action", ["install", "install/stream", "update", "uninstall"])
+@pytest.mark.parametrize("fail_after_change", [False, True])
+async def test_scene_suite_mutations_notify_other_sse_subscribers(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+    action: str, fail_after_change: bool,
+):
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.server.auth import require_admin
+    from flocks.server.routes import hub as hub_routes
+    from flocks.server.routes.event import EventBroadcaster
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    if action in {"update", "uninstall"} or fail_after_change:
+        await install_plugin("component", "soc-workspace")
+    if fail_after_change:
+        async def fail_after_payload_change(*args, **kwargs):
+            local.install_dir("webui", "soc_ui").rename(isolated_hub_env["home"] / "failed-webui-backup")
+            raise RuntimeError("fixture failure after changing installed payload")
+
+        operation = "install_plugin" if action.startswith("install") else f"{action}_plugin"
+        monkeypatch.setattr(hub_routes, operation, fail_after_payload_change)
+
+    broadcaster = EventBroadcaster()
+    monkeypatch.setattr(EventBroadcaster, "_instance", broadcaster)
+    published_states = []
+    original_publish = broadcaster.publish
+
+    async def publish_and_capture_state(event):
+        if event["type"] == "hub.scene_suites.changed":
+            suites = await hub_routes.hub_scene_suites()
+            published_states.append(next(suite.state for suite in suites if suite.id == "soc-workspace"))
+        await original_publish(event)
+
+    monkeypatch.setattr(broadcaster, "publish", publish_and_capture_state)
+    subscriber = await broadcaster.subscribe()
+    app = FastAPI()
+    app.include_router(hub_routes.router)
+    app.dependency_overrides[require_admin] = lambda: object()
+    endpoint = "/hub/plugins/component/soc-workspace"
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            if action == "uninstall":
+                response = await client.delete(endpoint, timeout=30)
+            else:
+                response = await client.post(f"{endpoint}/{action}", json={"scope": "global"}, timeout=30)
+        assert response.status_code == (422 if fail_after_change and action != "install/stream" else 200)
+        if fail_after_change:
+            assert "fixture failure after changing installed payload" in response.text
+        event = await asyncio.wait_for(subscriber.get(), timeout=1)
+        assert event["type"] == "hub.scene_suites.changed"
+        assert event["properties"] == {"suiteId": "soc-workspace", "action": action.split("/")[0]}
+        assert subscriber.empty()
+        assert published_states == ["partial" if fail_after_change else "available" if action == "uninstall" else "installed"]
+    finally:
+        await broadcaster.unsubscribe(subscriber)
+
+
+async def test_suite_uninstall_cleans_access_when_required_webui_payload_is_missing(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    await install_plugin("component", "soc-workspace")
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    webui_dir = home_plugins / "contracts" / "webui" / "soc_ui"
+    webui_dir.rename(isolated_hub_env["home"] / "soc_ui_missing_payload_backup")
+
+    assert await uninstall_plugin("component", "soc-workspace") is True
+    assert not local.load_installed_records()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert await uninstall_plugin("component", "soc-workspace") is False
+
+
+@pytest.mark.parametrize("encoded_id", ["%2e%2e", "%2e", "%2e%2e%5Csoc_ui", "C%3Asoc_ui"])
+async def test_uninstall_rejects_unsafe_plugin_ids_before_any_cleanup(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch, encoded_id: str,
+):
+    from unittest.mock import Mock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.server.auth import require_admin
+    from flocks.server.routes.hub import router
+
+    cleanup = Mock(return_value=False)
+    monkeypatch.setattr("flocks.hub.installer._remove_attached_access_contracts", cleanup)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_admin] = lambda: object()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.delete(f"/hub/plugins/webui/{encoded_id}", timeout=30)
+    assert response.status_code == 422
+    cleanup.assert_not_called()
+
+
+@pytest.mark.parametrize("target_kind", [
+    "parent", "sibling", "outside", "outside_missing", "symlink", "symlink_managed",
+])
+async def test_uninstall_rejects_record_paths_outside_the_exact_plugin_location(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch, target_kind: str,
+):
+    from unittest.mock import Mock
+
+    from flocks.hub import installer
+
+    plugin_id = "isolated-test"
+    expected = local.install_dir("webui", plugin_id)
+    expected.parent.mkdir(parents=True, exist_ok=True)
+    if target_kind == "parent":
+        target = expected.parent
+    elif target_kind == "sibling":
+        target = expected.parent / "different-plugin"
+        target.mkdir()
+    else:
+        target = isolated_hub_env["home"] / "outside"
+        if target_kind != "outside_missing":
+            target.mkdir()
+        if target_kind == "symlink":
+            expected.symlink_to(target, target_is_directory=True)
+            target = expected
+        elif target_kind == "symlink_managed":
+            expected.mkdir()
+            alias = target / "managed-alias"
+            alias.symlink_to(expected, target_is_directory=True)
+            target = alias
+    local.save_installed_record(local.make_record(
+        plugin_type="webui", plugin_id=plugin_id, version="1.0.0",
+        source="test", install_path=target,
+    ))
+    removal = Mock()
+    monkeypatch.setattr(installer.shutil, "rmtree", removal)
+    cleanup = Mock(return_value=False)
+    monkeypatch.setattr(installer, "_remove_attached_access_contracts", cleanup)
+    with pytest.raises(ValueError, match="user-managed|path|location"):
+        await uninstall_plugin("webui", plugin_id)
+    removal.assert_not_called()
+    cleanup.assert_not_called()
+    assert target.exists() is (target_kind != "outside_missing")
+    assert local.get_record("webui", plugin_id) is not None
+
+
+@pytest.mark.parametrize("payload_present", [False, True])
+async def test_uninstall_rejects_access_symlinks_before_removing_payload(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch, payload_present: bool,
+):
+    from unittest.mock import Mock
+
+    from flocks.hub import installer
+
+    plugin_id = "isolated-test"
+    payload = local.install_dir("webui", plugin_id)
+    if payload_present:
+        payload.mkdir(parents=True)
+    outside = isolated_hub_env["home"] / "outside-access"
+    outside.mkdir()
+    access = local.install_root("webui").parent / "access" / plugin_id
+    access.parent.mkdir(parents=True, exist_ok=True)
+    access.symlink_to(outside, target_is_directory=True)
+    local.save_installed_record(local.make_record(
+        plugin_type="webui", plugin_id=plugin_id, version="1.0.0",
+        source="test", install_path=payload,
+    ))
+    removal = Mock()
+    monkeypatch.setattr(installer.shutil, "rmtree", removal)
+    with pytest.raises(ValueError, match="Access contract path"):
+        await uninstall_plugin("webui", plugin_id)
+    removal.assert_not_called()
+    assert payload.exists() is payload_present
+    assert outside.is_dir()
+    assert local.get_record("webui", plugin_id) is not None
+
+
+@pytest.mark.parametrize("owned_by_suite", [False, True])
+async def test_scene_suite_infers_orphans_only_from_its_own_workflow_records(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch, owned_by_suite: bool,
+):
+    from flocks.server.routes.hub import hub_scene_suites
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    record = await install_plugin(
+        "workflow", "stream_alert_triage",
+        installed_by="component:soc-workspace" if owned_by_suite else None,
+    )
+    suite = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert suite.state == ("partial" if owned_by_suite else "available")
+    assert suite.workspaceEnabled is None
+    if not owned_by_suite:
+        assert await uninstall_plugin("component", "soc-workspace") is False
+        assert local.get_record("workflow", "stream_alert_triage") == record
+        assert Path(record.installPath).is_dir()
+
+
+async def test_scene_suite_reports_page_package_versions(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    """The suite version can stay put while its page package is behind; the
+    manager needs both numbers to explain an "update available" badge."""
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.server.routes.hub import hub_scene_suites
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    await install_plugin("component", "soc-workspace")
+    latest_pages = load_manifest("webui", "soc_ui").version
+    suite = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert suite.state == "installed"
+    assert suite.workspaceVersion == latest_pages
+    assert suite.workspaceLatestVersion == latest_pages
+
+    # Pages installed by an older build: the suite itself is current, its pages are not.
+    local.save_installed_record(local.get_record("webui", "soc_ui").model_copy(update={"version": "0.0.1"}))
+    clear_catalog_caches()
+    stale = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert stale.state == "updateAvailable"
+    assert stale.installedVersion == load_manifest("component", "soc-workspace").version
+    assert stale.workspaceVersion == "0.0.1"
+    assert stale.workspaceLatestVersion == latest_pages
+
+
+@pytest.mark.parametrize("ownership", ["suite", "independent", "project"])
+async def test_suite_uninstall_after_catalog_reconciles_missing_webui_preserves_ownership(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch, ownership: str,
+):
+    from flocks.server.routes.hub import hub_scene_suites
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    if ownership != "suite":
+        await install_plugin("webui", "soc_ui", scope="project" if ownership == "project" else "global")
+    await install_plugin("component", "soc-workspace")
+    record = local.get_record("webui", "soc_ui")
+    Path(record.installPath).rename(isolated_hub_env["home"] / "webui-backup")
+    access_dir = local.install_root("webui", record.scope).parent / "access" / "soc_ui"
+    assert access_dir.is_dir()
+
+    suite = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert suite.state == "partial"
+    assert local.get_record("webui", "soc_ui") == record
+    assert await uninstall_plugin("component", "soc-workspace") is True
+    assert access_dir.exists() is (ownership != "suite")
+    assert await uninstall_plugin("component", "soc-workspace") is False
+
+
+@pytest.mark.parametrize("owner", ["component:soc-workspace", "component:other-suite", None])
+async def test_scene_suite_with_only_owned_access_left_is_partial(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch, owner: str | None,
+):
+    from flocks.server.routes.hub import hub_scene_suites
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    record = await install_plugin("webui", "soc_ui", installed_by=owner)
+    Path(record.installPath).rename(isolated_hub_env["home"] / "webui-backup")
+    access = local.install_root("webui").parent / "access" / "soc_ui"
+    suite = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    owned = owner == "component:soc-workspace"
+    assert suite.state == ("partial" if owned else "available")
+    assert suite.installedVersion is None
+    assert suite.workspaceEnabled is None
+    assert await uninstall_plugin("component", "soc-workspace") is owned
+    assert access.exists() is not owned
+
+
+@pytest.mark.parametrize(("plugin_type", "plugin_id"), [("webui", "soc_ui"), ("workflow", "stream_alert_triage")])
+async def test_catalog_reconciles_missing_payload_without_retained_access(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch, plugin_type: str, plugin_id: str,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    record = await install_plugin(plugin_type, plugin_id)
+    Path(record.installPath).rename(isolated_hub_env["home"] / "payload-backup")
+    if plugin_type == "webui":
+        access = local.install_root("webui").parent / "access" / plugin_id
+        access.rename(isolated_hub_env["home"] / "access-backup")
+    entry = next(item for item in list_catalog(plugin_type=plugin_type) if item.id == plugin_id)
+    assert entry.state == "available"
+    assert entry.installedVersion is None
+    assert local.get_record(plugin_type, plugin_id) is None
+
+
+async def test_webui_uninstall_cleans_access_without_an_install_record(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    record = await install_plugin("webui", "soc_ui")
+    Path(record.installPath).rename(isolated_hub_env["home"] / "soc_ui_backup")
+    local.remove_installed_record("webui", "soc_ui")
+    access_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "contracts" / "access" / "soc_ui"
+
+    assert await uninstall_plugin("webui", "soc_ui") is True
+    assert not access_dir.exists()
+    assert await uninstall_plugin("webui", "soc_ui") is False
+
+
+async def test_component_uninstall_preserves_project_webui(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    project_record = await install_plugin("webui", "soc_ui", scope="project")
+    await install_plugin("component", "soc-workspace")
+
+    assert await uninstall_plugin("component", "soc-workspace") is True
+    assert local.get_record("webui", "soc_ui") == project_record
+    assert Path(project_record.installPath).is_dir()
+    assert (
+        isolated_hub_env["project_dir"] / ".flocks" / "plugins" / "contracts" / "access" / "soc_ui"
+    ).is_dir()
+
+
+async def test_missing_project_webui_uninstall_preserves_access_contracts(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    record = await install_plugin("webui", "soc_ui", scope="project")
+    Path(record.installPath).rename(isolated_hub_env["project_dir"] / "soc_ui_backup")
+
+    await uninstall_plugin("webui", "soc_ui")
+    assert (
+        isolated_hub_env["project_dir"] / ".flocks" / "plugins" / "contracts" / "access" / "soc_ui"
+    ).is_dir()
+
+
+async def test_suite_uninstall_required_child_failure_has_context_and_can_retry(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+):
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.hub import installer
+    from flocks.server.auth import require_admin
+    from flocks.server.routes.hub import router
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr(installer, "_refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    await install_plugin("component", "soc-workspace")
+    original_uninstall = installer.uninstall_plugin
+
+    async def fail_required_tool(plugin_type, plugin_id):
+        if plugin_type == "tool" and plugin_id == "soc_workspace_query":
+            raise PermissionError("access denied")
+        return await original_uninstall(plugin_type, plugin_id)
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_admin] = lambda: object()
+    endpoint = "/hub/plugins/component/soc-workspace"
+    monkeypatch.setattr(installer, "uninstall_plugin", fail_required_tool)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        failed = await client.delete(endpoint, timeout=30)
+        assert failed.status_code == 422
+        assert "soc-workspace" in failed.json()["detail"]
+        assert "tool/soc_workspace_query" in failed.json()["detail"]
+        assert "access denied" in failed.json()["detail"]
+        assert local.get_record("component", "soc-workspace") is not None
+        assert local.get_record("tool", "soc_workspace_query") is not None
+
+        monkeypatch.setattr(installer, "uninstall_plugin", original_uninstall)
+        retried = await client.delete(endpoint, timeout=30)
+        assert retried.status_code == 200, retried.text
+        assert retried.json() == {"removed": True}
+        assert not local.load_installed_records()
 
 
 async def test_hub_uninstalls_python_tool_without_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):

@@ -1,7 +1,13 @@
 import { severityKey, severityRows } from './severityValues';
 
+// The host installs the runtime for this page right before the bundle
+// evaluates. Bind it here once: this page keeps polling while another SOC
+// page is open in a kept-alive pane, and reading the global later would pick
+// up that page's `api.page` scope instead of ours.
+const boundSdk = globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
+
 function getSdk() {
-  const sdk = globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
+  const sdk = boundSdk ?? globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
   if (!sdk || !sdk.React || !sdk.api) {
     throw new Error('Flocks WebUI contract page runtime is not initialized.');
   }
@@ -2952,7 +2958,7 @@ export default function Page() {
 const CSS = `
 .adtd-root {
   box-sizing: border-box;
-  min-height: 100vh;
+  min-height: 100%;
   min-width: 1100px;
   margin: 0;
   padding: 0 16px;
@@ -4267,7 +4273,7 @@ const CSS = `
   --command-blue: #3677bc;
   --command-border: rgba(255, 255, 255, .09);
   position: relative;
-  height: 100vh;
+  height: 100%;
   min-height: 720px;
   min-width: 1180px;
   margin: 0;
@@ -4487,7 +4493,7 @@ const CSS = `
   z-index: 2;
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--event-rail-width, 330px);
-  height: calc(100vh - 68px);
+  height: calc(100% - 68px);
   min-height: 652px;
   transition: grid-template-columns .24s ease;
 }

@@ -1,0 +1,12 @@
+{
+  "id": "code-audit-overview",
+  "title": "审计总览",
+  "titleEn": "Audit Overview",
+  "route": "/contracts/webui/code-audit-overview",
+  "icon": "FileSearch",
+  "order": 10,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 1788900000000
+}

@@ -807,6 +807,7 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
         capabilities=manifest.capabilities,
         trust=manifest.trust,
         riskLevel=manifest.risk.level,
+        edition=getattr(manifest, "edition", "oss"),
         state=state,
         installedVersion=installed_version,
         source=manifest.source.kind,
@@ -826,7 +827,15 @@ def _resolve_install_path(
         path = Path(record.installPath)
         if local.has_install_payload(plugin_type, path):
             return path, record
-        local.remove_installed_record(plugin_type, plugin_id)
+        # Access contracts can outlive a missing WebUI payload. Keep their
+        # ownership/scope record for a later safe uninstall, while reporting no
+        # installed payload or installed version in the catalog response.
+        retained_access = (
+            plugin_type == "webui"
+            and (local.install_root("webui", record.scope).parent / "access" / plugin_id).exists()
+        )
+        if not retained_access:
+            local.remove_installed_record(plugin_type, plugin_id)
         record = None
     if inferred_installs is not None:
         return inferred_installs.get((plugin_type, plugin_id)), record
@@ -866,6 +875,7 @@ def _entry_from_index(
         useCases=item.useCases,
         trust=item.trust,
         riskLevel=item.riskLevel,
+        edition=item.edition,
         state=state,
         installedVersion=installed_version,
         source="bundled",
@@ -891,6 +901,7 @@ def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubC
         capabilities=manifest.capabilities,
         trust=manifest.trust,
         riskLevel=manifest.risk.level,
+        edition=getattr(manifest, "edition", "oss"),
         state="installed",
         installedVersion=manifest.version,
         source="system",
@@ -959,6 +970,7 @@ def _entry_from_bundled_tool(
         capabilities=manifest.capabilities,
         trust=manifest.trust,
         riskLevel=manifest.risk.level,
+        edition=getattr(manifest, "edition", "oss"),
         state=state,
         installedVersion=installed_version,
         source="bundled",
@@ -979,6 +991,27 @@ def list_manifests() -> list[HubPluginManifest]:
         except Exception:
             continue
     return result
+
+
+def scene_suite_workspace_owners() -> dict[str, str]:
+    """Map each WebUI workspace id to the scene suite (component) that ships it.
+
+    A suite's ``webui`` component ref carries the workspace id, so a workspace
+    directory nobody in the catalog references (for example one left behind by
+    a build of another branch) is simply absent from the result.
+    """
+    owners: dict[str, str] = {}
+    for entry in _catalog_entries_snapshot():
+        if entry.type != "component":
+            continue
+        try:
+            refs = load_manifest("component", entry.id).components
+        except Exception:
+            continue
+        for ref in refs:
+            if ref.type == "webui":
+                owners.setdefault(ref.id, entry.id)
+    return owners
 
 
 def _contains_any(values: Iterable[str], selected: Optional[list[str]]) -> bool:

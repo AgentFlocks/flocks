@@ -27,6 +27,9 @@ PAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 WORKSPACE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 MAX_SOURCE_FILE_BYTES = 512_000
 ALLOWED_WRITE_PREFIXES = ("src/", "assets/", "api/")
+# Workspaces are disabled from the UI without touching the plugin files, so a
+# suite update never resurrects a workspace the operator turned off.
+WORKSPACE_STATE_FILE = ".workspace-state.json"
 ALLOWED_WRITE_FILES = frozenset({"manifest.json"})
 WORKSPACE_MANIFEST_FILE = "workspace.json"
 _SOURCE_SUFFIXES = {".tsx", ".ts", ".jsx", ".js", ".css", ".json"}
@@ -97,6 +100,23 @@ def get_project_webui_pages_root(project_dir: Optional[Path] = None) -> Path:
     """Return the project-space read root for checked-in WebUI pages."""
     base = project_dir or Path.cwd()
     return (base / ".flocks" / "plugins" / "contracts" / "webui").resolve()
+
+
+def _replace_with_retry(src: Path, dst: Path, attempts: int = 4) -> None:
+    """``os.replace`` that survives a reader holding ``dst`` open on Windows.
+
+    Windows refuses to replace a file another handle has open (WinError 32);
+    a reader on a worker thread only holds it for microseconds, so a few short
+    retries are enough. Other platforms never raise here.
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 class WebUIPagesStore:
@@ -199,10 +219,49 @@ class WebUIPagesStore:
             return Path(rel)
         raise ValueError(f"writes are not allowed for path: {relative_path}")
 
+    def _workspace_state_path(self) -> Path:
+        return self._root / WORKSPACE_STATE_FILE
+
+    def read_workspace_enabled_overrides(self) -> dict[str, bool]:
+        """Operator overrides of `enabled`, keyed by workspace id."""
+        try:
+            raw = self._workspace_state_path().read_text(encoding="utf-8")
+        except OSError:
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            log.warning("webui.workspace_state.invalid", {"path": str(self._workspace_state_path())})
+            return {}
+        enabled = data.get("enabled") if isinstance(data, dict) else None
+        if not isinstance(enabled, dict):
+            return {}
+        return {str(key): bool(value) for key, value in enabled.items()}
+
+    def set_workspace_enabled(self, workspace_id: str, enabled: bool) -> WebUIWorkspaceListItem:
+        workspace_id = self.validate_workspace_id(workspace_id)
+        overrides = self.read_workspace_enabled_overrides()
+        overrides[workspace_id] = bool(enabled)
+        self.ensure_root()
+        # Readers may run on a worker thread; swap the file in whole so they
+        # never see a truncated state.
+        state_path = self._workspace_state_path()
+        tmp_path = state_path.with_name(f"{state_path.name}.tmp-{os.getpid()}")
+        tmp_path.write_text(
+            json.dumps({"enabled": overrides}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _replace_with_retry(tmp_path, state_path)
+        for workspace in self.list_workspaces():
+            if workspace.id == workspace_id:
+                return workspace
+        raise FileNotFoundError(f"工作区不存在: {workspace_id}")
+
     def list_pages(self, *, enabled_only: bool = False) -> list[WebUIPageListItem]:
         self.ensure_root()
         items: list[WebUIPageListItem] = []
         seen_keys: set[str] = set()
+        overrides = self.read_workspace_enabled_overrides()
         for root in self._read_roots:
             if not root.is_dir():
                 continue
@@ -215,10 +274,15 @@ class WebUIPagesStore:
                 if page_id in seen_keys or manifest.id in seen_keys:
                     continue
                 seen_keys.update({page_id, manifest.id})
-                if enabled_only and not manifest.enabled:
+                workspace = self._workspace_for_page_dir(root, page_dir)
+                # A page of a disabled workspace is off too, so old links to it
+                # stop resolving until the workspace is enabled again.
+                page_enabled = manifest.enabled and (
+                    overrides.get(workspace.id, True) if workspace else True
+                )
+                if enabled_only and not page_enabled:
                     continue
                 build = self._read_build_meta_at(page_dir)
-                workspace = self._workspace_for_page_dir(root, page_dir)
                 items.append(
                     WebUIPageListItem(
                         id=manifest.id,
@@ -227,7 +291,7 @@ class WebUIPagesStore:
                         route=manifest.route,
                         icon=manifest.icon,
                         order=manifest.order,
-                        enabled=manifest.enabled,
+                        enabled=page_enabled,
                         placement=manifest.placement,
                         buildHash=build.hash,
                         buildStatus=build.status,
@@ -244,6 +308,7 @@ class WebUIPagesStore:
         self.ensure_root()
         workspaces: list[WebUIWorkspaceListItem] = []
         seen_workspace_ids: set[str] = set()
+        overrides = self.read_workspace_enabled_overrides()
         for root in self._read_roots:
             if not root.is_dir():
                 continue
@@ -251,7 +316,8 @@ class WebUIPagesStore:
                 if manifest.id in seen_workspace_ids:
                     continue
                 seen_workspace_ids.add(manifest.id)
-                if enabled_only and not manifest.enabled:
+                workspace_enabled = overrides.get(manifest.id, manifest.enabled)
+                if enabled_only and not workspace_enabled:
                     continue
 
                 pages: list[WebUIPageListItem] = []
@@ -263,7 +329,8 @@ class WebUIPagesStore:
                     if page_manifest is None:
                         continue
                     seen_page_ids.add(page_manifest.id)
-                    if enabled_only and not page_manifest.enabled:
+                    page_enabled = page_manifest.enabled and workspace_enabled
+                    if enabled_only and not page_enabled:
                         continue
                     build = self._read_build_meta_at(page_dir)
                     pages.append(
@@ -274,7 +341,7 @@ class WebUIPagesStore:
                             route=page_manifest.route,
                             icon=page_manifest.icon,
                             order=page_manifest.order,
-                            enabled=page_manifest.enabled,
+                            enabled=page_enabled,
                             placement=page_manifest.placement,
                             buildHash=build.hash,
                             buildStatus=build.status,
@@ -294,11 +361,12 @@ class WebUIPagesStore:
                         route=webui_contract_workspace_route(manifest.id),
                         icon=manifest.icon,
                         order=manifest.order,
-                        enabled=manifest.enabled,
+                        enabled=workspace_enabled,
                         placement=manifest.placement,
                         defaultPageId=manifest.defaultPageId,
                         sections=manifest.sections,
                         pages=pages,
+                        native=self._project_root is not None and root == self._project_root,
                     )
                 )
         workspaces.sort(key=lambda item: (item.order, item.title))

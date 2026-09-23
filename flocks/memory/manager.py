@@ -369,7 +369,7 @@ class MemoryManager:
                             {
                                 "project_id": self.project_id,
                                 "reason": (
-                                    "SQLite runtime does not support FTS5"
+                                    "SQLite runtime cannot provide the session search index"
                                 ),
                             },
                         )

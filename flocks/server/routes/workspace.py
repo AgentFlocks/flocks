@@ -50,11 +50,13 @@ import sys
 import zipfile
 from pathlib import Path
 from typing import List, Optional, Literal
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from flocks.channel.media_filename import sanitize_filename
 from flocks.project.project import Project
 from flocks.server.auth import get_optional_user, require_user
 from flocks.workspace.manager import WorkspaceManager
@@ -228,11 +230,12 @@ def _inline_preview_response(target: Path) -> FileResponse:
     )
 
 
-def _download_response(target: Path) -> FileResponse:
+def _download_response(target: Path, *, filename: Optional[str] = None) -> FileResponse:
     return FileResponse(
         path=str(target),
-        filename=target.name,
+        filename=filename or target.name,
         media_type="application/octet-stream",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -347,10 +350,12 @@ async def delete_dir(
 
 @router.post("/upload", summary="Upload file(s)")
 async def upload_files(
+    request: Request,
     dest: str = Query("", description="Destination directory (relative)"),
     purpose: Optional[Literal["chat"]] = Query(None, description="Upload purpose"),
     files: List[UploadFile] = File(...),
 ):
+    current_user = require_user(request) if purpose == "chat" else None
     mgr = _get_manager()
     workspace_root = _workspace_root(mgr)
     try:
@@ -370,16 +375,73 @@ async def upload_files(
             results.append({"name": "", "error": "Filename is missing"})
             continue
 
-        filename = Path(raw_name).name  # strip any dir component from client
-        if purpose == "chat" and not _is_allowed_upload_filename(filename):
-            results.append({
+        if purpose == "chat":
+            from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload
+            from flocks.utils.id import Identifier
+
+            filename = sanitize_filename(unquote(raw_name), fallback="")
+            if not filename:
+                results.append({"name": "", "error": "Filename is invalid"})
+                continue
+            if not _is_allowed_upload_filename(filename):
+                results.append({
+                    "name": filename,
+                    "error": f"Unsupported file type (allowed: {_ALLOWED_UPLOAD_LABEL})",
+                })
+                continue
+
+            upload_id = Identifier.ascending("part")
+            target = None
+            completed = False
+            total = 0
+            try:
+                target = create_chat_upload_target(current_user.id, upload_id, filename)
+                # Stream directly to this upload's exclusive staging file.
+                # Keep writes bounded and synchronous so cancellation cannot
+                # leave a background writer racing with close/cleanup.
+                with target.open("xb") as handle:
+                    while True:
+                        chunk = await upload.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            break
+                        handle.write(chunk)
+                if total > max_bytes:
+                    results.append({"name": filename, "error": f"File too large (max {max_mb} MB)"})
+                    continue
+                completed = True
+            except Exception as exc:
+                results.append({"name": filename, "error": f"Failed to stage upload: {exc}"})
+                continue
+            finally:
+                # Also runs for CancelledError. A failed create must never
+                # remove an existing upload with the same ID.
+                if target is not None and not completed:
+                    remove_staged_chat_upload(current_user.id, upload_id)
+
+            is_text = WorkspaceManager.is_text_file(target)
+            mime_type = upload.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            log.info("workspace.chat_file.staged", {
+                "upload_id": upload_id,
                 "name": filename,
-                "error": f"Unsupported file type (allowed: {_ALLOWED_UPLOAD_LABEL})",
+                "size": total,
+                "is_text": is_text,
+            })
+            results.append({
+                "uploadID": upload_id,
+                "name": filename,
+                "mime": mime_type,
+                "size": total,
+                "is_text_file": is_text,
+                "preview_warning": None if is_text else "Binary file — download only",
             })
             continue
 
-        # Read file in chunks to enforce size limit without loading entire
-        # content into memory before checking.
+        filename = Path(raw_name).name  # strip any dir component from client
+        # Read regular Workspace uploads in chunks before overwriting the
+        # destination, so an oversized upload leaves existing content intact.
         chunks: list[bytes] = []
         total = 0
         too_large = False
@@ -398,8 +460,8 @@ async def upload_files(
             continue
 
         content = b"".join(chunks)
-        # Keep attachment paths stable across repeated uploads by overwriting the
-        # existing file instead of auto-renaming to "name (1).ext".
+        # Keep regular Workspace paths stable across repeated uploads by
+        # overwriting the existing file instead of auto-renaming it.
         target = dest_dir / filename
         target.write_bytes(content)
 
@@ -421,6 +483,18 @@ async def upload_files(
         })
 
     return {"uploaded": results}
+
+
+@router.delete("/upload/chat/{upload_id}", summary="Discard staged chat upload")
+async def discard_chat_upload(upload_id: str, request: Request):
+    from flocks.session.files import remove_staged_chat_upload
+
+    current_user = require_user(request)
+    try:
+        removed = remove_staged_chat_upload(current_user.id, upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"uploadID": upload_id, "removed": removed}
 
 
 @router.get("/file", summary="Read text file content")

@@ -37,6 +37,7 @@
       "htmlSandbox": "HTML 已在受限沙箱中渲染，脚本不会执行。",
       "jsonParseFailed": "JSON 解析失败，已按原始文本显示。",
       "jsonlParseFailed": "{{count}} 行 JSONL 解析失败，已保留原始文本。",
+      "csvTruncated": "当前仅预览前 {{rows}} 行、{{columns}} 列。",
       "pdfLoading": "正在加载 PDF...",
       "pdfRendering": "正在渲染页面...",
       "pdfLoadFailed": "PDF 预览加载失败",
