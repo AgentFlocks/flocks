@@ -82,7 +82,7 @@ Docker / rootful podman 的 bridge 网络有自己的网络命名空间，包从
 | arm64（开发机）：CentOS Stream 9 容器，宿主内核 Linux 6.8，用 dev-arm64 包 + .run 安装 | 160 / 160 |
 | `tests/test_setup_a.py`：参数文件 / 代理 URL / 网段 / 三份渲染 / 现成代理设置解析 / 终端提问（开发机 pytest） | 42 / 42 |
 
-日志在 `tests/results/`。没验证的：物理机 / 客户虚拟机上的 CentOS 9、真实 Docker、客户真实的代理产品、SELinux enforcing、上联网桥判据里「成员口不是 veth」那条分支（容器里 eth0 是 veth，只走到了默认路由那条）。跑测试的两个坑：`colima start` 另一个 profile 会切走 docker context（一律显式 `DOCKER_CONTEXT=`）；e2e 跑着的时候不能改 `tests/e2e-centos9.sh`（bash 边读边执行）。x86 VM 上读 nft 表的断言偶发拿到空输出，对这类断言重试 3 次。
+跑了什么、结果、交付包校验和记在 `tests/results/README.txt`（原始日志只留在跑测试的机器上，不进仓库）。没验证的：物理机 / 客户虚拟机上的 CentOS 9、真实 Docker、客户真实的代理产品、SELinux enforcing、上联网桥判据里「成员口不是 veth」那条分支（容器里 eth0 是 veth，只走到了默认路由那条）。跑测试的两个坑：`colima start` 另一个 profile 会切走 docker context（一律显式 `DOCKER_CONTEXT=`）；e2e 跑着的时候不能改 `tests/e2e-centos9.sh`（bash 边读边执行）。x86 VM 上读 nft 表的断言偶发拿到空输出，对这类断言重试 3 次。
 
 ## 7. 仓库里的其他东西
 
