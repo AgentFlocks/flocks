@@ -267,7 +267,7 @@ function buildUpdateNotification(info: VersionInfo | null, language: string): Us
 
   const isZh = language.toLowerCase().startsWith('zh');
   return {
-    id: `whats-new-${version}`,
+    id: `whats-new-${version.replace(/^v/i, '')}`,
     kind: 'whats_new',
     title: isZh ? `Flocks ${formatUpdateVersion(version)} 更新内容` : `What's new in Flocks ${formatUpdateVersion(version)}`,
     summary: isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.',
@@ -692,7 +692,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     };
   }, [i18n.language, notificationGateReady, updateInfo, user?.id]);
 
-  const allNotifications = updateNotification
+  const allNotifications = updateNotification && !notifications.some((item) => item.id === updateNotification.id)
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
   const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0

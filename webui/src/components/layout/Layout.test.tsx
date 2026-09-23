@@ -268,6 +268,28 @@ const testContentRoutes: RouteObject[] = [
   { path: '*', element: <RouteProbe /> },
 ];
 
+function rcNotices() {
+  return [
+    {
+      id: 'holiday-benefits-2026-09-23',
+      kind: 'benefit',
+      title: '10 月 Token 政策调整',
+      body: 'Holiday transition support',
+      highlights: [],
+      priority: 10,
+    },
+    {
+      id: 'whats-new-2026.9.23',
+      kind: 'whats_new',
+      title: 'Flocks v2026.9.23 更新内容',
+      body: 'Static release details',
+      version: '2026.9.23',
+      highlights: [],
+      priority: 20,
+    },
+  ];
+}
+
 function renderHomeWithLayout() {
   return renderLayoutAt('/');
 }
@@ -1201,6 +1223,61 @@ describe('Layout onboarding entry', () => {
     expect(getActiveNotifications).toHaveBeenCalledTimes(1);
     expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.04.28');
     expect(checkUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows both RC notices when the admin update check has no release notes', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    getActiveNotifications.mockResolvedValue(rcNotices());
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: 'v2026.9.14',
+      current_version: 'v2026.9.23',
+      release_notes: null,
+      error: null,
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('10 月 Token 政策调整')).toBeInTheDocument();
+    expect(screen.getByText('Flocks v2026.9.23 更新内容')).toBeInTheDocument();
+    expect(screen.getByText('Static release details')).toBeInTheDocument();
+    expect(getNotificationAckStatus).not.toHaveBeenCalled();
+  });
+
+  it('shows both RC notices to members without an admin update check', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: { id: 'member-1', username: 'member', role: 'member', status: 'active' },
+      logout: vi.fn(),
+    });
+    getActiveNotifications.mockResolvedValue(rcNotices());
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('10 月 Token 政策调整')).toBeInTheDocument();
+    expect(screen.getByText('Flocks v2026.9.23 更新内容')).toBeInTheDocument();
+    expect(checkUpdate).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates bundled release notes against the same dynamic release', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    getActiveNotifications.mockResolvedValue(rcNotices());
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: 'v2026.9.23',
+      current_version: '2026.9.23',
+      release_notes: 'Dynamic release details',
+      error: null,
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('Flocks v2026.9.23 更新内容')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.9.23');
+    });
+    expect(screen.getAllByText('Flocks v2026.9.23 更新内容')).toHaveLength(1);
+    expect(screen.queryByText('Dynamic release details')).not.toBeInTheDocument();
   });
 
   it('does not show acknowledged update release notes again', async () => {
