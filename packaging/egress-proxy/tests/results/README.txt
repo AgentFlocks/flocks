@@ -1,5 +1,5 @@
 跑过什么、结果如何（v2.0.0，开发机 Apple Silicon Mac + colima）。原始日志（*.log）只留在跑测试的那台机器上，不进仓库；
-要重新拿一份就照下面的命令再跑一遍，日志会落回这个目录。
+要重新拿一份就照下面的命令再跑一遍，日志会落回这个目录。下面的命令都以 packaging/egress-proxy/ 为工作目录。
 
 交付目标是 x86_64，以 x86_64 那轮为准；arm64 只是开发机上容器跑得快（10 分钟 vs 35 分钟）用来快速迭代，包在 dist/dev-arm64/，不交付。
 
@@ -14,7 +14,8 @@
           T05n help、X04 零参数 .run 取 dnf.conf 里的代理、X04c .run 直接跟 IP:端口、X04d .run 不带参数 → 终端三问、X04e .run help
   arm64   PASS 160 / FAIL 0 / SKIP 0   DOCKER_CONTEXT=colima tests/e2e-centos9.sh --arch arm64 \
                                          --bundle dist/dev-arm64/…-arm64.tar.gz --run dist/dev-arm64/…-arm64.run
-  pytest  42 / 42                      uv run pytest tests/test_setup_a.py
+  pytest  42 / 42                      <flocks 仓库根>/.venv/bin/python -m pytest tests/test_setup_a.py -q
+                                       （这个目录没有自己的 pyproject.toml，别在这儿 uv run，它会去用仓库根那个项目）
           （主机:端口 补 http://、wgetrc 解析、终端提问的五种分支与 Ctrl-D、机器现成代理设置解析不了时报来源并遮账号后忽略）
 
 2026-09-21（上一版）：x86_64 与 arm64 各 150 / 150、pytest 37 / 37。当时 B 上的 SOCKS5 代理还是用后来删掉的 extras/relay 装的，
