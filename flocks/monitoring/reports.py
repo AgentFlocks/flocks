@@ -4,9 +4,9 @@ import hashlib
 import json
 import os
 import tempfile
-from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from flocks.workspace.manager import WorkspaceManager
 from .store import rows, write, connection
 
 _locks: dict[tuple, asyncio.Lock] = {}
@@ -95,7 +95,7 @@ async def export_report(owner, scope, day):
             data = await snapshot(owner, scope, day)
             content = render(data)
             digest = hashlib.sha256(f'{owner}:{scope}'.encode()).hexdigest()[:16]
-            directory = Path.home() / '.flocks' / 'workspace' / 'outputs' / day
+            directory = WorkspaceManager.get_instance().get_workspace_dir().expanduser() / 'outputs' / day
             directory.mkdir(parents=True, exist_ok=True)
             target = directory / f'host-security-monitor-{digest}.md'
             fd, temp = tempfile.mkstemp(prefix='.monitor-', dir=directory)

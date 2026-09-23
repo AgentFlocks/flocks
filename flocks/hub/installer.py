@@ -950,6 +950,10 @@ async def install_plugin(
             plan["requiresConfirmation"] and (not confirm_changes or confirmation_token != plan["token"])
         ):
             raise UpdateConfirmationRequired(public_plan(plan))
+        for item in plan["items"]:
+            if item["type"] == "component" and item["id"] == "host-security-monitor":
+                from flocks.monitoring.lifecycle import preflight_install
+                await preflight_install()
         try:
             backup = await asyncio.to_thread(create_backup, plan) if plan["requiresConfirmation"] else None
         except Exception as exc:
@@ -998,8 +1002,9 @@ async def _install_plugin(
     src = plugin_root(plugin_type, plugin_id, prefer_bundled=True)
     validate_package(src, manifest)
     if plugin_type == "component" and plugin_id == "host-security-monitor":
-        from flocks.monitoring.lifecycle import validate_manifest
+        from flocks.monitoring.lifecycle import preflight_install, validate_manifest
         validate_manifest(manifest, src)
+        await preflight_install()
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
     access_dst = _contracts_access_dir(plugin_id, scope) if plugin_type == "webui" and (src / "access").is_dir() else None
     expected = None
@@ -1081,10 +1086,16 @@ async def _install_plugin(
         if "package" not in retained_roots:
             _commit_replacement(package_backup)
         return record
-    except Exception:
+    except Exception as install_error:
+        compensation_error = None
         if monitor_registration_started:
             from flocks.monitoring.lifecycle import compensate_install_failure
-            await compensate_install_failure(previous_record is not None)
+            try:
+                await compensate_install_failure(previous_record is not None)
+            except Exception as exc:
+                # A task-store error must not strand the replaced package or
+                # prevent restoration of its previous installation record.
+                compensation_error = exc
         if access_replacement is not None:
             _rollback_replacement(
                 *access_replacement, recovery_root=recovery_root / plugin_type / plugin_id / "access",
@@ -1107,6 +1118,8 @@ async def _install_plugin(
                 await _refresh_runtime(plugin_type, dst)
             except Exception:
                 pass
+        if compensation_error is not None:
+            raise RuntimeError(f'监测登记清理未完成；插件文件及安装记录已恢复，请检查任务状态后重试：{install_error}') from compensation_error
         raise
 
 

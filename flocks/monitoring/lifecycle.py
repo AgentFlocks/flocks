@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 from flocks.auth.context import get_current_auth_user
 from flocks.hub import local
@@ -11,6 +12,7 @@ from flocks.task.models import SchedulerStatus
 from flocks.task.plugin_models import TaskSpec
 from flocks.task.plugin_sync import upsert_task_specs
 from flocks.task.store import TaskStore
+from flocks.workspace.manager import WorkspaceManager
 from .models import COMPONENT_ID, MonitoringPolicy, MonitoringDeclaration
 from .store import rows, write, encode
 from .adapter import discover
@@ -42,13 +44,19 @@ async def install(manifest):
         raise ValueError('安装监测套件需要已登录的拥有者')
     async with _lock:
         old = await rows('SELECT * FROM monitor_installations WHERE owner=? AND scope=?', (user.id, COMPONENT_ID))
-        digest = hashlib.sha256(user.id.encode()).hexdigest()[:16]
-        directory = Path.home() / '.flocks' / 'workspace' / 'monitoring' / digest
-        directory.mkdir(parents=True, exist_ok=True)
+        directory = await preflight_install()
+        projects = await Project.list(owner_id=user.id)
+        names = {project.name.casefold() for project in projects}
+        name, suffix = '安全运营监测', 1
+        while name.casefold() in names:
+            suffix += 1
+            name = f'安全运营监测 ({suffix})'
         try:
-            project = await Project.create(owner_id=user.id, name='安全运营监测', worktree=str(directory))
+            # Project.create checks canonical allowed roots before mkdir.
+            project = await Project.create(owner_id=user.id, name=name, worktree=str(directory))
         except ProjectPathConflictError as exc:
             project = exc.project
+        directory = Path(project.worktree)
         devices, tool, reason = await discover()
         policy = MonitoringPolicy(owner=user.id, project=project.id, directory=str(directory),
                                   devices=devices, tool=tool or 'sangfor_xdr_incidents')
@@ -76,6 +84,36 @@ async def install(manifest):
             scheduler.status = SchedulerStatus.ACTIVE
             await TaskStore.update_scheduler(scheduler)
             await write('UPDATE monitor_installations SET activation_pending=0 WHERE owner=? AND scope=?', (user.id, COMPONENT_ID))
+
+
+async def preflight_install():
+    """Check the target before replacing a package; never create directories here."""
+    user = get_current_auth_user()
+    if user is None:
+        raise ValueError('安装监测套件需要已登录的拥有者')
+    old = await rows('SELECT policy FROM monitor_installations WHERE owner=? AND scope=?', (user.id, COMPONENT_ID))
+    if old:
+        # Keep the original project identity and history on reinstall. A changed
+        # workspace configuration is not authorization to migrate an old project.
+        directory = Path(MonitoringPolicy.model_validate_json(old[0]['policy']).directory)
+    else:
+        digest = hashlib.sha256(user.id.encode()).hexdigest()[:16]
+        directory = WorkspaceManager.get_instance().get_workspace_dir() / 'monitoring' / digest
+    try:
+        directory = directory.expanduser().resolve()
+        roots = Project.allowed_roots()
+        if not roots or not any(directory == root or directory.is_relative_to(root) for root in roots):
+            raise ValueError('监测项目目录不在允许范围内，请检查 FLOCKS_WORKSPACE_DIR 与 FLOCKS_PROJECT_ROOTS 的配置及软链接真实位置')
+        ancestor = directory
+        while not ancestor.exists() and ancestor != ancestor.parent:
+            ancestor = ancestor.parent
+        if not ancestor.is_dir() or not os.access(ancestor, os.R_OK | os.W_OK | os.X_OK):
+            raise ValueError('监测项目目录不可创建或写入，请检查工作区目录权限')
+        if directory.exists():
+            Project.validate_worktree(str(directory))
+    except (OSError, RuntimeError) as exc:
+        raise ValueError('监测项目目录无法解析，请检查工作区路径及软链接') from exc
+    return directory
 
 
 async def uninstall():

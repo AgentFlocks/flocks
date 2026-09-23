@@ -16,9 +16,20 @@ from flocks.task.queue import TaskQueue
 from flocks.tool.registry import ToolRegistry, Tool, ToolInfo, ToolResult, ToolParameter, ParameterType
 from flocks.tool.device.store import insert_device
 from flocks.monitoring.reports import snapshot
+from flocks.workspace.manager import WorkspaceManager
 
 @pytest.mark.asyncio
-async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch):
+@pytest.mark.parametrize('symlinked_workspace', [False, True])
+async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch, tmp_path, symlinked_workspace):
+    if symlinked_workspace:
+        home, storage = tmp_path / 'home', tmp_path / 'storage'
+        home.mkdir()
+        storage.mkdir()
+        (home / '.flocks').symlink_to(storage, target_is_directory=True)
+        monkeypatch.setattr(Path, 'home', staticmethod(lambda: home))
+        monkeypatch.setenv('FLOCKS_ROOT', str(home / '.flocks'))
+        monkeypatch.setenv('FLOCKS_WORKSPACE_DIR', str(home / '.flocks/workspace'))
+        monkeypatch.setattr(WorkspaceManager, '_instance', None)
     user = await AuthService.bootstrap_admin('monitor-test', 'Synthetic-test-password-2026!')
     token = set_current_auth_user(user.to_auth_user())
     calls = []
@@ -53,5 +64,7 @@ async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch
         data = await snapshot(user.id, COMPONENT_ID, attempts[0]['business_date'])
         assert data['metrics']['events'] == 1 and data['report']['status'] == 'updated'
         assert calls == ['list', 'get_entities']
+        if symlinked_workspace:
+            assert list((storage / 'workspace/outputs' / attempts[0]['business_date']).glob('host-security-monitor-*.md'))
     finally:
         reset_current_auth_user(token)

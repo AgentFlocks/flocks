@@ -353,18 +353,25 @@ class Project:
 
         configured = os.getenv("FLOCKS_PROJECT_ROOTS", "").strip()
         candidates = [Path(item).expanduser() for item in configured.split(os.pathsep) if item]
+        workspace = None
         if not candidates:
-            candidates = [Path.home()]
+            from flocks.workspace.manager import WorkspaceManager
+
+            # The application's configured workspace can live outside HOME,
+            # including when ~/.flocks is a symlink. Trust only that workspace,
+            # not its parent data directory. Explicit project roots stay strict.
+            workspace = WorkspaceManager.get_instance().get_workspace_dir().expanduser()
+            candidates = [Path.home(), workspace]
         if default_worktree:
             candidates.append(Path(default_worktree).expanduser())
 
         roots: List[Path] = []
         for candidate in candidates:
             try:
-                resolved = candidate.resolve(strict=True)
+                resolved = candidate.resolve(strict=candidate != workspace)
             except (OSError, RuntimeError):
                 continue
-            if not resolved.is_dir():
+            if not resolved.is_dir() and not (candidate == workspace and not resolved.exists()):
                 continue
             if any(resolved == root or resolved.is_relative_to(root) for root in roots):
                 continue

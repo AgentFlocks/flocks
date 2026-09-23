@@ -7,10 +7,15 @@ from flocks.task.manager import TaskManager
 from flocks.session.message import Message
 from flocks.session.session import Session
 from flocks.auth.context import AuthUser, set_current_auth_user, reset_current_auth_user
+from flocks.workspace.manager import WorkspaceManager
 
 @pytest.fixture(autouse=True)
 async def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, 'home', staticmethod(lambda: tmp_path))
+    monkeypatch.setenv('FLOCKS_ROOT', str(tmp_path / '.flocks'))
+    monkeypatch.setenv('FLOCKS_WORKSPACE_DIR', str(tmp_path / '.flocks/workspace'))
+    monkeypatch.delenv('FLOCKS_PROJECT_ROOTS', raising=False)
+    monkeypatch.setattr(WorkspaceManager, '_instance', None)
     monkeypatch.setenv('FLOCKS_CONFIG_DIR', str(tmp_path / '.flocks/config'))
     monkeypatch.setenv('FLOCKS_DATA_DIR', str(tmp_path / 'data'))
     monkeypatch.setenv('FLOCKS_HUB_ROOT', str(Path(__file__).resolve().parents[2] / '.flocks/flockshub'))
