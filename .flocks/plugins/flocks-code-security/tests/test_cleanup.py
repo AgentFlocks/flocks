@@ -457,3 +457,98 @@ async def test_service_quota_reaches_worker_result_when_scan_write_is_locked(tmp
         assert read_json(task_dir / "result.json")["failure_code"] == MODEL_QUOTA_EXHAUSTED
     finally:
         batch_worker.cleanup_work(read_json(task_dir / "current.json")["work_dir"], task_dir)
+
+
+def _legacy_fuzz_run(store, scan_id, container_name):
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO cybergym_tasks (scan_id, task_id, manifest_json, status, created_at, updated_at) "
+            "VALUES (?, 'legacy', '{}', 'active', '2026-09-07', '2026-09-07')", (scan_id,),
+        )
+    run = store.start_cybergym_run(scan_id, "fuzz", {})
+    with store._connect() as connection:
+        connection.execute("UPDATE cybergym_runs SET container_name = ? WHERE run_id = ?", (container_name, run["run_id"]))
+    store.retain_ui_history = True
+    return run["run_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("container_name,returncode,stderr,expected", [
+    (None, 0, "", "not_requested"),
+    ("cybergym-fuzz-" + "a" * 24, 0, "", "removed"),
+    ("cybergym-fuzz-" + "a" * 24, 1, "Error: No such container", "not_found"),
+])
+async def test_interrupted_legacy_fuzz_cleanup_converges(tmp_path, monkeypatch, container_name, returncode, stderr, expected):
+    from types import SimpleNamespace
+
+    runtime, scan_id, snapshot, target = prepare(tmp_path, monkeypatch)
+    run_id = _legacy_fuzz_run(runtime.store, scan_id, container_name)
+    runtime.store.mark_scan_terminal(scan_id, "interrupted")
+    docker = Mock(return_value=SimpleNamespace(returncode=returncode, stderr=stderr))
+    monkeypatch.setattr(cleanup_module.subprocess, "run", docker)
+
+    result = await cleanup_scan(runtime, scan_id)
+
+    assert result["status"] == "completed"
+    run = runtime.store.get_cybergym_run_by_id(run_id)
+    assert run["status"] == "cancelled"
+    assert run["result"]["container_cleanup"]["status"] == expected
+    assert not Path(snapshot.root_path).exists()
+    assert (target / "app.py").exists()
+    if container_name:
+        docker.assert_called_once_with(["docker", "rm", "--force", container_name], capture_output=True, text=True, timeout=20)
+    else:
+        docker.assert_not_called()
+    assert await cleanup_scan(runtime, scan_id) == result
+    assert docker.call_count == int(container_name is not None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["daemon", "missing", "timeout"])
+async def test_legacy_fuzz_cleanup_retries_without_losing_data(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    runtime, scan_id, snapshot, _ = prepare(tmp_path, monkeypatch)
+    run_id = _legacy_fuzz_run(runtime.store, scan_id, "cybergym-fuzz-" + "b" * 24)
+    runtime.store.mark_scan_terminal(scan_id, "interrupted")
+    docker = Mock(return_value=SimpleNamespace(returncode=1, stderr="Cannot connect to the Docker daemon"))
+    if failure == "missing":
+        docker.side_effect = FileNotFoundError("docker")
+    elif failure == "timeout":
+        docker.side_effect = cleanup_module.subprocess.TimeoutExpired("docker", 20)
+    monkeypatch.setattr(cleanup_module.subprocess, "run", docker)
+
+    assert (await cleanup_scan(runtime, scan_id))["status"] == "failed"
+    assert runtime.store.get_cybergym_run_by_id(run_id)["status"] == "running"
+    assert Path(snapshot.root_path).exists()
+    assert runtime.store.list_phase_runs(scan_id)
+
+    docker.side_effect = None
+    docker.return_value = SimpleNamespace(returncode=0, stderr="")
+    assert (await cleanup_scan(runtime, scan_id))["status"] == "completed"
+    assert runtime.store.get_cybergym_run_by_id(run_id)["status"] == "cancelled"
+    assert not Path(snapshot.root_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_legacy_fuzz_cleanup_preserves_terminal_outcome(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    runtime, scan_id, _, _ = prepare(tmp_path, monkeypatch)
+    run_id = _legacy_fuzz_run(runtime.store, scan_id, "cybergym-fuzz-" + "c" * 24)
+    runtime.store.finish_cybergym_run(run_id, "completed", {"crash_count": 2})
+    runtime.store.record_cybergym_fuzz_cleanup(run_id, {"status": "failed"})
+    runtime.store.mark_scan_terminal(scan_id, "interrupted")
+    monkeypatch.setattr(cleanup_module.subprocess, "run", Mock(return_value=SimpleNamespace(returncode=0, stderr="")))
+    assert (await cleanup_scan(runtime, scan_id))["status"] == "completed"
+    run = runtime.store.get_cybergym_run_by_id(run_id)
+    assert run["status"] == "completed"
+    assert run["result"] == {"crash_count": 2, "container_cleanup": {"status": "removed"}}
+
+
+def test_legacy_fuzz_cleanup_refuses_unrelated_container(monkeypatch):
+    docker = Mock()
+    monkeypatch.setattr(cleanup_module.subprocess, "run", docker)
+    with pytest.raises(ValueError, match="unrecognized"):
+        cleanup_module._remove_legacy_fuzz_container("unrelated-service")
+    docker.assert_not_called()

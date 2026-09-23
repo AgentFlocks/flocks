@@ -1037,6 +1037,13 @@ class ScanStore:
                 )
                 connection.execute("DROP TABLE cybergym_runs")
                 connection.execute("ALTER TABLE cybergym_runs_v6 RENAME TO cybergym_runs")
+            # Retired roles remain decodable during migration, but cannot be
+            # used to create or launch workers on this branch.
+            migration_role_agents = {
+                **WORKER_ROLE_AGENTS,
+                "prober": "code-security-prober",
+                "cybergym_solver": "code-security-cybergym-solver",
+            }
             legacy_bindings = connection.execute(
                 """
                 SELECT sb.session_id, sb.scan_id, sb.work_unit_id,
@@ -1080,7 +1087,7 @@ class ScanStore:
                     attempt_id=attempt_id,
                     phase=legacy["phase"],
                     role=legacy["role"],
-                    agent_name=WORKER_ROLE_AGENTS[legacy["role"]],
+                    agent_name=migration_role_agents[legacy["role"]],
                     session_id=legacy["session_id"],
                     provider_id=None,
                     model_id=None,
@@ -1105,7 +1112,7 @@ class ScanStore:
                         ordinal,
                         legacy["session_id"],
                         legacy["background_task_id"],
-                        WORKER_ROLE_AGENTS[legacy["role"]],
+                        migration_role_agents[legacy["role"]],
                         migrated_toolset_digest,
                         migrated_scope_digest,
                         capsule.digest(),

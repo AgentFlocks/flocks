@@ -220,6 +220,7 @@ def test_all_audit_tools_register() -> None:
         "investigation",
         "verification",
         "targeted_rescan",
+        "poc_generation",
     ]
     prepare = ToolRegistry.get("audit_prepare").info
     assert all(parameter.name != "verification_votes" for parameter in prepare.parameters)
@@ -465,3 +466,15 @@ async def test_public_status_exposes_cybergym_state(
 
     assert result.success is True
     assert result.output["cybergym"] == {"task_id": "fixture", "status": "submitted"}
+
+
+def test_interactive_audit_schema_accepts_required_poc_phase() -> None:
+    import jsonschema
+
+    register_tools()
+    infos, _ = resolve_callable_tool_infos(AGENT_TOOLS["code-security"])
+    schema = next(info for info in infos if info.name == "audit_run_workers").get_schema().to_json_schema()
+    jsonschema.validate({"scan_id": "scan_test", "phase": "poc_generation"}, schema)
+    for phase in ("probing", "cybergym_solving"):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({"scan_id": "scan_test", "phase": phase}, schema)

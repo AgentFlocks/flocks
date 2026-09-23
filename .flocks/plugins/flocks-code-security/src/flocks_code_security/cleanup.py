@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import subprocess
 import shutil
 from pathlib import Path
 from weakref import WeakValueDictionary
@@ -60,6 +62,44 @@ async def _owned_worker_sessions(parent_session_id: str, scan_id: str) -> list[s
     ]
 
 
+def _remove_legacy_fuzz_container(container_name: str | None) -> dict[str, str]:
+    """Remove only a persisted container named by the retired fuzz runner."""
+    if container_name is None:
+        return {"status": "not_requested"}
+    if not isinstance(container_name, str) or not re.fullmatch(r"cybergym-fuzz-[0-9a-f]{24}", container_name):
+        raise ValueError("Refusing cleanup of an unrecognized legacy fuzz container")
+    try:
+        result = subprocess.run(
+            ["docker", "rm", "--force", container_name],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("Legacy fuzz container cleanup is unavailable; retaining execution data") from exc
+    if result.returncode == 0:
+        return {"status": "removed"}
+    if "no such container" in result.stderr.casefold():
+        return {"status": "not_found"}
+    raise RuntimeError(f"Legacy fuzz container cleanup failed: {result.stderr.strip()[:1000]}")
+
+
+async def _cleanup_legacy_fuzz_runs(store, scan_id: str) -> None:
+    # Called only after the scan is terminal and its worker sessions are stopped.
+    # Docker failure must leave data available for the next cleanup attempt.
+    for run in store.list_cybergym_runs(scan_id):
+        if run["kind"] != "fuzz":
+            continue
+        prior = (run.get("result") or {}).get("container_cleanup") or {}
+        if run["status"] != "running" and prior.get("status") in {"removed", "not_found", "not_requested"}:
+            continue
+        cleanup = await asyncio.to_thread(_remove_legacy_fuzz_container, run.get("container_name"))
+        if run["status"] == "running":
+            store.finish_cybergym_run(
+                run["run_id"], "cancelled",
+                {"status": "cancelled", "failure_code": "cancelled", "cancel_source": "terminal_cleanup"},
+            )
+        store.record_cybergym_fuzz_cleanup(run["run_id"], cleanup)
+
+
 async def cleanup_scan(runtime: PluginRuntime, scan_id: str, *, owned_parent_session: bool = False) -> dict:
     try:
         return await _cleanup_scan(runtime, scan_id, owned_parent_session=owned_parent_session)
@@ -102,6 +142,7 @@ async def _cleanup_scan(runtime: PluginRuntime, scan_id: str, *, owned_parent_se
             deleted_sessions += await _delete_session(session_id, allowed)
         # Session deletion waits for execution to stop before source removal.
         store.cancel_scan_work(scan_id)
+        await _cleanup_legacy_fuzz_runs(store, scan_id)
         store.assert_cybergym_runs_terminal(scan_id)
         snapshot = store.get_snapshot(scan["snapshot_id"])
         deleted_trees = 0

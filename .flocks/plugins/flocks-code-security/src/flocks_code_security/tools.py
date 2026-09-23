@@ -2998,7 +2998,7 @@ def register_tools() -> None:
         _register(name, description, handler, [_parameter("scan_id", ParameterType.STRING, "Bound scan identifier.")])
     _register(
         "audit_run_workers",
-        "Create and launch isolated standard-audit workers, including at most one focused investigation, one allowed parent-directed targeted rescan, and host-owned PoC generation when enabled.",
+        "Create and launch isolated standard-audit workers, including at most one focused investigation, one allowed parent-directed targeted rescan, and mandatory PoC generation.",
         audit_run_workers,
         [
             _parameter("scan_id", ParameterType.STRING, "Bound scan identifier."),
@@ -3014,6 +3014,7 @@ def register_tools() -> None:
                     "investigation",
                     "verification",
                     "targeted_rescan",
+                    "poc_generation",
                 ],
             ),
         ],

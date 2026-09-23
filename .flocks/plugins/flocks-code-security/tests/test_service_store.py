@@ -1894,8 +1894,11 @@ def test_execution_capsule_mismatch_fails_closed(
     assert events[-1]["type"] == "identity.mismatch"
 
 
+@pytest.mark.parametrize("role,phase", [
+    ("baseline", "baseline"), ("prober", "probing"), ("cybergym_solver", "cybergym_solving"),
+])
 def test_initialize_backfills_legacy_worker_binding_and_receipts(
-    tmp_path: Path,
+    tmp_path: Path, role: str, phase: str,
 ) -> None:
     store = _store(tmp_path)
     scan_id = store.create_scan(
@@ -1966,15 +1969,18 @@ def test_initialize_backfills_legacy_worker_binding_and_receipts(
             "WHERE work_unit_id = ?",
             ("legacy-worker", "legacy-task", work_unit_id),
         )
+        connection.execute("UPDATE work_units SET role = ?, phase = ? WHERE work_unit_id = ?", (role, phase, work_unit_id))
+        connection.execute("UPDATE session_bindings SET role = ? WHERE session_id = ?", (role, "legacy-worker"))
         connection.execute("PRAGMA user_version = 0")
 
     store.initialize()
 
-    migrated = store.require_binding("legacy-worker", {"baseline"})
+    migrated = store.require_binding("legacy-worker", {role})
     assert migrated.attempt_id is not None
     attempt = store.get_work_attempt(migrated.attempt_id)
     assert attempt is not None
     assert attempt["background_task_id"] == "legacy-task"
+    assert attempt["agent_name"] == "code-security-" + role.replace("_", "-")
     with store._connect() as connection:
         receipt_attempt = connection.execute(
             "SELECT attempt_id FROM source_access WHERE session_id = ?",
