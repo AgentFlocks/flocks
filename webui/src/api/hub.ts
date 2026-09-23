@@ -4,6 +4,7 @@ export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' |
 export type HubPluginState =
   | 'available'
   | 'installed'
+  | 'partial'
   | 'updateAvailable'
   | 'localOnly'
   | 'broken'
@@ -146,7 +147,7 @@ export interface HubSceneSuite {
   version: string;
   installedVersion?: string | null;
   edition: 'oss' | 'pro';
-  state: HubPluginState | 'partial';
+  state: HubPluginState;
   workspaceId?: string | null;
   workspaceTitle?: string | null;
   workspaceRoute?: string | null;

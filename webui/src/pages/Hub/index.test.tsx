@@ -176,6 +176,52 @@ describe('HubPage catalog loading', () => {
     expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
   });
 
+  it('shows an incomplete suite and repairs it through backup confirmation', async () => {
+    const entry = { ...catalogEntry('soc-workspace', 'SOC Suite'), type: 'component' as const, state: 'partial' as const };
+    const repaired = { ...entry, state: 'installed' as const };
+    hubAPI.catalogPage.mockResolvedValueOnce(catalogPage([entry])).mockResolvedValue(catalogPage([repaired]));
+    hubAPI.catalog.mockResolvedValue({ data: [repaired] });
+    hubAPI.update.mockResolvedValue({ data: repaired });
+    hubAPI.previewUpdate.mockResolvedValue({ data: {
+      scope: 'global', token: 'repair-token', requiresConfirmation: true,
+      items: [{ type: 'component', id: entry.id, name: entry.name, requiresConfirmation: true }],
+    } });
+
+    renderHub();
+    expect(await screen.findByText('Incomplete')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Uninstall' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Complete installation' }));
+    await screen.findByRole('dialog');
+    expect(hubAPI.previewUpdate).toHaveBeenCalledWith('component', entry.id);
+    expect(hubAPI.install).not.toHaveBeenCalled();
+    expect(hubAPI.installStream).not.toHaveBeenCalled();
+    expect(hubAPI.update).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Back up and overwrite' }));
+    await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith('component', entry.id, 'global', {
+      confirmationToken: 'repair-token', confirmChanges: true,
+    }));
+    expect(await screen.findByText('Installed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Complete installation' })).not.toBeInTheDocument();
+  });
+
+  it('cancels an incomplete suite repair without installing or updating', async () => {
+    const entry = { ...catalogEntry('soc-workspace', 'SOC Suite'), type: 'component' as const, state: 'partial' as const };
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([entry]));
+    hubAPI.previewUpdate.mockResolvedValue({ data: {
+      scope: 'global', token: 'repair-token', requiresConfirmation: true,
+      items: [{ type: 'component', id: entry.id, name: entry.name, requiresConfirmation: true }],
+    } });
+
+    renderHub();
+    await userEvent.click(await screen.findByRole('button', { name: 'Complete installation' }));
+    await screen.findByRole('dialog');
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(hubAPI.install).not.toHaveBeenCalled();
+    expect(hubAPI.installStream).not.toHaveBeenCalled();
+    expect(hubAPI.update).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Complete installation' })).toBeEnabled();
+  });
+
   it('ignores an older search response that finishes after the latest query', async () => {
     const oldSearch = deferred<ReturnType<typeof catalogPage>>();
     const latestSearch = deferred<ReturnType<typeof catalogPage>>();

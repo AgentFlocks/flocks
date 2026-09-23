@@ -15,6 +15,7 @@ PluginEdition = Literal["oss", "pro"]
 PluginState = Literal[
     "available",
     "installed",
+    "partial",
     "updateAvailable",
     "localOnly",
     "broken",

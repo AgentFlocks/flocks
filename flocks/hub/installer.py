@@ -154,19 +154,31 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
-def _purge_stale_scratch(parent: Path, name: str) -> None:
-    """Remove leftover ``.<name>.<rand>`` / ``.<name>.bak`` staging dirs.
+def _ensure_no_pending_backup(dst: Path) -> None:
+    backup = dst.parent / f".{dst.name}.bak"
+    if backup.exists() or backup.is_symlink():
+        raise RuntimeError(
+            f"Plugin recovery is required before retrying: original data remains at {backup}; "
+            f"current installation is at {dst}. Recover the previous installation before continuing."
+        )
 
-    A failed atomic swap (see :func:`_replace_prepared_path`) can leave
-    scratch and backup dirs behind next to *parent*/*name*. They are never
-    valid installs, but on Windows a lingering ``.<name>.bak`` blocks the
-    next swap, so we clear both before staging a fresh copy.
+
+def _purge_stale_scratch(parent: Path, name: str) -> None:
+    """Discard prepared trees only after ruling out an unfinished rollback.
+
+    A .bak directory may be the sole old copy when retaining the replacement
+    failed (for example across filesystems). Never classify it as scratch,
+    even when the runtime failure has cleared on a later attempt.
     """
+    _ensure_no_pending_backup(parent / name)
     if not parent.is_dir():
         return
     for entry in parent.iterdir():
-        stale = entry.name.startswith(f".{name}.") or entry.name == f".{name}.bak"
-        if not stale:
+        prefix = f".{name}."
+        suffix = entry.name[len(prefix):] if entry.name.startswith(prefix) else ""
+        # mkdtemp adds one suffix without dots. A dotted remainder may belong
+        # to another legal plugin ID (e.g. .plugin.extra.bak), not this install.
+        if not suffix or "." in suffix or suffix == "bak":
             continue
         try:
             if entry.is_dir() and not entry.is_symlink():
@@ -204,12 +216,11 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
 def _replace_prepared_path(
     prepared: Path, dst: Path, *, backup_destination: Path | None = None,
 ) -> Path | None:
+    _ensure_no_pending_backup(dst)
     backup: Path | None = None
     if dst.exists() or dst.is_symlink():
         backup = backup_destination if backup_destination is not None else dst.parent / f".{dst.name}.bak"
-        if backup_destination is None:
-            _remove_path(backup)
-        else:
+        if backup_destination is not None:
             backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if backup.exists() or backup.is_symlink():
                 raise FileExistsError(f"Retained original already exists: {backup}")
@@ -930,6 +941,11 @@ async def install_plugin(
 ) -> InstalledPluginRecord:
     async with mutation_lock():
         plan = build_plan(plugin_type, plugin_id, scope)
+        # Block the whole operation before replacing any suite child when an
+        # earlier failure left an unresolved original in a temporary backup.
+        for item in plan["items"]:
+            for target in item["_roots"].values():
+                _ensure_no_pending_backup(Path(target))
         if (confirmation_token is not None and confirmation_token != plan["token"]) or (
             plan["requiresConfirmation"] and (not confirm_changes or confirmation_token != plan["token"])
         ):

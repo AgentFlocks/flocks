@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from flocks.hub import local
 from flocks.hub.catalog import (
     category_counts,
     clear_catalog_caches,
@@ -137,7 +136,7 @@ def _prioritize_installed_catalog_entries(
     entries: list[HubCatalogEntry],
 ) -> list[HubCatalogEntry]:
     """Put plugins that need local attention at the beginning of the catalog."""
-    priority = {"updateAvailable": 0, "installed": 1}
+    priority = {"partial": 0, "updateAvailable": 0, "installed": 1}
     return sorted(entries, key=lambda entry: priority.get(entry.state, 2))
 
 
@@ -263,7 +262,7 @@ def _suite_workspace_id(plugin_id: str) -> Optional[str]:
 
 @router.get("/hub/scene-suites", response_model=list[SceneSuiteEntry])
 async def hub_scene_suites(_user: object = Depends(require_user)):
-    """Scene suites for the scene-workspace suite manager (Hub no longer lists them)."""
+    """Scene suites with the same install state exposed in the Hub catalog."""
     return await asyncio.to_thread(_load_scene_suites)
 
 
@@ -271,10 +270,8 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
     from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_workspace_route
 
     catalog = list_catalog()
-    records = local.load_installed_records()
     entries = [entry for entry in catalog if entry.type == "component"]
     catalog_by_key = {(entry.type, entry.id): entry for entry in catalog}
-    installed_keys = {key for key, entry in catalog_by_key.items() if entry.installPath}
     workspaces = {item.id: item for item in WebUIPagesStore().list_workspaces()}
     suites: list[SceneSuiteEntry] = []
     for entry in entries:
@@ -284,30 +281,7 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
             refs = []
         workspace_id = next((ref.id for ref in refs if ref.type == "webui"), None)
         workspace = workspaces.get(workspace_id) if workspace_id else None
-        required_keys = {(ref.type, ref.id) for ref in refs if not ref.optional and ref.type != "component"}
-        owned_child_present = any(
-            (record := records.get(f"{ref.type}:{ref.id}")) is not None
-            and record.installedBy == f"component:{entry.id}"
-            and (
-                (ref.type, ref.id) in installed_keys
-                # Catalog keeps an otherwise missing WebUI's record only when
-                # its access contracts still need ownership-aware cleanup.
-                or (ref.type == "webui" and record.installPath is not None)
-            )
-            for ref in refs if ref.type != "component"
-        )
-        shell_present = ("component", entry.id) in installed_keys
-        # A leftover workspace or dependency is still a local installation to
-        # repair, even when the component shell or its record has disappeared.
-        # Required child checks reuse the catalog snapshot rather than rescanning
-        # each plugin's files. Optional children do not affect completeness.
-        state = entry.state
         child = catalog_by_key.get(("webui", workspace_id)) if workspace_id else None
-        if (
-            (not shell_present and (workspace is not None or owned_child_present))
-            or (shell_present and not required_keys.issubset(installed_keys))
-        ):
-            state = "partial"
         suites.append(
             SceneSuiteEntry(
                 id=entry.id,
@@ -318,7 +292,7 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
                 version=entry.version,
                 installedVersion=entry.installedVersion,
                 edition=entry.edition,
-                state=state,
+                state=entry.state,
                 workspaceId=workspace_id,
                 workspaceTitle=workspace.title if workspace else None,
                 workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,

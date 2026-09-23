@@ -669,17 +669,41 @@ def _cached_catalog_entries(
         if manifest:
             entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
             seen.add((bundled_type, bundled_id))
-    # A suite can ship unchanged while a referenced workflow/tool/page gets a
-    # new release. Expose that update on the suite as well as on the child.
+    # Both Hub and the scene manager consume this state. A suite needs repair
+    # when required payloads are missing, even if its version is current. A
+    # repair also updates outdated children, so completeness takes precedence.
     by_key = {(entry.type, entry.id): entry for entry in entries}
+    installed_keys = {key for key, entry in by_key.items() if entry.installPath}
     for entry in entries:
-        if entry.type != "component" or entry.state != "installed":
+        if entry.type != "component" or entry.state == "incompatible":
             continue
         try:
             refs = load_manifest("component", entry.id).components
         except Exception:
             continue
-        if any(
+        required_keys = {(ref.type, ref.id) for ref in refs if not ref.optional and ref.type != "component"}
+        shell_present = ("component", entry.id) in installed_keys
+        workspace_present = any(ref.type == "webui" and (ref.type, ref.id) in installed_keys for ref in refs)
+        owned_child_present = any(
+            (record := records.get(f"{ref.type}:{ref.id}")) is not None
+            and record.installedBy == f"component:{entry.id}"
+            and (
+                (ref.type, ref.id) in installed_keys
+                # An access contract can outlive its WebUI payload. Only its
+                # owning suite should offer to repair that leftover install.
+                or (
+                    ref.type == "webui"
+                    and (local.install_root("webui", record.scope).parent / "access" / ref.id).exists()
+                )
+            )
+            for ref in refs if ref.type != "component"
+        )
+        if (
+            (not shell_present and (workspace_present or owned_child_present))
+            or (shell_present and not required_keys.issubset(installed_keys))
+        ):
+            entry.state = "partial"
+        elif entry.state == "installed" and any(
             child.state == "updateAvailable"
             for ref in refs
             if ref.type != "component"

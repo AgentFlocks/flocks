@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from filelock import FileLock, Timeout
+from pydantic import ValidationError
 
 from flocks.config.config import Config
 from flocks.hub import local
@@ -115,9 +116,11 @@ def build_plan(plugin_type: str, plugin_id: str, scope: str = "global") -> dict:
         try:
             release = load_manifest(kind, identifier)
             source = plugin_root(kind, identifier, prefer_bundled=True)
-        except FileNotFoundError:
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, ValidationError):
             if (kind, identifier) in optional_keys:
-                # The installer already skips unavailable optional dependencies.
+                # Match the installer's handling of unavailable or malformed
+                # optional manifests. Snapshot and path-safety errors below
+                # must still stop the operation before any replacement.
                 continue
             raise
         target = _resolve_install_destination(kind, identifier, source, scope)

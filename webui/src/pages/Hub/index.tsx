@@ -165,10 +165,11 @@ const HUB_TEXT = {
     trust: '信任等级',
     workflowDiagram: 'Workflow 可视化流程图',
     selectFile: '点击左侧文件查看详情',
-    actions: { install: '安装', update: '更新', uninstall: '卸载' },
+    actions: { install: '安装', repair: '补全安装', update: '更新', uninstall: '卸载' },
     states: {
       available: '可安装',
       installed: '已安装',
+      partial: '待补全',
       updateAvailable: '可更新',
       incompatible: '不兼容',
       broken: '异常',
@@ -226,10 +227,11 @@ const HUB_TEXT = {
     trust: 'Trust',
     workflowDiagram: 'Workflow diagram',
     selectFile: 'Select a file on the left to preview it',
-    actions: { install: 'Install', update: 'Update', uninstall: 'Uninstall' },
+    actions: { install: 'Install', repair: 'Complete installation', update: 'Update', uninstall: 'Uninstall' },
     states: {
       available: 'Available',
       installed: 'Installed',
+      partial: 'Incomplete',
       updateAvailable: 'Update available',
       incompatible: 'Incompatible',
       broken: 'Broken',
@@ -684,7 +686,7 @@ export default function HubPage() {
                 }}
                 options={[
                   { value: '', label: text.all },
-                  ...(['available', 'installed', 'updateAvailable', 'incompatible'] as const).map(state => ({
+                  ...(['available', 'installed', 'partial', 'updateAvailable', 'incompatible'] as const).map(state => ({
                     value: state,
                     label: text.states[state],
                     count: facetCounts.state[state] ?? 0,
@@ -1252,6 +1254,7 @@ function ActionButtons({ item, actionId, text, onAction, compact = false }: {
   if (user?.role !== 'admin') return null;
   if (item.native && item.state === 'installed') return null;
   if (item.state === 'available') return <button className={buttonClass} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.install}</button>;
+  if (item.state === 'partial') return <button className={buttonClass} title={text.actions.repair} aria-label={text.actions.repair} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.repair}</button>;
   if (item.state === 'updateAvailable') return <button className={buttonClass} onClick={() => onAction(item, 'update')}><RefreshCw className="w-3.5 h-3.5" />{!compact && text.actions.update}</button>;
   if (item.state === 'installed') {
     return (

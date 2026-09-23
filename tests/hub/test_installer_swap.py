@@ -123,7 +123,6 @@ def test_replace_with_retry_reraises_after_exhausting_attempts(tmp_path, monkeyp
 def test_purge_stale_scratch_removes_leftovers(tmp_path):
     parent = tmp_path
     _make_tree(parent / ".soc_ui.55ram7wo" / "soc_overview", "stranded")
-    _make_tree(parent / ".soc_ui.bak" / "soc_dashboard", "stranded")
     _make_tree(parent / "soc_ui", "live")
     # Unrelated dot-dir for a different plugin must be left untouched.
     _make_tree(parent / ".other.bak", "keep")
@@ -131,7 +130,6 @@ def test_purge_stale_scratch_removes_leftovers(tmp_path):
     installer._purge_stale_scratch(parent, "soc_ui")
 
     assert not (parent / ".soc_ui.55ram7wo").exists()
-    assert not (parent / ".soc_ui.bak").exists()
     assert (parent / "soc_ui" / "manifest.json").read_text(encoding="utf-8") == "live"
     assert (parent / ".other.bak").exists()
 

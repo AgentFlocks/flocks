@@ -917,7 +917,7 @@ async def test_scene_suite_state_reflects_real_payload_completeness(
                     ]})
                 return manifest
 
-            monkeypatch.setattr("flocks.server.routes.hub.load_manifest", manifest_with_optional_workflow)
+            monkeypatch.setattr("flocks.hub.catalog.load_manifest", manifest_with_optional_workflow)
     elif scenario == "missing_tool":
         Path(preserved_tool.installPath).rename(isolated_hub_env["home"] / "tool-backup")
     elif scenario == "disabled":
