@@ -8,7 +8,7 @@ interface ContractRuntime {
 
 const englishMessages: Record<string, string> = {
   "审计准备": "Audit preparation",
-  "代码分析": "Code analysis",
+  "代码漏洞审计": "Code vulnerability audit",
   "漏洞确认": "Finding confirmation",
   "{{count}} 个分组": "{{count}} groups",
   "审计阶段分组": "Audit stage groups",

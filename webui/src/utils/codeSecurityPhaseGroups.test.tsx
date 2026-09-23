@@ -85,13 +85,13 @@ describe("audit display groups", () => {
       />,
     );
     fireEvent.click(screen.getByRole("tab", { name: /基线扫描阶段/ }));
-    fireEvent.click(group("代码分析"));
-    expect(group("代码分析")).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(group("代码漏洞审计"));
+    expect(group("代码漏洞审计")).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "基线扫描" }),
     ).toBeInTheDocument();
-    fireEvent.click(group("代码分析"));
+    fireEvent.click(group("代码漏洞审计"));
     expect(screen.getByRole("tab", { name: /基线扫描阶段/ })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -169,7 +169,7 @@ describe("audit display groups", () => {
     expect(group("漏洞确认")).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("tab", { name: /PoC 生成.*阶段/ })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tabpanel")).toHaveTextContent("PoC 生成");
-    fireEvent.click(group("代码分析"));
+    fireEvent.click(group("代码漏洞审计"));
     view.rerender(
       <PhaseWorkspace
         {...props}
@@ -177,7 +177,7 @@ describe("audit display groups", () => {
         currentPhase="poc_generation"
       />,
     );
-    expect(group("代码分析")).toHaveAttribute("aria-expanded", "true");
+    expect(group("代码漏洞审计")).toHaveAttribute("aria-expanded", "true");
   });
   it.each([
     [{ scan: { dynamic_validator: "cybergym" } }, "CyberGym 验证"],

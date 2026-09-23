@@ -2476,7 +2476,7 @@ describe("code security workspace contract page", () => {
         .getAllByRole("tab")
         .map((tab) => tab.querySelector("strong")?.textContent),
     ).toEqual(["静态验证 · 第 1 轮", "静态验证 · 第 2 轮"]);
-    await userEvent.click(screen.getByRole("button", { name: /代码分析/ }));
+    await userEvent.click(screen.getByRole("button", { name: /代码漏洞审计/ }));
     expect(screen.getByRole("tab")).toHaveTextContent("定向复扫");
     await userEvent.click(screen.getByRole("button", { name: /审计准备/ }));
     expect(screen.getByRole("tab")).toHaveTextContent("准备源码快照");

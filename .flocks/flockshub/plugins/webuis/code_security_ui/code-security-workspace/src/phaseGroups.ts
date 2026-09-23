@@ -4,7 +4,7 @@ import type { PhaseRun, ScanDetail } from "./types";
 // Presentation categories only. Phase IDs and orchestration stay untouched.
 export const phaseGroups = [
   { id: "prepare", label: "审计准备" },
-  { id: "analysis", label: "代码分析" },
+  { id: "analysis", label: "代码漏洞审计" },
   { id: "confirm", label: "漏洞确认" },
   { id: "report", label: "审计报告" },
 ] as const;
