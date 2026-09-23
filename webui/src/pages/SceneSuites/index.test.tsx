@@ -247,13 +247,20 @@ describe('SceneSuitesPage', () => {
 
   it('updates a suite in one call so its pages come along, and leaves the scene enabled', async () => {
     hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...SOC, state: 'updateAvailable' as const, workspaceEnabled: false }] });
+    hubAPI.previewUpdate.mockResolvedValue({ data: {
+      scope: 'global', token: 'preview-token', requiresConfirmation: true,
+      items: [{ type: 'component', id: 'soc-workspace', name: 'SOC 套件', requiresConfirmation: true }],
+    } });
     const user = userEvent.setup();
     renderPage();
 
     const soc = await waitFor(() => card('soc-workspace'));
     await user.click(within(soc).getByRole('button', { name: '更新' }));
 
-    await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace', 'global', { confirmationToken: 'preview-token', confirmChanges: false }));
+    await screen.findByRole('dialog');
+    expect(hubAPI.update).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '备份并覆盖更新' }));
+    await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace', 'global', { confirmationToken: 'preview-token', confirmChanges: true }));
     expect(hubAPI.update).toHaveBeenCalledTimes(1);
     // A scene left disabled by an earlier 停用 must not stay disabled after an
     // update the user just asked for.

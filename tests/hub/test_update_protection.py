@@ -43,18 +43,41 @@ def backup_manifest(response):
     return path, json.loads((path / "backup.json").read_text())["plan"]
 
 
-async def test_clean_update_needs_no_confirmation_or_backup(client, isolated_hub_env):
-    root = await installed_workflow()
+@pytest.mark.parametrize(
+    "kind,identifier",
+    [
+        ("workflow", "stream_alert_triage"),
+        ("workflow", "stream_alert_denoise"),
+        ("tool", "soc_workspace_query"),
+        ("webui", "soc_ui"),
+        ("component", "soc-workspace"),
+    ],
+)
+async def test_clean_soc_replacement_always_confirms_and_backs_up(client, kind, identifier):
+    record = await installer.install_plugin(kind, identifier)
+    root = Path(record.installPath)
     before = tree_hashes(root)
+    url = f"/hub/plugins/{kind}/{identifier}/update"
+    preview = (await client.post(url + "/preview")).json()
+    assert preview["requiresConfirmation"] is True
+    assert (await client.post(url)).status_code == 409
+    assert (await client.post(url.replace("/update", "/install"))).status_code == 409
+    for _ in range(2):
+        preview = (await client.post(url + "/preview")).json()
+        assert preview["requiresConfirmation"]
+        result = await client.post(url, json={"confirmationToken": preview["token"], "confirmChanges": True})
+        assert result.status_code == 200, result.text
+        backup, _ = backup_manifest(result)
+        assert tree_hashes(backup / "0/package") == before
+        assert tree_hashes(root) == before
+
+
+async def test_first_install_without_existing_content_does_not_prompt(client):
     preview = (await client.post(URL + "/preview")).json()
-    assert preview["requiresConfirmation"] is False
-    assert preview["items"][0]["changes"] == []
-    result = await client.post(URL)
-    assert result.status_code == 200, result.text
-    assert result.json()["backupPath"] is None
-    assert tree_hashes(root) == before
-    assert not (isolated_hub_env["data_dir"] / "hub/backups").exists()
-    assert result.json()["fileHashes"]
+    assert not preview["requiresConfirmation"]
+    response = await client.post(URL.replace("/update", "/install"))
+    assert response.status_code == 200
+    assert response.json()["backupPath"] is None
 
 
 @pytest.mark.parametrize("mode", ["child", "suite"])
@@ -73,7 +96,6 @@ async def test_edits_require_confirmation_then_backup_and_overwrite(client, mode
     preview = (await client.post(url + "/preview")).json()
     assert preview["requiresConfirmation"] is True
     item = next(i for i in preview["items"] if i["id"] == record.id)
-    assert {c["kind"] for c in item["changes"]} == {"added", "modified", "deleted"}
     assert not any(k.startswith("_") for k in item)
     for body in ({}, {"confirmChanges": True}, {"confirmationToken": preview["token"]}):
         denied = await client.post(url, json=body)
@@ -92,7 +114,7 @@ async def test_edits_require_confirmation_then_backup_and_overwrite(client, mode
     assert (root / "workflow.json").read_bytes() == original
     assert not (root / "user-notes.txt").exists()
     assert deleted.exists()
-    assert not (await client.post(url + "/preview")).json()["requiresConfirmation"]
+    assert (await client.post(url + "/preview")).json()["requiresConfirmation"]
 
 
 async def test_webui_access_is_protected_and_generated_files_ignored(client):
@@ -106,11 +128,10 @@ async def test_webui_access_is_protected_and_generated_files_ignored(client):
     (cache / "cache.pyc").write_bytes(b"cache")
     local.save_installed_record(record.model_copy(update={"version": "0.0.1"}))
     url = "/hub/plugins/webui/soc_ui/update"
-    assert not (await client.post(url + "/preview")).json()["requiresConfirmation"]
+    assert (await client.post(url + "/preview")).json()["requiresConfirmation"]
     access = local.install_root("webui").parent / "access/soc_ui"
     (access / "user-contract.json").write_text('{"custom": true}')
     preview = (await client.post(url + "/preview")).json()
-    assert {"path": "access/user-contract.json", "kind": "added"} in preview["items"][0]["changes"]
     result = await client.post(url, json={"confirmationToken": preview["token"], "confirmChanges": True})
     assert result.status_code == 200, result.text
     backup, _ = backup_manifest(result)
@@ -119,29 +140,15 @@ async def test_webui_access_is_protected_and_generated_files_ignored(client):
     assert not (access / "user-contract.json").exists()
 
 
-@pytest.mark.parametrize(
-    "legacy_version,modified,requires,known",
-    [
-        ("same", False, False, True),
-        ("same", True, True, True),
-        ("older", False, True, False),
-    ],
-)
-async def test_legacy_baseline_handling(client, legacy_version, modified, requires, known):
+@pytest.mark.parametrize("baseline", [None, {}, {"package/custom.txt": "pretend-official-hash"}])
+async def test_recorded_baseline_cannot_waive_confirmation(client, baseline):
     record = await installer.install_plugin("workflow", "stream_alert_triage")
-    local.save_installed_record(
-        record.model_copy(
-            update={
-                "fileHashes": None,
-                "version": record.version if legacy_version == "same" else "0.0.1",
-            }
-        )
-    )
-    if modified:
-        (Path(record.installPath) / "custom.txt").write_text("custom")
+    local.save_installed_record(record.model_copy(update={"fileHashes": baseline}))
     plan = (await client.post(URL + "/preview")).json()
-    assert plan["requiresConfirmation"] is requires
-    assert plan["items"][0]["baselineKnown"] is known
+    assert plan["requiresConfirmation"]
+    assert "baselineKnown" not in plan["items"][0]
+    assert "changes" not in plan["items"][0]
+    assert (await client.post(URL)).status_code == 409
 
 
 async def test_stale_confirmation_cannot_overwrite_new_edits(client, isolated_hub_env):
@@ -156,17 +163,19 @@ async def test_stale_confirmation_cannot_overwrite_new_edits(client, isolated_hu
     assert not (isolated_hub_env["data_dir"] / "hub/backups").exists()
 
 
-async def test_backup_failure_aborts_entire_suite_before_replacement(client, monkeypatch):
+@pytest.mark.parametrize("modified", [False, True])
+async def test_backup_failure_aborts_entire_suite_before_replacement(client, monkeypatch, modified):
     await installer.install_plugin("component", "soc-workspace")
     for identifier in ("stream_alert_triage", "stream_alert_denoise"):
         record = local.get_record("workflow", identifier)
         local.save_installed_record(record.model_copy(update={"version": "0.0.1"}))
-        (Path(record.installPath) / "custom.txt").write_text(identifier)
+        if modified:
+            (Path(record.installPath) / "custom.txt").write_text(identifier)
     before_records = local._record_path().read_bytes()
     before_files = tree_hashes(local.install_root("workflow"))
     url = "/hub/plugins/component/soc-workspace/update"
     preview = (await client.post(url + "/preview")).json()
-    assert len([i for i in preview["items"] if i["requiresConfirmation"]]) == 2
+    assert len([i for i in preview["items"] if i["requiresConfirmation"]]) == 3
 
     def fail_backup(plan):
         raise OSError("disk full")
@@ -207,7 +216,8 @@ async def test_edit_during_staging_is_not_overwritten(client, monkeypatch):
         (root / "just-edited.txt").write_text("new user change")
 
     monkeypatch.setattr(installer, "_copy_package_contents", copy_with_concurrent_edit)
-    response = await client.post(URL)
+    preview = (await client.post(URL + "/preview")).json()
+    response = await client.post(URL, json={"confirmationToken": preview["token"], "confirmChanges": True})
     assert response.status_code == 422
     assert "changed during update" in response.json()["detail"]
     assert (root / "just-edited.txt").read_text() == "new user change"

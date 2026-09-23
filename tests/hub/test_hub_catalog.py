@@ -1001,7 +1001,10 @@ async def test_scene_suite_mutations_notify_other_sse_subscribers(
             if action == "uninstall":
                 response = await client.delete(endpoint, timeout=30)
             else:
-                response = await client.post(f"{endpoint}/{action}", json={"scope": "global"}, timeout=30)
+                body = {"scope": "global"}
+                if action == "update":
+                    body.update(confirmationToken=build_plan("component", "soc-workspace")["token"], confirmChanges=True)
+                response = await client.post(f"{endpoint}/{action}", json=body, timeout=30)
         assert response.status_code == (422 if fail_after_change and action != "install/stream" else 200)
         if fail_after_change:
             assert "fixture failure after changing installed payload" in response.text
@@ -1221,9 +1224,9 @@ async def test_suite_update_follows_child_versions_without_bumping_suite(
         target = "component/soc-workspace" if update_mode == "suite" else f"{child_type}/{child_id}"
         preview = await client.post(f"/hub/plugins/{target}/update/preview")
         assert preview.status_code == 200
-        assert preview.json()["requiresConfirmation"] is needs_update
+        assert preview.json()["requiresConfirmation"] is True
         response = await client.post(f"/hub/plugins/{target}/update", json={
-            "confirmationToken": preview.json()["token"], "confirmChanges": needs_update,
+            "confirmationToken": preview.json()["token"], "confirmChanges": True,
         })
         assert response.status_code == 200, response.text
         updated = local.get_record(child_type, child_id)
@@ -1306,7 +1309,9 @@ async def test_updating_a_workflow_notifies_scene_suite_subscribers(isolated_hub
     app.include_router(router)
     app.dependency_overrides[require_admin] = lambda: object()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/hub/plugins/workflow/stream_alert_triage/update")
+        response = await client.post("/hub/plugins/workflow/stream_alert_triage/update", json={
+            "confirmationToken": build_plan("workflow", "stream_alert_triage")["token"], "confirmChanges": True,
+        })
         assert response.status_code == 200, response.text
     assert ("hub.scene_suites.changed", {"suiteId": "soc-workspace", "action": "update"}) in events
 

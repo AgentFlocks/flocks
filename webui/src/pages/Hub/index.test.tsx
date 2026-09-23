@@ -142,12 +142,19 @@ describe('HubPage catalog loading', () => {
       hubAPI.catalogPage.mockResolvedValueOnce(catalogPage([entry])).mockResolvedValue(catalogPage([updated]));
       hubAPI.catalog.mockResolvedValue({ data: [updated] });
       hubAPI.update.mockResolvedValue({ data: updated });
+      hubAPI.previewUpdate.mockResolvedValue({ data: {
+        scope: 'global', token: 'preview-token', requiresConfirmation: true,
+        items: [{ type, id: 'soc-entry', name: 'SOC Entry', requiresConfirmation: true }],
+      } });
 
       renderHub();
       expect(await screen.findByText('SOC Entry')).toBeInTheDocument();
       expect(screen.getByText('Update available')).toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: 'Update' }));
-      await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith(type, 'soc-entry', 'global', { confirmationToken: 'preview-token', confirmChanges: false }));
+      await screen.findByRole('dialog');
+      expect(hubAPI.update).not.toHaveBeenCalled();
+      await user.click(screen.getByRole('button', { name: 'Back up and overwrite' }));
+      await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith(type, 'soc-entry', 'global', { confirmationToken: 'preview-token', confirmChanges: true }));
       expect(await screen.findByText('Installed')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
     },

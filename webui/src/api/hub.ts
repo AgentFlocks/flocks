@@ -166,9 +166,7 @@ export interface HubUpdatePlan {
     type: HubPluginType;
     id: string;
     name: string;
-    baselineKnown: boolean;
     requiresConfirmation: boolean;
-    changes: Array<{ path: string; kind: 'added' | 'deleted' | 'modified' }>;
   }>;
 }
 

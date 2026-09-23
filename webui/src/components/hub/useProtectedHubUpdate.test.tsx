@@ -11,9 +11,8 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'zh
 const changedPlan = {
   type: 'component', id: 'soc-workspace', scope: 'global', token: 'first', requiresConfirmation: true,
   items: [
-    { type: 'workflow', id: 'triage', name: '研判工作流', requiresConfirmation: true, baselineKnown: true,
-      changes: [{ path: 'package/workflow.json', kind: 'modified' }] },
-    { type: 'webui', id: 'soc_ui', name: 'SOC 页面', requiresConfirmation: true, baselineKnown: false, changes: [] },
+    { type: 'workflow', id: 'triage', name: '研判工作流', requiresConfirmation: true },
+    { type: 'webui', id: 'soc_ui', name: 'SOC 页面', requiresConfirmation: true },
   ],
 };
 function Harness() {
@@ -28,13 +27,16 @@ describe('protected Hub updates', () => {
     hubAPI.update.mockResolvedValue({ data: { backupPath: '/data/hub/backups/snapshot' } });
   });
 
-  it('updates clean components without opening a dialog', async () => {
-    hubAPI.previewUpdate.mockResolvedValue({ data: { ...changedPlan, requiresConfirmation: false, items: [] } });
+  it('prompts even when components have no local changes', async () => {
+    hubAPI.previewUpdate.mockResolvedValue({ data: changedPlan });
     render(<Harness />);
     await userEvent.click(screen.getByRole('button', { name: '更新' }));
+    await screen.findByRole('dialog');
+    expect(hubAPI.update).not.toHaveBeenCalled();
+    expect(screen.getByText(/无论是否修改过组件/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '备份并覆盖更新' }));
     await waitFor(() => expect(done).toHaveBeenCalledWith(true));
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace', 'global', { confirmationToken: 'first', confirmChanges: false });
+    expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace', 'global', { confirmationToken: 'first', confirmChanges: true });
   });
 
   it('lists all affected components and cancellation leaves the whole suite unchanged', async () => {
@@ -42,9 +44,8 @@ describe('protected Hub updates', () => {
     await userEvent.click(screen.getByRole('button', { name: '更新' }));
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
     expect(screen.getByText('研判工作流')).toBeInTheDocument();
-    expect(screen.getByText(/修改: package\/workflow.json/)).toBeInTheDocument();
     expect(screen.getByText('SOC 页面')).toBeInTheDocument();
-    expect(screen.getByText('缺少原始版本基准，无法确认本地是否修改。')).toBeInTheDocument();
+    expect(screen.queryByText(/缺少原始版本基准/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: '取消' }));
     expect(done).toHaveBeenCalledWith(false);
     expect(hubAPI.update).not.toHaveBeenCalled();

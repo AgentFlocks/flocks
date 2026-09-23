@@ -24,7 +24,7 @@ from flocks.hub.security import SKIP_NAMES
 
 class UpdateConfirmationRequired(Exception):
     def __init__(self, plan: dict):
-        super().__init__("Local changes require confirmation before replacement")
+        super().__init__("Existing SOC content requires confirmation before replacement")
         self.plan = plan
 
 
@@ -132,29 +132,11 @@ def build_plan(plugin_type: str, plugin_id: str, scope: str = "global") -> dict:
         matching_record = (
             record if record and record.installPath and Path(record.installPath).resolve() == target.resolve() else None
         )
-        baseline = matching_record.fileHashes if matching_record else None
         version = matching_record.version if matching_record else local.installed_payload_version(kind, target)
-        # An identical released version can provide the missing legacy baseline.
-        # Never compare an old customized install with a DIFFERENT release.
-        if baseline is None and version == release.version:
-            baseline = official
+        # Every replacement of installed SOC content requires consent and backup.
+        # File snapshots only detect concurrent writes; they never waive protection.
         exists = target.exists() or (access is not None and access.exists())
-        unknown = exists and baseline is None
-        changes = []
-        if baseline is not None:
-            for path in sorted(current.keys() | baseline.keys()):
-                if current.get(path) != baseline.get(path):
-                    changes.append(
-                        {
-                            "path": path,
-                            "kind": "added"
-                            if path not in baseline
-                            else "deleted"
-                            if path not in current
-                            else "modified",
-                        }
-                    )
-        requires = (kind, identifier) in protected and exists and (unknown or bool(changes))
+        requires = (kind, identifier) in protected and (exists or matching_record is not None)
         items.append(
             {
                 "type": kind,
@@ -162,8 +144,6 @@ def build_plan(plugin_type: str, plugin_id: str, scope: str = "global") -> dict:
                 "name": release.nameCn or release.name,
                 "installedVersion": version,
                 "version": release.version,
-                "baselineKnown": not unknown,
-                "changes": changes,
                 "requiresConfirmation": requires,
                 "_roots": {"package": str(target), **({"access": str(access)} if access is not None else {})},
                 "_current": current,

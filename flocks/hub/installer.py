@@ -786,7 +786,6 @@ async def _install_plugin(
             scope=scope,
             installed_by=installed_by,
         )
-        record = record.model_copy(update={"fileHashes": payload_hashes(plugin_type, dst, access_dst)})
         local.save_installed_record(record)
         clear_catalog_caches()
         await _refresh_runtime(plugin_type, dst)

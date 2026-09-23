@@ -79,17 +79,13 @@ export function useProtectedHubUpdate() {
   const dialog = <>
     {plan && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
       <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="hub-update-confirm-title" className="flex max-h-[85vh] w-full max-w-xl flex-col rounded-xl bg-white p-6 shadow-xl dark:bg-zinc-900">
-        <h2 id="hub-update-confirm-title" className="text-lg font-semibold">{zh ? '更新会覆盖本地改动' : 'Updating will overwrite local changes'}</h2>
+        <h2 id="hub-update-confirm-title" className="text-lg font-semibold">{zh ? '备份并覆盖现有组件' : 'Back up and overwrite existing components'}</h2>
         <p className="my-3 text-sm text-gray-600 dark:text-zinc-300">{zh
-          ? '以下组件存在本地改动，或无法确认是否修改。继续后会先完整备份本次将被替换的组件，再用官方版本覆盖；备份失败会停止更新。'
-          : 'These components contain local changes, or their original version cannot be verified. Continuing backs up the components being replaced before installing the official release. A failed backup stops the update.'}</p>
+          ? '无论是否修改过组件，更新都会覆盖现有内容。继续后会先完整备份本次将被替换的组件，再安装官方版本；备份失败会停止更新。'
+          : 'Updating overwrites existing content, whether or not you have changed it. Continuing first backs up the components being replaced, then installs the official release. A failed backup stops the update.'}</p>
         <div className="min-h-0 overflow-y-auto text-sm">
           {plan.items.filter(item => item.requiresConfirmation).map(item => <div key={`${item.type}:${item.id}`} className="mb-4">
             <p className="font-medium">{item.name} <span className="text-gray-500">({item.id})</span></p>
-            {!item.baselineKnown && <p className="mt-1 text-amber-700 dark:text-amber-400">{zh ? '缺少原始版本基准，无法确认本地是否修改。' : 'Original version unavailable; local changes cannot be determined.'}</p>}
-            <ul className="mt-1 space-y-1 break-all text-gray-600 dark:text-zinc-300">{item.changes.map(change => <li key={change.path}>
-              {zh ? { added: '新增', deleted: '删除', modified: '修改' }[change.kind] : change.kind}: {change.path}
-            </li>)}</ul>
           </div>)}
         </div>
         <div className="mt-4 flex justify-end gap-3">
