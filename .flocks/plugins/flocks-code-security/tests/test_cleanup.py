@@ -137,9 +137,16 @@ def test_owned_tree_rejects_symlink_and_outside_path(tmp_path):
 
 
 def test_pruning_retains_selected_fuzz_input_and_ancestry(tmp_path):
-    from test_cybergym_runtime import _store
+    from test_service_store import _store
 
-    store, scan_id = _store(tmp_path)
+    store = _store(tmp_path)
+    scan_id = store.create_scan(parent_session_id="legacy", snapshot_id="snapshot_test",
+                               mode="cybergym_level1", ruleset_digest="rules")
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO cybergym_tasks (scan_id, task_id, manifest_json, status, created_at, updated_at) "
+            "VALUES (?, 'legacy', '{}', 'active', '2026-09-07', '2026-09-07')", (scan_id,),
+        )
     with store._connect() as connection:
         connection.execute("UPDATE scans SET cleanup_intermediates = 1 WHERE scan_id = ?", (scan_id,))
 

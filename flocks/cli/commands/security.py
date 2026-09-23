@@ -135,20 +135,6 @@ def _read_knowledge_base(
     return {"display_name": source.name, "content": content}
 
 
-def _read_cybergym_manifest(path: Path) -> dict[str, Any]:
-    """Read one host-approved Level 1 manifest without treating it as executable input."""
-    source = path.expanduser()
-    if not source.is_file() or source.is_symlink():
-        raise ValueError("CyberGym manifest must be a regular file")
-    if source.stat().st_size > 64 * 1024:
-        raise ValueError("CyberGym manifest may contain at most 64 KiB")
-    try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("CyberGym manifest must be a valid UTF-8 JSON object") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("CyberGym manifest must be a JSON object")
-    return payload
 
 
 def _load_plugin_cli() -> tuple[AuditRunner, StatusReader]:
@@ -345,11 +331,6 @@ def security_audit(
         "--json",
         help="Emit newline-delimited JSON progress events",
     ),
-    dynamic: bool = typer.Option(
-        False,
-        "--dynamic",
-        help="Execute validated probes in a network-isolated local Docker runtime",
-    ),
     cleanup_intermediates: bool = typer.Option(
         False,
         "--cleanup-intermediates/--no-cleanup-intermediates",
@@ -384,18 +365,13 @@ def security_audit(
         "--knowledge-base",
         help="Optional untrusted UTF-8 vulnerability target specification",
     ),
-    cybergym_manifest: Optional[Path] = typer.Option(
-        None,
-        "--cybergym-manifest",
-        help="Trusted Level 1 JSON execution manifest; enables cybergym_level1 mode",
-    ),
 ) -> None:
     """Run the host-orchestrated audit with parent-Agent adjudication.
 
     All audit stages expose standard file, bash, grep, webfetch, websearch and
     todo tools by default; the model chooses when to use them. No tool opt-in
     flags are needed. PoC generation always follows static adjudication;
-    --dynamic additionally enables dynamic validation.
+    PoCs are generated from source evidence without a dynamic validation phase.
     """
     try:
         run_standard_audit, _scan_status = _load_plugin_cli()
@@ -413,8 +389,6 @@ def security_audit(
             audit_kwargs["cleanup_intermediates"] = True
         if not copy_source:
             audit_kwargs["copy_source"] = False
-        if dynamic:
-            audit_kwargs["dynamic_enabled"] = True
         if coverage_policy not in {"evidence_backed_partial", "exhaustive"}:
             raise ValueError("Unsupported coverage policy")
         if coverage_policy != "evidence_backed_partial":
@@ -424,9 +398,6 @@ def security_audit(
                 knowledge_base,
                 audited_target=target,
             )
-        if cybergym_manifest is not None:
-            audit_kwargs["scan_mode"] = "cybergym_level1"
-            audit_kwargs["cybergym_manifest"] = _read_cybergym_manifest(cybergym_manifest)
         result = asyncio.run(_run_audit_with_cleanup(run_standard_audit, target, **audit_kwargs))
     except KeyboardInterrupt:
         if not json_output:

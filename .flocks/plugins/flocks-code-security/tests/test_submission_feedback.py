@@ -38,14 +38,6 @@ def test_adjudication_error_example_passes_structure_validation(tmp_path: Path, 
     # The actual store now passes field validation and reaches scan lookup.
     with pytest.raises(ValueError, match="Scan not found"):
         store.save_adjudication("missing-scan", example)
-    if example["action"] == "finalize":
-        assessments, _ = json.JSONDecoder().raw_decode(
-            message.split("one per confirmed candidate: ", 1)[1]
-        )
-        example["dynamic_assessments"] = assessments
-        jsonschema.validate(example, schema)
-        with pytest.raises(ValueError, match="Scan not found"):
-            store.save_adjudication("missing-scan", example)
 
 
 @pytest.mark.parametrize("normalize", [normalize_dispositions, normalize_open_questions])

@@ -224,7 +224,5 @@ export interface NewAuditValues {
   excludePatterns: string;
   maxFileBytes: number;
   copySource: boolean;
-  dynamicEnabled: boolean;
-  dynamicConfirmed: boolean;
   coveragePolicy: "evidence_backed_partial" | "exhaustive";
 }

@@ -196,7 +196,6 @@ def test_scan_rejects_removed_vote_configuration(tmp_path: Path) -> None:
         )
 
 
-
 def test_report_data_includes_public_work_attempt_model_identity(
     tmp_path: Path,
 ) -> None:
@@ -1264,21 +1263,8 @@ async def test_scan_start_requires_admin_and_an_authorized_workspace(
     assert escaped.value.code == "target_not_authorized"
     assert escaped.value.status_code == 403
 
-    with pytest.raises(AuditServiceError) as incompatible:
-        await service.start_scan(
-            StartScanRequest(
-                target_path=workspace,
-                copy_source=False,
-                dynamic_enabled=True,
-            ),
-            AuditCaller(
-                subject="admin-1",
-                source="tool",
-                is_admin=True,
-                authorized_root=workspace,
-            ),
-        )
-    assert incompatible.value.code == "incompatible_parameters"
+    with pytest.raises(TypeError, match="dynamic_enabled"):
+        StartScanRequest(target_path=workspace, dynamic_enabled=True)
 
 
 def test_terminal_direct_source_scan_deletion_never_returns_source_as_cleanup_root(
@@ -2176,3 +2162,17 @@ def test_analysis_progress_does_not_require_batch_membership(tmp_path, role) -> 
              "read", "app.py", attempt["created_at"]),
         )
     assert store.work_attempt_has_analysis_progress(attempt["attempt_id"])
+
+
+@pytest.mark.parametrize("role,phase", [("prober", "probing"), ("cybergym_solver", "cybergym_solving")])
+def test_removed_dynamic_workers_cannot_be_created(tmp_path, role, phase):
+    store = _store(tmp_path)
+    scan_id = store.create_scan(
+        parent_session_id="parent", snapshot_id="snapshot_test", mode="standard", ruleset_digest="rules",
+    )
+    with pytest.raises(ValueError, match="Unsupported work-unit role"):
+        store.create_work_unit(scan_id=scan_id, phase=phase, role=role, paths=["."])
+    with pytest.raises(ValueError, match="Unsupported worker phase"):
+        store.create_worker_batch(scan_id=scan_id, phase=phase, units=[{"role": role, "paths": ["."]}])
+    with pytest.raises(ValueError, match="Unsupported session binding role"):
+        store.bind_session(session_id="worker", scan_id=scan_id, snapshot_id="snapshot_test", role=role, work_unit_id="unit")

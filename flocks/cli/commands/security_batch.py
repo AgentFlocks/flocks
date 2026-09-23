@@ -39,12 +39,6 @@ def start(
     source: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True),
     concurrency: int = typer.Option(30, min=1, max=128),
     model: Optional[str] = typer.Option(None),
-    dynamic: bool = typer.Option(
-        False, "--dynamic", help="Enable local fuzz/GDB validation using each task's cybergym.json."
-    ),
-    dynamic_concurrency: int = typer.Option(
-        2, min=1, max=128, help="Maximum active dynamic containers per batch; each uses 1 CPU and 1024 MiB."
-    ),
     phase_timeouts: Optional[Path] = typer.Option(
         None, exists=True, dir_okay=False,
         help="JSON file of cumulative per-phase budgets in seconds. Uses built-in phase budgets when neither timeout option is given; no overall task timeout.",
@@ -69,12 +63,6 @@ def start(
     tools at every stage by default; the model chooses when to use them.
     No tool opt-in flags are needed. PoC generation is always enabled.
 
-    With --dynamic, each folder must also contain a trusted cybergym.json with
-    a prebuilt vulnerable_runner image, target_binary, fuzzer_target,
-    input_contract, gdb_supported=true, fuzzer_supported=true and limits.
-    Images must already be available locally. Execution is local validation;
-    official CyberGym grading is not dispatched. Static concurrency and
-    --dynamic-concurrency (active containers) are independent limits.
     """
     try:
         root = prepare_batch(
@@ -82,8 +70,6 @@ def start(
             run_dir=run_dir,
             concurrency=concurrency,
             model=model,
-            dynamic=dynamic,
-            dynamic_concurrency=dynamic_concurrency,
             task_timeout=task_timeout,
             phase_timeouts=read_json(phase_timeouts) if phase_timeouts else None,
             max_snapshot_bytes=max_snapshot_bytes,

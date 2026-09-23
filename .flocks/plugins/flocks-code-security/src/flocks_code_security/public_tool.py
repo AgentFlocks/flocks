@@ -81,7 +81,6 @@ async def code_security_audit(
     action: str,
     target_path: str | None = None,
     scan_mode: str = "standard",
-    cybergym_manifest: dict[str, Any] | None = None,
     scan_id: str | None = None,
     model: str | None = None,
     include_paths: list[str] | None = None,
@@ -89,7 +88,6 @@ async def code_security_audit(
     max_file_bytes: int | None = None,
     copy_source: bool = True,
     cleanup_intermediates: bool = False,
-    dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     idempotency_key: str | None = None,
     after_event_seq: int = 0,
@@ -111,30 +109,18 @@ async def code_security_audit(
             await ctx.ask(
                 "code_security.audit.start",
                 [str(target)],
-                metadata={"action": "start", "dynamic_enabled": bool(dynamic_enabled), "scan_mode": scan_mode},
+                metadata={"action": "start", "scan_mode": scan_mode},
             )
-            if dynamic_enabled:
-                await ctx.ask(
-                    "code_security.audit.dynamic",
-                    [str(target)],
-                    metadata={
-                        "action": "start",
-                        "dynamic_enabled": True,
-                        "safety": "network-none, no-host-mounts, read-only-rootfs",
-                    },
-                )
             detail = await service.start_scan(
                 StartScanRequest(
                     target_path=target,
                     scan_mode=scan_mode,
-                    cybergym_manifest=cybergym_manifest,
                     model=model,
                     include_paths=tuple(include_paths or ["."]),
                     exclude_patterns=tuple(exclude_patterns or []),
                     max_file_bytes=max_file_bytes,
                     copy_source=copy_source,
                     cleanup_intermediates=cleanup_intermediates,
-                    dynamic_enabled=dynamic_enabled,
                     coverage_policy=coverage_policy,
                     idempotency_key=idempotency_key,
                 ),
@@ -238,7 +224,6 @@ def register_public_tool() -> None:
             description=(
                 "Start and manage a trusted digest-bound code security audit. "
                 "Audits copy source into a read-only snapshot by default and provide standard file, command, and research tools. "
-                "dynamic_enabled=true runs validated probes in restricted local Docker. "
                 "Start returns quickly; keep the scan_id for status, wait, result, or cancel."
             ),
             category=ToolCategory.CUSTOM,
@@ -250,15 +235,9 @@ def register_public_tool() -> None:
                 _parameter(
                     "scan_mode",
                     ParameterType.STRING,
-                    "Audit mode; cybergym_level1 requires cybergym_manifest.",
+                    "Audit mode.",
                     default="standard",
-                    enum=["standard", "cybergym_level1"],
-                ),
-                _parameter(
-                    "cybergym_manifest",
-                    ParameterType.OBJECT,
-                    "Trusted CyberGym Level 1 execution manifest for start.",
-                    required=False,
+                    enum=["standard"],
                 ),
                 _parameter("scan_id", ParameterType.STRING, "Scan identifier for status, wait, result, or cancel."),
                 _parameter("model", ParameterType.STRING, "Optional pinned provider/model."),
@@ -293,12 +272,6 @@ def register_public_tool() -> None:
                     default=False,
                 ),
                 _parameter(
-                    "dynamic_enabled",
-                    ParameterType.BOOLEAN,
-                    "Enable restricted local Docker validation.",
-                    default=False,
-                ),
-                _parameter(
                     "coverage_policy",
                     ParameterType.STRING,
                     "Allow trusted partial coverage or require exhaustive terminal dispositions.",
@@ -320,7 +293,7 @@ def register_public_tool() -> None:
             native=False,
             always_load=False,
             disable_on_repeated_failure=False,
-            tags=["security", "code-security", "code-audit", "static-analysis", "dynamic-validation"],
+            tags=["security", "code-security", "code-audit", "static-analysis"],
         ),
         handler=code_security_audit,
     )

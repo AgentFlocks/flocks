@@ -147,8 +147,9 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     baseline = agents["code-security-baseline"]
     investigator = agents["code-security-investigator"]
     verifier = agents["code-security-verifier"]
-    prober = agents["code-security-prober"]
 
+    assert "code-security-prober" not in agents
+    assert "code-security-cybergym-solver" not in agents
     assert set(agents) == set(AGENT_TOOLS)
     for name, agent in agents.items():
         assert agent.native is False
@@ -181,14 +182,8 @@ def test_agents_are_declarative_isolated_and_non_delegatable() -> None:
     assert "audit_knowledge_base" in AGENT_TOOLS[baseline.name]
     assert "audit_knowledge_base" not in AGENT_TOOLS[verifier.name]
     assert verifier.hidden is True
-    assert prober.hidden is True
-    assert "audit_submit_probe" in AGENT_TOOLS[prober.name]
-    assert "audit_knowledge_base" not in AGENT_TOOLS[prober.name]
     assert "audit_knowledge_base" in AGENT_TOOLS[investigator.name]
     assert "audit_submit_coverage" in AGENT_TOOLS[investigator.name]
-    cybergym_solver = agents["code-security-cybergym-solver"]
-    assert "audit_cybergym_fuzz_wait" in AGENT_TOOLS[cybergym_solver.name]
-    assert "audit_cybergym_fuzz_status" not in AGENT_TOOLS[cybergym_solver.name]
     assert yaml.safe_load(
         (AGENTS_ROOT / baseline.name / "agent.yaml").read_text(encoding="utf-8")
     )["steps"] == 200
@@ -206,7 +201,7 @@ def test_all_audit_tools_register() -> None:
 
     expected = {name for names in AGENT_TOOLS.values() for name in names if name.startswith("audit_")}
     assert expected
-    assert all(ToolRegistry.get(name) is None for name in ("audit_inventory", "audit_read", "audit_search"))
+    assert all(ToolRegistry.get(name) is None for name in ("audit_inventory", "audit_read", "audit_search", "audit_probe_subject", "audit_submit_probe", "audit_cybergym_context", "audit_cybergym_submit"))
     assert all(ToolRegistry.get(name) is not None for name in expected)
     for name in expected:
         info = ToolRegistry.get(name).info
@@ -220,13 +215,11 @@ def test_all_audit_tools_register() -> None:
     run_workers = ToolRegistry.get("audit_run_workers")
     phase = next(parameter for parameter in run_workers.info.parameters if parameter.name == "phase")
     assert phase.enum == [
-            "threat_modeling",
-            "baseline",
-            "investigation",
-            "verification",
-        "probing",
+        "threat_modeling",
+        "baseline",
+        "investigation",
+        "verification",
         "targeted_rescan",
-        "cybergym_solving",
     ]
     prepare = ToolRegistry.get("audit_prepare").info
     assert all(parameter.name != "verification_votes" for parameter in prepare.parameters)
@@ -236,6 +229,7 @@ def test_all_audit_tools_register() -> None:
         if parameter.name == "copy_source"
     )
     assert copy_source.default is True
+    assert not {"dynamic_enabled", "cybergym_manifest"} & {p.name for p in prepare.parameters}
 
     threat_model_tool = ToolRegistry.get("audit_submit_threat_model").info
     threat_model_parameter = next(
@@ -401,11 +395,10 @@ def test_public_code_security_tool_registers_as_one_multi_action_entry() -> None
     assert tool.info.disable_on_repeated_failure is False
     assert tool.info.requires_confirmation is False
     action = next(parameter for parameter in tool.info.parameters if parameter.name == "action")
-    dynamic = next(parameter for parameter in tool.info.parameters if parameter.name == "dynamic_enabled")
     copy_source = next(parameter for parameter in tool.info.parameters if parameter.name == "copy_source")
     assert action.enum == PUBLIC_TOOL_ACTIONS
-    assert dynamic.default is False
     assert copy_source.default is True
+    assert not {"dynamic_enabled", "cybergym_manifest"} & {p.name for p in tool.info.parameters}
 
 
 @pytest.mark.asyncio

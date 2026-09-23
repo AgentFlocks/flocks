@@ -149,8 +149,6 @@ def prepare_batch(
     phase_timeouts: dict[str, int] | None = None,
     model: str | None,
     max_snapshot_bytes: int,
-    dynamic: bool = False,
-    dynamic_concurrency: int = 2,
     skip_external_symlinks: list[str] | None = None,
     auto_exclude_external_symlinks: bool = False,
     exclude_cyclic_symlinks: bool = False,
@@ -161,10 +159,10 @@ def prepare_batch(
     if phase_timeouts is not None:
         if task_timeout is not None:
             raise ValueError("Choose phase_timeouts or legacy task_timeout, not both")
-        phase_timeouts = validate_budgets(phase_timeouts, dynamic=dynamic)
+        phase_timeouts = validate_budgets(phase_timeouts, dynamic=False)
     elif type(task_timeout) is not int or task_timeout < 1:
         raise ValueError("task_timeout must be a positive integer in seconds")
-    if concurrency < 1 or max_snapshot_bytes < 1 or dynamic_concurrency < 1:
+    if concurrency < 1 or max_snapshot_bytes < 1:
         raise ValueError("Concurrency, timeout and size limit must be positive")
     if type(max_snapshot_files) is not int or max_snapshot_files < 1:
         raise ValueError("max_snapshot_files must be a positive integer")
@@ -192,12 +190,6 @@ def prepare_batch(
             raise ValueError(f"Task {directory.name}: description must contain 1–32768 bytes")
     if not tasks:
         raise ValueError("No Arvo tasks containing repo-vul.tar.gz and description.txt were found")
-    if dynamic:
-        from flocks.security.batch_dynamic import load_manifest, preflight
-
-        for key, task in tasks.items():
-            task["cybergym_manifest"] = load_manifest(source / key / "cybergym.json")
-        preflight([task["cybergym_manifest"] for task in tasks.values()])
     batch_id = f"batch_{uuid4().hex}"
     root = (
         (
@@ -225,8 +217,7 @@ def prepare_batch(
                 **({"phase_timeouts": phase_timeouts} if phase_timeouts is not None else {"task_timeout": task_timeout}),
                 "model": model,
                 "poc": True,
-                "dynamic": dynamic,
-                "dynamic_concurrency": dynamic_concurrency,
+                "dynamic": False,
                 "max_snapshot_bytes": max_snapshot_bytes,
                 "skip_external_symlinks": link_exclusions,
                 "auto_exclude_external_symlinks": auto_exclude_external_symlinks,
@@ -629,6 +620,8 @@ async def run_batch(root: Path, *, retry_failed: bool = False, progress=print) -
     root = root.expanduser().resolve()
     with file_lock(root / "run.lock"):
         config = read_json(root / "batch.json")
+        if config.get("dynamic"):
+            raise ValueError("Dynamic audit batches are not supported on this branch; resume with codex/cybergym-tuning")
         budgets = config.get("phase_timeouts")
         # Older batches could omit the PoC phase and its budget. New attempts
         # always generate PoCs, including when resuming those saved batches.

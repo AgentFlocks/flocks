@@ -25,7 +25,6 @@ from flocks.utils.langfuse import (
 
 from flocks_code_security.paths import outputs_root
 from flocks_code_security.builtin_tools import COMMON_TOOL_NAMES, source_workspace_prompt
-from flocks_code_security.dynamic_validation import DockerDynamicRunner
 from flocks_code_security.orchestration import (
     FollowUpPlanningError,
     build_follow_up_unit,
@@ -44,37 +43,17 @@ from flocks_code_security.tools import (
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 TERMINAL_BATCH_STATUSES = {"completed", "partial", "failed", "cancelled"}
-DYNAMIC_AGENT_TOOL_NAMES = {"audit_probe_subject", "audit_submit_probe"}
 GUIDED_AUDIT_TOOL_NAMES = {"audit_knowledge_base"}
-CYBERGYM_AGENT_TOOL_NAMES = {
-    "audit_cybergym_context",
-    "audit_cybergym_checkpoint",
-    "audit_cybergym_materialize",
-    "audit_cybergym_artifact_create",
-    "audit_cybergym_replay",
-    "audit_cybergym_gdb",
-    "audit_cybergym_fuzz_start",
-    "audit_cybergym_fuzz_wait",
-    "audit_cybergym_fuzz_status",
-    "audit_cybergym_minimize",
-    "audit_cybergym_submit",
-}
 
 
 def _require_enabled_audit_tools(
     *,
-    dynamic_enabled: bool = False,
     knowledge_base_enabled: bool = False,
-    cybergym_enabled: bool = False,
 ) -> None:
     ToolRegistry.init()
     excluded = set()
-    if not dynamic_enabled:
-        excluded.update(DYNAMIC_AGENT_TOOL_NAMES)
     if not knowledge_base_enabled:
         excluded.update(GUIDED_AUDIT_TOOL_NAMES)
-    if not cybergym_enabled:
-        excluded.update(CYBERGYM_AGENT_TOOL_NAMES)
     required = (*COMMON_TOOL_NAMES, *(name for name in AUDIT_TOOL_NAMES if name not in excluded))
     unavailable = [name for name in required if (tool := ToolRegistry.get(name)) is None or not tool.info.enabled]
     if unavailable:
@@ -106,15 +85,6 @@ def _emit(
     except Exception:
         # Telemetry is best-effort and must never change scan behavior.
         pass
-
-
-def _cybergym_no_artifact_reason(runtime: Any, scan_id: str) -> str:
-    reason = getattr(runtime, "no_artifact_failure_reason", None)
-    if callable(reason):
-        value = reason(scan_id)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return "no_verified_crash"
 
 
 def _start_phase_observation(parent: Any, phase: str) -> Any:
@@ -283,17 +253,13 @@ class AuditOrchestrator:
         ctx: ToolContext,
         target: Path,
         progress: ProgressCallback | None,
-        dynamic_enabled: bool = False,
         scan_mode: str = "standard",
-        dynamic_runner: DockerDynamicRunner | None = None,
         prepared: dict[str, Any] | None = None,
     ) -> None:
         self.ctx = ctx
         self.target = target
         self.progress = progress
-        self.dynamic_enabled = bool(dynamic_enabled)
         self.scan_mode = scan_mode
-        self.dynamic_runner = dynamic_runner
         self.prepared = prepared
 
     async def _verify_remaining(
@@ -369,54 +335,6 @@ class AuditOrchestrator:
         )
         return status
 
-    async def _run_dynamic_remaining(
-        self,
-        scan_id: str,
-        status: dict[str, Any],
-        scan_observation: Any,
-    ) -> dict[str, Any]:
-        if not self.dynamic_enabled:
-            return status
-        enter_audit_phase(self.ctx, "dynamic_validation")
-        scope = _start_phase_observation(scan_observation, "dynamic_validation")
-        observation_parent = scan_observation if scope is None else scope.observation
-        _emit(
-            self.progress,
-            "dynamic.started",
-            {"counts": status.get("counts", {})},
-            observation_parent=observation_parent,
-        )
-        try:
-            status = await self._execute_dynamic_remaining(
-                scan_id,
-                status,
-                observation_parent,
-            )
-        except BaseException as exc:
-            _emit(
-                self.progress,
-                "dynamic.cancelled" if isinstance(exc, asyncio.CancelledError) else "dynamic.failed",
-                {"error_type": type(exc).__name__},
-                observation_parent=observation_parent,
-            )
-            _end_observation(
-                scope,
-                output={"status": "failed", "error_type": type(exc).__name__},
-                level="ERROR",
-                status_message=type(exc).__name__,
-            )
-            raise
-        _emit(
-            self.progress,
-            "dynamic.completed",
-            {"counts": status.get("counts", {})},
-            observation_parent=observation_parent,
-        )
-        _end_observation(
-            scope,
-            output={"status": "completed", "counts": status.get("counts", {})},
-        )
-        return status
 
     async def _run_poc_generation(
         self,
@@ -461,81 +379,6 @@ class AuditOrchestrator:
         )
         return status
 
-    async def _execute_dynamic_remaining(
-        self,
-        scan_id: str,
-        status: dict[str, Any],
-        observation_parent: Any,
-    ) -> dict[str, Any]:
-        store = get_runtime().store
-        remaining = int(status.get("counts", {}).get("confirmed_without_dynamic_record", 0))
-        while remaining > 0:
-            probe_batch, status = await _run_phase(
-                self.ctx,
-                scan_id,
-                "probing",
-                self.progress,
-                observation_parent,
-            )
-            if probe_batch.get("status") != "completed":
-                raise RuntimeError("Probing worker batch did not complete successfully")
-            current = int(
-                status.get("counts", {}).get(
-                    "confirmed_without_dynamic_record",
-                    0,
-                )
-            )
-            if current >= remaining:
-                raise RuntimeError("Probing phase made no progress")
-            remaining = current
-
-        runnable = await asyncio.to_thread(
-            store.list_dynamic_runs,
-            scan_id,
-            status="ready",
-        )
-        if runnable:
-            runner = self.dynamic_runner or DockerDynamicRunner(store)
-            self.dynamic_runner = runner
-            _emit(
-                self.progress,
-                "dynamic.preflight_started",
-                {"candidate_count": len(runnable)},
-                observation_parent=observation_parent,
-            )
-            await runner.preflight(observation_parent=observation_parent)
-            _emit(
-                self.progress,
-                "dynamic.preflight_completed",
-                {"candidate_count": len(runnable)},
-                observation_parent=observation_parent,
-            )
-            _emit(
-                self.progress,
-                "dynamic.execution_started",
-                {"candidate_count": len(runnable)},
-                observation_parent=observation_parent,
-            )
-            await runner.run_all(
-                runnable,
-                concurrency=2,
-                observation_parent=observation_parent,
-            )
-            _emit(
-                self.progress,
-                "dynamic.execution_completed",
-                {"candidate_count": len(runnable)},
-                observation_parent=observation_parent,
-            )
-        await asyncio.to_thread(store.assert_dynamic_runs_terminal, scan_id)
-        status = _require_success(await audit_status(self.ctx, scan_id))
-        _emit(
-            self.progress,
-            "scan.status",
-            status,
-            observation_parent=observation_parent,
-        )
-        return status
 
     async def _run_parent_adjudication(
         self,
@@ -661,135 +504,6 @@ class AuditOrchestrator:
         )
         return decision
 
-    async def _run_cybergym_solver(
-        self,
-        scan_id: str,
-        status: dict[str, Any],
-        scan_observation: Any,
-    ) -> dict[str, Any]:
-        """Run CyberGym as a dynamic validator over the generic PoC input."""
-        if self.scan_mode != "cybergym_level1":
-            return status
-        enter_audit_phase(self.ctx, "dynamic_validation")
-        scope = _start_phase_observation(scan_observation, "dynamic_validation")
-        parent = scan_observation if scope is None else scope.observation
-        runtime = None
-        try:
-            _emit(
-                self.progress,
-                "dynamic.started",
-                {"scan_id": scan_id, "validator": "cybergym"},
-                observation_parent=parent,
-            )
-            runtime = get_runtime().cybergym
-            import_seeds = getattr(runtime, "seed_from_poc_bundles", None)
-            if callable(import_seeds):
-                imported = await asyncio.to_thread(import_seeds, scan_id)
-                _emit(
-                    self.progress,
-                    "dynamic.poc_consumed",
-                    imported,
-                    observation_parent=parent,
-                )
-                if imported["accepted_bundle_count"] == 0:
-                    runtime.mark_failed_no_artifact(
-                        scan_id,
-                        selection_reason=imported["selection_reason"],
-                    )
-                    status = _require_success(await audit_status(self.ctx, scan_id))
-                    _emit(self.progress, "scan.status", status, observation_parent=parent)
-                    _emit(
-                        self.progress,
-                        "dynamic.completed",
-                        {"scan_id": scan_id, "status": "not_runnable", "validator": "cybergym"},
-                        observation_parent=parent,
-                    )
-                    _end_observation(
-                        scope,
-                        output={"status": "completed", "reason": imported["selection_reason"]},
-                    )
-                    return status
-            batch, status = await _run_phase(
-                self.ctx,
-                scan_id,
-                "cybergym_solving",
-                self.progress,
-                parent,
-            )
-            task = runtime.store.get_cybergym_task(scan_id)
-            if task is None:
-                raise RuntimeError("CyberGym task is missing after solver phase")
-            if batch.get("status") != "completed" or task["status"] == "active":
-                cancel_fuzz = getattr(runtime, "cancel_fuzz_runs", None)
-                if callable(cancel_fuzz):
-                    await asyncio.shield(
-                        cancel_fuzz(
-                            scan_id,
-                            cancel_source=(
-                                "solver_phase_failed"
-                                if batch.get("status") != "completed"
-                                else "solver_finalization"
-                            ),
-                        )
-                    )
-                selected = runtime.select_final_artifact(scan_id)
-                if selected is None or selected["local_validation"] != "verified":
-                    runtime.mark_failed_no_artifact(
-                        scan_id,
-                        selection_reason=_cybergym_no_artifact_reason(runtime, scan_id),
-                    )
-                else:
-                    await runtime.submit(
-                        scan_id,
-                        selected["artifact"]["artifact_id"],
-                        local_validation=selected["local_validation"],
-                        selection_reason=selected["selection_reason"],
-                    )
-                status = _require_success(await audit_status(self.ctx, scan_id))
-                _emit(self.progress, "scan.status", status, observation_parent=parent)
-            elif task["status"] not in {"submitted", "failed_no_artifact"}:
-                raise RuntimeError(f"CyberGym task is not finalizable: {task['status']}")
-            _emit(
-                self.progress,
-                "dynamic.completed",
-                {"scan_id": scan_id, "counts": status.get("counts", {}), "validator": "cybergym"},
-                observation_parent=parent,
-            )
-            _end_observation(scope, output={"status": "completed", "counts": status.get("counts", {})})
-            return status
-        except BaseException as exc:
-            if not isinstance(exc, asyncio.CancelledError) and runtime is not None:
-                try:
-                    await asyncio.shield(
-                        runtime.cancel_fuzz_runs(
-                            scan_id,
-                            cancel_source="solver_phase_failed",
-                        )
-                    )
-                except Exception as cleanup_exc:
-                    _emit(
-                        self.progress,
-                        "dynamic.cleanup_failed",
-                        {
-                            "scan_id": scan_id,
-                            "validator": "cybergym",
-                            "error_type": type(cleanup_exc).__name__,
-                        },
-                        observation_parent=parent,
-                    )
-            _emit(
-                self.progress,
-                "dynamic.cancelled" if isinstance(exc, asyncio.CancelledError) else "dynamic.failed",
-                {"scan_id": scan_id, "validator": "cybergym", "error_type": type(exc).__name__},
-                observation_parent=parent,
-            )
-            _end_observation(
-                scope,
-                output={"status": "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", "error_type": type(exc).__name__},
-                level="WARNING" if isinstance(exc, asyncio.CancelledError) else "ERROR",
-                status_message=type(exc).__name__,
-            )
-            raise
 
     async def run(self) -> dict[str, Any]:
         scan_id: str | None = None
@@ -798,15 +512,7 @@ class AuditOrchestrator:
             if self.prepared is not None:
                 prepared = self.prepared
             else:
-                prepare_result = (
-                    await audit_prepare(
-                        self.ctx,
-                        str(self.target),
-                        dynamic_enabled=True,
-                    )
-                    if self.dynamic_enabled
-                    else await audit_prepare(self.ctx, str(self.target))
-                )
+                prepare_result = await audit_prepare(self.ctx, str(self.target))
                 prepared = _require_success(prepare_result)
             scan_id = prepared["scan_id"]
             if langfuse_is_active():
@@ -818,13 +524,11 @@ class AuditOrchestrator:
                             "feature:code-security",
                             f"scan:{scan_id}",
                             f"mode:{self.scan_mode}",
-                            f"dynamic:{str(self.dynamic_enabled).lower()}",
                         ],
                         input={
                             "scan_id": scan_id,
                             "target": str(self.target),
                             "mode": self.scan_mode,
-                            "dynamic_enabled": self.dynamic_enabled,
                             "snapshot": prepared.get("snapshot", {}),
                         },
                         metadata={
@@ -874,11 +578,6 @@ class AuditOrchestrator:
                 status,
                 scan_observation,
             )
-            status = await self._run_dynamic_remaining(
-                scan_id,
-                status,
-                scan_observation,
-            )
             decision = await self._run_parent_adjudication(
                 scan_id,
                 scan_observation,
@@ -896,11 +595,6 @@ class AuditOrchestrator:
                     status,
                     scan_observation,
                 )
-                status = await self._run_dynamic_remaining(
-                    scan_id,
-                    status,
-                    scan_observation,
-                )
                 decision = await self._run_parent_adjudication(
                     scan_id,
                     scan_observation,
@@ -910,11 +604,6 @@ class AuditOrchestrator:
 
             status = _require_success(await audit_status(self.ctx, scan_id))
             status = await self._run_poc_generation(
-                scan_id,
-                status,
-                scan_observation,
-            )
-            status = await self._run_cybergym_solver(
                 scan_id,
                 status,
                 scan_observation,
@@ -999,11 +688,9 @@ async def run_standard_audit(
     source_exclusions: list[dict[str, str]] | None = None,
     copy_source: bool = True,
     cleanup_intermediates: bool = False,
-    dynamic_enabled: bool = False,
     coverage_policy: str = "evidence_backed_partial",
     knowledge_base: dict[str, str] | None = None,
     scan_mode: str = "standard",
-    cybergym_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the trusted standard audit through the shared service layer."""
     from flocks_code_security.service import (
@@ -1024,7 +711,6 @@ async def run_standard_audit(
         StartScanRequest(
             target_path=target,
             scan_mode=scan_mode,
-            cybergym_manifest=cybergym_manifest,
             model=model,
             max_file_bytes=max_file_bytes,
             max_total_bytes=max_total_bytes,
@@ -1034,7 +720,6 @@ async def run_standard_audit(
             source_exclusions=tuple(source_exclusions or []),
             copy_source=copy_source,
             cleanup_intermediates=cleanup_intermediates,
-            dynamic_enabled=dynamic_enabled,
             coverage_policy=coverage_policy,
             knowledge_base=knowledge_base_input,
         ),

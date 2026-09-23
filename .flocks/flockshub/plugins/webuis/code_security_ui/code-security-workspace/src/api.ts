@@ -120,8 +120,6 @@ export function createAuditApi(base = BASE) {
       excludePatterns: splitLines(values.excludePatterns),
       maxFileBytes: values.maxFileBytes,
       copySource: values.copySource,
-      dynamicEnabled: values.dynamicEnabled,
-      dynamicConfirmed: values.dynamicConfirmed,
       coveragePolicy: values.coveragePolicy,
       idempotencyKey,
     });
@@ -269,11 +267,10 @@ export async function configureAudit(
   history: { role: string; content: string }[],
   signal?: AbortSignal,
 ) {
-  const { dynamicConfirmed: _consent, ...draft } = values;
   return (
     await getApi().post(
       `${BASE}/configuration`,
-      { message, values: draft, history },
+      { message, values, history },
       { signal },
     )
   ).data;

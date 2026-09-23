@@ -200,7 +200,7 @@ describe("audit conversation", () => {
     expect(screen.queryByText("旧阶段迟到输出")).not.toBeInTheDocument();
     expect(screen.getByText("当前阶段输出")).toBeInTheDocument();
   });
-  it("applies automatic configuration without creating a scan or dynamic consent", async () => {
+  it("applies automatic configuration without creating a scan", async () => {
     post.mockResolvedValue({
       data: {
         reply: "已排除测试目录，请检查参数",
@@ -212,7 +212,6 @@ describe("audit conversation", () => {
           excludePatterns: "tests/**",
           maxFileBytes: 1048576,
           copySource: true,
-          dynamicEnabled: false,
           coveragePolicy: "evidence_backed_partial",
         },
       },
@@ -234,7 +233,7 @@ describe("audit conversation", () => {
         onCreated={() => {}}
       />,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "自动选择" }));
+    fireEvent.click(screen.getByRole("tab", { name: "自动模式" }));
     fireEvent.change(screen.getByRole("textbox", { name: "审计需求草稿" }), {
       target: { value: "审计 Demo 的 src，排除 tests" },
     });
@@ -243,7 +242,8 @@ describe("audit conversation", () => {
     expect(post).toHaveBeenCalledTimes(1);
     expect(post.mock.calls[0][0]).toBe("/api/code-security/v1/configuration");
     expect(post.mock.calls[0][1].values).not.toHaveProperty("dynamicConfirmed");
-    fireEvent.click(screen.getByRole("button", { name: "检查参数并发起审计" }));
+    expect(post.mock.calls[0][1].values).not.toHaveProperty("dynamicEnabled");
+    fireEvent.click(screen.getByRole("tab", { name: "手动模式" }));
     expect(screen.getByDisplayValue("src")).toBeInTheDocument();
     expect(screen.getByDisplayValue("tests/**")).toBeInTheDocument();
     expect(post).toHaveBeenCalledTimes(1);

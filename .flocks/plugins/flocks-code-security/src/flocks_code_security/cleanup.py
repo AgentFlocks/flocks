@@ -91,7 +91,6 @@ async def _cleanup_scan(runtime: PluginRuntime, scan_id: str, *, owned_parent_se
         # Successful reports must already be sealed before any destructive work.
         if scan["status"] == "completed" and store.scan_status(scan_id)["integrity_status"] != "valid":
             raise ValueError("Final artifact bundle is not valid; retaining execution data")
-        await runtime.cybergym.cancel_fuzz_runs(scan_id, cancel_source="terminal_cleanup")
         session_ids = store.cleanup_session_ids(scan_id)
         session_ids.extend(await _owned_worker_sessions(scan["parent_session_id"], scan_id))
         session_ids = list(dict.fromkeys(session_ids))

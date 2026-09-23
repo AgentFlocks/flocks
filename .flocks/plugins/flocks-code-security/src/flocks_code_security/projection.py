@@ -53,30 +53,12 @@ AGENT_TOOLS = {
         "audit_verification_subject",
         "audit_submit_verdict",
     ],
-    "code-security-prober": [
-        *COMMON_TOOL_NAMES,
-        "audit_probe_subject",
-        "audit_submit_probe",
-    ],
     "code-security-poc-generator": [
         *COMMON_TOOL_NAMES,
         "audit_poc_subject",
         "audit_knowledge_base",
         "audit_repository_summary",
         "audit_submit_poc",
-    ],
-    "code-security-cybergym-solver": [
-        *COMMON_TOOL_NAMES,
-        "audit_cybergym_context",
-        "audit_cybergym_checkpoint",
-        "audit_cybergym_materialize",
-        "audit_cybergym_artifact_create",
-        "audit_cybergym_replay",
-        "audit_cybergym_gdb",
-        "audit_cybergym_fuzz_start",
-        "audit_cybergym_fuzz_wait",
-        "audit_cybergym_minimize",
-        "audit_cybergym_submit",
     ],
 }
 

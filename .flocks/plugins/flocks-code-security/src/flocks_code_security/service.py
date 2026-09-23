@@ -32,7 +32,6 @@ from flocks_code_security.cli import (
     _resolve_model,
 )
 from flocks_code_security.artifact_integrity import find_output_directory
-from flocks_code_security.cybergym_runtime import CyberGymManifestError, CyberGymTargetManifest
 from flocks_code_security.paths import data_dir, outputs_root, runtime_dir
 from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
@@ -147,7 +146,6 @@ class KnowledgeBaseInput:
 class StartScanRequest:
     target_path: Path
     scan_mode: str = "standard"
-    cybergym_manifest: dict[str, Any] | None = None
     model: str | None = None
     include_paths: tuple[str, ...] = (".",)
     exclude_patterns: tuple[str, ...] = ()
@@ -157,7 +155,6 @@ class StartScanRequest:
     max_files: int = 50_000
     copy_source: bool = True
     cleanup_intermediates: bool = False
-    dynamic_enabled: bool = False
     coverage_policy: str = "evidence_backed_partial"
     idempotency_key: str | None = None
     knowledge_base: KnowledgeBaseInput | None = None
@@ -315,29 +312,9 @@ class _ProgressRecorder:
                 payload,
                 phase_run_id=phase_run_id,
             )
-            latest_seq = snapshot_event["seq"]
-            if not self.dynamic_enabled:
-                skipped = self.store.start_phase_run(
-                    self.scan_id,
-                    "dynamic_validation",
-                    summary={"reason": "disabled_by_request"},
-                )
-                self.store.finish_phase_run(
-                    skipped["phase_run_id"],
-                    "skipped",
-                    summary={"reason": "disabled_by_request"},
-                )
-                skipped_event = self.store.append_scan_event(
-                    self.scan_id,
-                    "phase.skipped",
-                    "动态验证已跳过",
-                    {"phase": "dynamic_validation", "reason": "disabled_by_request"},
-                    phase_run_id=skipped["phase_run_id"],
-                )
-                latest_seq = skipped_event["seq"]
-                self.store.set_current_phase(self.scan_id, "snapshot")
-            self._publish_change(latest_seq)
+            self._publish_change(snapshot_event["seq"])
             return
+
         elif event == "dynamic.started":
             run = self.store.start_phase_run(
                 self.scan_id,
@@ -645,7 +622,6 @@ class AuditService:
         normalized = StartScanRequest(
             target_path=target,
             scan_mode=str(request.scan_mode or "").strip(),
-            cybergym_manifest=request.cybergym_manifest,
             model=(request.model or "").strip() or None,
             include_paths=self._validate_relative_paths(request.include_paths, "include_paths"),
             exclude_patterns=self._validate_exclude_patterns(request.exclude_patterns),
@@ -655,40 +631,14 @@ class AuditService:
             max_files=request.max_files,
             copy_source=bool(request.copy_source),
             cleanup_intermediates=request.cleanup_intermediates,
-            dynamic_enabled=bool(request.dynamic_enabled),
             coverage_policy=str(request.coverage_policy or "").strip(),
             idempotency_key=(request.idempotency_key or "").strip() or None,
             knowledge_base=self._validate_knowledge_base(request.knowledge_base),
         )
         if type(normalized.cleanup_intermediates) is not bool:
             raise AuditServiceError("invalid_parameter", "cleanup_intermediates must be a boolean")
-        if normalized.scan_mode not in {"standard", "cybergym_level1"}:
+        if normalized.scan_mode != "standard":
             raise AuditServiceError("invalid_parameter", "Unsupported scan_mode")
-        if normalized.scan_mode == "cybergym_level1":
-            if normalized.cybergym_manifest is None:
-                raise AuditServiceError(
-                    "cybergym_manifest_required",
-                    "cybergym_level1 requires a trusted cybergym_manifest",
-                )
-            try:
-                cybergym_manifest = CyberGymTargetManifest.from_dict(
-                    normalized.cybergym_manifest
-                ).public_dict()
-            except CyberGymManifestError as exc:
-                raise AuditServiceError("invalid_cybergym_manifest", str(exc)) from exc
-            normalized = StartScanRequest(
-                **{**normalized.__dict__, "cybergym_manifest": cybergym_manifest}
-            )
-            if normalized.dynamic_enabled:
-                raise AuditServiceError(
-                    "incompatible_parameters",
-                    "cybergym_level1 does not use generic dynamic validation",
-                )
-        elif normalized.cybergym_manifest is not None:
-            raise AuditServiceError(
-                "incompatible_parameters",
-                "cybergym_manifest requires scan_mode=cybergym_level1",
-            )
         if normalized.max_file_bytes is not None and (
             not isinstance(normalized.max_file_bytes, int)
             or isinstance(normalized.max_file_bytes, bool)
@@ -706,11 +656,6 @@ class AuditService:
             type(normalized.max_total_bytes) is not int or normalized.max_total_bytes < 1
         ):
             raise AuditServiceError("invalid_parameter", "max_total_bytes must be a positive integer")
-        if normalized.dynamic_enabled and not normalized.copy_source:
-            raise AuditServiceError(
-                "incompatible_parameters",
-                "Dynamic validation requires copy_source=true",
-            )
         if normalized.coverage_policy not in {
             "evidence_backed_partial",
             "exhaustive",
@@ -740,9 +685,7 @@ class AuditService:
                 copy_source=normalized.copy_source,
                 cleanup_intermediates=normalized.cleanup_intermediates,
                 mode=normalized.scan_mode,
-                dynamic_enabled=normalized.dynamic_enabled,
                 coverage_policy=normalized.coverage_policy,
-                cybergym_manifest=normalized.cybergym_manifest,
             )
             try:
                 prepared = _require_success(prepare_result)
@@ -786,10 +729,7 @@ class AuditService:
 
             recorder = _ProgressRecorder(
                 scan_id,
-                dynamic_enabled=(
-                    normalized.dynamic_enabled
-                    or normalized.scan_mode == "cybergym_level1"
-                ),
+                dynamic_enabled=False,
                 downstream=progress,
             )
             recorder("scan.prepared", prepared)
@@ -844,7 +784,6 @@ class AuditService:
                 ctx,
                 request.target_path,
                 recorder,
-                dynamic_enabled=request.dynamic_enabled,
                 scan_mode=request.scan_mode,
                 prepared=prepared,
             ).run()
@@ -1592,9 +1531,7 @@ class AuditService:
     ) -> ToolContext:
         try:
             _require_enabled_audit_tools(
-                dynamic_enabled=request.dynamic_enabled,
                 knowledge_base_enabled=request.knowledge_base is not None,
-                cybergym_enabled=request.scan_mode == "cybergym_level1",
             )
             await Storage.init()
             provider_id, model_id = await _resolve_model(request.model)
@@ -1624,7 +1561,6 @@ class AuditService:
                 "model": {"providerID": provider_id, "modelID": model_id},
                 "suppress_parent_completion": True,
                 "audit_owner_subject": caller.subject,
-                "trusted_cybergym_manifest": request.cybergym_manifest,
             },
         )
 
@@ -1820,7 +1756,6 @@ class AuditService:
         payload = {
             "target_path": str(request.target_path),
             "scan_mode": request.scan_mode,
-            "cybergym_manifest": request.cybergym_manifest,
             "model": request.model,
             "include_paths": list(request.include_paths),
             "exclude_patterns": list(request.exclude_patterns),
@@ -1829,7 +1764,6 @@ class AuditService:
             "max_files": request.max_files,
             "copy_source": request.copy_source,
             "cleanup_intermediates": request.cleanup_intermediates,
-            "dynamic_enabled": request.dynamic_enabled,
             "poc_enabled": True,
             "coverage_policy": request.coverage_policy,
             "knowledge_base": (

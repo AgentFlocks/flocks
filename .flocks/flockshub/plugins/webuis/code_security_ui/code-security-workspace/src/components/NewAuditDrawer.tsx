@@ -19,8 +19,6 @@ const EMPTY_VALUES: NewAuditValues = {
   excludePatterns: "",
   maxFileBytes: 1_048_576,
   copySource: true,
-  dynamicEnabled: false,
-  dynamicConfirmed: false,
   coveragePolicy: "evidence_backed_partial",
 };
 const CREATE_ERROR_MESSAGES: Record<string, string> = {
@@ -82,7 +80,7 @@ export function NewAuditDrawer({
         controller.signal,
       );
       if (controller.signal.aborted) return;
-      setValues({ ...result.values, dynamicConfirmed: false });
+      setValues(result.values);
       setConfigurationMessages((current) => [
         ...current,
         { role: "user", content: text },
@@ -144,7 +142,6 @@ export function NewAuditDrawer({
       setValues((current) => {
         const next = {
           ...current,
-          dynamicConfirmed: false,
           ...(initialProjectId &&
           availableProjects.some((project) => project.id === initialProjectId)
             ? {
@@ -158,7 +155,6 @@ export function NewAuditDrawer({
         if (initialProjectId) baselineRef.current = next;
         return next;
       });
-      setErrors((current) => ({ ...current, dynamicConfirmed: "" }));
     }
     wasOpenRef.current = open;
   }, [open, initialProjectId, availableProjects]);
@@ -168,7 +164,7 @@ export function NewAuditDrawer({
     try {
       sessionStorage.setItem(
         DRAFT_KEY,
-        JSON.stringify({ ...values, dynamicConfirmed: false }),
+        JSON.stringify(values),
       );
     } catch {
       // A blocked session store must not make the audit form unusable.
@@ -222,33 +218,6 @@ export function NewAuditDrawer({
     setErrors((current) => ({ ...current, [key]: "" }));
     setSubmitError("");
   };
-  const setDynamicEnabled = (enabled: boolean) => {
-    setValues((current) => ({
-      ...current,
-      dynamicEnabled: enabled,
-      dynamicConfirmed: enabled ? current.dynamicConfirmed : false,
-    }));
-    setErrors((current) => ({
-      ...current,
-      dynamicEnabled: "",
-      dynamicConfirmed: "",
-    }));
-    setSubmitError("");
-  };
-  const setCopySource = (enabled: boolean) => {
-    setValues((current) => ({
-      ...current,
-      copySource: enabled,
-      dynamicEnabled: enabled ? current.dynamicEnabled : false,
-      dynamicConfirmed: enabled ? current.dynamicConfirmed : false,
-    }));
-    setErrors((current) => ({
-      ...current,
-      dynamicEnabled: "",
-      dynamicConfirmed: "",
-    }));
-    setSubmitError("");
-  };
   const validatePath = () => {
     const path = values.targetPath.trim();
     const invalid =
@@ -267,8 +236,6 @@ export function NewAuditDrawer({
       nextErrors.targetPath = "目标目录必须是工作区内的相对路径。";
     if (!modelReady)
       nextErrors.model = "请选择一个可用模型。";
-    if (values.dynamicEnabled && !values.dynamicConfirmed)
-      nextErrors.dynamicConfirmed = "请确认已理解动态验证的执行边界。";
     setErrors(nextErrors);
     if (Object.values(nextErrors).some(Boolean)) {
       window.setTimeout(() => errorRef.current?.focus(), 0);
@@ -563,7 +530,7 @@ export function NewAuditDrawer({
                   id="audit-copySource"
                   type="checkbox"
                   checked={values.copySource}
-                  onChange={(event) => setCopySource(event.target.checked)}
+                  onChange={(event) => set("copySource", event.target.checked)}
                 />
               </label>
               <label className="cs-field" htmlFor="audit-maxFileBytes">
@@ -612,63 +579,6 @@ export function NewAuditDrawer({
             </div>
           </fieldset>
 
-          <fieldset>
-            <legend>{t("验证方式")}</legend>
-            <label className="cs-toggle" htmlFor="audit-dynamicEnabled">
-              <span>
-                <strong>{t("动态验证")}</strong>
-                <small>{t("默认关闭；开启后执行受限 Docker 探测。")}</small>
-              </span>
-              <input
-                id="audit-dynamicEnabled"
-                type="checkbox"
-                checked={values.dynamicEnabled}
-                disabled={!values.copySource}
-                onChange={(event) => setDynamicEnabled(event.target.checked)}
-              />
-            </label>
-            {!values.copySource && (
-              <small>
-                {t("直接源码审计不支持动态验证；重新开启源码复制后可用。")}
-              </small>
-            )}
-            {values.dynamicEnabled && (
-              <div className="cs-dynamic-confirm">
-                <Icon name="flask" />
-                <div>
-                  <h3>{t("动态验证将在本地 Docker 中构建并运行受限探测")}</h3>
-                  <p>
-                    {t(
-                      "无网络 · 无主机挂载 · 只读根文件系统 · 无 capabilities · 资源受限 · 仅使用本地已有镜像",
-                    )}
-                  </p>
-                  <p>
-                    {t(
-                      "需要 Docker CLI、可用的本地 daemon，以及快照中受支持的 Dockerfile。",
-                    )}
-                  </p>
-                  <label htmlFor="audit-dynamicConfirmed">
-                    <input
-                      id="audit-dynamicConfirmed"
-                      type="checkbox"
-                      checked={values.dynamicConfirmed}
-                      onChange={(event) =>
-                        set("dynamicConfirmed", event.target.checked)
-                      }
-                      aria-invalid={Boolean(errors.dynamicConfirmed)}
-                    />
-                    <span>
-                      {t("我理解动态验证会执行快照中的受限代码，并同意继续。")}
-                    </span>
-                  </label>
-                  {errors.dynamicConfirmed && (
-                    <small role="alert">{errors.dynamicConfirmed}</small>
-                  )}
-                </div>
-              </div>
-            )}
-          </fieldset>
-
           <footer>
             <button
               className="cs-button cs-button--secondary"
@@ -687,9 +597,7 @@ export function NewAuditDrawer({
                   ? values.copySource
                     ? "正在创建不可变快照…"
                     : "正在准备直接源码审计…"
-                  : values.dynamicEnabled
-                    ? "启动动态审计"
-                    : "启动静态审计",
+                  : "启动静态审计",
               )}
             </button>
           </footer>
@@ -703,7 +611,12 @@ function readDraft(): NewAuditValues {
   try {
     const parsed = JSON.parse(sessionStorage.getItem(DRAFT_KEY) || "null");
     return parsed && typeof parsed === "object"
-      ? { ...EMPTY_VALUES, ...parsed, dynamicConfirmed: false }
+      ? (Object.fromEntries(
+          Object.entries(EMPTY_VALUES).map(([key, value]) => [
+            key,
+            parsed[key] ?? value,
+          ]),
+        ) as NewAuditValues)
       : EMPTY_VALUES;
   } catch {
     return EMPTY_VALUES;

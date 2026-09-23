@@ -13,7 +13,6 @@ from flocks_code_security.orchestration import (
     MAX_SCOPES_PER_WORK_UNIT,
     FollowUpPlanningError,
     build_follow_up_unit,
-    cybergym_solver_prompt,
     plan_baseline_units,
     plan_verification_units,
 )
@@ -85,32 +84,6 @@ def test_small_repository_stays_in_one_deterministic_work_unit() -> None:
     assert first[0]["paths"] == ["."]
     assert len(first[0]["assignment_digest"]) == 64
     assert _assignment_counts(files, first) == Counter({"app.py": 1, "src/auth.py": 1})
-
-
-def test_cybergym_solver_prompt_requires_contract_aware_preflight() -> None:
-    prompt = cybergym_solver_prompt()
-
-    assert "input_contract" in prompt
-    assert "required_suffix_hex" in prompt
-    assert prompt.index("replay") < prompt.index("fuzz")
-    assert "already includes its replay" in prompt
-    assert "execution_state" in prompt
-    assert "poc_states" in prompt
-    assert "accepted generic PoCs" in prompt
-    assert "one generic PoC lineage" in prompt
-    assert "Never call fuzz status" in prompt
-    assert "stop without a final artifact" in prompt
-    assert "mis-shaped input, not validation evidence" in prompt
-    assert "fixed-side cleanliness" in prompt
-    assert "honestly mark it unverified" not in prompt
-
-
-def test_cybergym_solver_recovery_prompt_uses_persisted_checkpoint() -> None:
-    prompt = cybergym_solver_prompt(recovery_reason="solver_inactive")
-
-    assert "recovery attempt" in prompt
-    assert "solver_inactive" in prompt
-    assert "do not repeat completed bootstrap imports" in prompt
 
 
 def test_large_files_do_not_create_extra_baseline_workers() -> None:

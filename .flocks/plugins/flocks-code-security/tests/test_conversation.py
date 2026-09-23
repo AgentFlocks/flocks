@@ -238,11 +238,10 @@ async def test_auto_configuration_cannot_select_unauthorized_project(audit, monk
         await routes.configure_audit(None, payload)
     assert error.value.status_code == 502
     values.workspaceId = "allowed"
-    values.dynamicEnabled = True
     values.copySource = False
     chat.model_reply.return_value = json.dumps({"reply": "Review configuration", "values": values.model_dump()})
     result = await routes.configure_audit(None, payload)
-    assert result["values"]["dynamicEnabled"] is False
+    assert "dynamicEnabled" not in result["values"]
     assert "dynamicConfirmed" not in result["values"]
 
 

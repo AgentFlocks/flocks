@@ -1,10 +1,10 @@
 # Flocks Code Security
 
-Project-level Flocks plugin for static source-code security audits with optional local-Docker validation.
+Project-level Flocks plugin for static source-code security audits with mandatory PoC generation.
 
 Current implementation provides:
 
-- nine isolated code-security agents (primary adjudicator, threat modeler, repository-wide baseline, focused investigator, verifier, prober, PoC generator, CyberGym solver, result assistant);
+- seven isolated code-security agents (primary adjudicator, threat modeler, repository-wide baseline, focused investigator, verifier, PoC generator, result assistant);
 - a subset-only callable-tool projection;
 - digest-bound source views backed by reproducible read-only copies by default;
 - standard file operations, shell commands, regex search, web research, and task tracking;
@@ -19,12 +19,12 @@ Current implementation provides:
 Target code is copied into the plugin snapshot store by default. Agents receive file, shell, and network tools for supporting work. Prompts instruct them to keep the canonical snapshot unchanged and use scratch copies for modifications or experiments; tool visibility is no longer a read-only execution boundary. Every audit assigns one repository-wide baseline work unit over `.` with a 200-step ceiling; it is never split by file count or byte size. If the baseline returns valid blocking questions with exact related paths, the host may launch at most one focused investigator over their deduplicated union before verification.
 
 
-All nine agents receive these standard tools by default, including during parent adjudication:
+All seven agents receive these standard tools by default, including during parent adjudication:
 `read`, `write`, `edit`, `apply_patch`, `glob`, `delete`, `move`, `copy`, `mkdir`,
 `bash`, `grep`, `webfetch`, `websearch`, and `todo`.
 The duplicate `audit_inventory`, `audit_read`, and `audit_search` tools have been
 removed; use `glob`, `read`, and `grep` instead. Audit-specific context, candidate,
-coverage, verdict, PoC, runner, query, and lifecycle tools remain stage-specific.
+coverage, verdict, PoC, query, and lifecycle tools remain stage-specific.
 
 Workers receive the absolute snapshot root and assigned paths in their work message.
 Standard tools retain their original behavior: `read` returns file contents and does
@@ -61,7 +61,7 @@ When migrating commands from the experimental CLI branch, remove `--bash` and
 `--web-search` from `flocks security audit` and `flocks security batch run`.
 PoC generation always runs after static adjudication in single audits and batch
 runs. Remove `--poc` / `--generate-poc` from existing commands; these switches are
-no longer accepted. Use `--dynamic` when dynamic validation is also needed.
+no longer accepted.
 
 To skip the source copy and audit the source directory directly:
 
@@ -69,7 +69,7 @@ To skip the source copy and audit the source directory directly:
 flocks security audit /absolute/path/to/source --no-copy
 ```
 
-Direct mode still records the initial inventory and file digests. Audit reads fail closed if an included source file changes, and deleting the scan never deletes the source directory. Direct mode cannot be combined with dynamic validation.
+Direct mode still records the initial inventory and file digests. Audit reads fail closed if an included source file changes, and deleting the scan never deletes the source directory.
 
 Snapshots include up to 4 GiB by default, allowing large source trees such as
 Wireshark with built static libraries. The total is checked before content hashing.
@@ -82,24 +82,14 @@ omits build products from the requested scope. Files exceeding a per-file cap ar
 recorded as omissions; this does not establish complete repository coverage.
 The service/API equivalent of the total cap is `max_total_bytes` / `maxTotalBytes`.
 
-Dynamic validation is explicit opt-in:
-
-```bash
-flocks security audit /absolute/path/to/source --dynamic
-```
-
-For a CyberGym-style guided audit, attach one small UTF-8 vulnerability description:
+For a guided source audit, attach one small UTF-8 vulnerability description:
 
 ```bash
 flocks security audit /absolute/path/to/source \
   --knowledge-base /absolute/path/to/description.txt
 ```
 
-The description is captured before the scan starts, stored as immutable scan-bound data, and exposed only to the threat modeler, static workers, independent verifiers, and final adjudicator. It is always treated as an untrusted hypothesis rather than source evidence; the dynamic probe author never receives the raw content. The sealed report records only its file name, byte length, and SHA-256 digest.
-
-CyberGym Level 1 fuzzer manifests require a trusted structured `input_contract` with optional `required_prefix_hex` and `required_suffix_hex` fields. The runtime validates those fixed bytes for every raw seed and records the normalized contract in seed provenance, so wrapper-only static PoCs cannot lose harness-required headers or trailers (for example, a selector suffix of `01000000`). Before fuzzing, every seed must pass vulnerable-side replay; GDB is an optional diagnostic aid rather than a fuzzing precondition.
-
-Dynamic scans ask an isolated prober to describe a control/attack pair for each statically confirmed candidate. A trusted host runner validates the contract and builds only from an existing snapshot Dockerfile with no network, pulls, cache, or unrestricted build steps. BuildKit runs are pinned to the local default Docker builder and resource-limited; otherwise the runner forces the resource-limited legacy builder against the verified local daemon and fails preflight if neither backend can enforce CPU, memory, process, and shared-memory limits. Each script runs in a fresh local container with no network, no capabilities, a read-only root, bounded resources, and no mounts. The fail-closed Dockerfile policy accepts only an explicit instruction set and rejects parser directives, heredocs, `ADD`, `ONBUILD`, `FROM --platform`, and all `RUN` options; every external `FROM` or `COPY --from` image must already exist locally, while `scratch` needs no image inspection. The runner stores bounded facts only; the parent Agent decides whether those facts reproduce the candidate. Runnable probes require Docker CLI access and a local Docker daemon endpoint. Docker is a containment boundary for this opt-in workflow, not a general malicious-code sandbox.
+The description is captured before the scan starts, stored as immutable scan-bound data, and exposed only to the threat modeler, static workers, independent verifiers, and final adjudicator. It is always treated as an untrusted hypothesis rather than source evidence. The sealed report records only its file name, byte length, and SHA-256 digest.
 
 The command prints the `scan_id` as soon as the digest-bound source view is ready, then follows threat modeling, repository-wide baseline scanning, optional focused investigation, independent verification, parent-Agent adjudication, and report generation. This one-command path is **host-orchestrated** by `AuditOrchestrator`; the `code-security` primary Agent makes the semantic accept/reject or targeted-rescan decision, but it does not schedule the CLI's macro phases. To inspect the same persisted progress from another terminal without changing the scan:
 
@@ -147,7 +137,7 @@ export LANGFUSE_HOST=https://your-langfuse.example.com
 flocks security audit /absolute/path/to/source
 ```
 
-The `code-security.scan` trace records snapshot preparation, threat-modeling, baseline, optional investigation, verification, optional dynamic validation and targeted rescan, parent adjudication, batch status changes, scan counters, and the final finding summary. Worker model-step spans are attached beneath their phase in the same trace while retaining isolated Flocks sessions. Each step records its agent role, work-unit ID, assigned paths, and candidate ID. Under each model generation, audit-tool spans show the concrete inspection and decision actions. Repeated worker polling remains available to the CLI progress callback, but Langfuse records a progress span only when batch status or counts change.
+The `code-security.scan` trace records snapshot preparation, threat-modeling, baseline, optional investigation, verification, PoC generation and optional targeted rescan, parent adjudication, batch status changes, scan counters, and the final finding summary. Worker model-step spans are attached beneath their phase in the same trace while retaining isolated Flocks sessions. Each step records its agent role, work-unit ID, assigned paths, and candidate ID. Under each model generation, audit-tool spans show the concrete inspection and decision actions. Repeated worker polling remains available to the CLI progress callback, but Langfuse records a progress span only when batch status or counts change.
 
 For local batch diagnostics, run `flocks security batch status <run-dir>` and
 inspect each task's `runtime`. Workers refresh `tasks/<task-id>/runtime.json`
@@ -172,19 +162,17 @@ Dynamic scans add spans for Docker preflight, the bounded runner, each candidate
 
 Model messages and audit-tool inputs/outputs can contain proprietary source code. Prefer a trusted self-hosted Langfuse deployment for full-fidelity traces. Set `FLOCKS_LANGFUSE_CAPTURE_MODE=truncated` and `FLOCKS_LANGFUSE_MAX_CHARS=<limit>` when bounded payload capture is required. Langfuse failures are best-effort only and never alter scan state or finalization.
 
-Standard static audits use the flow threat modeling → repository-wide baseline → optional focused investigation → verification → parent adjudication → deterministic reduction. Dynamic audits insert probing and Docker execution after verification. The parent may instead direct one targeted rescan, followed by verification, dynamic processing of only new confirmed candidates, and a mandatory second/final adjudication. Baseline and investigator workers must consume the persisted threat model before they can submit candidates or coverage. Every candidate must receive one independent verifier verdict and be classified by the parent before finalization. Parent-rejected candidates are omitted, insufficient-evidence candidates remain deferred coverage, and only independently confirmed candidates accepted by the parent are projected into SARIF.
+Standard static audits use the flow threat modeling → repository-wide baseline → optional focused investigation → verification → parent adjudication → PoC generation → deterministic reduction. The parent may instead direct one targeted rescan, followed by verification and a mandatory second/final adjudication. Baseline and investigator workers must consume the persisted threat model before they can submit candidates or coverage. Every candidate must receive one independent verifier verdict and be classified by the parent before finalization. Parent-rejected candidates are omitted, insufficient-evidence candidates remain deferred coverage, and only independently confirmed candidates accepted by the parent are projected into SARIF.
 
 The public `code-security` Agent remains the interactive audit entry point. In an interactive audit it may drive the audit tools directly. In the one-command CLI path it is invoked only at the adjudication boundary, where the session callable-tool set exposes the common standard tools plus `audit_knowledge_base`, `audit_adjudication_context`, and `audit_submit_adjudication`; the host resumes control after the decision.
 
-The nine Agent definitions are declarative and live in `src/flocks_code_security/agents/<agent-name>/agent.yaml`, with each prompt in the adjacent `prompt.md`. Tools, skills, model settings, and isolation policy can therefore be reviewed and changed independently for each Agent while remaining owned and packaged by this plugin.
+The seven Agent definitions are declarative and live in `src/flocks_code_security/agents/<agent-name>/agent.yaml`, with each prompt in the adjacent `prompt.md`. Tools, skills, model settings, and isolation policy can therefore be reviewed and changed independently for each Agent while remaining owned and packaged by this plugin.
 
-All nine code-security Agents combine a dedicated session with the `isolated` prompt profile. Their model input contains the Agent prompt, execution-mode rules, core configuration guard and tool protocol, minimal runtime environment, and only host-selected Agent skills; it excludes the Rex/Flocks provider identity, workspace instruction files, memory, optional `UserPromptBefore` context, and unrelated runtime metadata. Trusted `LLM_BEFORE`/`LLM_AFTER` hooks remain part of the host policy and redaction boundary. Their callable application tools never exceed the names declared in `AGENT_TOOLS`; phase projection may reduce that set, globally auto-loaded tools are not added, and host runtime controls such as `plan_exit` remain available when their mode requires them.
+All seven code-security Agents combine a dedicated session with the `isolated` prompt profile. Their model input contains the Agent prompt, execution-mode rules, core configuration guard and tool protocol, minimal runtime environment, and only host-selected Agent skills; it excludes the Rex/Flocks provider identity, workspace instruction files, memory, optional `UserPromptBefore` context, and unrelated runtime metadata. Trusted `LLM_BEFORE`/`LLM_AFTER` hooks remain part of the host policy and redaction boundary. Their callable application tools never exceed the names declared in `AGENT_TOOLS`; phase projection may reduce that set, globally auto-loaded tools are not added, and host runtime controls such as `plan_exit` remain available when their mode requires them.
 
 Threat-model evidence uses the exact `relative_path`, `blob_digest`, `start_line`, and `end_line` contract exposed in the tool schema. A threat-modeler may atomically refine its own structurally valid draft while its work unit remains active; once the work unit completes, the model is immutable. Worker completion, baseline launch, finalization, and status inspection re-check the structural contract. Semantic completeness remains the threat-model agent's responsibility and is not guessed from language-dependent placeholder blacklists. Historical scans with structurally invalid threat models are reported with `integrity_status: invalid` and must not be used.
 
-Finalization validates `scan-manifest.json`, `findings.json`, and `coverage.json` against the vendored Codex Security v1 schemas before atomically publishing a sealed `completed` bundle. Findings carry stable finding/occurrence IDs, fingerprints, CWE taxonomy, digest-bound code evidence, root cause, validation, attack path, and remediation. Coverage carries surface dispositions, immutable receipts, explicit exclusions, deferred work, and completeness. `adjudication.json` is a sealed supplemental artifact containing the parent decisions and rejection reasons. Dynamic bundles also seal `dynamic-validation.json`; PoC files are published only for candidates that are parent-accepted, statically confirmed, and dynamically reproduced. Clean Git roots are revision-bound; dirty worktrees add a content snapshot digest. Markdown, SARIF, and `threat-model.json` remain readable projections outside the canonical contract.
-
-Normal completion, errors, and cancellation remove the named containers, final images, and `~/.flocks/workspace/code-security/runtime/docker/<scan_id>/` files created by the scan. A hard host-process or daemon crash can leave labeled resources. Inspect and remove only resources carrying `flocks.code_security.scan_id=<scan_id>`; do not use a broad Docker prune. Shared Docker build cache is daemon-managed and is not part of the exact cleanup guarantee.
+Finalization validates `scan-manifest.json`, `findings.json`, and `coverage.json` against the vendored Codex Security v1 schemas before atomically publishing a sealed `completed` bundle. Findings carry stable finding/occurrence IDs, fingerprints, CWE taxonomy, digest-bound code evidence, root cause, validation, attack path, and remediation. Coverage carries surface dispositions, immutable receipts, explicit exclusions, deferred work, and completeness. `adjudication.json` is a sealed supplemental artifact containing the parent decisions and rejection reasons. PoC files are generated for parent-accepted, statically confirmed candidates. Historical dynamic-validation artifacts remain readable. Clean Git roots are revision-bound; dirty worktrees add a content snapshot digest. Markdown, SARIF, and `threat-model.json` remain readable projections outside the canonical contract.
 
 Coverage completeness describes static source coverage, not the absence of environmental uncertainty. Inventoried zero-byte files are counted as `notApplicable`; later, stronger analysis receipts replace weaker baseline states deterministically. Missing receipts may receive one same-session coverage-only recovery when analysis progress already exists. After that bounded recovery, unread or failed non-empty files, snapshot omissions, or explicitly blocking questions fail finalization with `coverage_blocked` while preserving the recorded database facts. External-service, deployment, runtime, and unresolved-hypothesis questions are retained as non-blocking validation limitations.
 
@@ -195,42 +183,3 @@ Run the plugin regression suite from the Flocks checkout with:
 ```bash
 .venv/bin/pytest -q .flocks/plugins/flocks-code-security/tests
 ```
-
-
-### CyberGym evidence and recovery
-
-Local replay and the official judge share sanitizer classification. Recover-mode
-UBSAN findings can count even with exit code zero; ordinary nonzero exits,
-sanitizer banners, initialization errors and LSAN-under-ptrace errors cannot.
-GDB reachability remains independent of debugger status. New replay observations
-are grouped by manifest digest and crash signature before the two-replay gate;
-the official judge must still find the fixed side clean. A manifest digest
-identifies configuration, not the contents of a mutable image tag: use immutable
-runner images for comparable results.
-
-LibFuzzer preflight requires positive guards or inline-counter evidence. Missing
-coverage evidence is `coverage_unverified`, distinct from observed zero coverage.
-AFL retains its existing engine behavior. Runner rebuilding and protocol-specific
-seed corpora remain deployment inputs; the runtime does not infer network framing
-from a protocol name.
-
-The solver can save an 8 KiB plan per accepted PoC through
-`audit_cybergym_checkpoint`. Context restores the latest plan together with run
-facts and failure summaries. Plans are untrusted notes and never authorize a
-verified result. `audit_cybergym_materialize` derives an input from an existing
-seed using non-overlapping MSB-first bit edits (`offset_bits`, `width_bits`,
-`value`) and optional `size_bytes` with zero padding. It preserves lineage and
-validates the trusted input contract. Widths are limited to 64 bits and a recipe
-to 256 edits; protocol grammars belong in caller-supplied plans and seed corpora.
-
-Fuzz collection keeps crash candidates first, at most 64 artifacts and 16 corpus
-items per run, within 16 MiB of new bytes. Corpus and verification artifacts (seeds, crashes, minimized inputs and dictionaries)
-have separate scan pools, each limited to 256 artifacts and 64 MiB through the
-runtime; the database checks these limits transactionally. Historical corpus
-over the limit is retained but cannot grow, while verification can continue.
-Directory traversal stops after 4096 entries. Results contain compact references,
-bounded diagnostics and explicit partial/failed collection metadata. Omitted
-crashes are reported as incomplete collection. A storage or cleanup failure does
-not erase the observed process outcome, and missing bytes cannot be submitted as
-a verified artifact. Final failure summaries preserve run and worker reasons;
-only a later successful operation in the same lineage resolves an old failure.

@@ -66,8 +66,6 @@ WORKER_ROLE_AGENTS = {
     "baseline": "code-security-baseline",
     "investigator": "code-security-investigator",
     "verifier": "code-security-verifier",
-    "prober": "code-security-prober",
-    "cybergym_solver": "code-security-cybergym-solver",
     "poc_generator": "code-security-poc-generator",
 }
 DYNAMIC_EXECUTION_CATEGORIES = (
@@ -1633,7 +1631,7 @@ class ScanStore:
         status: str = "pending",
         assignment_digest: str | None = None,
     ) -> str:
-        if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober", "cybergym_solver", "poc_generator"}:
+        if role not in {"threat_modeler", "baseline", "investigator", "verifier", "poc_generator"}:
             raise ValueError("Unsupported work-unit role")
         if not paths or not all(isinstance(path, str) and path for path in paths):
             raise ValueError("Work units require at least one path")
@@ -1688,9 +1686,7 @@ class ScanStore:
             "baseline",
             "investigation",
             "verification",
-            "probing",
             "targeted_rescan",
-            "cybergym_solving",
             "poc_generation",
         }:
             raise ValueError("Unsupported worker phase")
@@ -1706,10 +1702,6 @@ class ScanStore:
             # avoids constructing a half batch before that guard fires.
             connection.execute("BEGIN IMMEDIATE")
             scan = self._require_scan_status(connection, scan_id, {"running"})
-            if phase == "probing" and not bool(scan["dynamic_enabled"]):
-                raise ValueError("Dynamic validation is not enabled for this scan")
-            if phase == "cybergym_solving" and scan["mode"] != "cybergym_level1":
-                raise ValueError("CyberGym solver requires cybergym_level1 scan mode")
             if phase == "poc_generation" and not bool(scan["poc_enabled"]):
                 raise ValueError("PoC generation is not enabled for this scan")
             active = connection.execute(
@@ -1775,22 +1767,6 @@ class ScanStore:
                     raise ValueError("A targeted rescan has already been created")
                 if len(units) != 1 or units[0].get("paths") != directive["paths"]:
                     raise ValueError("Targeted-rescan scope must exactly match the adjudication")
-            if phase == "cybergym_solving":
-                task = connection.execute(
-                    "SELECT status FROM cybergym_tasks WHERE scan_id = ?", (scan_id,)
-                ).fetchone()
-                finalized = connection.execute(
-                    "SELECT 1 FROM adjudications WHERE scan_id = ? AND action = 'finalize'",
-                    (scan_id,),
-                ).fetchone()
-                prior = connection.execute(
-                    "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = 'cybergym_solving'",
-                    (scan_id,),
-                ).fetchone()
-                if task is None or task["status"] != "active" or finalized is None or prior is not None:
-                    raise ValueError("CyberGym solving requires one active task after final adjudication")
-                if len(units) != 1 or units[0].get("paths") != ["."]:
-                    raise ValueError("CyberGym solving requires exactly one task-level work unit")
             if phase == "poc_generation":
                 finalized = connection.execute(
                     "SELECT 1 FROM adjudications WHERE scan_id = ? AND action = 'finalize'",
@@ -1808,16 +1784,14 @@ class ScanStore:
                 subject_id = unit.get("subject_id")
                 vote_index = unit.get("vote_index")
                 assignment_digest = unit.get("assignment_digest")
-                if role not in {"threat_modeler", "baseline", "investigator", "verifier", "prober", "cybergym_solver", "poc_generator"}:
+                if role not in {"threat_modeler", "baseline", "investigator", "verifier", "poc_generator"}:
                     raise ValueError("Unsupported work-unit role")
                 expected_role = {
                     "threat_modeling": "threat_modeler",
                     "baseline": "baseline",
                     "investigation": "investigator",
                     "verification": "verifier",
-                    "probing": "prober",
                     "targeted_rescan": "baseline",
-                    "cybergym_solving": "cybergym_solver",
                     "poc_generation": "poc_generator",
                 }[phase]
                 if role != expected_role:
@@ -1829,10 +1803,10 @@ class ScanStore:
                     or not all(isinstance(path, str) and path for path in paths)
                 ):
                     raise ValueError("Work units require between 1 and 2000 paths")
-                if phase in {"probing", "poc_generation"} and not subject_id:
+                if phase == "poc_generation" and not subject_id:
                     raise ValueError(f"{phase.title()} work units require a candidate subject")
-                if phase not in {"verification", "probing", "poc_generation"} and subject_id is not None:
-                    raise ValueError("Only verification, probing, and PoC-generation work units may have a subject")
+                if phase not in {"verification", "poc_generation"} and subject_id is not None:
+                    raise ValueError("Only verification and PoC-generation work units may have a subject")
                 if vote_index is not None and (phase != "verification" or vote_index != 1):
                     raise ValueError("Only a single verification verdict is supported")
                 if phase == "baseline" and (
@@ -2505,24 +2479,6 @@ class ScanStore:
                 row = connection.execute(
                     "SELECT 1 FROM verifications WHERE candidate_id = ?",
                     (assignment["subject_id"],),
-                ).fetchone()
-            elif role == "prober":
-                assignment = connection.execute(
-                    "SELECT subject_id FROM worker_batch_units WHERE work_unit_id = ?",
-                    (work_unit_id,),
-                ).fetchone()
-                if assignment is None or assignment["subject_id"] is None:
-                    return False
-                row = connection.execute(
-                    "SELECT 1 FROM dynamic_runs WHERE probe_work_unit_id = ? AND candidate_id = ?",
-                    (work_unit_id, assignment["subject_id"]),
-                ).fetchone()
-            elif role == "cybergym_solver":
-                row = connection.execute(
-                    "SELECT 1 FROM cybergym_tasks WHERE scan_id = ("
-                    "SELECT scan_id FROM work_units WHERE work_unit_id = ?"
-                    ") AND status IN ('submitted', 'failed_no_artifact')",
-                    (work_unit_id,),
                 ).fetchone()
             elif role == "poc_generator":
                 assignment = connection.execute(
@@ -3319,36 +3275,6 @@ class ScanStore:
         with self._connect() as connection:
             scan = self._require_scan_status(connection, scan_id, {"running"})
             self._require_dynamic_ready(connection, scan_id, scan=scan)
-
-    def create_cybergym_task(self, scan_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
-        """Persist a host-validated Level 1 task before a solver can access it."""
-        from flocks_code_security.cybergym_runtime import CyberGymTargetManifest
-
-        normalized = CyberGymTargetManifest.from_dict(manifest).public_dict()
-        now = _now()
-        with self._lock, self._connect() as connection:
-            scan = self._require_scan_status(connection, scan_id, {"running"})
-            if scan["mode"] != "cybergym_level1":
-                raise ValueError("CyberGym task requires cybergym_level1 scan mode")
-            try:
-                connection.execute(
-                    "INSERT INTO cybergym_tasks (scan_id, task_id, manifest_json, status, "
-                    "final_artifact_id, selected_poc_id, local_validation, selection_reason, created_at, updated_at) "
-                    "VALUES (?, ?, ?, 'active', NULL, NULL, NULL, NULL, ?, ?)",
-                    (
-                        scan_id,
-                        normalized["task_id"],
-                        json.dumps(normalized, ensure_ascii=False, sort_keys=True),
-                        now,
-                        now,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ValueError("CyberGym task already exists for this scan") from exc
-        task = self.get_cybergym_task(scan_id)
-        if task is None:  # pragma: no cover - defensive persistence boundary
-            raise ValueError("CyberGym task was not persisted")
-        return task
 
     @staticmethod
     def _decode_cybergym_task(row: sqlite3.Row) -> dict[str, Any]:
@@ -4455,10 +4381,6 @@ class ScanStore:
                     '"rejected_candidates":[{"candidate_id":"candidate_id","reason":"rejection rationale"}]}. '
                     "accepted_candidate_ids lists accepted IDs; rejected_candidates lists rejected IDs and reasons. "
                     "Classify every actual candidate exactly once; replace example IDs with bound candidate IDs. "
-                    "Dynamic scans additionally require dynamic_assessments, one per confirmed candidate: "
-                    '[{"candidate_id":"candidate_id","conclusion":"inconclusive","rationale":"assessment evidence"}]. '
-                    "Omit dynamic_assessments on static scans; choose the conclusion from "
-                    "reproduced, not_reproduced, inconclusive, not_run according to persisted run evidence."
                 )
             raw_accepted = decision["accepted_candidate_ids"]
             rejected = decision["rejected_candidates"]
@@ -5556,8 +5478,6 @@ class ScanStore:
             "baseline",
             "investigator",
             "verifier",
-            "prober",
-            "cybergym_solver",
             "poc_generator",
         }
         if role not in allowed_roles:

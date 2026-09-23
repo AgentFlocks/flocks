@@ -86,24 +86,6 @@ def test_create_scan_request_has_no_vote_configuration() -> None:
     assert "verificationVotes" not in legacy.model_dump(by_alias=True)
 
 
-@pytest.mark.asyncio
-async def test_dynamic_scan_requires_explicit_confirmation(monkeypatch) -> None:
-    monkeypatch.setattr(
-        code_security,
-        "require_admin",
-        lambda _request: SimpleNamespace(id="admin-1", role="admin"),
-    )
-    payload = code_security.CreateScanRequest(
-        workspaceId="workspace-1",
-        dynamicEnabled=True,
-        dynamicConfirmed=False,
-    )
-
-    with pytest.raises(HTTPException) as raised:
-        await code_security.create_scan(SimpleNamespace(), payload)
-
-    assert raised.value.status_code == 400
-    assert raised.value.detail["code"] == "dynamic_confirmation_required"
 
 
 @pytest.mark.asyncio
@@ -233,3 +215,17 @@ async def test_docx_download_has_word_media_type_and_attachment_name(monkeypatch
     assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     assert response.headers["content-disposition"] == 'attachment; filename="report.docx"'
     service.download_artifact.assert_awaited_once_with("scan", "report.docx", user)
+
+
+@pytest.mark.parametrize("field", [
+    "dynamicEnabled", "dynamic_enabled", "dynamicConfirmed", "dynamic_confirmed",
+    "cybergymManifest", "cybergym_manifest",
+])
+def test_removed_dynamic_launch_fields_are_rejected(field):
+    with pytest.raises(ValueError, match="not supported on this branch"):
+        code_security.CreateScanRequest(workspaceId="workspace-1", **{field: True})
+
+
+def test_cybergym_scan_mode_is_rejected():
+    with pytest.raises(ValueError):
+        code_security.CreateScanRequest(workspaceId="workspace-1", scanMode="cybergym")

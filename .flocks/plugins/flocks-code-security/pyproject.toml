@@ -1,7 +1,7 @@
 [project]
 name = "flocks-code-security"
 version = "0.6.0"
-description = "Code security audit plugin with optional Docker validation"
+description = "Static code security audit plugin with mandatory PoC generation"
 requires-python = ">=3.12,<3.13"
 dependencies = ["jsonschema>=4.20.0", "python-docx>=1.1.2", "markdown-it-py>=3.0.0"]
 

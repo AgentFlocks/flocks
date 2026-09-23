@@ -20,7 +20,6 @@ SOURCE_ROLES = {
     "baseline",
     "investigator",
     "verifier",
-    "prober",
     "poc_generator",
 }
 

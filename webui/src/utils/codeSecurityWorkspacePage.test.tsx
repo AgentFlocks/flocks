@@ -2296,28 +2296,15 @@ describe("code security workspace contract page", () => {
     ).toBeInTheDocument();
   });
 
-  it("requires explicit confirmation when dynamic validation is enabled", async () => {
-    const user = userEvent.setup();
+  it("does not offer dynamic validation in new audits", async () => {
     render(<Page />);
     await screen.findByRole("heading", { name: "flocks" });
-
     await openCreateAudit();
-    await user.click(screen.getByRole("checkbox", { name: /^动态验证/ }));
-
-    expect(
-      screen.getByText("动态验证将在本地 Docker 中构建并运行受限探测"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByLabelText(
-        "我理解动态验证会执行快照中的受限代码，并同意继续。",
-      ),
-    ).not.toBeChecked();
-    expect(
-      screen.getByRole("button", { name: "启动动态审计" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /^动态验证/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启动静态审计" })).toBeInTheDocument();
   });
 
-  it("submits direct source mode and disables incompatible dynamic validation", async () => {
+  it("submits direct source mode without dynamic options", async () => {
     const user = userEvent.setup();
     apiPost.mockResolvedValueOnce({ data: scanDetail });
     render(<Page />);
@@ -2332,50 +2319,13 @@ describe("code security workspace contract page", () => {
 
     expect(copySource).not.toBeChecked();
     expect(screen.queryByText("直接源码审计")).not.toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: /^动态验证/ })).toBeDisabled();
-    expect(
-      screen.getByText("直接源码审计不支持动态验证；重新开启源码复制后可用。"),
-    ).toBeInTheDocument();
+
 
     await user.click(screen.getByRole("button", { name: "启动静态审计" }));
     await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1));
     expect(apiPost.mock.calls[0][1].copySource).toBe(false);
-    expect(apiPost.mock.calls[0][1].dynamicEnabled).toBe(false);
-  });
-
-  it("clears dynamic execution consent when the option is disabled and reopened", async () => {
-    const user = userEvent.setup();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(<Page />);
-    await screen.findByRole("heading", { name: "flocks" });
-
-    await openCreateAudit();
-    const dynamicEnabled = screen.getByRole("checkbox", { name: /^动态验证/ });
-    await user.click(dynamicEnabled);
-    const consent = screen.getByLabelText(
-      "我理解动态验证会执行快照中的受限代码，并同意继续。",
-    );
-    await user.click(consent);
-    expect(consent).toBeChecked();
-
-    await user.click(dynamicEnabled);
-    await user.click(dynamicEnabled);
-    expect(
-      screen.getByLabelText(
-        "我理解动态验证会执行快照中的受限代码，并同意继续。",
-      ),
-    ).not.toBeChecked();
-
-    await user.click(
-      screen.getAllByRole("button", { name: "关闭新建审计" }).at(-1)!,
-    );
-    await openCreateAudit();
-    expect(
-      screen.getByLabelText(
-        "我理解动态验证会执行快照中的受限代码，并同意继续。",
-      ),
-    ).not.toBeChecked();
-    expect(confirm).toHaveBeenCalledOnce();
+    expect(apiPost.mock.calls[0][1]).not.toHaveProperty("dynamicEnabled");
+    expect(apiPost.mock.calls[0][1]).not.toHaveProperty("dynamicConfirmed");
   });
 
   it("reuses the idempotency key when an unchanged create request is retried", async () => {

@@ -257,6 +257,8 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
     from flocks.security.batch_diagnostics import RuntimeDiagnostics
 
     config = read_json(root / "batch.json")
+    if config.get("dynamic"):
+        raise ValueError("Dynamic audit batches are not supported on this branch")
     task_dir = resolve_task(root, task_id)
     current = read_json(task_dir / "current.json")
     if current["attempt"] != attempt:
@@ -336,8 +338,6 @@ async def execute(root: Path, task_id: str, attempt: str) -> dict:
                 progress=progress,
                 **({"phase_started": phase_started} if "phase_timeouts" in config else {}),
                 knowledge_base=_read_knowledge_base(description, audited_target=source),
-                scan_mode="cybergym_level1" if config.get("dynamic") else "standard",
-                cybergym_manifest=task.get("cybergym_manifest"),
                 copy_source=False,
                 exclude_patterns=[glob.escape(item["path"]) for item in exclusions],
                 source_exclusions=exclusions,
