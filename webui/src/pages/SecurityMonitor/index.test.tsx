@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import SecurityMonitor from './index';
-const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn() }));
+const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn() }));
 vi.mock('@/api/securityMonitoring', async importOriginal => ({ ...(await importOriginal<any>()), monitoringApi: mocks }));
 vi.mock('@/hooks/useSSE', () => ({ useSSE: () => ({}) }));
 vi.mock('@/components/common/SessionChat', () => ({ default: ({ sessionId, hideInput, live }: any) => <div data-testid="native-chat">{sessionId} {hideInput && 'readonly'} {live && 'live'}</div> }));
@@ -75,4 +75,34 @@ it('pauses monitoring and clears the next execution time', async () => {
  expect(mocks.pause).toHaveBeenCalledTimes(1);
  expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('监测状态：已暂停');
  expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次执行：—');
+});
+
+it('downloads one diagnostic file without starting another monitoring round', async () => {
+ const blob = new Blob(['{"schema":1,"records":[]}'], { type: 'application/json' });
+ const createUrl = vi.fn(() => 'blob:diagnostics');
+ Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl });
+ Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+ const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+ mocks.diagnostics.mockResolvedValue({ data: blob });
+ render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(screen.getByRole('button', { name: '导出诊断日志' }));
+ await waitFor(() => expect(createUrl).toHaveBeenCalledWith(blob));
+ expect(click).toHaveBeenCalledTimes(1);
+ expect(mocks.start).not.toHaveBeenCalled();
+ expect(mocks.pause).not.toHaveBeenCalled();
+ click.mockRestore();
+});
+
+it('deduplicates diagnostic downloads and keeps retry available after failure', async () => {
+ let reject!: (reason: unknown) => void;
+ mocks.diagnostics.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+ render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ const button = screen.getByRole('button', { name: '导出诊断日志' });
+ fireEvent.click(button); fireEvent.click(button);
+ expect(mocks.diagnostics).toHaveBeenCalledTimes(1);
+ expect(screen.getByRole('button', { name: '正在导出…' })).toBeDisabled();
+ await act(async () => reject(new Error('private path')));
+ expect(await screen.findByRole('alert')).toHaveTextContent('诊断日志导出失败，请稍后重试。');
+ expect(screen.getByRole('button', { name: '导出诊断日志' })).toBeEnabled();
+ expect(screen.queryByText('private path')).not.toBeInTheDocument();
 });

@@ -18,6 +18,7 @@ async def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(WorkspaceManager, '_instance', None)
     monkeypatch.setenv('FLOCKS_CONFIG_DIR', str(tmp_path / '.flocks/config'))
     monkeypatch.setenv('FLOCKS_DATA_DIR', str(tmp_path / 'data'))
+    monkeypatch.setenv('FLOCKS_LOG_DIR', str(tmp_path / 'logs'))
     monkeypatch.setenv('FLOCKS_HUB_ROOT', str(Path(__file__).resolve().parents[2] / '.flocks/flockshub'))
     Config._global_config = None
     Config._cached_config = None

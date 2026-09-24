@@ -16,6 +16,7 @@ from .models import MonitoringPolicy
 from .sessions import ensure_daily
 from .store import rows, write, connection, encode
 from .adapter import XdrAdapter, ContractError, normalize, page_items
+from . import diagnostics as diag
 
 _running: dict[str, asyncio.Task] = {}
 
@@ -50,6 +51,11 @@ class Recorder:
         self.parent_id = parent_id
 
     async def call(self, name, params, operation):
+        stage = {'查询 XDR 事件': 'query.events', '查询关联主机': 'query.entities', '关联分析': 'correlate'}.get(name, 'step.other')
+        with diag.span(stage, page=params.get('page_num'), page_size=params.get('page_size')):
+            return await self._call(name, params, operation)
+
+    async def _call(self, name, params, operation):
         message = await emit_message(self.session_id, name, finished=False, parent_id=self.parent_id)
         step_id = Identifier.ascending('part')
         start = now()
@@ -117,9 +123,11 @@ async def query_device(adapter, device, start, end, recorder):
     raise ContractError('达到分页预算，查询未完成')
 
 
+@diag.traced('run')
 async def run(execution, policy, adapter_factory=XdrAdapter):
     started = now()  # actual semaphore admission, not scheduled/queued time
-    session, day = await ensure_daily(policy, started)
+    with diag.span('session.prepare', devices=len(policy.devices), max_pages=policy.max_pages, timeout_seconds=policy.timeout_seconds):
+        session, day = await ensure_daily(policy, started)
     execution.session_id = session.id
     execution.started_at = started
     await TaskStore.update_execution(execution)
@@ -149,8 +157,10 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             cursor = await rows('SELECT through_time FROM monitor_cursors WHERE owner=? AND scope=? AND device=?', (policy.owner, policy.scope, device))
             end = int(started.timestamp())
             start = (cursor[0]['through_time'] - 600) if cursor else end - 86400
+            diag.event('query.window', device=diag.opaque(device), window_seconds=max(0, end - start), cursor_present=bool(cursor))
             try:
-                events = await query_device(adapter, device, start, end, recorder)
+                with diag.span('query.device', device=diag.opaque(device)):
+                    events = await query_device(adapter, device, start, end, recorder)
                 # Persist all normalized records and cursor in one transaction.
                 async with connection() as db:
                     for event in events:
@@ -205,17 +215,20 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         summary = '本轮未完成：' + '；'.join(errors)
         raise
     finally:
+        diag.result(status, events=len(observed), errors=len(errors))
         await write('UPDATE monitor_attempts SET status=?,finished_at=?,error=? WHERE id=?', (status, now().isoformat(), '；'.join(errors) or None, attempt_id))
         await emit_message(session.id, summary or '本轮已中断，未记录为成功。', parent_id=trigger_message.id)
         await write("INSERT INTO monitor_reports(owner,scope,business_date,status) VALUES(?,?,?,'pending') ON CONFLICT(owner,scope,business_date) DO UPDATE SET status='pending'", (policy.owner, policy.scope, day))
         SessionStatus.set(session.id, SessionStatusIdle())
         await publish('session.status', {'sessionID': session.id, 'status': {'type': 'idle'}})
         from .reports import export_report
-        await export_report(policy.owner, policy.scope, day)
+        with diag.span('report.export'):
+            await export_report(policy.owner, policy.scope, day)
     return LoopResult(action='error' if status == 'failed' else 'stop', error=summary if status == 'failed' else None,
                       metadata={'summary': summary})
 
 
+@diag.traced('dispatch')
 async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
     policy = MonitoringPolicy.model_validate(execution.execution_input_snapshot['context']['monitoring'])
     from flocks.hub import local
@@ -255,9 +268,12 @@ async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
                 if handle:
                     await asyncio.gather(handle, return_exceptions=True)
             if result is None or result.status != 'completed':
+                diag.event('background.result', failure=True, outcome='failed')
                 raise RuntimeError(result.error if result else '监测执行超时')
         execution.status = TaskStatus.COMPLETED
     except Exception as exc:
+        diag.result('failed')
+        diag.event('dispatch.result', failure=True, outcome='failed', error_type=type(exc).__name__)
         execution.status = TaskStatus.FAILED
         execution.error = str(exc)
     finally:

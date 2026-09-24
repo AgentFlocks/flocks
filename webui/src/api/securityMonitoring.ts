@@ -21,6 +21,7 @@ export interface MonitorSnapshot {
   report: { status: string; version: number; error: string | null };
 }
 export const monitoringApi = {
+  diagnostics: () => client.get<Blob>(`${MONITOR_API}/diagnostics`, { responseType: 'blob' }),
   start: () => client.post<MonitorSnapshot>(`${MONITOR_API}/start`),
   pause: () => client.post<MonitorSnapshot>(`${MONITOR_API}/pause`),
   overview: (day?: string) => client.get<MonitorSnapshot>(`${MONITOR_API}/overview`, { params: day ? { day } : {} }),

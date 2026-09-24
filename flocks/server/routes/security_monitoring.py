@@ -1,15 +1,30 @@
 """Owner-scoped monitor projections and explicit start/pause controls."""
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
+import asyncio
 import json
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 from flocks.server.auth import require_user
 from flocks.monitoring.models import COMPONENT_ID
 from flocks.monitoring.store import rows
 from flocks.monitoring.reports import snapshot
 
 router = APIRouter(prefix='/monitoring/host-security-monitor')
+
+
+@router.get('/diagnostics')
+async def diagnostics(user=Depends(require_user)):
+    from flocks.monitoring.diagnostics import export_bundle
+    try:
+        bundle = await asyncio.wait_for(asyncio.to_thread(export_bundle, user.id, COMPONENT_ID), timeout=15)
+    except (TimeoutError, RuntimeError, OSError):
+        raise HTTPException(503, '诊断日志暂时无法读取，请稍后重试') from None
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    return JSONResponse(bundle, headers={
+        'Content-Disposition': f'attachment; filename="security-monitor-diagnostics-{stamp}.json"',
+        'Cache-Control': 'no-store',
+    })
 
 
 async def resolve_day(owner, requested=None):

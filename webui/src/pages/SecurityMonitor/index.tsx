@@ -2,7 +2,7 @@ import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
 import { getApiBase } from '@/api/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ShieldCheck, ArrowUpRight, RefreshCw, Play, Pause, Loader2 } from 'lucide-react';
+import { ShieldCheck, ArrowUpRight, RefreshCw, Play, Pause, Loader2, Download } from 'lucide-react';
 import SessionChat from '@/components/common/SessionChat';
 import PageHeader from '@/components/common/PageHeader';
 import { monitoringApi, MONITOR_PATH, type MonitorSnapshot } from '@/api/securityMonitoring';
@@ -23,6 +23,9 @@ export default function SecurityMonitor() {
   const [controlBusy, setControlBusy] = useState(false);
   const [controlError, setControlError] = useState('');
   const [controlMessage, setControlMessage] = useState('');
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const exportPending = useRef(false);
   const controlPending = useRef(false);
   const refreshSequence = useRef(0);
   const refresh = useCallback(async () => {
@@ -61,17 +64,35 @@ export default function SecurityMonitor() {
     const url = URL.createObjectURL(new Blob([report], { type: 'text/markdown;charset=utf-8' }));
     const link = document.createElement('a'); link.href = url; link.download = `安全运营监测-${data?.businessDate}.md`; link.click(); URL.revokeObjectURL(url);
   };
+  const downloadDiagnostics = async () => {
+    if (exportPending.current) return;
+    exportPending.current = true;
+    setExportBusy(true); setExportError('');
+    try {
+      const response = await monitoringApi.diagnostics();
+      const url = URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = url; link.download = `security-monitor-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      setExportError('诊断日志导出失败，请稍后重试。');
+    } finally {
+      exportPending.current = false; setExportBusy(false);
+    }
+  };
   const active = data?.runs.find(r => r.status === 'running');
   const monitoringEnabled = data?.installation.installed && data.installation.status === 'active';
   const monitoringStatus = !data?.installation.installed ? '尚未安装' : !data.installation.ready ? '未就绪' : monitoringEnabled ? '已启动' : '已暂停';
   return <div className="flex h-full min-h-0 flex-col bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
     <div className="border-b border-gray-200 px-6 pt-5 dark:border-gray-700">
-      <PageHeader title="安全运营监测" description="只读查询与关联分析 · 处置未启用" icon={<ShieldCheck size={24} />} action={<button onClick={() => void refresh()} aria-label="刷新" className="p-2"><RefreshCw size={18} /></button>} />
+      <PageHeader title="安全运营监测" description="只读查询与关联分析 · 处置未启用" icon={<ShieldCheck size={24} />} action={<div className="flex items-center gap-2"><button disabled={exportBusy} onClick={() => void downloadDiagnostics()} title="导出近期运行步骤、耗时与错误类型，不含凭据或事件正文" className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50"><Download size={16} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button><button onClick={() => void refresh()} aria-label="刷新" className="p-2"><RefreshCw size={18} /></button></div>} />
       <div className="flex items-center justify-between gap-4"><nav className="flex gap-6" aria-label="监测工作区">
         {([['session', '监测对话'], ['dashboard', '总结看板'], ['report', '累计报告']] as const).map(([id, label]) => <Link key={id} to={`${MONITOR_PATH}/${id}`} className={`border-b-2 py-3 text-sm ${view === id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500'}`}>{label}</Link>)}
       </nav><input aria-label="业务日期" type="date" disabled={controlBusy} value={day || data?.businessDate || ''} onChange={e => setDay(e.target.value)} className="rounded border bg-transparent px-2 py-1 text-sm" /></div>
     </div>
     {error && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{error}</p>}
+    {exportError && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{exportError}</p>}
     {data && <section aria-label="监测控制" className="mx-6 mt-4 rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-sm"><p className="font-semibold">监测状态：{monitoringStatus}</p><p className="mt-1 text-gray-500">每 10 分钟执行 · 下次执行：{fmt(data.scheduledNextRun, data.timezone)}</p></div>

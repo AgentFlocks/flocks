@@ -98,6 +98,27 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     foreign = await snapshot('other', policy.scope, day)
     assert not foreign['runs'] and not foreign['events']
 
+
+@pytest.mark.asyncio
+async def test_failed_round_diagnostic_status_matches_persisted_facts(policy, monkeypatch):
+    from flocks.monitoring import diagnostics as diag
+    captured = []
+    monkeypatch.setattr(diag._sink, 'submit', lambda fields: captured.append(diag.safe_record(fields)))
+    class Failed(FixtureAdapter):
+        async def call(self, device, params, message):
+            raise ContractError('XDR 返回非 JSON 数据')
+    scheduler = await scheduler_for(policy)
+    execution = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
+    result = await run(execution, policy, Failed)
+    assert result.action == 'error'
+    assert (await rows('SELECT status FROM monitor_attempts'))[0]['status'] == 'failed'
+    assert not await rows('SELECT * FROM monitor_cursors')
+    assert captured[0]['event'] == 'trace.start'
+    assert captured[-1]['event'] == 'trace.end' and captured[-1]['outcome'] == 'failed'
+    assert any(r.get('stage') == 'query.events' and r.get('outcome') == 'error' for r in captured)
+    assert any(r['event'] == 'run.result' and r['events'] == 0 and r['errors'] == 1 for r in captured)
+    assert {r['execution'] for r in captured} == {diag.opaque(execution.id)}
+
 @pytest.mark.asyncio
 async def test_export_failure_retry_does_not_query(policy, monkeypatch):
     scheduler = await scheduler_for(policy)

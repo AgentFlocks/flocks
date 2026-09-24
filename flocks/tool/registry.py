@@ -743,7 +743,9 @@ class Tool:
                         await require_interactive(ctx.session_id)
                     await require_monitor_read(self.info.name, coerced_kwargs, ctx.session_id,
                                                resolved_device=ctx.extra.get("monitor_resolved_device"))
-                    result = await self.handler(ctx, **coerced_kwargs)
+                    from flocks.monitoring import diagnostics as monitor_diag
+                    with monitor_diag.span('tool.handler'):
+                        result = await self.handler(ctx, **coerced_kwargs)
                     terminal_status = "success" if result.success else "error"
             except asyncio.CancelledError as exc:
                 terminal_status = "cancelled"
@@ -793,30 +795,35 @@ class Tool:
             if result is None:
                 raise RuntimeError("Tool execution did not produce a result")
 
-            # Auto-truncate output unless the tool already handled it
-            if result.success and not result.truncated:
-                from flocks.tool.truncation import truncate_output
-                output_text = result.output
-                if output_text is not None and not isinstance(output_text, str):
-                    import json as _json
-                    try:
-                        output_text = _json.dumps(output_text, ensure_ascii=False, indent=2)
-                        result.output = output_text
-                    except (TypeError, ValueError):
-                        output_text = str(output_text)
-                        result.output = output_text
-                if isinstance(output_text, str):
-                    agent_name = ctx.agent if isinstance(ctx.agent, str) else ""
-                    tr = truncate_output(output_text, has_task_tool="task" in agent_name.lower())
-                    if tr.truncated:
-                        result.output = tr.content
-                        result.truncated = True
-                        result.metadata = {
-                            **(result.metadata or {}),
-                            "truncated": True,
-                            "output_path": tr.output_path,
-                        }
+            from flocks.monitoring import diagnostics as monitor_diag
+            monitor_diag.tool_result('tool.raw', result)
 
+            with monitor_diag.span('tool.normalize'):
+                # Auto-truncate output unless the tool already handled it
+                if result.success and not result.truncated:
+                    from flocks.tool.truncation import truncate_output
+                    output_text = result.output
+                    if output_text is not None and not isinstance(output_text, str):
+                        import json as _json
+                        try:
+                            output_text = _json.dumps(output_text, ensure_ascii=False, indent=2)
+                            result.output = output_text
+                        except (TypeError, ValueError):
+                            output_text = str(output_text)
+                            result.output = output_text
+                    if isinstance(output_text, str):
+                        agent_name = ctx.agent if isinstance(ctx.agent, str) else ""
+                        tr = truncate_output(output_text, has_task_tool="task" in agent_name.lower())
+                        if tr.truncated:
+                            result.output = tr.content
+                            result.truncated = True
+                            result.metadata = {
+                                **(result.metadata or {}),
+                                "truncated": True,
+                                "output_path": tr.output_path,
+                            }
+
+            monitor_diag.tool_result('tool.normalized', result)
             log.info("tool.execute.complete", {
                 "tool": self.info.name,
                 "success": result.success,

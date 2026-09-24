@@ -1,6 +1,7 @@
 """Sangfor XDR read-only contract; no device requests happen during discovery."""
 import json
 from flocks.tool.registry import ToolContext, ToolRegistry
+from . import diagnostics as diag
 
 ALLOWED_ACTIONS = frozenset({'list', 'get_entities', 'get_proof'})
 
@@ -46,17 +47,27 @@ class XdrAdapter:
         self.policy, self.session_id = policy, session_id
 
     async def call(self, device, params, message_id):
+        with diag.tool_call(), diag.span('tool.execute', device=diag.opaque(device),
+                                        action=params.get('action') if params.get('action') in ALLOWED_ACTIONS else 'other'):
+            return await self._call(device, params, message_id)
+
+    async def _call(self, device, params, message_id):
         if params.get('action') not in ALLOWED_ACTIONS or device not in self.policy.devices:
+            diag.event('adapter.failure', failure=True, reason='permission')
             raise PermissionError('Monitoring permits only bound read-only XDR actions')
         tool = ToolRegistry.get(self.policy.tool)
         if tool is None or not tool.info.enabled or tool.info.requires_confirmation:
+            diag.event('adapter.failure', failure=True, reason='unavailable')
             raise ContractError('只读查询能力不可用或需要确认')
         result = await ToolRegistry.execute(
             self.policy.tool,
             ctx=ToolContext(session_id=self.session_id, message_id=message_id, agent='rex'),
             device_id=device, **params,
         )
+        diag.event('adapter.result', success=result.success, truncated=bool(result.truncated),
+                   has_error=bool(result.error), **diag.shape(result.output))
         if not result.success:
+            diag.event('adapter.failure', failure=True, reason='tool_failed')
             # Device errors may include credentials or raw HTTP bodies. Persist a
             # bounded code; the protected device subsystem retains diagnostics.
             raise ContractError('设备查询失败或权限不足；请检查接入状态')
@@ -64,11 +75,18 @@ class XdrAdapter:
         if isinstance(value, str):
             try:
                 value = json.loads(value)
-            except ValueError:
+            except ValueError as exc:
+                diag.event('adapter.failure', failure=True, reason='non_json', truncated=bool(result.truncated),
+                           error_type=type(exc).__name__, json_position=getattr(exc, 'pos', None),
+                           json_line=getattr(exc, 'lineno', None), json_column=getattr(exc, 'colno', None),
+                           **diag.shape(value))
                 raise ContractError('XDR 返回非 JSON 数据') from None
+        diag.event('adapter.decoded', **diag.shape(value))
         if not isinstance(value, dict):
+            diag.event('adapter.failure', failure=True, reason='not_object')
             raise ContractError('XDR 返回结构不符合契约')
         if value.get('success') is False or value.get('code') not in (None, 0, '0', 200, '200'):
+            diag.event('adapter.failure', failure=True, reason='business_error')
             raise ContractError('XDR 业务查询失败')
         return value
 
@@ -83,6 +101,7 @@ def page_items(value):
     total = data.get('total')
     if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
         raise ContractError('分页 total 无效')
+    diag.event('page.validated', items=len(items), total=total)
     return items, total
 
 
