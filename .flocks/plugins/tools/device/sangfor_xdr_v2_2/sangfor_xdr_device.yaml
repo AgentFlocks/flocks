@@ -1,0 +1,33 @@
+name: sangfor_xdr_device
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_device
+description_cn: 设备管理。block_device_list：查询封禁设备列表。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description: 设备管理。block_device_list：查询封禁设备列表。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - block_device_list
+      description: block_device_list：查询封禁设备列表
+    api_params:
+      type: object
+      properties:
+        type:
+          type: array
+          description: 设备类型；枚举值[ [AF ,EDR,EDR LITE，SAAS EDR LITE，SAAS EDR]， [AF] 查询网侧设备， [EDR,EDR LITE，SAAS EDR LITE，SAAS
+            EDR]查询端侧设备；文档值参考：[AF]=AF设备；[EDR]=EDR设备；[EDR LITE]=EDR LITE设别；[SAAS EDR]=SAAS EDR设备；[SAAS EDR LITE]=SAAS EDR LITE设备；适用动作：block_device_list
+          items: {}
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action

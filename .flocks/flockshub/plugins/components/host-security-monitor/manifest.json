@@ -4,9 +4,9 @@
   "type": "component",
   "name": "Security Operations Monitoring",
   "nameCn": "安全运营监测",
-  "description": "Read-only scheduled XDR monitoring with native daily sessions and cumulative reports.",
-  "descriptionCn": "每十分钟只读监测，复用每日原生会话，关联分析、总结看板与累计报告。处置未启用。",
-  "version": "1.0.0",
+  "description": "Read-only scheduled XDR monitoring with human-confirmed disposition and verified status readback.",
+  "descriptionCn": "每十分钟只读筛选监测，复用每日原生会话；人工确认处置后写回 XDR 并回查闭环，同步看板与报告。",
+  "version": "1.1.0",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
@@ -54,9 +54,9 @@
     "filesystem": "read-write"
   },
   "risk": {
-    "level": "low",
+    "level": "medium",
     "reasons": [
-      "只读查询；不执行安全处置"
+      "人工确认后修改 XDR 事件处置状态；定时监测保持只读，不执行主机隔离或修复"
     ]
   },
   "entrypoints": [
@@ -68,7 +68,8 @@
   "requiredCoreCapabilities": [
     "monitor.daily.v1",
     "monitor.readonly.v1",
-    "monitor.native-messages.v1"
+    "monitor.native-messages.v1",
+    "monitor.confirmed-disposition.v1"
   ],
   "edition": "oss"
 }

@@ -1,35 +1,27 @@
 name: sangfor_xdr_incidents
 group: XDR
-description: >
-  Manage Sangfor XDR security incidents. Query incidents by time range,
-  update disposition status, retrieve incident proof and related entities
-  (hosts, IPs, files, processes, DNS). Key tool for incident response.
-description_cn: >
-  管理深信服 XDR 安全事件。支持按时间范围查询事件列表、
-  批量修改事件处置状态、获取事件举证信息，以及查询事件关联实体
-  （主机、内外网IP、文件、进程、DNS），是安全事件响应的核心工具。
-  （注：标准开放接口列表中没有 incidents/:uuid/detail，事件详情请使用 list
-  并按 uuId 过滤获取。）
+description: 安全事件。list：查询安全事件列表；update_status：批量修改安全事件处置接口；status_list：查询安全事件处置状态列表；get_proof：根据事件uuId获取举证信息；get_entities：根据事件uuId获取事件dns处置实体；trends：事件趋势图统计接口；aggregation：事件聚合通用API。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description_cn: 安全事件。list：查询安全事件列表；update_status：批量修改安全事件处置接口；status_list：查询安全事件处置状态列表；get_proof：根据事件uuId获取举证信息；get_entities：根据事件uuId获取事件dns处置实体；trends：事件趋势图统计接口；aggregation：事件聚合通用API。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
 category: custom
 enabled: true
 requires_confirmation: false
 provider: sangfor_xdr
-
 inputSchema:
   type: object
   properties:
     action:
       type: string
-      description: >
-        事件操作类型：
-        - `list`           ：查询安全事件列表
-        - `update_status`   ：批量修改事件处置状态
-        - `status_list`     ：根据事件 UUID 数组批量查询事件当前处置状态
-                            （POST /incidents/dealstatus/list，body 为 `["incident-uuid1", ...]`）
-        - `get_proof`       ：根据事件 UUID 获取举证信息（GET /incidents/:uuid/proof）
-        - `get_entities`    ：根据事件 UUID 获取处置实体（GET /incidents/:uuid/entities/{type}，需指定 entity_type）
-      enum: [list, update_status, status_list, get_proof, get_entities]
-      default: list
+      enum:
+      - list
+      - update_status
+      - status_list
+      - get_proof
+      - get_entities
+      - trends
+      - aggregation
+      description: list：查询安全事件列表；update_status：批量修改安全事件处置接口；status_list：查询安全事件处置状态列表；get_proof：根据事件uuId获取举证信息；get_entities：根据事件uuId获取事件dns处置实体；trends：事件趋势图统计接口；aggregation：事件聚合通用API
     start_time:
       type: integer
       description: 查询起始时间（Unix 秒级时间戳），默认 24 小时前。
@@ -39,56 +31,360 @@ inputSchema:
     page_size:
       type: integer
       description: 每页条数。
-      default: 20
+      minimum: 5
+      maximum: 200
     page_num:
       type: integer
       description: 页码，从 1 开始。
-      default: 1
+      minimum: 1
     uuid:
       type: string
-      description: 事件唯一ID（get_proof / get_entities 时必填）。
+      description: 路径参数；仅适用于路径包含 uuid 的 action。
     uuids:
       type: array
-      description: >
-        事件 UUID 数组（update_status 必填；status_list 时为查询主体，
-        留空则发送 `[]`，部分 XDR 版本会返回"参数不合法"，建议显式提供至少一个 UUID）。
+      description: UUID 列表：用于 list/update_status/status_list；status_list 必须提供非空列表。
       items:
         type: string
+    entity_type:
+      type: string
+      description: '事件关联实体类型（get_entities 时必填）： - `host`    ：主机实体 - `dns`     ：DNS 处置实体 - `innerip` ：内网IP处置实体 - `ip`      ：外网IP处置实体
+        - `file`    ：文件实体 - `process` ：进程实体
+
+        '
+      enum:
+      - host
+      - dns
+      - innerip
+      - ip
+      - file
+      - process
     deal_status:
       type: integer
-      description: >
-        处置状态（update_status 时使用）：
-        1=待处置，2=处置中，3=处置完成。
+      description: 仅 update_status：0 待处置、10 处置中、40 已处置、50 已挂起、60 接受风险、70 已遏制。list 使用 deal_statuses 数组。
+      enum:
+      - 0
+      - 10
+      - 40
+      - 50
+      - 60
+      - 70
     deal_comment:
       type: string
       description: 处置备注。
-    entity_type:
+    pageNum:
+      type: integer
+      description: 页码；安全事件列表的页码（映射到 page，仅适用定义该字段的 action。）
+      minimum: 1
+    time_field:
       type: string
-      description: >
-        事件关联实体类型（get_entities 时必填）：
-        - `host`    ：主机实体
-        - `dns`     ：DNS 处置实体
-        - `innerip` ：内网IP处置实体
-        - `ip`      ：外网IP处置实体
-        - `file`    ：文件实体
-        - `process` ：进程实体
-      enum: [host, dns, innerip, ip, file, process]
-      default: host
-  required: [action]
-
-response_hints: |
-  事件关键字段说明（list 接口）：
-  - data.list[].uuId: 事件唯一ID
-  - data.list[].name: 事件名称
-  - data.list[].riskLevel: 风险等级
-  - data.list[].alertIds: 关联告警ID列表
-  - data.list[].dataSource: 数据来源（EDR/NDR）
-  - data.list[].hostIp: 受影响主机
-  - data.list[].dealStatus: 处置状态
-  - data.list[].detectionStatus: 事件检测状态（0=事中，1=事后）
-  - data.list[].attackStory: 攻击故事线(JSON)
-  - data.list[].rootCauseAnalysis: 根因分析(JSON)
-
+      description: 时间字段（映射到 timeField，仅适用定义该字段的 action。）
+      enum:
+      - endTime
+      - startTime
+      - auditTime
+      - updateTime
+      - uploadTime
+      - occurTime
+      - insertTime
+    white_status:
+      type: array
+      description: 加白状态（映射到 whiteStatus，仅适用定义该字段的 action。）
+      items:
+        type: string
+        enum:
+        - 未加白
+        - 部分加白
+        - 已加白
+    deal_statuses:
+      type: array
+      description: 处置状态列表；查询特定处置状态的事件；传参是TMG标准数值, 具体的TMG标准值与数据库中数值的转换参考"详细说明"中的描述（映射到 dealStatus，仅适用定义该字段的 action。）
+      items:
+        type: integer
+        enum:
+        - 0
+        - 10
+        - 40
+        - 50
+        - 60
+        - 70
+    uuId:
+      type: string
+      description: 路径参数 uuid 的兼容别名。
+    api_params:
+      type: object
+      properties:
+        startTimestamp:
+          type: integer
+          description: 起始时间；对安全事件的最近发生时间做筛选；适用动作：list,trends,aggregation
+        endTimestamp:
+          type: integer
+          description: 结束时间；对安全事件的最近发生时间做筛选；适用动作：list,trends,aggregation
+        timeField:
+          anyOf:
+          - type: string
+            description: 时间字段；适用动作：list
+            enum:
+            - endTime
+            - startTime
+            - auditTime
+            - updateTime
+            - uploadTime
+            - occurTime
+            - insertTime
+          - type: string
+            description: 过滤的时间字段；适用动作：trends,aggregation
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        pageSize:
+          type: integer
+          description: 页面大小；每页展示事件条数；5-200；适用动作：list
+          minimum: 5
+          maximum: 200
+        page:
+          type: integer
+          description: 页码；安全事件列表的页码；适用动作：list
+          minimum: 1
+        sort:
+          type: string
+          description: 排序规则；格式为"字段1:排序方式,字段2排序方式", 为空时默认按最近发生时间(endTime)降序排列, [sortField/sortOrder]和[sort]均不为空时优先按[sort]排序；适用动作：list,aggregation
+        uuIds:
+          anyOf:
+          - type: array
+            description: 事件ID列表；查询指定uuId的事件；适用动作：list
+            items:
+              type: string
+              minLength: 1
+            minItems: 0
+            maxItems: 200
+          - type: array
+            description: 事件ID列表；1-200；适用动作：update_status
+            items:
+              type: string
+              minLength: 1
+            minItems: 1
+            maxItems: 200
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        dealStatus:
+          anyOf:
+          - type: array
+            description: 处置状态列表；查询特定处置状态的事件；传参是TMG标准数值, 具体的TMG标准值与数据库中数值的转换参考"详细说明"中的描述；适用动作：list
+            items:
+              type: integer
+              enum:
+              - 0
+              - 10
+              - 40
+              - 50
+              - 60
+              - 70
+          - type: integer
+            description: 处置状态；适用动作：update_status
+            enum:
+            - 0
+            - 10
+            - 40
+            - 50
+            - 60
+            - 70
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        severities:
+          type: array
+          description: 安全等级；适用动作：list
+          items:
+            type: integer
+            enum:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+        hostBranchId:
+          type: array
+          description: 资产组；适用动作：list
+          items: {}
+        platformHostBranchIds:
+          type: array
+          description: 平台资产组；建议使用 platformHostBranchIds 参数作为 hostBranchId 的升级字段。虽然 hostBranchId 仍可使用，但在平台级联场景中，不同平台的资产组 ID
+            可能重复。当两个参数都有值时，将优先使用 platformHostBranchIds。；适用动作：list
+          items: {}
+        whiteStatus:
+          type: array
+          description: 加白状态；适用动作：list
+          items:
+            type: string
+            enum:
+            - 未加白
+            - 部分加白
+            - 已加白
+        manages:
+          type: array
+          description: 上报设备ID；适用动作：list
+          items: {}
+        excludeManages:
+          type: array
+          description: 排除上报设备ID；适用动作：list
+          items: {}
+        threatDefines:
+          type: array
+          description: 事件定性；适用动作：list
+          items: {}
+        incidentSources:
+          type: array
+          description: 事件来源；适用动作：list
+          items: {}
+        riskTags:
+          type: array
+          description: 风险标签；参考详细说明中的"标签分类表"；适用动作：list
+          items: {}
+        gptResults:
+          type: array
+          description: 研判结论；适用动作：list
+          items: {}
+        dataSources:
+          type: array
+          description: 数据源；适用动作：list
+          items: {}
+        incidentThreatClasses:
+          type: array
+          description: 安全事件一级分类；适用动作：list
+          items: {}
+        platformIds:
+          type: array
+          description: 平台id；适用动作：list
+          items: {}
+        dealComment:
+          type: string
+          description: 操作备注；适用动作：update_status
+          maxLength: 2048
+        ids:
+          type: array
+          description: 安全事件id列表；适用动作：status_list
+          items:
+            type: string
+            minLength: 1
+          minItems: 1
+          maxItems: 1000
+        filterParam:
+          anyOf:
+          - type: object
+            description: 其他过滤字段；适用动作：trends
+            properties:
+              hostBranchIds:
+                type: array
+                description: 资产组；文档值参考：[ ]=表示全部
+                items: {}
+              severities:
+                type: array
+                description: 安全等级；文档值参考：[ ]=表示全部；[0]=信息；[1]=低危；[2]=中危；[3]=高危；[4]=严重
+                items: {}
+              whiteStatus:
+                type: array
+                description: 加白状态；文档值参考： ["未加白","部分加白"]=加白状态不为"已加白"的事件； ["已加白"]=加白状态为"已加白"的事件； ["部分加白"]=加白状态为"部分加白"的事件； ["未加白"]=加白状态为"未加白"的事件；[
+                  ]=表示全部
+                items: {}
+              dealStatus:
+                type: array
+                description: 处置状态；文档值参考：1=待处置；2=处置中；3=处置完成；4=挂起；5=已忽略；6=已遏制
+                items: {}
+            additionalProperties: false
+          - type: object
+            description: 其他过滤字段；适用动作：aggregation
+            properties:
+              severities:
+                type: array
+                description: 安全等级；文档值参考：[ ]=表示全部；[-1]=信息；[1]=低危；[2]=中危；[3]=高危；[4]=严重
+                items: {}
+              dealStatus:
+                type: array
+                description: 处置状态；文档值参考：[ ]=表示全部；[0]=未处置；[10]=处置中；[40]=已处置；[50]=已挂起；[60]=接受风险；[70]=已遏制
+                items: {}
+              hostBranchIds:
+                type: array
+                description: 资产组
+                items: {}
+              hostBusinessIds:
+                type: array
+                description: 所属业务
+                items: {}
+              whiteStatus:
+                type: array
+                description: 加白状态；文档值参考： ["未加白","部分加白"]=加白状态不为"已加白"的事件； ["已加白"]=加白状态为"已加白"的事件； ["部分加白"]=加白状态为"部分加白"的事件； ["未加白"]=加白状态为"未加白"的事件；[
+                  ]=表示全部
+                items: {}
+              manages:
+                type: array
+                description: 上报设备ID；文档值参考：["SIEM2", "SIEM3"]=筛选上报设备ID为SIEM2和SIEM3的数据
+                items: {}
+              incidentThreatClass:
+                type: array
+                description: 安全事件一级分类
+                items: {}
+            additionalProperties: false
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        aggBy:
+          type: array
+          description: 分组字段；适用动作：trends,aggregation
+          items: {}
+        aggFuncs:
+          anyOf:
+          - type: array
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 聚合结果名称
+                param:
+                  type: string
+                  description: 聚合字段
+              additionalProperties: false
+              required:
+              - name
+              - param
+            description: ；适用动作：trends
+          - type: array
+            description: 聚合操作；适用动作：aggregation
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 聚合结果名称
+                func:
+                  type: string
+                  description: 聚合操作名称
+                param:
+                  type: string
+                  description: 聚合字段
+              additionalProperties: false
+              required:
+              - name
+              - func
+              - param
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        interval:
+          type: string
+          description: 时间间隔；文档值参考：1m=m：分钟；1H=H：小时；1d=d：天；1M=M：月；适用动作：trends
+        excludeParam:
+          type: object
+          description: 排除条件；适用动作：aggregation
+          properties:
+            manages:
+              type: array
+              description: 上报设备ID；文档值参考：["SIEM4", "SIEM5"]=排除上报设备ID为SIEM4和SIEM5的数据
+              items: {}
+          additionalProperties: false
+        aggByAlias:
+          type: array
+          description: 分组别名；适用动作：aggregation
+          items: {}
+        limit:
+          type: integer
+          description: TOP数量；文档值参考：5=；适用动作：aggregation
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
 handler:
   type: script
   script_file: sangfor_xdr.handler.py

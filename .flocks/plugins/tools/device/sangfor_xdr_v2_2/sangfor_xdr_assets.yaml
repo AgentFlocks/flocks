@@ -1,40 +1,45 @@
 name: sangfor_xdr_assets
 group: XDR
-description: >
-  Query and manage Sangfor XDR assets. Retrieve asset lists, IP segment
-  tree, asset types, connected devices, and department structure.
-  Essential for asset inventory and attack surface management.
-description_cn: >
-  查询和管理深信服 XDR 资产。支持获取资产列表、IP 段树结构、
-  资产类型、接入设备列表和部门组织结构。用于资产盘点和攻击面管理。
+description: 资产管理。list：获取资产；ip_segment_tree：ip段左树查询接口；asset_class：获取资产类型；device_list：获取设备列表；department_tree：获取部门树；delete：删除资产；source_list：获取数据源列表；source_devices：获取来源设备；total：获取资产总数；pending_approval：获取待审核资产信息；users：获取责任人列表；depot_check_info：获取入库信息检查信息。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description_cn: 资产管理。list：获取资产；ip_segment_tree：ip段左树查询接口；asset_class：获取资产类型；device_list：获取设备列表；department_tree：获取部门树；delete：删除资产；source_list：获取数据源列表；source_devices：获取来源设备；total：获取资产总数；pending_approval：获取待审核资产信息；users：获取责任人列表；depot_check_info：获取入库信息检查信息。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
 category: custom
 enabled: true
 requires_confirmation: false
 provider: sangfor_xdr
-
 inputSchema:
   type: object
   properties:
     action:
       type: string
-      description: >
-        资产操作类型：
-        - `list`            ：查询资产列表（分页）
-        - `ip_segment_tree` ：查询 IP 段左树结构
-        - `asset_class`     ：获取资产类型分类
-        - `device_list`     ：获取接入设备列表
-        - `department_tree` ：获取部门组织树
-        - `delete`          ：删除资产
-      enum: [list, ip_segment_tree, asset_class, device_list, department_tree, delete]
-      default: list
+      enum:
+      - list
+      - ip_segment_tree
+      - asset_class
+      - device_list
+      - department_tree
+      - delete
+      - source_list
+      - source_devices
+      - total
+      - pending_approval
+      - users
+      - depot_check_info
+      description: list：获取资产；ip_segment_tree：ip段左树查询接口；asset_class：获取资产类型；device_list：获取设备列表；department_tree：获取部门树；delete：删除资产；source_list：获取数据源列表；source_devices：获取来源设备；total：获取资产总数；pending_approval：获取待审核资产信息；users：获取责任人列表；depot_check_info：获取入库信息检查信息
     page_size:
       type: integer
       description: 每页条数（list 时使用）。
-      default: 20
+      minimum: 1
     page_num:
       type: integer
       description: 页码，从 1 开始。
-      default: 1
+      minimum: 1
+    ids:
+      type: array
+      description: 要删除的资产ID列表（delete 时使用）。
+      items:
+        type: string
     name:
       type: string
       description: 数据源名称过滤（device_list 时可选）。
@@ -47,14 +52,205 @@ inputSchema:
     get_undistributed:
       type: integer
       description: 是否带无部门分组（department_tree 时可选，1=是）。
-    ids:
-      type: array
-      description: 要删除的资产ID列表（delete 时使用）。
-      items:
-        type: string
-  required: [action]
-
+    pageNum:
+      type: integer
+      description: 页码；过滤参数，默认不传，查询表格数据，表示页码编号，从第1页开始。默认值为1（映射到 page，仅适用定义该字段的 action。）
+      minimum: 1
+    exclude_gid:
+      type: integer
+      description: 需要排除的部门id（映射到 excludeGid，仅适用定义该字段的 action。）
+    api_params:
+      type: object
+      properties:
+        page:
+          type: integer
+          description: 页码；过滤参数，默认不传，查询表格数据，表示页码编号，从第1页开始。默认值为1；适用动作：list,users
+          minimum: 1
+        pageSize:
+          type: integer
+          description: 分页数量；过滤参数，默认不传，分页数量结合page参数，表示每页的展示的数据条数。默认值为25；适用动作：list,users
+          minimum: 1
+        connectStatus:
+          type: array
+          description: 终端接入状态；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+          items: {}
+        exposure:
+          type: string
+          description: 互联网暴露；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        magnitude:
+          type: string
+          description: 核心资产；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        system:
+          type: array
+          description: 操作系统；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+          items: {}
+        ip:
+          type: string
+          description: IP（模糊搜索，精准搜索）；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        assetId:
+          anyOf:
+          - type: integer
+            description: 资产ID（精准搜索）；过滤参数，默认不传；适用动作：list,delete,total,pending_approval
+          - type: number
+            description: 资产ID（精准搜索）；过滤参数，默认不传；适用动作：ip_segment_tree
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        mac:
+          type: string
+          description: mac（精准搜索）；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        searchType:
+          type: string
+          description: 搜索类型；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total
+        orderCol:
+          type: string
+          description: 排序字段；过滤参数，默认不传；适用动作：list
+        orderType:
+          type: string
+          description: 排序类型，配合orderCol使用；过滤参数，默认不传；适用动作：list
+        updateTimeRange:
+          type: string
+          description: 最近更新时间范围；过滤参数，默认不传，该字段与updateStartTimestamp和updateEndTimestamp重复，可二选其一进行参数定义。当参数重复时，服务优先解析updateTimeRange字段；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        updateStartTimestamp:
+          anyOf:
+          - type: integer
+            description: 最近更新时间范围起始时间；过滤参数，默认不传；适用动作：list,delete,total,pending_approval
+          - type: number
+            description: 最近更新时间范围起始时间；过滤参数，默认不传；适用动作：ip_segment_tree
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        updateEndTimestamp:
+          anyOf:
+          - type: integer
+            description: 最近更新时间范围截止时间；过滤参数，默认不传；适用动作：list,delete,total,pending_approval
+          - type: number
+            description: 最近更新时间范围截止时间；过滤参数，默认不传；适用动作：ip_segment_tree
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        assetIds:
+          type: array
+          description: 资产ID批量查询；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+          items: {}
+        hostName:
+          type: string
+          description: 主机名（模糊搜索，精准搜索）；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        name:
+          type: string
+          description: 资产名称（模糊搜索，精准搜索）；过滤参数，默认不传；适用动作：list,ip_segment_tree,device_list,delete,total,pending_approval
+        username:
+          type: string
+          description: 责任人（模糊搜索，精准搜索）；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        ipSegment:
+          type: string
+          description: IP段信息；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total
+        ipRanges:
+          type: array
+          description: ip范围查询（支持单个IP、IP范围、IP段，支持ipv4/ipv6）；适用动作：list,total
+          items: {}
+        branchId:
+          anyOf:
+          - type: integer
+            description: 资产组id；过滤参数，默认不传；适用动作：list,delete,total,pending_approval
+          - type: number
+            description: 资产组id；过滤参数，默认不传；适用动作：ip_segment_tree
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        branchIds:
+          type: array
+          description: 资产组id列表；过滤参数，默认不传；适用动作：list,total
+          items: {}
+        businessId:
+          anyOf:
+          - type: integer
+            description: 业务组id；过滤参数，默认不传；适用动作：list,delete,total
+          - type: number
+            description: 业务组id；过滤参数，默认不传；适用动作：ip_segment_tree
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        businessIds:
+          type: array
+          description: 业务组id列表；过滤参数，默认不传；适用动作：list,total
+          items: {}
+        classify1Id:
+          type: array
+          description: 资产类型；过滤参数，默认不传，可以通过 /api/xdr/v1/assets/assetclass接口获取可选值；适用动作：list,ip_segment_tree,delete,total,pending_approval
+          items: {}
+        firstTimeRange:
+          type: string
+          description: 首次发现时间范围；过滤参数，默认不传， 该字段与firstStartTimestamp和firstEndTimestamp重复，可二选其一进行参数定义。当参数重复时，服务优先解析firstTimeRange字段；适用动作：list,ip_segment_tree,delete,total,pending_approval
+        firstStartTimestamp:
+          anyOf:
+          - type: integer
+            description: 首次发现时间范围起始时间；过滤参数，默认不传；适用动作：list,delete,total,pending_approval
+          - type: number
+            description: 首次发现时间范围起始时间；过滤参数，默认不传；适用动作：ip_segment_tree
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        firstEndTimestamp:
+          anyOf:
+          - type: integer
+            description: 首次发现时间范围截止时间；过滤参数，默认不传；适用动作：list,delete,total,pending_approval
+          - type: number
+            description: 首次发现时间范围截止时间；过滤参数，默认不传；适用动作：ip_segment_tree
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        sourceDevice:
+          type: array
+          description: 数据源字符串列表；过滤参数，默认不传，可以通过 /api/xdr/v1/assets/sourcedevice接口获取可选值；适用动作：list,ip_segment_tree,delete,total,pending_approval
+          items: {}
+        tags:
+          type: array
+          description: 标签；过滤参数，默认不传；适用动作：list,ip_segment_tree,delete,total,pending_approval
+          items: {}
+        lastTimeRange:
+          type: string
+          description: 最近发现时间范围；适用动作：list,total
+        lastStartTimestamp:
+          type: integer
+          description: 最近发现时间范围起始时间；适用动作：list,total
+        lastEndTimestamp:
+          type: integer
+          description: 最近发现时间范围截至时间；适用动作：list,total
+        search:
+          type: string
+          description: 搜索；过滤参数，默认不传；适用动作：ip_segment_tree,users
+        isFilter:
+          type: boolean
+          description: 是否过滤资产小类；适用动作：asset_class
+        needAuto:
+          type: boolean
+          description: 是否展示未知分类；适用动作：asset_class
+        getUndistributed:
+          type: integer
+          description: 是否带无部门分组；适用动作：department_tree
+        excludeGid:
+          type: integer
+          description: 需要排除的部门id；适用动作：department_tree
+        ids:
+          type: array
+          description: 资产ID；过滤参数，默认不传；适用动作：delete
+          items:
+            type:
+            - string
+            - integer
+          minItems: 1
+        isAll:
+          type: boolean
+          description: 是否全部删除；过滤参数，默认不传；适用动作：delete,pending_approval
+        excludeIds:
+          type: array
+          description: 排除的资产ID,和isAll配合使用；过滤参数，默认不传；适用动作：delete,pending_approval
+          items: {}
+        manageStatus:
+          type: string
+          description: 资产管理状态；适用动作：total
+        gid:
+          type: integer
+          description: 部门id；文档值参考：0=；适用动作：users
+        needPersonRiskTags:
+          type: boolean
+          description: 是否需要展示风险信息；文档值参考：false=不处理风险资产；true=处理风险资产；适用动作：users
+        needAll:
+          type: boolean
+          description: 是否一次获取所有责任人；文档值参考：false=不一次获取全部责任人；true=一次获取全部责任人；适用动作：users
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action
 handler:
   type: script
   script_file: sangfor_xdr.handler.py
   function: run_assets
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。

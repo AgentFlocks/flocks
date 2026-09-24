@@ -404,7 +404,7 @@ def test_vuln_list_includes_required_dataType(handler):
     assert captured["path"] == "/api/xdr/v1/vuls/risk/list"
     body = captured["data"]
     assert body["dataType"] == "loophole"
-    assert body["page"] == 1
+    assert "page" not in body and "pageNum" not in body
     assert body["pageSize"] == 20
 
 
@@ -414,13 +414,13 @@ def test_vuln_list_allows_weakpwd_dataType(handler):
         handler.run_vulns,
         {"action": "vuln_list", "data_type": "weakpwd"},
     )
-    assert captured["data"]["dataType"] == "weakpwd"
+    assert captured["data"]["dataType"] == "weak_pwd"
 
 
-def test_baseline_list_uses_page_not_pageNum(handler):
+def test_baseline_list_uses_cursor_not_page_number(handler):
     captured = _run_action(handler, handler.run_vulns, {"action": "baseline"})
     body = captured["data"]
-    assert "page" in body and "pageNum" not in body, body
+    assert "page" not in body and "pageNum" not in body, body
 
 
 def test_request_get_does_not_transmit_body_but_signs_canonical_payload(handler):
@@ -540,6 +540,17 @@ def test_assets_list_honours_explicit_paging(handler):
         {"action": "list", "page_num": 2, "page_size": 30},
     )
     assert captured["data"] == {"page": 2, "pageSize": 30}
+
+
+def test_incidents_list_uses_verified_native_monitor_filters(handler):
+    params = {"action": "list", "start_time": 1000, "end_time": 2000,
+              "page_num": 2, "page_size": 100, "time_field": "endTime",
+              "deal_statuses": [0, 10], "white_status": ["未加白", "部分加白"]}
+    result = _run_action(handler, handler.run_incidents, params)
+    assert result['path'] == '/api/xdr/v1/incidents/list'
+    assert result['data'] == {'startTimestamp': 1000, 'endTimestamp': 2000,
+                              'page': 2, 'pageSize': 100, 'timeField': 'endTime',
+                              'dealStatus': [0, 10], 'whiteStatus': ['未加白', '部分加白']}
 
 
 @pytest.mark.parametrize(

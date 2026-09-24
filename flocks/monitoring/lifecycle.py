@@ -18,7 +18,7 @@ from .store import rows, write, encode
 from .adapter import discover
 
 _lock = asyncio.Lock()
-CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-messages.v1'}
+CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-messages.v1', 'monitor.confirmed-disposition.v1'}
 
 
 def validate_manifest(manifest, package=None):
@@ -69,7 +69,7 @@ async def install(manifest):
             for execution in await TaskStore.list_active_executions_for_scheduler(existing.id):
                 await TaskManager.cancel_execution(execution.id)
         await upsert_task_specs([TaskSpec(
-            dedup_key=key, title='安全运营监测', description='每十分钟只读查询与关联分析；处置未启用',
+            dedup_key=key, title='安全运营监测', description='每十分钟只读筛选与关联分析；人工确认后写回并回查闭环',
             cron=declaration.cron, enabled=False, timezone=policy.timezone,
             context={'monitoring': policy.model_dump()}, tags=['monitoring', COMPONENT_ID],
         )])

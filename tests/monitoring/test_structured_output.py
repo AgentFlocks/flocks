@@ -31,6 +31,7 @@ async def setup(monkeypatch, tmp_path):
         ToolParameter(name=n, type=ParameterType.INTEGER, required=False)
         for n in ('start_time', 'end_time', 'page_num', 'page_size')
     ] + [ToolParameter(name=n, type=ParameterType.STRING, required=False) for n in ('uuid', 'entity_type')]
+    params += [ToolParameter(name='time_field', type=ParameterType.STRING, required=False)] + [ToolParameter(name=n, type=ParameterType.ARRAY, required=False) for n in ('white_status', 'deal_statuses')]
     tool = Tool(ToolInfo(name='fixture_xdr', source='device', provider='fixture', description='Fixture', parameters=params), handler)
     execute = tool.execute
     async def observed_execute(*args, **kwargs):
@@ -69,6 +70,15 @@ async def query(state):
         return await XdrAdapter(state.policy, 'fixture').call('device-1', {'action': 'list'}, 'message')
 
 
+async def test_old_tool_cannot_silently_drop_required_filters(setup):
+    setup.tool.info.parameters = [p for p in setup.tool.info.parameters if p.name not in {'deal_statuses', 'white_status', 'time_field'}]
+    with pytest.raises(ContractError, match='请更新 XDR API 工具'):
+        await XdrAdapter(setup.policy, 'fixture').call('device-1', {
+            'action': 'list', 'deal_statuses': [0, 10], 'white_status': ['未加白', '部分加白'], 'time_field': 'endTime',
+        }, 'message')
+    assert setup.calls == []
+
+
 @pytest.mark.parametrize('list_field', ['list', 'item'])
 async def test_large_pages_real_registry_complete_round_and_cursor(setup, list_field):
     def payload(action, params):
@@ -88,6 +98,8 @@ async def test_large_pages_real_registry_complete_round_and_cursor(setup, list_f
     assert len(await rows('SELECT * FROM monitor_cursors')) == 1
     assert (await rows('SELECT status FROM monitor_attempts'))[0]['status'] == 'completed'
     assert [p['page_num'] for p in setup.calls if p['action'] == 'list'] == [1, 2]
+    assert all(p['deal_statuses'] == [0, 10] and p['white_status'] == ['未加白', '部分加白']
+               and p['time_field'] == 'endTime' for p in setup.calls if p['action'] == 'list')
     assert len(setup.calls) == 107 and setup.after.await_count == 107
     first = setup.display[0]
     assert first.truncated and isinstance(first.output, str)
@@ -95,6 +107,70 @@ async def test_large_pages_real_registry_complete_round_and_cursor(setup, list_f
         json.loads(first.output)
     assert 'structured_output' not in first.model_dump()
     assert set(first.model_dump()) == {'success', 'output', 'error', 'metadata', 'title', 'truncated', 'attachments'}
+
+
+@pytest.mark.parametrize('mode', ['mixed', 'all_excluded', 'unknown'])
+async def test_business_selection_after_real_tool_capture(setup, monkeypatch, mode):
+    from flocks.monitoring import runtime
+    from flocks.monitoring.reports import snapshot
+    from flocks.monitoring.selection import Disposition, IncidentState, monitoring_selection, FILTER_EXPRESSION
+    from flocks.session.message import Message
+    # Domain states are fixture metadata, deliberately not claimed to be XDR
+    # fields or enums. The actual ToolRegistry/Tool/Hook/capture path is used.
+    domain = {}
+    cases = [(Disposition.PENDING, False), (Disposition.IN_PROGRESS, False),
+             (Disposition.OTHER, False), (Disposition.PENDING, True),
+             (Disposition.IN_PROGRESS, True), (Disposition.OTHER, True)]
+    for i in range(201):
+        disposition, whitelisted = cases[i % 6] if i < 100 else (Disposition.PENDING, True)
+        if i == 200:
+            disposition, whitelisted = Disposition.IN_PROGRESS, False
+        if mode == 'all_excluded':
+            whitelisted = True
+        if mode == 'unknown' and i == 200:
+            whitelisted = None
+        domain[str(i)] = IncidentState(disposition, whitelisted)
+    rule = monitoring_selection(lambda raw: domain[raw['uuId']])
+    query_device = runtime.query_device
+    async def selected_query(*args):
+        return await query_device(*args, selection=rule)
+    monkeypatch.setattr(runtime, 'query_device', selected_query)
+    def payload(action, params):
+        if action == 'get_entities':
+            return {'code': 'Success', 'data': {'item': []}}
+        start = (params['page_num'] - 1) * 100
+        return {'code': 'Success', 'data': {'item': [
+            {'uuId': str(i), 'name': 'synthetic-name-' + 'x' * 3000, 'riskLevel': 1}
+            for i in range(start, min(start + 100, 201))], 'total': 201}}
+    setup.payload = payload
+    scheduler = await TaskManager.create_scheduler(title='selection fixture', context={'monitoring': setup.policy.model_dump()})
+    execution = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
+    with unattended_scope(), monitoring_read_scope(setup.policy.tool, setup.policy.devices):
+        result = await run(execution, setup.policy)
+    attempt = (await rows('SELECT * FROM monitor_attempts'))[0]
+    projection = await snapshot(setup.policy.owner, setup.policy.scope, attempt['business_date'])
+    expected_ids = {str(i) for i in range(100) if i % 6 in {0, 1}} | {'200'} if mode == 'mixed' else set()
+    assert {event['id'] for event in projection['events']} == expected_ids
+    assert projection['metrics']['events'] == len(expected_ids)
+    assert {call['uuid'] for call in setup.calls if call['action'] == 'get_entities'} == expected_ids
+    assert [call['page_num'] for call in setup.calls if call['action'] == 'list'] == [1, 2, 3]
+    assert setup.after.await_count == len(setup.calls) == 3 + len(expected_ids)
+    assert setup.display[0].truncated and setup.display[1].truncated
+    assert result.action == ('error' if mode == 'unknown' else 'stop')
+    assert bool(await rows('SELECT * FROM monitor_cursors')) is (mode != 'unknown')
+    messages = await Message.list_with_parts(attempt['session_id'])
+    summaries = [part.text for message in messages for part in message.parts
+                 if part.type == 'text' and part.metadata and part.metadata.get('monitoringSummary')]
+    assert any(FILTER_EXPRESSION in text and '原始返回 100 条，符合条件 0 条，排除 100 条' in text for text in summaries)
+    if mode != 'unknown':
+        assert any(f'本轮 XDR 安全事件符合条件 {len(expected_ids)} 条' in text for text in summaries)
+        last_query = [step for step in projection['runs'][0]['steps'] if step['tool'] == '查询 XDR 事件'][-1]
+        counts = json.loads(last_query['output'])['selection']['cumulative']
+        assert counts['source_unique'] == 201 and counts['matched_unique'] == len(expected_ids)
+    else:
+        assert attempt['status'] == 'failed'
+        assert any('加白状态缺失或未识别' in text and '水位不推进' in text for text in summaries)
+        assert not any('本轮 XDR 安全事件符合条件' in text for text in summaries)
 
 
 @pytest.mark.parametrize('code', [None, 0, '0', 200, '200', 'Success'])

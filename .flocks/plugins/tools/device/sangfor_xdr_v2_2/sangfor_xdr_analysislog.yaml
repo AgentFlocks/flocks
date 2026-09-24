@@ -1,0 +1,87 @@
+name: sangfor_xdr_analysislog
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_analysislog
+description_cn: 安全日志。network_security_count：查询网络安全日志数量；network_security_list：分页查询网络安全日志列表。按 action 选择契约；原生字段使用 api_params，数组请求体使用
+  api_body。返回原始响应，不裁剪字段。
+description: 安全日志。network_security_count：查询网络安全日志数量；network_security_list：分页查询网络安全日志列表。按 action 选择契约；原生字段使用 api_params，数组请求体使用
+  api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - network_security_count
+      - network_security_list
+      description: network_security_count：查询网络安全日志数量；network_security_list：分页查询网络安全日志列表
+    api_params:
+      type: object
+      properties:
+        startTimestamp:
+          type: integer
+          description: 秒级开始时间戳 (不填则默认为当前秒的七天前时间戳)；适用动作：network_security_count,network_security_list
+        endTimestamp:
+          type: integer
+          description: 秒级结束时间戳 (不填则默认为今日23:59:59的时间戳)；适用动作：network_security_count,network_security_list
+        productTypes:
+          type: array
+          description: 上报设备产品 (不填则默认为全部)；文档值参考：["STA"]=；["EDR"]=；["AC"]=；["CWPP"]=；["SSL VPN"]=；["NTA"]=；["SIP SecLog"]=；["Logger"]=；适用动作：network_security_count,network_security_list
+          items: {}
+        accessDirections:
+          type: array
+          description: 访问方向 (不填默认为全部)；枚举校验 1:外对内 2:内对外 3:内对内；文档值参考：1=外对内；2=内对外；3=内对内；适用动作：network_security_count,network_security_list
+          items: {}
+        threatClasses:
+          type: array
+          description: '威胁一级分类 (不填默认查全部)；参考详细说明中的附件: "网络安全日志威胁分类规范"；适用动作：network_security_count,network_security_list'
+          items: {}
+        threatTypes:
+          type: array
+          description: '威胁二级分类 (不填默认查全部)；"一级分类+下划线+二级分类",  参考详细说明中的附件: "网络安全日志威胁分类规范"；适用动作：network_security_count,network_security_list'
+          items: {}
+        threatSubTypes:
+          type: array
+          description: '威胁三级分类 (不填默认查全部)；"一级分类+下划线+二级分类+下划线+三级分类",  参考详细说明中的附件: "网络安全日志威胁分类规范"；适用动作：network_security_count,network_security_list'
+          items: {}
+        srcIps:
+          type: array
+          description: 源IP (不填查全部)；适用动作：network_security_count,network_security_list
+          items: {}
+        dstIps:
+          type: array
+          description: 目的IP (不填查全部)；适用动作：network_security_count,network_security_list
+          items: {}
+        attackStates:
+          type: array
+          description: 攻击状态 (不填查全部)；枚举校验 0：尝试、1：失败、2：成功、3：失陷；文档值参考：0=尝试；1=失败；2=成功；3=失陷；适用动作：network_security_count,network_security_list
+          items: {}
+        severities:
+          type: array
+          description: 严重性 (不填查全部)；枚举校验   0:信息 1:低危 2:中危 3:高危 4:严重；文档值参考：[0]=信息 severity in (0, 10]；[1]=低危 severity in (10,
+            30]；[2]=中危 severity in (30, 50]；[3]=高危 severity in (50, 70]；[4]=严重 severity in (70, 100]；适用动作：network_security_count,network_security_list
+          items: {}
+        page:
+          type: integer
+          description: 页码 (不填则默认为1)；适用动作：network_security_list
+          minimum: 1.0
+          maximum: 100000.0
+        pageSize:
+          type: integer
+          description: 页大小 (不填则默认为5)；适用动作：network_security_list
+          minimum: 5.0
+          maximum: 200.0
+        sortType:
+          type: string
+          description: 排序类型；文档值参考：DESC=按时间降序；ASC=按时间升序；适用动作：network_security_list
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action

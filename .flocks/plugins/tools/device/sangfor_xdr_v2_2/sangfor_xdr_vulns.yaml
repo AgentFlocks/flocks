@@ -1,58 +1,383 @@
 name: sangfor_xdr_vulns
 group: XDR
-description: >
-  Query and manage Sangfor XDR vulnerability data. Retrieve baseline
-  compliance data, vulnerability lists, update fix status, and query
-  data source devices. For vulnerability and compliance management.
-description_cn: >
-  查询和管理深信服 XDR 脆弱性数据。支持获取基线合规数据、
-  漏洞列表、修改修复状态和查询数据源设备。用于漏洞和合规管理。
+description: 脆弱性。baseline：获取基线数据；vuln_list：获取漏洞、弱密码数据；update_status：修改脆弱性状态信息；source_device：获取数据源；attack_type_aggregation：脆弱性攻击类型聚合接口；baseline_level_aggregation：脆弱性的等级分布-基线；branch_count_aggregation：脆弱性按资产组聚合topN；loophole_level_aggregation：脆弱性的等级分布-漏洞；risk_trends：脆弱性风险趋势图统计；asset_stats：脆弱性stats通用API--资产视角；asset_aggregation：脆弱性聚合通用API--资产视角；risk_aggregation：脆弱性聚合通用API；attack_types：获取漏洞攻击类型；threat_tags：获取威胁标签。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description_cn: 脆弱性。baseline：获取基线数据；vuln_list：获取漏洞、弱密码数据；update_status：修改脆弱性状态信息；source_device：获取数据源；attack_type_aggregation：脆弱性攻击类型聚合接口；baseline_level_aggregation：脆弱性的等级分布-基线；branch_count_aggregation：脆弱性按资产组聚合topN；loophole_level_aggregation：脆弱性的等级分布-漏洞；risk_trends：脆弱性风险趋势图统计；asset_stats：脆弱性stats通用API--资产视角；asset_aggregation：脆弱性聚合通用API--资产视角；risk_aggregation：脆弱性聚合通用API；attack_types：获取漏洞攻击类型；threat_tags：获取威胁标签。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
 category: custom
 enabled: true
 requires_confirmation: false
 provider: sangfor_xdr
-
 inputSchema:
   type: object
   properties:
     action:
       type: string
-      description: >
-        脆弱性操作类型：
-        - `baseline`      ：获取基线合规数据
-        - `vuln_list`     ：获取漏洞、弱密码数据（POST /vuls/risk/list）
-        - `update_status` ：修改漏洞修复状态
-        - `source_device` ：获取数据源设备列表
-      enum: [baseline, vuln_list, update_status, source_device]
-      default: baseline
+      enum:
+      - baseline
+      - vuln_list
+      - update_status
+      - source_device
+      - attack_type_aggregation
+      - baseline_level_aggregation
+      - branch_count_aggregation
+      - loophole_level_aggregation
+      - risk_trends
+      - asset_stats
+      - asset_aggregation
+      - risk_aggregation
+      - attack_types
+      - threat_tags
+      description: baseline：获取基线数据；vuln_list：获取漏洞、弱密码数据；update_status：修改脆弱性状态信息；source_device：获取数据源；attack_type_aggregation：脆弱性攻击类型聚合接口；baseline_level_aggregation：脆弱性的等级分布-基线；branch_count_aggregation：脆弱性按资产组聚合topN；loophole_level_aggregation：脆弱性的等级分布-漏洞；risk_trends：脆弱性风险趋势图统计；asset_stats：脆弱性stats通用API--资产视角；asset_aggregation：脆弱性聚合通用API--资产视角；risk_aggregation：脆弱性聚合通用API；attack_types：获取漏洞攻击类型；threat_tags：获取威胁标签
     page_size:
       type: integer
       description: 每页条数。
-      default: 20
+      minimum: 1
     page_num:
       type: integer
-      description: 页码，从 1 开始。
-      default: 1
-    data_type:
-      type: string
-      description: >
-        脆弱性类型（vuln_list 时使用，spec 中此字段为唯一必填项；
-        缺失会触发"请求参数校验失败"）：
-        - `loophole` ：漏洞数据（默认）
-        - `weakpwd`  ：弱密码数据
-      enum: [loophole, weakpwd]
-      default: loophole
+      description: 游标接口仅兼容省略或 1；下一批使用 last_id，不能递增页码。
+      minimum: 1
     ids:
       type: array
       description: 漏洞 ID 列表（update_status 时使用）。
       items:
         type: string
-    fixStatus:
+    start_time:
+      type: integer
+      description: 起始时间；10位时间戳（映射到 startTimestamp，仅适用定义该字段的 action。）
+    end_time:
+      type: integer
+      description: 结束时间；10位时间戳（映射到 endTimestamp，仅适用定义该字段的 action。）
+    time_field:
       type: string
-      description: 修复状态（update_status 时使用）。
-  required: [action]
-
+      description: 时间类型（映射到 timeField，仅适用定义该字段的 action。）
+    last_id:
+      type: string
+      description: 上一次请求的结果中的最后一条数据的标志id；首次请求传入""，代表返回第一页的数据（映射到 lastId，仅适用定义该字段的 action。）
+    data_type:
+      type: string
+      description: vuln_list：loophole 漏洞；weak_pwd 弱密码。兼容旧输入 weakpwd，发送为 weak_pwd。
+      enum:
+      - loophole
+      - weak_pwd
+      - weakpwd
+    vuln_handler:
+      type: array
+      description: 脆弱性处理（映射到 vulnHandler，仅适用定义该字段的 action。）
+      items:
+        type: object
+        properties:
+          fixStatus:
+            type: number
+            description: 修复状态
+            enum:
+            - 2
+            - 3
+            - 4
+            - 5
+          desc:
+            type: string
+            description: 描述信息
+          md5NameAsset:
+            type: string
+            description: 漏洞的md5_name_asset
+          md5BelongHost:
+            type: string
+            description: 漏洞的md5_belong_host
+          md5Repeat:
+            type: string
+            description: 漏洞的md5_repeat
+        additionalProperties: false
+        required:
+        - fixStatus
+      minItems: 1
+    api_params:
+      type: object
+      properties:
+        level:
+          type: array
+          description: 基线风险等级；过滤参数，默认不传；适用动作：baseline,baseline_level_aggregation
+          items: {}
+        baselineType:
+          type: array
+          description: 安全控制点；过滤参数，默认不传；适用动作：baseline,baseline_level_aggregation
+          items: {}
+        standard:
+          type: array
+          description: 基线标准；过滤参数，默认不传；适用动作：baseline,baseline_level_aggregation
+          items: {}
+        startTimestamp:
+          anyOf:
+          - type: integer
+            description: 起始时间；10位时间戳；适用动作：baseline,vuln_list,baseline_level_aggregation,loophole_level_aggregation,risk_trends,asset_stats,asset_aggregation,risk_aggregation
+          - type: number
+            description: 开始时间，秒级时间戳；适用动作：attack_type_aggregation,branch_count_aggregation
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        endTimestamp:
+          anyOf:
+          - type: integer
+            description: 结束时间；10位时间戳；适用动作：baseline,vuln_list,baseline_level_aggregation,loophole_level_aggregation,risk_trends,asset_stats,asset_aggregation,risk_aggregation
+          - type: number
+            description: 结束时间，秒级时间戳；适用动作：attack_type_aggregation,branch_count_aggregation
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        timeField:
+          type: string
+          description: 时间类型；适用动作：baseline,vuln_list,attack_type_aggregation,baseline_level_aggregation,branch_count_aggregation,loophole_level_aggregation,risk_trends,asset_stats,asset_aggregation,risk_aggregation
+        pageSize:
+          type: integer
+          description: 分页大小；默认分页大小为100；适用动作：baseline,vuln_list
+          minimum: 1
+        lastId:
+          type: string
+          description: 上一次请求的结果中的最后一条数据的标志id；首次请求传入""，代表返回第一页的数据；适用动作：baseline,vuln_list
+        assetIp:
+          type: string
+          description: 资产ip；过滤参数，默认不传；适用动作：baseline,vuln_list,baseline_level_aggregation
+          maxLength: 255
+        assetManager:
+          type: string
+          description: 资产责任人；过滤参数，默认不传。；适用动作：baseline,vuln_list,baseline_level_aggregation
+          maxLength: 255
+        assetBranchIds:
+          anyOf:
+          - type: array
+            description: 所属资产组；过滤参数，默认不传。最小值-1；适用动作：baseline,vuln_list,baseline_level_aggregation
+            items: {}
+            maxItems: 10
+          - type: array
+            description: 资产组ID筛选, 数字列表, 非必填，默认所有；适用动作：attack_type_aggregation,branch_count_aggregation,loophole_level_aggregation
+            items: {}
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        assetGroupIds:
+          anyOf:
+          - type: array
+            description: 所属业务组；过滤参数，默认不传。最小值-1；适用动作：baseline,attack_type_aggregation,baseline_level_aggregation,branch_count_aggregation,loophole_level_aggregation
+            items: {}
+          - type: array
+            description: 所属业务组；过滤参数，默认不传；适用动作：vuln_list
+            items: {}
+            maxItems: 10
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        assetTags:
+          type: array
+          description: 资产标签；过滤参数，默认不传；适用动作：baseline,vuln_list,baseline_level_aggregation
+          items: {}
+          maxItems: 10
+        assetMagnitudes:
+          type: array
+          description: 资产重要性；过滤参数，默认不传；适用动作：baseline,vuln_list,baseline_level_aggregation
+          items: {}
+        sort:
+          type: string
+          description: 排序字段；适用动作：baseline,vuln_list,branch_count_aggregation,asset_aggregation,risk_aggregation
+        assetType:
+          type: string
+          description: 资产类型；过滤参数，默认不传；适用动作：vuln_list
+        fixPriority:
+          type: array
+          description: 修复优先级；过滤参数，默认不传；适用动作：vuln_list,attack_type_aggregation,branch_count_aggregation,loophole_level_aggregation
+          items: {}
+        dataType:
+          anyOf:
+          - type: string
+            description: 脆弱性类型；适用动作：vuln_list
+            enum:
+            - loophole
+            - weak_pwd
+          - type: string
+            description: 脆弱性类型：loophole漏洞/ weak_pwd弱密码 非必填，默认所有，不传这个字段就是筛选弱密码与漏洞；适用动作：attack_type_aggregation,branch_count_aggregation
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        name:
+          type: string
+          description: 脆弱性名称；过滤参数，默认不传；适用动作：vuln_list
+          minLength: 0
+          maxLength: 1024
+        attackTypes:
+          type: array
+          description: 脆弱性类型；过滤参数，默认不传；适用动作：vuln_list
+          items: {}
+          maxItems: 10
+        scanTypes:
+          type: array
+          description: 脆弱性检测方式；过滤参数，默认不传；适用动作：vuln_list
+          items: {}
+        threatTags:
+          type: array
+          description: 威胁标签；过滤参数，默认不传；适用动作：vuln_list
+          items: {}
+        assetExposures:
+          type: array
+          description: 互联网暴露；过滤参数，默认不传；适用动作：vuln_list
+          items: {}
+        riskLevels:
+          type: array
+          description: 风险等级；过滤参数，默认不传；适用动作：vuln_list,attack_type_aggregation,branch_count_aggregation,loophole_level_aggregation
+          items: {}
+        vulnHandler:
+          type: array
+          description: 脆弱性处理；适用动作：update_status
+          items:
+            type: object
+            properties:
+              fixStatus:
+                type: number
+                description: 修复状态
+                enum:
+                - 2
+                - 3
+                - 4
+                - 5
+              desc:
+                type: string
+                description: 描述信息
+              md5NameAsset:
+                type: string
+                description: 漏洞的md5_name_asset
+              md5BelongHost:
+                type: string
+                description: 漏洞的md5_belong_host
+              md5Repeat:
+                type: string
+                description: 漏洞的md5_repeat
+            additionalProperties: false
+            required:
+            - fixStatus
+          minItems: 1
+        fixedStatus:
+          type: array
+          description: '处置状态: 0未处置,1处置中,2处置完成（已修复）,3处置完成（已接受）,4处置完成（已忽略）,5处置完成（误报),6处置完成（已缓解）,非必填，默认全部；适用动作：attack_type_aggregation,branch_count_aggregation'
+          items: {}
+        limit:
+          anyOf:
+          - type: number
+            description: 返回数量 非必填， 默认返回全部；适用动作：attack_type_aggregation,branch_count_aggregation
+          - type: integer
+            description: TOP数量；适用动作：asset_aggregation,risk_aggregation
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        filterParam:
+          anyOf:
+          - type: object
+            description: 其他过滤字段；适用动作：risk_trends
+            properties:
+              dataType:
+                type: string
+                description: 脆弱性类型，数组和字符串都可以；文档值参考：loophole=漏洞；weak_pwd=弱密码
+              riskLevels:
+                type: array
+                description: 风险等级；文档值参考：0=低；1=中；2=高；3=严重
+                items: {}
+              assetBranchIds:
+                type: array
+                description: 资产组ID筛选, 数字列表, 非必填
+                items: {}
+              assetGroupIds:
+                type: array
+                description: 所属业务组 数据字典： -1 [int] - - 默认值 参数示例： [-1] 最大长度： 备注： 过滤参数，默认不传。最小值-1
+                items: {}
+              fixPriority:
+                type: array
+                description: 修复优先级
+                items: {}
+            additionalProperties: false
+          - type: object
+            properties:
+              fixPriority:
+                type: array
+                description: 修复优先级；纯数字；文档值参考：1=低优先级；2=中优先级；3=高优先级
+                items: {}
+              dataType:
+                type: string
+                description: 脆弱性类型；文档值参考：loophole=漏洞；weak_pwd=弱密码
+              branchIds:
+                type: array
+                description: 所属资产组
+                items: {}
+              groupIds:
+                type: array
+                description: 所属业务组
+                items: {}
+            additionalProperties: false
+            description: ；适用动作：asset_stats,asset_aggregation
+          - type: object
+            properties:
+              fixPriority:
+                type: array
+                description: 修复优先级；纯数字；文档值参考：1=低优先级；2=中优先级；3=高优先级
+                items: {}
+              dataType:
+                type: string
+                description: 脆弱性类型；文档值参考：loophole=漏洞；weak_pwd=弱密码
+              branchIds:
+                type: array
+                description: 所属资产组
+                items: {}
+              groupIds:
+                type: array
+                description: 所属业务组
+                items: {}
+              riskLevels:
+                type: array
+                description: 风险等级；文档值参考：0=低危；1=中危；2=高危；3=严重
+                items: {}
+            additionalProperties: false
+            description: ；适用动作：risk_aggregation
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        aggBy:
+          type: array
+          description: 分组字段；目前只支持一个分组字段；适用动作：risk_trends,asset_aggregation,risk_aggregation
+          items: {}
+        aggFuncs:
+          anyOf:
+          - type: array
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 聚合结果名称
+                func:
+                  type: string
+                  description: 聚合操作名称
+                param:
+                  type: string
+                  description: 聚合字段
+              additionalProperties: false
+              required:
+              - name
+              - func
+            description: ；适用动作：risk_trends,risk_aggregation
+          - type: array
+            description: 聚合操作；适用动作：asset_stats,asset_aggregation
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 聚合结果名称--aggFuncs中name值必须不同于其他name值
+                func:
+                  type: string
+                  description: 聚合操作名称
+                param:
+                  type: string
+                  description: 聚合字段
+              additionalProperties: false
+              required:
+              - name
+              - func
+              - param
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        interval:
+          type: string
+          description: 时间间隔；文档值参考：1H=H：小时；1d=d：天；适用动作：risk_trends
+        needEmpty:
+          type: string
+          description: 需要 无漏洞类型；文档值参考：true=需要无威胁标签；false=不需要无威胁标签；适用动作：attack_types,threat_tags
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action
 handler:
   type: script
   script_file: sangfor_xdr.handler.py
   function: run_vulns
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。

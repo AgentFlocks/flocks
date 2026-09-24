@@ -36,13 +36,26 @@ def event_label(event):
     return f"{label(event.get('name'), '名称未提供')}（ID：{label(event.get('uuId') or event.get('id'), limit=100)}）"
 
 
-def page_summary(page, items, cumulative, complete):
-    text = f'第 {page} 页查询到 {len(items)} 条事件，本轮累计去重 {cumulative} 条。'
-    if complete:
-        text += f'分页已完整结束。本轮 XDR 安全事件查询到 {cumulative} 条事件。'
+def incident_type(event):
+    native = [label(event.get(key), '', 80) for key in ('incidentThreatClass', 'incidentThreatType')]
+    return ' / '.join(value for value in native if value) or label(event.get('type') or event.get('incidentType') or event.get('eventType'), '类型未提供', 80)
+
+
+def page_summary(page, items, cumulative, complete, *, selection=None, received=None, counts=None):
+    if selection is not None:
+        text = (f'本地筛选条件：{selection}。第 {page} 页原始返回 {received} 条，'
+                f'符合条件 {len(items)} 条，排除 {received - len(items)} 条。'
+                f"本轮原始累计去重 {counts['source_unique']} 条，符合条件 {cumulative} 条，"
+                f"排除 {counts['excluded_unique']} 条；重复返回 {counts['duplicates']} 条。")
+        if complete:
+            text += f'分页已完整结束。本轮 XDR 安全事件符合条件 {cumulative} 条。'
     else:
+        text = f'第 {page} 页查询到 {len(items)} 条事件，本轮累计去重 {cumulative} 条。'
+    if complete and selection is None:
+        text += f'分页已完整结束。本轮 XDR 安全事件查询到 {cumulative} 条事件。'
+    elif not complete:
         text += '分页尚未结束，暂不提交事件及查询水位。'
-    lines = (f"{i}. {event_label(event)}；类型：{label(event.get('type') or event.get('incidentType') or event.get('eventType'), '类型未提供', 80)}；主机：{label(event.get('hostIp'), '未提供', 100)}。"
+    lines = (f"{i}. {event_label(event)}；类型：{incident_type(event)}；主机：{label(event.get('hostIp'), '未提供', 100)}。"
              for i, event in enumerate(items, 1))
     return Summary(text, detail_lines(lines, len(items)))
 
@@ -62,11 +75,11 @@ def hosts_summary(event, hosts):
 def analysis_summary(result, events, groups):
     related = [keys for keys in groups.values() if len(keys) > 1]
     if not events and result['errors']:
-        return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。处置未启用。')
+        return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。自动处置未启用。')
     text = f"关联分析完成：分析 {len(events)} 条事件，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；{result['risk']} 条风险，{result['unknown']} 条待判定。"
     if result['errors']:
         text += f"有 {len(result['errors'])} 项查询或主机补查错误，结果不完整。"
-    text += '处置未启用，风险保持未闭环。'
+    text += '自动处置未启用，风险保持未闭环。'
     by_key = {event['key']: event for event in events}
     lines = (f"{i}. 主机：{label(by_key[keys[0]].get('host'), limit=100)}；关联事件：" + '；'.join(event_label(by_key[key]) for key in keys[:20]) + (f'；另 {len(keys)-20} 条事件见上方各页查询明细' if len(keys) > 20 else '') + '。'
              for i, keys in enumerate(related, 1))

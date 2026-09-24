@@ -34,4 +34,5 @@ class MonitoringDeclaration(BaseModel):
     sessionPolicy: Literal['daily']
     interactionMode: Literal['unattended']
     actions: list[Literal['list', 'get_entities', 'get_proof']]
+    # This declaration governs unattended scheduling, never the confirmed UI path.
     dispositionEnabled: Literal[False]

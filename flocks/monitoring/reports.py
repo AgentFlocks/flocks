@@ -21,7 +21,8 @@ async def snapshot(owner, scope, day):
             return [dict(x) for x in await cur.fetchall()]
         installations = await select('SELECT * FROM monitor_installations WHERE owner=? AND scope=?', (owner, scope))
         runs = await select('SELECT * FROM monitor_attempts WHERE owner=? AND scope=? AND business_date=? ORDER BY sequence', (owner, scope, day))
-        observations = await select('SELECT o.*,a.sequence,a.session_id,a.message_id FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY a.sequence', (owner, scope, day))
+        observations = await select('SELECT o.*,a.sequence,a.session_id,a.message_id,a.started_at FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY a.sequence', (owner, scope, day))
+        dispositions = await select('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? ORDER BY created_at', (owner, scope))
         steps = await select('SELECT s.* FROM monitor_steps s JOIN monitor_attempts a ON a.id=s.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY s.started_at', (owner, scope, day))
         report = await select('SELECT status,version,error FROM monitor_reports WHERE owner=? AND scope=? AND business_date=?', (owner, scope, day))
         daily = await select('SELECT session_id FROM monitor_daily_sessions WHERE owner=? AND scope=? AND business_date=?', (owner, scope, day))
@@ -33,8 +34,18 @@ async def snapshot(owner, scope, day):
     events = {}
     for item in observations:
         event = json.loads(item['data'])
-        event.update(sessionID=item['session_id'], messageID=item['message_id'], attemptID=item['attempt_id'])
+        event.update(sessionID=item['session_id'], messageID=item['message_id'], attemptID=item['attempt_id'], observedAt=item['started_at'])
         events[item['event_key']] = event
+    for disposition in dispositions:
+        event = events.get(disposition['event_key'])
+        if event is None:
+            continue
+        event['dispositionRecord'] = disposition
+        # A later monitoring observation belongs to the active 0/10 query and
+        # therefore reopens an event. Absence from that query never closes it.
+        verified = disposition['status'] == 'verified' and disposition['updated_at'] >= event['observedAt']
+        event['closure'] = 'closed' if verified else 'open'
+        event['disposition'] = 'XDR 已处置，回查确认' if verified else '待确认处置结果' if disposition['status'] in ('writing', 'pending', 'mismatch') else '待人工确认'
     installation = installations[0] if installations else None
     for run in runs:
         run['result'] = json.loads(run['result'])
@@ -58,15 +69,18 @@ async def snapshot(owner, scope, day):
             'metrics': {'definitions': int(bool(installation and installation['installed'])),
                         'started': len({r['execution_id'] for r in runs}), 'attempts': len(runs),
                         'events': len(events), 'risk': sum(e['risk'] == 'risk' for e in events.values()),
+                        'openRisk': sum(e['risk'] == 'risk' and e['closure'] != 'closed' for e in events.values()),
+                        'closed': sum(e['closure'] == 'closed' for e in events.values()),
                         'unknown': sum(e['risk'] == 'unknown' for e in events.values()),
                         'ignored': sum(e['risk'] == 'ignored' for e in events.values())},
-            'disposition': '未启用'}
+            'disposition': '人工确认后写回，回查确认闭环'}
 
 
 def render(data):
     metrics = data['metrics']
-    lines = [f"# 安全运营监测 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。处置未启用，查询成功不代表事件闭环。", '',
+    lines = [f"# 安全运营监测 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。定时监测只读；人工确认后写回 XDR 已处置状态，回查确认后闭环。状态闭环不代表执行了主机隔离或修复。", '',
              f"启动轮次：{metrics['started']}；尝试：{metrics['attempts']}；去重事件：{metrics['events']}；风险：{metrics['risk']}；待判定：{metrics['unknown']}。", '']
+    lines += [f"未闭环风险：{metrics['openRisk']}；回查确认闭环：{metrics['closed']}。", '']
     if data['events']:
         lines += ['## 去重事件', '']
         for event in data['events']:
@@ -74,7 +88,11 @@ def render(data):
             name = str(event['name']).replace('\n', ' ')
             for char in ('\\', '[', ']', '*', '_', '`', '<', '>'):
                 name = name.replace(char, '\\' + char)
-            lines += [f"- {name} · {event['risk']} · 未闭环；[关联对话](/sessions?session={event['sessionID']}&focusMessage={event['messageID']})"]
+            closure = '已闭环（XDR 回查确认）' if event['closure'] == 'closed' else '未闭环'
+            lines += [f"- {name} · {event['risk']} · {closure}；[关联对话](/sessions?session={event['sessionID']}&focusMessage={event['messageID']})"]
+            if event.get('dispositionRecord'):
+                item = event['dispositionRecord']
+                lines += [f"  - 处置记录：{item['id']}；状态：{item['status']}；回查值：{item['observed_status']}；更新时间：{item['updated_at']}。"]
         lines += ['']
     for run in data['runs']:
         lines += [f"## 轮次 {run['execution_id']} · 尝试 {run['id']}", '',
@@ -84,7 +102,7 @@ def render(data):
             lines += [f"异常：{run['error']}", '']
         for step in run['steps']:
             lines += [f"- {step['tool']}：{step['status']}。{step['error'] or step['output'] or ''}"]
-        lines += ['', '处置未启用；风险事件保持待处置、未闭环。', '']
+        lines += ['', '本轮为只读监测；人工处置结果见去重事件中的回查状态。', '']
     return '\n'.join(lines)
 
 

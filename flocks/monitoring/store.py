@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS monitor_observations (
 CREATE TABLE IF NOT EXISTS monitor_cursors (
  owner TEXT NOT NULL, scope TEXT NOT NULL, device TEXT NOT NULL, through_time INTEGER NOT NULL,
  PRIMARY KEY(owner, scope, device));
+CREATE TABLE IF NOT EXISTS monitor_dispositions (
+ id TEXT NOT NULL, owner TEXT NOT NULL, scope TEXT NOT NULL, event_key TEXT NOT NULL,
+ comment TEXT NOT NULL, status TEXT NOT NULL, observed_status INTEGER, error TEXT,
+ session_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(owner, scope, id));
+CREATE INDEX IF NOT EXISTS monitor_dispositions_event ON monitor_dispositions(owner,scope,event_key,created_at);
 CREATE TABLE IF NOT EXISTS monitor_reports (
  owner TEXT NOT NULL, scope TEXT NOT NULL, business_date TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'pending', version INTEGER NOT NULL DEFAULT 0,

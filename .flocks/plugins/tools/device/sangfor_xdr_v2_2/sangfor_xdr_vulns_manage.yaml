@@ -1,0 +1,350 @@
+name: sangfor_xdr_vulns_manage
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: true
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_vulns_manage
+description_cn: 脆弱性写入管理。create_option_fields：新增自定义字段；upload_risks：新增脆弱性。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description: 脆弱性写入管理。create_option_fields：新增自定义字段；upload_risks：新增脆弱性。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - create_option_fields
+      - upload_risks
+      description: create_option_fields：新增自定义字段；upload_risks：新增脆弱性
+    api_params:
+      type: object
+      properties:
+        option:
+          type: array
+          description: 自定义字段配置；适用动作：create_option_fields
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+                description: 自定义字段key；只允许中文，大小写英文，数字，下划线，横线，点
+                maxLength: 64
+              name:
+                type: string
+                description: 自定义字段名称；只允许中文，大小写英文，数字，下划线，横线，点
+                maxLength: 64
+              isShow:
+                type: boolean
+                description: 自定义字段是否展示在表头
+              values:
+                type: array
+                description: 属性配置
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                      description: 属性名称；只允许中文，大小写英文，数字，下划线，横线，点
+                      maxLength: 64
+                    value:
+                      type: string
+                      description: 属性值；只允许中文，大小写英文，数字，下划线，横线，点
+                      maxLength: 64
+                  additionalProperties: false
+                  required:
+                  - name
+                  - value
+                maxItems: 96
+              valueType:
+                type: integer
+                description: 属性值类型；文档值参考：0=字符串；1=数值；2=数值范围
+            additionalProperties: false
+            required:
+            - key
+            - name
+            - isShow
+            - valueType
+        conflictMethod:
+          type: integer
+          description: 冲突操作，新自定义字段与老自定义字段冲突；文档值参考：0=跳过；1=覆盖；适用动作：create_option_fields
+        taskId:
+          type: string
+          description: 扫描任务ID；只允许数字、字母、下划线、中横线、点；适用动作：upload_risks
+          maxLength: 64
+        uploadTimestamp:
+          type: integer
+          description: 发送上传时间戳；适用动作：upload_risks
+        adapter:
+          type: object
+          description: 适配器信息；适用动作：upload_risks
+          properties:
+            sid:
+              type: string
+              description: 适配器ID；类似AF的设备ID。只允许数字、字母、下划线、中横线、点
+              maxLength: 64
+            vendor:
+              type: string
+              description: 适配器厂商；适配器厂商，默认sangfor。允许中文、数字、字母、下划线、中横线、点、逗号、空白符、@、(、）
+              maxLength: 64
+            productType:
+              type: string
+              description: 适配器产品类型；适配器产品型号，数据源列表接口返回的name。只允许数字、小写字母、下划线、中横线、点
+              maxLength: 64
+            productVer:
+              type: string
+              description: 适配器产品版本；适配器版本号。只允许数字、小写字母、下划线、中横线、点、空白符、(、)
+              maxLength: 64
+            originProductType:
+              type: string
+              description: 适配器源产品类型；原始上报的产品类型。只允许数字、小写字母、下划线、中横线、点、空白符、(、)
+              maxLength: 64
+            originProductVer:
+              type: string
+              description: 适配器源产品版本；原始上报的产品类型。允许中文、数字、字母、下划线、中横线、点、逗号、空白符、@、(、）
+              maxLength: 64
+          additionalProperties: false
+          required:
+          - sid
+          - vendor
+          - productType
+          - productVer
+        vulns:
+          type: array
+          description: 脆弱性列表；适用动作：upload_risks
+          items:
+            type: object
+            properties:
+              foundTimestamp:
+                type: integer
+                description: 脆弱性发现时间戳
+              SFID:
+                type: string
+                description: 深信服统一的脆弱性ID
+                maxLength: 50
+              typeId:
+                type: string
+                description: 脆弱性类型ID；脆弱性类型Id，蓝军统一脆弱性分类规范，比如弱密码类型统一为"SFA_0002_00045"
+                maxLength: 32
+              assetId:
+                type: string
+                description: 资产ID，网侧可能为null；资产唯一id，网侧可能为null
+                maxLength: 95
+              assetType:
+                type: integer
+                description: 资产类型；文档值参考：0=主机资产；1=容器资产；2=容器镜像资产；3=容器集群资产；4=容器节点资产
+              ips:
+                type: array
+                description: 脆弱性对应的ip信息列表，列表兼容终端多IP
+                items:
+                  type: object
+                  properties:
+                    addr:
+                      type: string
+                      description: 脆弱性IP，ipv4或ipv6。当assetId为null时,必填。
+                    mac:
+                      type: string
+                      description: 脆弱性IP对应的mac地址。每两个字符中间以冒号分隔。为""都表示无MAC。
+                  additionalProperties: false
+                  required:
+                  - addr
+              portNum:
+                type: integer
+                description: 脆弱性端口；端口范围：系统端口(0-1023),用户端口(1024-49151), 动态或私有端口(49152-65535)。 端口为0是存在的，虽然RFC https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.txt
+                  规定端口为0为Reserved，且bind函数会将bind为0修改为random port number，但是还是有办法对端口为0进行监听，比如通过iptables转发端口
+              portProtocol:
+                type: string
+                description: 脆弱性端口4层网络协议，"tcp" 或 "udp"；文档值参考：tcp=TCP协议；udp=UDP协议
+              name:
+                type: string
+                description: 脆弱性名称
+                maxLength: 256
+              type:
+                type: string
+                description: 脆弱性类型
+                maxLength: 128
+              level:
+                type: integer
+                description: 脆弱性风险等级；文档值参考：0=信息；1=低危；2=中危；3=高危；4=严重
+              description:
+                type: string
+                description: 脆弱性描述信息
+                maxLength: 2048
+              solutions:
+                type: array
+                description: 脆弱性解决方案列表，列表最大10，默认为[]；string[], 列表len <= 10, 字符串长 <=2048
+                items: {}
+                maxItems: 10
+              effections:
+                type: array
+                description: 脆弱性影响列表，列表最大10，默认为[]；string[], 列表len <= 10, 字符串长 <=2048
+                items: {}
+                maxItems: 10
+              references:
+                type: array
+                description: 脆弱性参考引用列表，列表最大10，默认为[]
+                items: {}
+              publishTimestamp:
+                type: integer
+                description: 漏洞披露发布时间
+              patchs:
+                type: array
+                description: 脆弱性补丁名列表；string[], 列表len <= 10, 字符串长 <=128
+                items: {}
+                maxItems: 10
+              vendor:
+                type: string
+                description: 脆弱性组件的厂商
+              cves:
+                type: array
+                description: cve列表，可能一个漏洞对应多个cve, 默认为[]；string[], 列表len <= 10, 字符串长 <=30
+                items: {}
+                maxItems: 10
+              cnvds:
+                type: array
+                description: cnvd列表；string[], 列表len <= 10, 字符串长 <=30
+                items: {}
+              cncves:
+                type: array
+                description: cncve列表；string[], 列表len <= 10, 字符串长 <=30
+                items: {}
+              cnnvds:
+                type: array
+                description: cnnvd列表；string[], 列表len <= 10, 字符串长 <=30
+                items: {}
+              mode:
+                type: integer
+                description: 脆弱性检测方式；检测方式：1-版本对比，2-poc，4-windows系统补丁，8-fuzz， 默认为0；文档值参考：1=版本对比；2=poc；4=windows系统补丁；8=fuzz
+              service:
+                type: string
+                description: 脆弱性端口对应的应用层服务协议，英文一律小写，默认为空
+                maxLength: 64
+              url:
+                type: string
+                description: 脆弱性影响的页面
+                maxLength: 512
+              reliability:
+                type: integer
+                description: 脆弱性可信度；可信度,低:1-4 中:5-7, 高:8-10，默认6
+                maximum: 10.0
+              detail:
+                type: object
+                description: 脆弱性详情字段，弱密码和漏洞的详情字段不一样
+                properties:
+                  snapshots:
+                    type: array
+                    description: 脆弱性快照信息列表，原理检测必填
+                    items:
+                      type: object
+                      properties:
+                        response:
+                          type: string
+                          description: 检测的响应数据， 响应最大保留1M，原理检测 必填
+                          maxLength: 1048576
+                        request:
+                          type: string
+                          description: 发送的检测请求, 请求最大保留2k，原理检测 必填
+                          maxLength: 2048
+                      additionalProperties: false
+                      required:
+                      - response
+                      - request
+                  description:
+                    type: string
+                    description: 脆弱性检测详情描述
+                  weaks:
+                    type: array
+                    description: 弱密码列表
+                    items:
+                      type: object
+                      properties:
+                        weakUser:
+                          type: string
+                          description: 弱密码脆弱性用户名
+                          maxLength: 64
+                        weakPassword:
+                          type: string
+                          description: 弱密码脆弱性密码
+                          maxLength: 64
+                        weakType:
+                          type: string
+                          description: 弱密码类型
+                          maxLength: 128
+                      additionalProperties: false
+                      required:
+                      - weakUser
+                      - weakPassword
+                    maxItems: 100
+                  componentName:
+                    type: string
+                    description: 脆弱性组件名称
+                    maxLength: 256
+                  componentType:
+                    type: string
+                    description: 脆弱性组件类型；文档值参考：frame=开发框架；os=系统
+                    maxLength: 64
+                  componentVersion:
+                    type: string
+                    description: 脆弱性组件版本，英文一律小写
+                    maxLength: 256
+                  fixStatus:
+                    type: integer
+                    description: 脆弱性修复状态；文档值参考：0=未修复；1=已修复
+                  fixTimestamp:
+                    type: integer
+                    description: 脆弱性修复时间戳
+                  verifyStatus:
+                    type: integer
+                    description: 脆弱性验证状态；文档值参考：0=未确认；1=正报；2=误报
+                  verifyTimestamp:
+                    type: integer
+                    description: 脆弱性修复时间戳
+                  process:
+                    type: object
+                    description: 脆弱性对应的进程信息
+                    properties:
+                      path:
+                        type: string
+                        description: 进程路径，注意，对于路径路径分隔符，统一使用"/"。
+                        maxLength: 512
+                      name:
+                        type: string
+                        description: 脆弱性对应的进程名称
+                        maxLength: 256
+                    additionalProperties: false
+                additionalProperties: false
+                required:
+                - snapshots
+                - weaks
+              option:
+                type: object
+                description: 自定义字段
+                properties: {}
+                additionalProperties: true
+              mergeMethod:
+                type: integer
+                description: 是否融合；文档值参考：1=不融合；2=只去重；3=深度融合
+            additionalProperties: false
+            required:
+            - foundTimestamp
+            - SFID
+            - typeId
+            - ips
+            - name
+            - type
+            - level
+            - description
+            - solutions
+            - effections
+            - references
+            - publishTimestamp
+            - option
+            - mergeMethod
+          maxItems: 200
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action

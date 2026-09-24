@@ -15,7 +15,7 @@ from flocks.utils.id import Identifier
 from .models import MonitoringPolicy
 from .sessions import ensure_daily
 from .store import rows, write, connection, encode
-from .adapter import XdrAdapter, ContractError, normalize, page_items, response_items
+from .adapter import XdrAdapter, ContractError, page_items, response_items
 from . import diagnostics as diag
 from .summaries import Summary, page_summary, hosts_summary, analysis_summary, event_label
 
@@ -105,37 +105,28 @@ class Recorder:
             await publish('message.updated', {'sessionID': self.session_id, 'info': info.model_dump(mode='json', by_alias=True)})
 
 
-async def query_device(adapter, device, start, end, recorder):
-    events, seen_pages, total_expected = {}, set(), None
+async def query_device(adapter, device, start, end, recorder, *, selection=None):
+    from .pagination import IncidentPages
+    batch = IncidentPages(device, selection)
     for page in range(1, adapter.policy.max_pages + 1):
-        params = {'action': 'list', 'start_time': start, 'end_time': end, 'page_num': page, 'page_size': 100}
+        params = {'action': 'list', 'start_time': start, 'end_time': end, 'page_num': page, 'page_size': 100,
+                  'time_field': 'endTime', 'deal_statuses': [0, 10], 'white_status': ['未加白', '部分加白']}
         async def query(message_id):
-            nonlocal total_expected
             value = await adapter.call(device, params, message_id)
             items, total = page_items(value)
-            signature = tuple(sorted(x['uuId'] for x in items))
-            if items and signature in seen_pages:
-                raise ContractError('分页重复，查询完整性无法确认')
-            seen_pages.add(signature)
-            if total is not None:
-                if total_expected is not None and total != total_expected:
-                    raise ContractError('分页总数变化，保留水位等待重试')
-                total_expected = total
-            for raw in items:
-                events[raw['uuId']] = normalize(device, raw)
-            if total_expected is not None and len(events) > total_expected:
-                raise ContractError('分页总数与去重记录不一致')
-            complete = total_expected is not None and len(events) == total_expected
-            if not complete and len(items) < 100:
-                if total_expected is not None:
-                    raise ContractError('分页提前结束；不推进查询水位')
-                complete = True
+            selected, complete = batch.add(items, total, params['page_size'])
             if not complete and page == adapter.policy.max_pages:
                 raise ContractError('达到分页预算，查询未完成')
-            return complete, {'device': device, 'page': page, 'received': len(items), 'total': total}, page_summary(page, items, len(events), complete)
+            display = {'device': device, 'page': page, 'received': len(items), 'total': total}
+            summary_args = {}
+            if selection is not None:
+                display['selection'] = {'description': selection.description, 'matched': len(selected),
+                                        'excluded': len(items) - len(selected), 'cumulative': batch.counts}
+                summary_args = {'selection': selection.description, 'received': len(items), 'counts': batch.counts}
+            return complete, display, page_summary(page, selected, len(batch.events), complete, **summary_args)
         complete = await recorder.call('查询 XDR 事件', {'device': device, **params}, query)
         if complete:
-            return list(events.values())
+            return list(batch.events.values())
     raise ContractError('达到分页预算，查询未完成')
 
 
@@ -153,7 +144,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 (attempt_id, execution.id, policy.owner, policy.project, policy.scope, day, session.id, message_id,
                  execution.execution_input_snapshot.get('scheduledFor'), started.isoformat(), 'running'))
     trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · 只读任务', role=MessageRole.USER)
-    await emit_message(session.id, '本轮安全运营监测开始。正在只读查询 XDR 事件并关联分析；处置未启用。', message_id=message_id, parent_id=trigger_message.id)
+    await emit_message(session.id, '本轮安全运营监测开始。只读查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析；自动处置未启用。', message_id=message_id, parent_id=trigger_message.id)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -219,11 +210,11 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?', (encode(event), attempt_id, event['key']))
             result = {'events': len(observed), 'risk': sum(e['risk'] == 'risk' for e in observed),
                       'unknown': sum(e['risk'] == 'unknown' for e in observed), 'ignored': 0,
-                      'errors': errors, 'disposition': '未启用', 'closure': 'open'}
+                      'errors': errors, 'disposition': '待人工确认', 'closure': 'open'}
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
         status = 'partial' if errors and observed else 'failed' if errors else 'completed'
-        summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。处置未启用，风险保持未闭环。"
+        summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。自动处置未启用，风险保持未闭环。"
         await write('UPDATE monitor_attempts SET result=? WHERE id=?', (encode(result), attempt_id))
     except BaseException as exc:
         status = 'interrupted' if isinstance(exc, asyncio.CancelledError) else 'failed'

@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 import asyncio
 import json
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
 from flocks.server.auth import require_user
@@ -11,6 +12,30 @@ from flocks.monitoring.store import rows
 from flocks.monitoring.reports import snapshot
 
 router = APIRouter(prefix='/monitoring/host-security-monitor')
+from flocks.monitoring.disposition import DispositionRequest
+
+
+async def _disposition_action(action):
+    try:
+        return await action
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        raise HTTPException(503, '处置请求未完成，请刷新后回查状态，勿重复写回') from None
+
+
+@router.post('/dispositions')
+async def confirm_disposition(body: DispositionRequest, user=Depends(require_user)):
+    from flocks.monitoring.disposition import confirm
+    return await _disposition_action(confirm(user.id, body))
+
+
+@router.post('/dispositions/{request_id}/recheck')
+async def recheck_disposition(request_id: UUID, user=Depends(require_user)):
+    from flocks.monitoring.disposition import recheck
+    return await _disposition_action(recheck(user.id, str(request_id)))
 
 
 @router.get('/diagnostics')

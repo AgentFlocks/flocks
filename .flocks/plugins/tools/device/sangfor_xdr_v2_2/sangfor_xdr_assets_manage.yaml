@@ -1,0 +1,1447 @@
+name: sangfor_xdr_assets_manage
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: true
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_assets_manage
+description_cn: 资产写入管理。create_vpc：新增vpc信息；edit：资产列表编辑和批量编辑；delete_adapter：删除资产上报设备；create_source：新增资产数据源；create_adapter：新增资产上报设备；upload：新增资产（上报）；create：新增资产（人工）；ignore_approval：资产审核忽略；approve：资产审核入库；create_user：新增责任人。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description: 资产写入管理。create_vpc：新增vpc信息；edit：资产列表编辑和批量编辑；delete_adapter：删除资产上报设备；create_source：新增资产数据源；create_adapter：新增资产上报设备；upload：新增资产（上报）；create：新增资产（人工）；ignore_approval：资产审核忽略；approve：资产审核入库；create_user：新增责任人。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - create_vpc
+      - edit
+      - delete_adapter
+      - create_source
+      - create_adapter
+      - upload
+      - create
+      - ignore_approval
+      - approve
+      - create_user
+      description: create_vpc：新增vpc信息；edit：资产列表编辑和批量编辑；delete_adapter：删除资产上报设备；create_source：新增资产数据源；create_adapter：新增资产上报设备；upload：新增资产（上报）；create：新增资产（人工）；ignore_approval：资产审核忽略；approve：资产审核入库；create_user：新增责任人
+    api_params:
+      type: object
+      properties:
+        vpcInfos:
+          type: array
+          description: 虚拟私有云信息；适用动作：create_vpc
+          items:
+            type: object
+            properties:
+              vpcId:
+                type: string
+                description: 虚拟私有云标识符
+              vpcName:
+                type: string
+                description: 虚拟私有云名称
+              isDelete:
+                type: boolean
+                description: 虚拟私有云是否删除
+              vxlanId:
+                type: integer
+                description: VXLAN环境中标识不同的网络 范围1到16,777,215。
+              isManual:
+                type: boolean
+                description: 是否手动添加
+            additionalProperties: false
+            required:
+            - vpcId
+        source:
+          type: string
+          description: vpc添加来源：“csc”，“device”；适用动作：create_vpc,create_adapter
+        assetIds:
+          type: array
+          description: 资产ID批量查询；过滤参数，默认不传；文档值参考：123=；适用动作：edit,ignore_approval,approve
+          items: {}
+        ipSegment:
+          type: string
+          description: IP段信息；过滤参数，默认不传；文档值参考：192.168.0.0/16=；适用动作：edit,ignore_approval,approve
+        branchId:
+          anyOf:
+          - type: number
+            description: 资产组id；过滤参数，默认不传；文档值参考：0=；适用动作：edit
+          - type: integer
+            description: 资产组ID；适用动作：create,ignore_approval
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        classify1Id:
+          anyOf:
+          - type: array
+            description: 资产类型；过滤参数，默认不传，可以通过 /api/xdr/v1/assets/assetclass接口获取可选值；文档值参考：0=未知；1=服务器；2=终端；5=网络设备；6=物联网设备；7=移动设备；8=网络安全产品设备；9=云平台设备；10=企业应用软件设备；适用动作：edit,ignore_approval,approve
+            items: {}
+          - type: number
+            description: 资产一级分类ID；文档值参考：0=未知；1=服务器；2=终端；5=网络设备；6=物联网设备；7=移动设备；8=网络安全产品设备；9=云平台设备；10=企业应用软件设备；适用动作：create
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        connectStatus:
+          type: array
+          description: 终端接入状态；过滤参数，默认不传；文档值参考：0=离线；1=在线；2=已禁用；3=已卸载；4=未授权；5=已移除；6=已降级；101=未安装；适用动作：edit,ignore_approval,approve
+          items: {}
+        sourceDevice:
+          type: array
+          description: 数据源字符串列表；过滤参数，默认不传，可以通过 /api/xdr/v1/assets/sourcedevice接口获取可选值；文档值参考：cwpp=cwpp；edr=edr；sip=sip；yj=云镜；sta=sta；manual=人工；identifier=风险关联；适用动作：edit,ignore_approval,approve
+          items: {}
+        system:
+          type: array
+          description: 操作系统；过滤参数，默认不传；文档值参考：Windows=；Linux=；OS X=；iOS=；airOS=；Android=；FreeBSD=；VMware=；Cisco=；MikroTik=；VxWorks=；F5
+            Networks=；Unix=；Mac=；Other=；Unknown=；适用动作：edit,ignore_approval,approve
+          items: {}
+        magnitude:
+          type: string
+          description: 核心资产；过滤参数，默认不传；文档值参考：normal=普通资产；core=核心资产；适用动作：edit,create,ignore_approval,approve
+        tags:
+          anyOf:
+          - type: array
+            description: 标签；过滤参数，默认不传；文档值参考：测试=；适用动作：edit,ignore_approval,approve
+            items: {}
+          - type: array
+            description: 资产标签；最大字符长度20；适用动作：create
+            items: {}
+            maxItems: 10
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        exposure:
+          type: string
+          description: 互联网暴露；过滤参数，默认不传；文档值参考：yes=是；no=否；unknown=未知；适用动作：edit,ignore_approval,approve
+        isAll:
+          type: boolean
+          description: 全部资产修改；过滤参数，默认不传；文档值参考：false=不勾选全部资产；true=全部资产；适用动作：edit,ignore_approval,approve
+        excludeIds:
+          type: array
+          description: 排除资产id；过滤参数，默认不传，全部资产修改时，可以取消一些资产修改，与删除资产功能对齐；文档值参考：288=；适用动作：edit,ignore_approval,approve
+          items: {}
+        searchType:
+          type: string
+          description: 搜索类型；过滤参数，默认不传；文档值参考：all=全部资产；history=历史资产；current=当前资产，资产管理处显示的资产；wait_approve=待审核资产；适用动作：edit
+        editInfo:
+          type: object
+          description: 编辑的信息；适用动作：edit
+          properties:
+            assetName:
+              type: string
+              description: 资产名称（列表编辑传参）
+            hostName:
+              type: string
+              description: 主机名（列表传参）
+            classify1Id:
+              type: number
+              description: 资产一级分类
+            classifyId:
+              type: number
+              description: 资产二级分类
+            users:
+              type: array
+              description: 责任人id列表
+              items: {}
+            tags:
+              type: array
+              description: 标签字符串数组
+              items: {}
+            location:
+              type: object
+              description: 资产位置（批量编辑传参）
+              properties:
+                countryId:
+                  type: number
+                  description: 国家id
+                country:
+                  type: string
+                  description: 国家名称
+                provinceId:
+                  type: number
+                  description: 省份id
+                province:
+                  type: string
+                  description: 省份名称
+                cityId:
+                  type: number
+                  description: 城市id
+                city:
+                  type: string
+                  description: 城市名称
+                districtId:
+                  type: number
+                  description: 区域id
+                district:
+                  type: string
+                  description: 区域名称
+                detail:
+                  type: string
+                  description: 详细信息
+              additionalProperties: false
+          additionalProperties: false
+        updateTimeRange:
+          type: string
+          description: 最近更新时间范围；过滤参数，默认不传，该字段与updateStartTimestamp和updateEndTimestamp重复，可二选其一进行参数定义。当参数重复时，服务优先解析updateTimeRange字段；文档值参考：30m=表示最近30分钟；1H=表示最近1小时；1d=表示最近1天；1M=表示最近1个月；custom=当timeRange的值为"custom"时，则系统解析startTimestamp字段和endTimestamp字段；；适用动作：edit,ignore_approval,approve
+        updateStartTimestamp:
+          type: integer
+          description: 最近更新时间范围起始时间；过滤参数，默认不传；文档值参考：1680278400=；适用动作：edit,ignore_approval,approve
+        updateEndTimestamp:
+          type: integer
+          description: 最近更新时间范围截止时间；过滤参数，默认不传；文档值参考：1680278400=；适用动作：edit,ignore_approval,approve
+        firstTimeRange:
+          type: string
+          description: 首次发现时间范围；过滤参数，默认不传， 该字段与firstStartTimestamp和firstEndTimestamp重复，可二选其一进行参数定义。当参数重复时，服务优先解析firstTimeRange字段；文档值参考：30m=表示最近30分钟；1H=表示最近1小时；1d=表示最近1天；1M=表示最近1个月；custom=当timeRange的值为"custom"时，则系统解析startTimestamp字段和endTimestamp字段；；适用动作：edit,ignore_approval,approve
+        firstStartTimestamp:
+          type: integer
+          description: 首次发现时间范围起始时间；过滤参数，默认不传；文档值参考：1680278400=；适用动作：edit,ignore_approval,approve
+        firstEndTimestamp:
+          type: integer
+          description: 首次发现时间范围截止时间；过滤参数，默认不传；文档值参考：1680278400=；适用动作：edit,ignore_approval,approve
+        ip:
+          type: string
+          description: IP（模糊搜索，精准搜索）；过滤参数，默认不传；文档值参考：like10.128=模糊搜索ip；=10.128.160.111=精准搜索ip；适用动作：edit,create_adapter,create,ignore_approval,approve
+        assetId:
+          type: integer
+          description: 资产ID（精准搜索）；过滤参数，默认不传；文档值参考：111=；适用动作：edit,ignore_approval,approve
+        mac:
+          type: string
+          description: mac（精准搜索）；过滤参数，默认不传；文档值参考：fe:fc:fe:1f:c9:53=；适用动作：edit,create_adapter,create,ignore_approval,approve
+        hostName:
+          anyOf:
+          - type: string
+            description: 主机名（模糊搜索，精准搜索）；过滤参数，默认不传；文档值参考：=admin=精准搜索；likeadmin=模糊搜索；适用动作：edit,ignore_approval,approve
+          - type: string
+            description: 主机名；适用动作：create
+            maxLength: 95
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        name:
+          type: string
+          description: 资产名称（模糊搜索，精准搜索）；过滤参数，默认不传；文档值参考：=asset=精准搜索；likeasset=模糊搜索；适用动作：edit,create_adapter,ignore_approval,approve,create_user
+        username:
+          type: string
+          description: 责任人（模糊搜索，精准搜索）；过滤参数，默认不传；文档值参考：=username=精准搜索；likeusername=模糊搜索；适用动作：edit,ignore_approval,approve
+        ids:
+          type: array
+          description: 设备ids；适用动作：delete_adapter
+          items: {}
+        shortName:
+          type: string
+          description: 数据源简称，简称（1-16个字符）；适用动作：create_source
+        longName:
+          type: string
+          description: 数据源全称，全称（1-40个字符）；适用动作：create_source
+        vendor:
+          type: string
+          description: 厂商；适用动作：create_source
+        type:
+          anyOf:
+          - type: integer
+            description: 0：网侧数据源，1：端侧数据源；适用动作：create_source
+          - type: string
+            description: 操作系统；文档值参考：Unknown=；Windows=；Linux=；OS X=；iOS=；airOS=；Android=；FreeBSD=；VMware=；Cisco=；MikroTik=；VxWorks=；F5
+              Networks=；Unix=；Mac=；Other=；适用动作：create
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        belongs:
+          type: array
+          description: 数据源来源；文档值参考：1=资产数据源；2=脆弱性数据源；适用动作：create_source
+          items: {}
+          maxItems: 5
+        assetName:
+          type: string
+          description: 资产名称；适用动作：create
+          maxLength: 95
+        classifyId:
+          type: number
+          description: 资产分类ID；参考详细说明；适用动作：create
+        comment:
+          type: string
+          description: 资产备注信息；适用动作：create
+          minLength: 0
+          maxLength: 95
+        users:
+          type: array
+          description: 责任人；适用动作：create
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+                description: 责任人ID
+              name:
+                type: string
+                description: 责任人名称；文档值参考：""=
+              email:
+                type: string
+                description: 责任人邮箱
+              phone:
+                type: string
+                description: 责任人电话
+            additionalProperties: false
+        ignoreType:
+          type: string
+          description: 直接忽略；传参only_ignore；文档值参考：only_ignore=；适用动作：ignore_approval
+        approveType:
+          type: string
+          description: 更新传输类型；列表页单个更新：single   批量更新：bulk  详情里面的审核入库：single_in_detail；文档值参考：single=列表页单个入库；single_in_detail=资产详情页面入库；bulk=列表页批量入库；适用动作：approve
+        approveAssetId:
+          type: integer
+          description: 更新传输id；过滤参数，默认不传，传输当前弹框审核的资产id，对于单个更新，不需要传上面的过滤条件；文档值参考：1=；适用动作：approve
+        depName:
+          type: string
+          description: 部门名称；文档值参考：测试部门名称=；适用动作：create_user
+        email:
+          type: string
+          description: 邮箱；文档值参考：test@ccc.com=；适用动作：create_user
+        gid:
+          type: integer
+          description: 部门ID；文档值参考：2=；适用动作：create_user
+        mobile:
+          type: string
+          description: 电话号码；文档值参考：14233345566=；适用动作：create_user
+        position:
+          type: string
+          description: 职位；文档值参考：test=；适用动作：create_user
+        sex:
+          type: integer
+          description: 性别；文档值参考：1=男；0=女；适用动作：create_user
+        coment:
+          type: string
+          description: 备注；适用动作：create_user
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+    api_body:
+      type: array
+      anyOf:
+      - type: array
+        items:
+          type: object
+          properties:
+            custom:
+              type: object
+              description: 自定义属性，不定数量子字段的map，同步第三方的自定义字段；key数量限制为30以内，key字符限制为大小写字母和数字，value长度限制256以内
+              properties: {}
+              additionalProperties: true
+            assetId:
+              type: string
+              description: 资产Id
+            taskId:
+              type: string
+              description: 扫描任务ID
+            uploadTimestamp:
+              type: number
+              description: 发送上传时间戳
+            adapter:
+              type: object
+              description: 适配器信息
+              properties:
+                sid:
+                  type: string
+                  description: 适配器唯一Id
+                vendor:
+                  type: string
+                  description: 适配器厂商
+                productType:
+                  type: string
+                  description: 适配器产品类型
+                productVer:
+                  type: string
+                  description: 适配器产品版本
+                originSid:
+                  type: string
+                  description: 原始上报的产品id
+                originProductType:
+                  type: string
+                  description: 原始上报的产品类型；只允许数字、小写字母、下划线、中横线、点、空白符、(、)
+                originProductVer:
+                  type: string
+                  description: 原始上报的产品版本；允许中文、数字、字母、下划线、中横线、点、逗号、空白符、@、(、）
+              additionalProperties: false
+              required:
+              - sid
+              - vendor
+              - productType
+              - productVer
+            device:
+              type: object
+              description: 代表数据产生的最终设备。
+              properties:
+                hostname:
+                  type: string
+                  description: 设备主机名；包含LDAP或AD域名或FQDN(Fully Qualified Domain Name)全限定域名，可通过hostname命令获取。英文字符一律小写。 =ecs.host.hostname,rapid7.hostName.name"
+                classifyId:
+                  type: number
+                  description: 设备分类小类；参考《设备分类标准》自动计算分类Id(classifyId)。如果子类ID为0，表示的是整个父类，例如80100表示的“手机”这个类，而80000表示的是“移动设备”这个类。
+                classify1Id:
+                  type: number
+                  description: 设备分类大类；参考《设备分类标准》一级分类Id(classify1Id)。存储这个字段，主要是为了适应频繁的ES聚合查询需求，如果没有类似需求可以删除。
+                onlineStatus:
+                  type: number
+                  description: 设备在线状态；文档值参考：0=离线；1=在线；2=禁用；3=卸载；4=未授权；5=移除；6=已降级
+                version:
+                  type: string
+                  description: 设备的版本；英文字符一律小写
+                distribution:
+                  type: string
+                  description: 设备发行版
+                vendor:
+                  type: string
+                  description: 设备厂商；英文字符一律小写
+                standard:
+                  type: string
+                  description: 设备标准
+                detail:
+                  type: string
+                  description: 设备详情
+                number:
+                  type: string
+                  description: 设备编号
+                location:
+                  type: string
+                  description: 设备位置
+                importance:
+                  type: number
+                  description: 资产重要性；文档值参考：0=
+                name:
+                  type: string
+                  description: 资产名称
+                comment:
+                  type: string
+                  description: 资产备注信息
+              additionalProperties: false
+              required:
+              - hostname
+              - classifyId
+              - classify1Id
+              - onlineStatus
+            hardware:
+              type: object
+              description: 硬件信息
+              properties:
+                board:
+                  type: object
+                  description: 主板信息
+                  properties:
+                    productName:
+                      type: string
+                      description: 主板产品名称；英文一律小写
+                    sn:
+                      type: string
+                      description: 主板序列号；英文一律小写
+                    vendor:
+                      type: string
+                      description: 主板供应商；英文一律小写
+                  additionalProperties: false
+                cpu:
+                  type: object
+                  description: CPU信息
+                  properties:
+                    deviceModel:
+                      type: string
+                      description: CPU模型名称；英文一律小写
+                    flags:
+                      type: string
+                      description: CPU标志；英文一律小写
+                    frequency:
+                      type: number
+                      description: CPU兆赫兹（单位MHz）。
+                    logicalCores:
+                      type: number
+                      description: CPU逻辑核数
+                    physicalCores:
+                      type: number
+                      description: CPU物理核数
+                    vendor:
+                      type: string
+                      description: CPU供应商；英文一律小写
+                  additionalProperties: false
+                  required:
+                  - deviceModel
+                  - frequency
+                disks:
+                  type: array
+                  description: 磁盘信息
+                  items:
+                    type: object
+                    properties:
+                      capacity:
+                        type: number
+                        description: 磁盘容量(GB)
+                      deviceModel:
+                        type: string
+                        description: 磁盘设备模型
+                      name:
+                        type: string
+                        description: 磁盘名称
+                      sn:
+                        type: string
+                        description: 磁盘序列号
+                      vendor:
+                        type: string
+                        description: 磁盘供应商
+                      productName:
+                        type: string
+                        description: 磁盘产品名称
+                    additionalProperties: false
+                partitions:
+                  type: array
+                  description: 分区信息
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        description: 磁盘分区名称
+                      mountPoint:
+                        type: string
+                        description: 磁盘分区挂载点
+                      capacity:
+                        type: number
+                        description: 磁盘分区容量(GB)
+                    additionalProperties: false
+                graphicsCards:
+                  type: array
+                  description: 显卡信息
+                  items:
+                    type: object
+                    properties:
+                      frequency:
+                        type: number
+                        description: 显卡兆赫兹
+                      productName:
+                        type: string
+                        description: 显卡产品名称
+                      vendor:
+                        type: string
+                        description: 显卡供应商
+                      vramCapacity:
+                        type: number
+                        description: 显卡内存容量
+                    additionalProperties: false
+                mem:
+                  type: object
+                  description: 内存信息
+                  properties:
+                    capacity:
+                      type: number
+                      description: 内存容量
+                    chips:
+                      type: array
+                      description: 内存条信息
+                      items:
+                        type: object
+                        properties:
+                          assetTag:
+                            type: string
+                            description: 内存条资产标签
+                          partNumber:
+                            type: string
+                            description: 内存条分区号
+                          sn:
+                            type: string
+                            description: 内存条序列号
+                          speed:
+                            type: number
+                            description: 内存条速度
+                          type:
+                            type: string
+                            description: 内存条类型
+                          vendor:
+                            type: string
+                            description: 内存条供应商
+                          capacity:
+                            type: number
+                            description: 内存容量
+                        additionalProperties: false
+                  additionalProperties: false
+                monitors:
+                  type: array
+                  description: 显示器信息
+                  items:
+                    type: object
+                    properties:
+                      productName:
+                        type: string
+                        description: 显示器产品名称
+                      vendor:
+                        type: string
+                        description: 显示器供应商
+                    additionalProperties: false
+                soundCards:
+                  type: array
+                  description: 声卡信息
+                  items:
+                    type: object
+                    properties:
+                      productName:
+                        type: string
+                        description: 声卡产品名称
+                      vendor:
+                        type: string
+                        description: 声卡供应商
+                    additionalProperties: false
+                usbs:
+                  type: array
+                  description: USB信息
+                  items:
+                    type: object
+                    properties:
+                      deviceId:
+                        type: string
+                        description: USB设备Id
+                      deviceType:
+                        type: number
+                        description: USB设备类型
+                      info:
+                        type: string
+                        description: USB额外信息
+                      vendor:
+                        type: string
+                        description: USB厂商
+                    additionalProperties: false
+              additionalProperties: false
+            os:
+              type: object
+              description: 操作系统
+              properties:
+                cpe:
+                  type: string
+                  description: 操作系统指纹
+                type:
+                  type: string
+                  description: 操作系统类型
+                bitness:
+                  type: number
+                  description: 操作系统位数
+                lang:
+                  type: string
+                  description: 操作系统语言
+                version:
+                  type: string
+                  description: 操作系统版本号
+                edition:
+                  type: string
+                  description: 操作系统版本
+                kernelVersion:
+                  type: string
+                  description: 操作系统内核版本
+                buildVersion:
+                  type: string
+                  description: 操作系统构建版本号
+                distribution:
+                  type: string
+                  description: 操作系统发行版
+                vendor:
+                  type: string
+                  description: 操作系统厂商
+                detail:
+                  type: string
+                  description: 操作系统详情
+                activeStatus:
+                  type: number
+                  description: 操作系统激活状态
+                accreditedTime:
+                  type: number
+                  description: 操作系统授权时间
+                installTime:
+                  type: number
+                  description: 操作系统安装时间
+                servicePack:
+                  type: string
+                  description: 操作系统补丁包
+              additionalProperties: false
+              required:
+              - type
+              - distribution
+            interfaces:
+              type: array
+              description: 网口信息列表
+              items:
+                type: object
+                properties:
+                  linkDeviceId:
+                    type: string
+                    description: 网口连接设备Id
+                  linkDevicePort:
+                    type: number
+                    description: 网口连接设备端口
+                  mac:
+                    type: string
+                    description: 网口MAC地址
+                  manufacturer:
+                    type: string
+                    description: 网口制造商
+                  name:
+                    type: string
+                    description: 网口名称
+                  operStatus:
+                    type: number
+                    description: 网口运行状态
+                additionalProperties: false
+                required:
+                - mac
+            ips:
+              type: array
+              description: IP信息列表
+              items:
+                type: object
+                properties:
+                  addr:
+                    type: string
+                    description: IP地址
+                  mac:
+                    type: string
+                    description: IP对应MAC地址
+                  subnet:
+                    type: number
+                    description: IP子网
+                  exposure:
+                    type: number
+                    description: IP暴露程度
+                  carrier:
+                    type: number
+                    description: IP所属运营商；文档值参考：0=Unknown；1=无运营商；2=电信；3=移动；4=网通
+                  isDynamic:
+                    type: number
+                    description: IP是否动态生成
+                  isInvalid:
+                    type: number
+                    description: IP是否无效
+                  type:
+                    type: number
+                    description: ip类型；文档值参考：0=普通ip；1=通信ip
+                  firstSeen:
+                    type: number
+                    description: IP首次出现时间
+                  lastSeen:
+                    type: number
+                    description: IP最近出现时间
+                additionalProperties: false
+                required:
+                - addr
+            ports:
+              type: array
+              description: 端口信息列表
+              items:
+                type: object
+                properties:
+                  number:
+                    type: number
+                    description: 端口号
+                  protocol:
+                    type: string
+                    description: 端口协议
+                  serviceName:
+                    type: string
+                    description: 端口应用层服务协议名称
+                  serviceVersion:
+                    type: string
+                    description: 端口应用层服务协议版本
+                  block:
+                    type: number
+                    description: 端口封堵状态
+                  description:
+                    type: string
+                    description: 端口描述
+                  exposure:
+                    type: number
+                    description: 端口暴露程度
+                  banner:
+                    type: string
+                    description: banner信息
+                  ip:
+                    type: string
+                    description: 端口关联IP
+                  process:
+                    type: object
+                    description: 端口进程
+                    properties:
+                      name:
+                        type: string
+                        description: 软件的进程名称
+                      pid:
+                        type: number
+                        description: 软件的进程pid
+                    additionalProperties: false
+                  components:
+                    type: array
+                    description: 端口组件列表
+                    items:
+                      type: object
+                      properties:
+                        nameId:
+                          type: number
+                          description: 组件名称Id
+                        name:
+                          type: string
+                          description: 组件名称
+                        version:
+                          type: string
+                          description: 组件版本
+                        languages:
+                          type: array
+                          description: 组件编程语言列表
+                          items: {}
+                        site:
+                          type: string
+                          description: 组件官方网站
+                        classifyId:
+                          type: number
+                          description: 组件分类Id
+                        classify1Id:
+                          type: number
+                          description: 组件一级分类Id
+                        vendor:
+                          type: string
+                          description: 组件开发商
+                        tags:
+                          type: array
+                          description: 组件标签列表
+                          items: {}
+                        path:
+                          type: string
+                          description: 发现组件的路径
+                      additionalProperties: false
+                  site:
+                    type: object
+                    description: 端口站点信息
+                    properties:
+                      url:
+                        type: string
+                        description: 站点URL
+                      code:
+                        type: number
+                        description: 站点响应码
+                      title:
+                        type: string
+                        description: 站点标题
+                    additionalProperties: false
+                additionalProperties: false
+                required:
+                - number
+                - protocol
+            accounts:
+              type: array
+              description: 账号信息列表
+              items:
+                type: object
+                properties:
+                  uid:
+                    type: string
+                    description: 账号Id字符串
+                  name:
+                    type: string
+                    description: 账号名称
+                  gid:
+                    type: number
+                    description: 账号组Id
+                  groupName:
+                    type: string
+                    description: 账号组名
+                  authorityLevel:
+                    type: number
+                    description: 账号权限级别
+                  createTime:
+                    type: number
+                    description: 账号创建时间
+                  home:
+                    type: string
+                    description: 账号HOME目录
+                  passwordExpireTime:
+                    type: number
+                    description: 账号密码超时时间
+                  risks:
+                    type: number
+                    description: 账号风险列表
+                  shell:
+                    type: string
+                    description: 账号登录SHELL
+                  status:
+                    type: number
+                    description: 账号状态
+                  type:
+                    type: number
+                    description: 账号类别
+                  updateTime:
+                    type: number
+                    description: 账号更新时间
+                  logins:
+                    type: array
+                    description: 账号登录信息列表
+                    items:
+                      type: object
+                      properties:
+                        ip:
+                          type: string
+                          description: 账号登录源地址
+                        loginTime:
+                          type: number
+                          description: 账号登录时间
+                        logoutTime:
+                          type: number
+                          description: 账号登出时间
+                        type:
+                          type: number
+                          description: 账号登录方式
+                      additionalProperties: false
+                  expireTime:
+                    type: number
+                    description: 账户过期时间
+                  passwordUpdateTime:
+                    type: number
+                    description: 账号密码更新时间
+                additionalProperties: false
+                required:
+                - uid
+                - status
+            processes:
+              type: array
+              description: 进程信息列表
+              items:
+                type: object
+                properties:
+                  pid:
+                    type: number
+                    description: 进程号
+                  gid:
+                    type: number
+                    description: 进程组号
+                  parentId:
+                    type: number
+                    description: 进程父亲号
+                  name:
+                    type: string
+                    description: 进程名称
+                  description:
+                    type: string
+                    description: 进程描述
+                  status:
+                    type: string
+                    description: 进程状态
+                  startTime:
+                    type: number
+                    description: 进程启动时间
+                  cmd:
+                    type: string
+                    description: 进程命令信息
+                  username:
+                    type: string
+                    description: 进程用户名称
+                  path:
+                    type: string
+                    description: 进程路径
+                  version:
+                    type: string
+                    description: 进程版本
+                  classifyId:
+                    type: number
+                    description: 进程分类Id
+                  cpu:
+                    type: number
+                    description: 进程cpu占用百分比
+                  memory:
+                    type: number
+                    description: 进程内存使用量
+                  md5:
+                    type: string
+                    description: 进程文件md5
+                additionalProperties: false
+                required:
+                - pid
+            softwares:
+              type: array
+              description: 软件信息列表
+              items:
+                type: object
+                properties:
+                  arch:
+                    type: string
+                    description: 软件架构
+                  cpe:
+                    type: string
+                    description: 软件指纹
+                  description:
+                    type: string
+                    description: 软件描述
+                  installTime:
+                    type: number
+                    description: 软件安装时间
+                  nameId:
+                    type: number
+                    description: 软件名称Id
+                  name:
+                    type: string
+                    description: 软件名称
+                  classifyId:
+                    type: number
+                    description: 软件分类Id
+                  classify1Id:
+                    type: number
+                    description: 软件一级分类Id
+                  path:
+                    type: string
+                    description: 软件安装路径
+                  vendor:
+                    type: string
+                    description: 软件开发商
+                  version:
+                    type: string
+                    description: 软件版本
+                  languages:
+                    type: array
+                    description: 软件开发语言列表
+                    items: {}
+                  tags:
+                    type: array
+                    description: 软件标签
+                    items: {}
+                  processes:
+                    type: array
+                    description: 软件关联的进程列表
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: 软件的进程名称
+                        pid:
+                          type: number
+                          description: 软件的进程pid
+                      additionalProperties: false
+                      required:
+                      - pid
+                  confPath:
+                    type: string
+                    description: 软件的配置文件路径
+                  username:
+                    type: string
+                    description: 软件运行的用户名
+                  logPath:
+                    type: string
+                    description: 软件的日志文件路径
+                  permission:
+                    type: number
+                    description: 软件的运行权限
+                additionalProperties: false
+                required:
+                - name
+                - classifyId
+                - classify1Id
+                - version
+            services:
+              type: array
+              description: 系统服务列表
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    description: 服务名称
+                  status:
+                    type: number
+                    description: 服务状态
+                  username:
+                    type: string
+                    description: 服务用户名
+                  description:
+                    type: string
+                    description: 服务描述
+                  startType:
+                    type: number
+                    description: 服务启动类型
+                  executableFile:
+                    type: string
+                    description: 服务可执行文件路径
+                  startTime:
+                    type: number
+                    description: 服务启动时间
+                additionalProperties: false
+                required:
+                - name
+                - status
+                - username
+                - description
+                - startType
+                - executableFile
+                - startTime
+            bootItems:
+              type: array
+              description: 开机启动项列表
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    description: 开机启动项名称
+                  publisher:
+                    type: string
+                    description: 开机启动项发布者
+                  status:
+                    type: number
+                    description: 开机启动项状态
+                  username:
+                    type: string
+                    description: 启动用户
+                  registryKey:
+                    type: string
+                    description: 开机启动项注册表位置
+                additionalProperties: false
+                required:
+                - name
+                - publisher
+                - status
+                - username
+                - registryKey
+            crontabs:
+              type: array
+              description: 计划任务列表
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    description: 计划任务名称
+                  cmd:
+                    type: string
+                    description: 计划任务命令
+                  username:
+                    type: string
+                    description: 计划任务执行用户名
+                  executeTimeDescription:
+                    type: string
+                    description: 计划任务执行时间描述信息
+                  createTime:
+                    type: number
+                    description: 计划任务创建时间
+                  status:
+                    type: number
+                    description: 计划任务启用状态
+                additionalProperties: false
+                required:
+                - name
+                - cmd
+                - username
+                - executeTimeDescription
+                - createTime
+                - status
+            shares:
+              type: array
+              description: 网络共享列表
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    description: 共享名称
+                  status:
+                    type: number
+                    description: 共享状态
+                  path:
+                    type: string
+                    description: 共享路径
+                  description:
+                    type: string
+                    description: 共享描述
+                additionalProperties: false
+                required:
+                - name
+                - status
+                - path
+                - description
+            webApps:
+              type: array
+              description: 网站程序列表
+              items:
+                type: object
+                properties:
+                  documentRoot:
+                    type: string
+                    description: 网站应用文档根目录
+                  domain:
+                    type: string
+                    description: 网站应用域名
+                  virtualHost:
+                    type: string
+                    description: 网站应用虚拟主机
+                  type:
+                    type: string
+                    description: 网站应用类型
+                  port:
+                    type: number
+                    description: 网站应用绑定端口
+                  virtualPath:
+                    type: string
+                    description: 网站应用虚拟路径
+                  name:
+                    type: string
+                    description: 网站应用名
+                  version:
+                    type: string
+                    description: 网站应用版本
+                  plugins:
+                    type: array
+                    description: 网站应用插件列表
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: 网站应用插件名称
+                        path:
+                          type: string
+                          description: 网站应用插件路径
+                        version:
+                          type: string
+                          description: 网站应用插件版本
+                      additionalProperties: false
+                additionalProperties: false
+                required:
+                - documentRoot
+                - name
+            webFrames:
+              type: array
+              description: 网站框架列表
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    description: 网站框架名称
+                  version:
+                    type: string
+                    description: 网站框架版本
+                  language:
+                    type: string
+                    description: 网站框架语言
+                  type:
+                    type: string
+                    description: 网站框架类型
+                  path:
+                    type: string
+                    description: 网站框架路径
+                additionalProperties: false
+                required:
+                - name
+                - version
+            webSites:
+              type: array
+              description: 站点列表
+              items:
+                type: object
+                properties:
+                  domain:
+                    type: string
+                    description: 站点域名
+                  ip:
+                    type: string
+                    description: 站点绑定ip
+                  protocol:
+                    type: string
+                    description: 站点协议
+                  port:
+                    type: number
+                    description: 站点端口
+                  username:
+                    type: string
+                    description: 站点用户名
+                  cmd:
+                    type: string
+                    description: 站点启动参数
+                  virtualPaths:
+                    type: array
+                    description: 站点虚拟路径列表
+                    items:
+                      type: object
+                      properties:
+                        physicalPath:
+                          type: string
+                          description: 站点物理路径
+                        group:
+                          type: string
+                          description: 站点路径所属组
+                        permission:
+                          type: string
+                          description: 站点路径权限
+                        language:
+                          type: string
+                          description: 站点路径开发语言
+                        owner:
+                          type: string
+                          description: 站点路径所属者
+                        virtualPath:
+                          type: string
+                          description: 站点虚拟路径
+                      additionalProperties: false
+                      required:
+                      - physicalPath
+                      - group
+                      - permission
+                      - language
+                      - owner
+                      - virtualPath
+                additionalProperties: false
+                required:
+                - domain
+                - ip
+                - protocol
+                - port
+                - username
+                - cmd
+                - virtualPaths
+            users:
+              type: array
+              description: 用户信息列表
+              items:
+                type: object
+                properties:
+                  emails:
+                    type: array
+                    description: 用户邮件列表
+                    items: {}
+                  employeeId:
+                    type: string
+                    description: 用户工号Id
+                  groups:
+                    type: array
+                    description: 用户所属列表
+                    items: {}
+                  name:
+                    type: string
+                    description: 用户名称
+                  phones:
+                    type: array
+                    description: 用户电话列表
+                    items: {}
+                  roles:
+                    type: array
+                    description: 用户角色列表
+                    items: {}
+                  sex:
+                    type: number
+                    description: 用户性别
+                additionalProperties: false
+                required:
+                - employeeId
+            patches:
+              type: array
+              description: 补丁信息列表
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    description: 补丁名称
+                  state:
+                    type: number
+                    description: 补丁状态
+                  version:
+                    type: string
+                    description: 补丁版本号
+                  riskLevel:
+                    type: number
+                    description: 补丁危险等级
+                  installTime:
+                    type: number
+                    description: 补丁安装时间
+                  publishTime:
+                    type: number
+                    description: 补丁发布时间
+                  publisherName:
+                    type: string
+                    description: 补丁发布者名称
+                  programName:
+                    type: string
+                    description: 补丁程序名称
+                  needReboot:
+                    type: number
+                    description: 补丁要求重启系统
+                additionalProperties: false
+                required:
+                - name
+                - version
+            connections:
+              type: array
+              description: 网络连接列表
+              items:
+                type: object
+                properties:
+                  localAddr:
+                    type: string
+                    description: 本地地址
+                  localPort:
+                    type: integer
+                    description: 本地端口
+                  remoteAddr:
+                    type: string
+                    description: 远程地址
+                  remotePort:
+                    type: integer
+                    description: 远程端口
+                  protocol:
+                    type: string
+                    description: 端口协议
+                  process:
+                    type: object
+                    description: 网络连接对应进程
+                    properties:
+                      name:
+                        type: string
+                        description: 进程名称
+                      pid:
+                        type: integer
+                        description: 进程pid
+                    additionalProperties: false
+                    required:
+                    - name
+                    - pid
+                additionalProperties: false
+                required:
+                - localAddr
+                - localPort
+                - remoteAddr
+                - remotePort
+                - protocol
+                - process
+            regedit:
+              type: array
+              description: 注册表信息列表
+              items:
+                type: object
+                properties:
+                  key:
+                    type: string
+                    description: 注册表key
+                  values:
+                    type: array
+                    description: 注册表values
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: 注册表信息名
+                        type:
+                          type: string
+                          description: 注册表信息类型
+                        data:
+                          type: string
+                          description: 注册表信息内容
+                      additionalProperties: false
+                      required:
+                      - name
+                      - type
+                      - data
+                additionalProperties: false
+                required:
+                - key
+                - values
+          additionalProperties: false
+          required:
+          - assetId
+          - uploadTimestamp
+          - adapter
+          - device
+          - ips
+        minItems: 1
+        description: upload：POST /api/xdr/v1/assets/uploadasset；新增资产（上报）
+      description: 原生 JSON 数组请求体。alerts.status_list 仍兼容 uuids；资产上报使用对象数组。
+  required:
+  - action

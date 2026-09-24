@@ -115,3 +115,15 @@ def test_bounded_summary_details_and_unknown_hosts():
     assert '已截短' in summary.details and '还有 ' in summary.details
     assert len(summary.details) <= summaries.MAX_DETAILS + 150
     assert '\u202e' not in summaries.label('name\u202eevil')
+
+
+@pytest.mark.parametrize('fields,expected', [
+    ({'incidentThreatClass':'恶意软件','incidentThreatType':'木马','type':'legacy'}, '恶意软件 / 木马'),
+    ({'incidentThreatType':'木马'}, '木马'),
+    ({'incidentThreatClass':'<img src=x>\n分类'}, '<img src=x> 分类'),
+    ({'incidentThreatClass':{},'type':'legacy'}, 'legacy'),
+    ({}, '类型未提供'),
+])
+def test_native_incident_classification_in_step_summary(fields, expected):
+    summary = summaries.page_summary(1, [{'uuId':'id',**fields}], 1, True)
+    assert f'类型：{expected}；' in summary.details

@@ -1,0 +1,62 @@
+name: sangfor_xdr_bigscreen_manage
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: true
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_bigscreen_manage
+description_cn: 大屏配置管理。delete_setting：删除自定义大屏配置；save_setting：保存大屏配置；update_topology_default_status：编辑拓扑图默认状态。按 action 选择契约；原生字段使用
+  api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description: 大屏配置管理。delete_setting：删除自定义大屏配置；save_setting：保存大屏配置；update_topology_default_status：编辑拓扑图默认状态。按 action 选择契约；原生字段使用
+  api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - delete_setting
+      - save_setting
+      - update_topology_default_status
+      description: delete_setting：删除自定义大屏配置；save_setting：保存大屏配置；update_topology_default_status：编辑拓扑图默认状态
+    customScreenId:
+      type: string
+      description: 路径参数；仅适用于路径包含 customScreenId 的 action。
+    custom_screen_id:
+      type: string
+      description: 路径参数 customScreenId 的兼容别名。
+    api_params:
+      type: object
+      properties:
+        isEnable:
+          type: integer
+          description: 大屏是否启用,0:不启用 1:启用；文档值参考：0=开启；1=关闭；适用动作：save_setting
+        title:
+          type: string
+          description: 大屏标题,20个字符限制；适用动作：save_setting
+        customScreenId:
+          type: string
+          description: uuid，全局唯一,长度限制为36；适用动作：save_setting,update_topology_default_status
+        url:
+          type: string
+          description: 跳转url,如http://baidu.com,100个字符限制；适用动作：save_setting
+        screenShots:
+          type: string
+          description: 大屏截图，base64,用于在大屏页面展示卡片，限制100kb；适用动作：save_setting
+        description:
+          type: string
+          description: 大屏描述,96个字符限制；适用动作：save_setting
+        areasStatus:
+          type: integer
+          description: 区域状态；文档值参考：0=未配置；1=已配置；适用动作：update_topology_default_status
+        keyName:
+          type: string
+          description: 设备大屏名称；适用动作：update_topology_default_status
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action

@@ -1,0 +1,278 @@
+name: sangfor_xdr_bigscreen
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_bigscreen
+description_cn: 大屏查询。topology_default_info：拓扑图默认信息；areas_info：区域资产设备信息；branch_list：获取资产组列表；device_list：接入设备列表；terminal_device_trends：接入终端类型设备趋势图；flow_device_trends：接入网络流量类型设备折线图；firewall_device_trends：接入防火墙类型设备趋势图；vulnerability_device_trends：接入扫描漏洞类型设备类型趋势图；vulnerability_trends：脆弱性趋势图；order_trends：工单趋势图；incident_trends：事件趋势图；asset_trends：风险资产趋势图；device_count：大屏接入设备概括数据；risk_deal_count：大屏风险闭环率；score：大屏评分信息；branch_access_info：资产组访问信息；branch_detail_info：单个资产组详情信息；branch_incidents：获取资产组(资产)的安全事件；asset_trend_details：获取单个资产的安全事件，脆弱性，工单趋势图信息；branch_orders：获取资产组(资产)的工单信息；branch_asset_details：获取指定资产组下资产的详情；asset_details：获取单个资产详情；branch_vulnerabilities：获取资产组(资产)的脆弱性列表；branch_risk_overview：获取资产组的核心资产，安全事件，脆弱性的趋势图数据；branch_totals：获取资产组的不同资产类型数量。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description: 大屏查询。topology_default_info：拓扑图默认信息；areas_info：区域资产设备信息；branch_list：获取资产组列表；device_list：接入设备列表；terminal_device_trends：接入终端类型设备趋势图；flow_device_trends：接入网络流量类型设备折线图；firewall_device_trends：接入防火墙类型设备趋势图；vulnerability_device_trends：接入扫描漏洞类型设备类型趋势图；vulnerability_trends：脆弱性趋势图；order_trends：工单趋势图；incident_trends：事件趋势图；asset_trends：风险资产趋势图；device_count：大屏接入设备概括数据；risk_deal_count：大屏风险闭环率；score：大屏评分信息；branch_access_info：资产组访问信息；branch_detail_info：单个资产组详情信息；branch_incidents：获取资产组(资产)的安全事件；asset_trend_details：获取单个资产的安全事件，脆弱性，工单趋势图信息；branch_orders：获取资产组(资产)的工单信息；branch_asset_details：获取指定资产组下资产的详情；asset_details：获取单个资产详情；branch_vulnerabilities：获取资产组(资产)的脆弱性列表；branch_risk_overview：获取资产组的核心资产，安全事件，脆弱性的趋势图数据；branch_totals：获取资产组的不同资产类型数量。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - topology_default_info
+      - areas_info
+      - branch_list
+      - device_list
+      - terminal_device_trends
+      - flow_device_trends
+      - firewall_device_trends
+      - vulnerability_device_trends
+      - vulnerability_trends
+      - order_trends
+      - incident_trends
+      - asset_trends
+      - device_count
+      - risk_deal_count
+      - score
+      - branch_access_info
+      - branch_detail_info
+      - branch_incidents
+      - asset_trend_details
+      - branch_orders
+      - branch_asset_details
+      - asset_details
+      - branch_vulnerabilities
+      - branch_risk_overview
+      - branch_totals
+      description: topology_default_info：拓扑图默认信息；areas_info：区域资产设备信息；branch_list：获取资产组列表；device_list：接入设备列表；terminal_device_trends：接入终端类型设备趋势图；flow_device_trends：接入网络流量类型设备折线图；firewall_device_trends：接入防火墙类型设备趋势图；vulnerability_device_trends：接入扫描漏洞类型设备类型趋势图；vulnerability_trends：脆弱性趋势图；order_trends：工单趋势图；incident_trends：事件趋势图；asset_trends：风险资产趋势图；device_count：大屏接入设备概括数据；risk_deal_count：大屏风险闭环率；score：大屏评分信息；branch_access_info：资产组访问信息；branch_detail_info：单个资产组详情信息；branch_incidents：获取资产组(资产)的安全事件；asset_trend_details：获取单个资产的安全事件，脆弱性，工单趋势图信息；branch_orders：获取资产组(资产)的工单信息；branch_asset_details：获取指定资产组下资产的详情；asset_details：获取单个资产详情；branch_vulnerabilities：获取资产组(资产)的脆弱性列表；branch_risk_overview：获取资产组的核心资产，安全事件，脆弱性的趋势图数据；branch_totals：获取资产组的不同资产类型数量
+    api_params:
+      type: object
+      properties:
+        devInfo:
+          anyOf:
+          - type: array
+            description: 设备信息；适用动作：areas_info
+            items:
+              type: object
+              properties:
+                id:
+                  type: integer
+                  description: 设备id
+                source:
+                  type: integer
+                  description: 设备来源；文档值参考：1=xdr设备；2=:第三方设备；3=自定义设备
+                bigscreenDevType:
+                  type: array
+                  description: 大屏设备类型；文档值参考：1=防火墙；2=上网审计；3=终端设备；4=网络流量；5=漏洞扫描；6=自定义设备
+                  items: {}
+                ip:
+                  type: string
+                  description: 设备ip；设备为第三方设备，ip必为正常ip
+              additionalProperties: false
+          - type: array
+            description: 设备信息；适用动作：vulnerability_device_trends
+            items:
+              type: object
+              properties:
+                id:
+                  type: integer
+                  description: 设备id
+                ip:
+                  type: string
+                  description: 设备ip
+                gatewayId:
+                  type: string
+                  description: 网关id
+                xdrType:
+                  type: integer
+                  description: 设备类型
+                source:
+                  type: integer
+                  description: 设备来源；文档值参考：1=xdr设备；2=第三方设备；3=自定义设备
+                type:
+                  type: array
+                  description: 大屏设备类型；文档值参考：1=防火墙；2=上网审计；3=终端设备；4=网络流量；5=漏洞扫描；6=自定义设备
+                  items: {}
+              additionalProperties: false
+              required:
+              - source
+              - type
+          - type: array
+            description: 设备信息；适用动作：device_count
+            items:
+              type: object
+              properties:
+                Id:
+                  type: integer
+                  description: 设备id
+                Ip:
+                  type: string
+                  description: 设备ip
+                source:
+                  type: integer
+                  description: 设备来源；文档值参考：1=xdr设备；2=第三方设备；3=自定义设备
+              additionalProperties: false
+              required:
+              - source
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        areas:
+          anyOf:
+          - type: array
+            description: 区域信息；适用动作：areas_info
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 区域名称
+                id:
+                  type: string
+                  description: 区域id
+                branchId:
+                  type: array
+                  description: 资产组id列表
+                  items: {}
+              additionalProperties: false
+          - type: array
+            description: 区域id；适用动作：device_count
+            items: {}
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        startTimestamp:
+          type: integer
+          description: 开始时间；适用动作：areas_info,terminal_device_trends,flow_device_trends,firewall_device_trends,vulnerability_device_trends,vulnerability_trends,order_trends,incident_trends,asset_trends,device_count,risk_deal_count,score,branch_access_info,branch_detail_info,branch_incidents,asset_trend_details,branch_orders,branch_asset_details,branch_vulnerabilities,branch_risk_overview
+        endTimestamp:
+          type: integer
+          description: 结束时间；适用动作：areas_info,terminal_device_trends,flow_device_trends,firewall_device_trends,vulnerability_device_trends,vulnerability_trends,order_trends,incident_trends,asset_trends,device_count,risk_deal_count,score,branch_access_info,branch_detail_info,branch_incidents,asset_trend_details,branch_orders,branch_asset_details,branch_vulnerabilities,branch_risk_overview
+        threatGrade:
+          type: array
+          description: 事件等级；文档值参考：1=低危；2=中危；3=高危；4=严重；适用动作：areas_info,incident_trends,asset_trends,risk_deal_count,score,branch_detail_info
+          items: {}
+        threatName:
+          type: array
+          description: 事件类型；适用动作：areas_info,incident_trends,asset_trends,risk_deal_count,score,branch_detail_info
+          items: {}
+        fixPriority:
+          type: array
+          description: 脆弱性修复优先级；文档值参考：1=低；2=中；3=高；适用动作：areas_info,vulnerability_trends,asset_trends,risk_deal_count,score,branch_detail_info
+          items: {}
+        areasStatus:
+          type: integer
+          description: 区域状态(0:未配置1：已配置)；文档值参考：0=未配置；1=已配置；适用动作：areas_info
+        devinfo:
+          anyOf:
+          - type: array
+            items:
+              type: object
+              properties:
+                id:
+                  type: integer
+                  description: 设备id
+                ip:
+                  type: string
+                  description: 设备ip
+                gatewayId:
+                  type: string
+                  description: 设备网关id
+                xdrType:
+                  type: integer
+                  description: 设备类型
+                type:
+                  type: array
+                  description: 大屏设备类型；文档值参考：1=防火墙；2=上网审计；3=终端设备；4=网络流量；5=漏洞扫描；6=自定义设备
+                  items: {}
+                source:
+                  type: integer
+                  description: 设备来源；文档值参考：1=xdr设备；2=:第三方设备；3=自定义设备
+              additionalProperties: false
+              required:
+              - type
+              - source
+            description: ；适用动作：terminal_device_trends,flow_device_trends
+          - type: array
+            items:
+              type: object
+              properties:
+                id:
+                  type: integer
+                  description: 设备id
+                ip:
+                  type: string
+                  description: 设备ip
+                gatewayId:
+                  type: string
+                  description: 网关ip
+                xdrType:
+                  type: integer
+                  description: 设备类型
+                source:
+                  type: integer
+                  description: 设备来源；文档值参考：1=xdr设备；2=第三方设备；3=自定义设备
+                type:
+                  type: array
+                  description: 大屏设备类型；文档值参考：1=防火墙；2=上网审计；3=终端设备；4=网络流量；5=漏洞扫描；6=:自定义设备
+                  items: {}
+              additionalProperties: false
+              required:
+              - source
+              - type
+            description: ；适用动作：firewall_device_trends
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        branchs:
+          type: array
+          description: 资产组；适用动作：terminal_device_trends,device_count
+          items: {}
+        timeRange:
+          type: string
+          description: 时间范围类型；文档值参考：custom=自定义时间；last24h=最近24小时；last7d=最近7天；last30d=最近30天；适用动作：terminal_device_trends,flow_device_trends,firewall_device_trends,vulnerability_device_trends,vulnerability_trends,order_trends,incident_trends,asset_trends,branch_detail_info,asset_trend_details,branch_risk_overview
+        branchType:
+          type: integer
+          description: 资产组类型；文档值参考：1=全部；2=核心资产；3=普通资产；4=自定义资产组；适用动作：vulnerability_trends,order_trends,incident_trends,asset_trends
+        branchId:
+          anyOf:
+          - type: array
+            description: 资产组id集；适用动作：vulnerability_trends,incident_trends,asset_trends,risk_deal_count,score,branch_detail_info
+            items: {}
+          - type: integer
+            description: 资产组ID；适用动作：branch_incidents,asset_trend_details,branch_orders,branch_asset_details,branch_vulnerabilities,branch_risk_overview,branch_totals
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        branchIds:
+          type: array
+          description: 资产组id列表；适用动作：order_trends
+          items: {}
+        whiteStatus:
+          type: array
+          description: 加白状态，不传默认查询未加白以及部分加白；文档值参考：whitened=已加白；unwhitened=未加白；partiallyWhitened=部分加白；适用动作：incident_trends
+          items: {}
+        sourceBranchIds:
+          type: integer
+          description: 源资产组；适用动作：branch_access_info
+        assetIds:
+          type: array
+          description: 资产ID集合；值可为空,空为查询所有,与magnitude只使用一个,并且优先级高于magnitude；适用动作：branch_incidents,branch_orders,branch_vulnerabilities,branch_risk_overview
+          items: {}
+        magnitude:
+          anyOf:
+          - type: integer
+            description: 核心资产筛选；值可为空,空为查询所有,与assetIds只使用一个,并且优先级低于assetIds；文档值参考：5=普通；7=核心；适用动作：branch_incidents,branch_vulnerabilities,branch_risk_overview
+          - type: string
+            description: 核心资产筛选；值可为空,空为查询所有,与assetIds只使用一个,并且优先级低于assetIds；文档值参考：normal=普通；core=核心；all=全部；适用动作：branch_orders
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        riskTag:
+          type: array
+          description: 事件类型；值可为空,空为查询所有；适用动作：branch_incidents,asset_trend_details,branch_asset_details,branch_risk_overview
+          items: {}
+        incidentSeverity:
+          type: array
+          description: 事件等级；值可为空,空为查询所有；文档值参考：4=严重；3=高危；2=中危；1=低危；适用动作：branch_incidents,asset_trend_details,branch_asset_details,branch_risk_overview
+          items: {}
+        assetId:
+          type: integer
+          description: 资产Id；适用动作：asset_trend_details,asset_details
+        fixPriorityLevel:
+          type: array
+          description: 脆弱性修复优先级；值可为空,空为查询所有；文档值参考：1=低；2=中；3=高；适用动作：asset_trend_details,branch_asset_details,branch_vulnerabilities,branch_risk_overview
+          items: {}
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action

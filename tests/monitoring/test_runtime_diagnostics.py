@@ -13,7 +13,7 @@ from flocks.monitoring import diagnostics as diag
 from flocks.monitoring.adapter import XdrAdapter, ContractError
 from flocks.monitoring.models import COMPONENT_ID
 from flocks.server.routes import security_monitoring as api
-from flocks.tool.registry import Tool, ToolContext, ToolInfo, ToolRegistry, ToolResult
+from flocks.tool.registry import Tool, ToolContext, ToolInfo, ToolRegistry, ToolResult, ToolParameter, ParameterType
 
 
 class Capture:
@@ -74,12 +74,15 @@ async def test_real_tool_display_truncation_preserves_machine_result(monkeypatch
     monkeypatch.setattr(truncation, '_OUTPUT_DIR', output_dir)
     monkeypatch.setattr(truncation, '_last_cleanup_ts', 0)
     payload = {'code': 'Success', 'data': {'list': [{'uuId': str(i), 'name': 'CUSTOMER_SECRET' * 200} for i in range(100)]}}
-    async def handler(ctx):
+    async def handler(ctx, action):
+        assert action == 'list'
         return ToolResult(success=True, output=payload)
-    tool = Tool(ToolInfo(name='sangfor_xdr_incidents', description='Fixture'), handler)
+    tool = Tool(ToolInfo(name='sangfor_xdr_incidents', description='Fixture',
+                         parameters=[ToolParameter(name='action', type=ParameterType.STRING)]), handler)
     client = adapter(monkeypatch, None)
     async def execute(name, ctx, **params):
-        return await tool.execute(ctx)
+        ctx.extra['monitor_resolved_device'] = params['device_id']
+        return await tool.execute(ctx, action=params['action'])
     monkeypatch.setattr(ToolRegistry, 'execute', execute)
     async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
         value = await client.call('private-device', {'action': 'list'}, 'message')

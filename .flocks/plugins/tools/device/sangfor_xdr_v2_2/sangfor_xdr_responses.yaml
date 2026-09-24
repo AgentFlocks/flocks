@@ -1,35 +1,341 @@
 name: sangfor_xdr_responses
 group: XDR
-description: >
-  Manage Sangfor XDR host isolation responses. Query currently isolated
-  hosts and release (unisolate) hosts. Use during incident containment.
-description_cn: >
-  管理深信服 XDR 主机隔离响应。查询当前已隔离主机列表，
-  以及解除主机隔离。适用于安全事件遏制与恢复阶段。
+description: 响应处置。isolate_list：查询隔离主机策略列表；unisolate：解除隔离主机；remove_trusted_file：移除信任文件策略；trusted_file_list：查询信任文件策略列表；release_disposed_file：解除处置文件策略；block_ip_detail：根据策略ID查询封禁地址详情；block_ip_endpoint：新增端侧封禁地址策略；reblock_ip：再次封禁地址策略；block_ip_network：新增网侧封禁地址策略；unblock_ip：解除封禁地址策略；block_ip_list：查询封禁地址策略列表；start_virus_scan：新增病毒查杀任务；virus_scan_status：病毒查杀任务状态检查。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description_cn: 响应处置。isolate_list：查询隔离主机策略列表；unisolate：解除隔离主机；remove_trusted_file：移除信任文件策略；trusted_file_list：查询信任文件策略列表；release_disposed_file：解除处置文件策略；block_ip_detail：根据策略ID查询封禁地址详情；block_ip_endpoint：新增端侧封禁地址策略；reblock_ip：再次封禁地址策略；block_ip_network：新增网侧封禁地址策略；unblock_ip：解除封禁地址策略；block_ip_list：查询封禁地址策略列表；start_virus_scan：新增病毒查杀任务；virus_scan_status：病毒查杀任务状态检查。按
+  action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
 category: custom
 enabled: true
 requires_confirmation: true
 provider: sangfor_xdr
-
 inputSchema:
   type: object
   properties:
     action:
       type: string
-      description: >
-        响应操作类型：
-        - `isolate_list` ：查询已隔离主机策略列表
-        - `unisolate`    ：解除主机隔离
-      enum: [isolate_list, unisolate]
-      default: isolate_list
-    host_ips:
+      enum:
+      - isolate_list
+      - unisolate
+      - remove_trusted_file
+      - trusted_file_list
+      - release_disposed_file
+      - block_ip_detail
+      - block_ip_endpoint
+      - reblock_ip
+      - block_ip_network
+      - unblock_ip
+      - block_ip_list
+      - start_virus_scan
+      - virus_scan_status
+      description: isolate_list：查询隔离主机策略列表；unisolate：解除隔离主机；remove_trusted_file：移除信任文件策略；trusted_file_list：查询信任文件策略列表；release_disposed_file：解除处置文件策略；block_ip_detail：根据策略ID查询封禁地址详情；block_ip_endpoint：新增端侧封禁地址策略；reblock_ip：再次封禁地址策略；block_ip_network：新增网侧封禁地址策略；unblock_ip：解除封禁地址策略；block_ip_list：查询封禁地址策略列表；start_virus_scan：新增病毒查杀任务；virus_scan_status：病毒查杀任务状态检查
+    page_num:
+      type: integer
+      description: 页码（映射到 page，仅适用定义该字段的 action。）
+      minimum: 1
+    page_size:
+      type: integer
+      description: 页面大小；最多查询200条（映射到 pageSize，仅适用定义该字段的 action。）
+      minimum: 1
+      maximum: 200
+    pageNum:
+      type: integer
+      description: 页码（映射到 page，仅适用定义该字段的 action。）
+      minimum: 1
+    start_time:
+      type: integer
+      description: 起始时间；查询处置时间在起始时间后的隔离主机策略（映射到 startTimestamp，仅适用定义该字段的 action。）
+    end_time:
+      type: integer
+      description: 结束时间；查询处置时间在结束时间前的隔离主机策略（映射到 endTimestamp，仅适用定义该字段的 action。）
+    isolate_status:
+      type: integer
+      description: 处置状态列表；0:隔离失败 1:隔离成功 空:查询全部（映射到 isolateStatus，仅适用定义该字段的 action。）
+      enum:
+      - 0
+      - 1
+    host_ip:
+      type: string
+      description: 隔离主机（映射到 hostIp，仅适用定义该字段的 action。）
+    ids:
       type: array
-      description: 要解除隔离的主机 IP 列表（unisolate 时使用）。
       items:
         type: string
-  required: [action]
-
+      minItems: 1
+      description: unisolate 必填：隔离策略 ID 列表，不能用主机 IP 代替。
+    taskId:
+      type: string
+      description: 路径参数；仅适用于路径包含 taskId 的 action。
+    task_id:
+      type: string
+      description: 路径参数 taskId 的兼容别名。
+    api_params:
+      type: object
+      properties:
+        startTimestamp:
+          type: integer
+          description: 起始时间；查询处置时间在起始时间后的隔离主机策略；适用动作：isolate_list,trusted_file_list,block_ip_list
+        endTimestamp:
+          type: integer
+          description: 结束时间；查询处置时间在结束时间前的隔离主机策略；适用动作：isolate_list,trusted_file_list,block_ip_list
+        pageSize:
+          anyOf:
+          - type: integer
+            description: 页面大小；最多查询200条；适用动作：isolate_list
+            minimum: 1
+            maximum: 200
+          - type: integer
+            description: 页面大小；文档值参考：10=默认查询100条；适用动作：trusted_file_list,block_ip_list
+            minimum: 1
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        page:
+          type: integer
+          description: 页码；适用动作：isolate_list,trusted_file_list,block_ip_list
+          minimum: 1
+        isolateStatus:
+          type: integer
+          description: 处置状态列表；0:隔离失败 1:隔离成功 空:查询全部；适用动作：isolate_list
+          enum:
+          - 0
+          - 1
+        hostIp:
+          type: string
+          description: 隔离主机；适用动作：isolate_list
+        ids:
+          anyOf:
+          - type: array
+            description: 隔离主机策略ID列表；适用动作：unisolate
+            items:
+              type: string
+              minLength: 1
+            minItems: 1
+          - type: array
+            description: 信任文件策略ID；正则："^[0-9a-f]+$"；适用动作：remove_trusted_file,release_disposed_file
+            items: {}
+            minItems: 1
+            maxItems: 200
+          - type: array
+            description: 策略id列表；最大数组长度50；适用动作：block_ip_detail,reblock_ip,unblock_ip
+            items: {}
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        dealStatus:
+          type: array
+          description: 处置状态枚举，0-处置成功 1-处置失败 2-处置中 3-解除中 4-解除失败 ，默认为[]，表示查询全部；文档值参考：0=处置成功；1=处置失败；2=处置中；3=解除中；4=解除失败；适用动作：trusted_file_list
+          items: {}
+        sortInfos:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: 排序字段名字；文档值参考：dealTime=处置时间；username=处置人
+              sort:
+                type: string
+                description: 排序方式，desc或asc，默认desc；文档值参考：desc=降序；asc=升序
+            additionalProperties: false
+          description: ；适用动作：trusted_file_list
+        searchInfos:
+          type: array
+          description: 模糊搜索；适用动作：trusted_file_list,block_ip_list
+          items:
+            type: object
+            properties:
+              fieldName:
+                type: string
+                description: 搜索字段；文档值参考：hostIp=所属资产；filePath=文件；fileMd5=文件md5；username=处置人
+              fieldValue:
+                type: string
+                description: 搜索字段的值
+            additionalProperties: false
+        name:
+          type: string
+          description: 规则名称；正则： "[^*<>\"'%\\[\\]+&\\\\]*"   最小长度1，最大长度512 名称可以重复；适用动作：block_ip_endpoint,block_ip_network
+        reason:
+          type: string
+          description: 封禁备注；正则："[^*<>\"'%\\[\\]+&\\\\]*"；适用动作：block_ip_endpoint,block_ip_network
+        timeType:
+          type: string
+          description: 封禁时长类型；枚举：1-forever-永久封禁，2-temporary-自定义封禁时长，当类型为temporary时，timeUnit 和 timeValue 都必须填；文档值参考：forever=永久封禁；temporary=自定义封禁时长；适用动作：block_ip_endpoint,block_ip_network
+        timeValue:
+          type: integer
+          description: 封禁时长，当封禁时长类型为自定义封禁时长时，该字段不能为空；当timeUnit 是 d 时，最小1，最大15，当timeUnit 是h时，最小是1，最大是360，当timeUnit时m时，最小是3，最大是21600；适用动作：block_ip_endpoint,block_ip_network
+        timeUnit:
+          type: string
+          description: 时间单位，当封禁时长类型为自定义封禁时长时，该字段不能为空；枚举值 d天，h小时，m分钟；文档值参考：d=天；h=小时；m=分钟；适用动作：block_ip_endpoint,block_ip_network
+        plugIpList:
+          type: array
+          description: 封堵ip列表；正则："[^*<>\"'%\\[\\]+&\\\\]*"；适用动作：block_ip_endpoint
+          items: {}
+        direction:
+          type: string
+          description: 封堵方向；文档值参考：SRC_IP=源ip；DST_IP=目的ip；SRC_DST_IP=其他；适用动作：block_ip_endpoint
+        plugPort:
+          type: array
+          description: 封堵端口；限制范围：1<= port <= 65535；文档值参考：["any"]=全部端口；["100"]=端口100；["100-10000"]=端口范围100-10000；适用动作：block_ip_endpoint
+          items: {}
+        devices:
+          anyOf:
+          - type: array
+            description: 设备信息列表；适用动作：block_ip_endpoint
+            items:
+              type: object
+              properties:
+                devId:
+                  type: integer
+                  description: 设备id
+                devType:
+                  type: string
+                  description: 设备类型；枚举值 [EDR,EDR LITE，SAAS EDR LITE，SAAS EDR]；文档值参考：EDR=EDR；EDR LITE=EDR LITE；SAAS EDR LITE=SAAS
+                    EDR LITE；SAAS EDR=SAAS EDR
+                devName:
+                  type: string
+                  description: 设备名字；正则： "^[^*<>()\"'%\\[\\]+&\\\\]*$"
+                devVersion:
+                  type: string
+                  description: 设备版本；正则： "^[^*<>()\"'%\\[\\]+&\\\\]*$"
+                agents:
+                  type: array
+                  description: 封堵终端列表
+                  items:
+                    type: object
+                    properties:
+                      agentId:
+                        type: string
+                        description: 终端id；正则："[^*<>\"'%\\[\\]+&\\\\]*"
+                      agentIp:
+                        type: string
+                        description: 终端IP；正则："[^*<>\"'%\\[\\]+&\\\\]*"
+                      branchName:
+                        type: string
+                        description: 资产组名；正则："[^*<>\"'%\\[\\]+&\\\\]*"
+                    additionalProperties: false
+                    required:
+                    - agentId
+              additionalProperties: false
+              required:
+              - devId
+              - devType
+              - devName
+              - agents
+          - type: array
+            description: 设备信息列表；适用动作：block_ip_network
+            items:
+              type: object
+              properties:
+                devId:
+                  type: integer
+                  description: 设备id
+                devName:
+                  type: string
+                  description: 设备名字；最大长度8
+                devType:
+                  type: string
+                  description: 设备类型；枚举值 [AF,SIP,EDR,MIRROR,STA,CWPP,EDR LITE,LOCAL XDR,SIR，SAAS EDR LITE，SAAS EDR]；文档值参考：AF=AF；SIP=SIP；EDR=EDR；MIRROR=MIRROR；STA=STA；CWPP=CWPP；EDR
+                    LITE=EDR LITE；LOCAL XDR=LOCAL XDR；SIR=SIR；SAAS EDR LITE=SAAS EDR LITE；SAAS EDR=SAAS EDR
+                devVersion:
+                  type: string
+                  description: 设备版本
+              additionalProperties: false
+              required:
+              - devId
+              - devName
+              - devType
+              - devVersion
+          - type: array
+            description: 设备集合；适用动作：start_virus_scan
+            items:
+              type: object
+              properties:
+                devId:
+                  type: integer
+                  description: 设备ID devId和gatewayId有一个就好，最好传gatewayId
+                devName:
+                  type: string
+                  description: 设备名称
+                devType:
+                  type: string
+                  description: 设备类型：枚举【EDR,SAAS EDR】；文档值参考：EDR=；SAAS EDR=
+                assetId:
+                  type: integer
+                  description: 资产ID
+                agentId:
+                  type: string
+                  description: 终端ID
+                mgrId:
+                  type: string
+                devIp:
+                  type: object
+                  description: 设备Ip 只能是ip类型
+                  properties: {}
+                  additionalProperties: true
+                assetIp:
+                  type: string
+                  description: 资产Ip 只能是ip类型
+                gatewayId:
+                  type: string
+                  description: 网关ID devId和gatewayId有一个就好，最好传gatewayId
+              additionalProperties: false
+              required:
+              - devId
+              - devType
+              - assetId
+              - agentId
+              - mgrId
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        blockIpRule:
+          type: object
+          description: 封禁对象匹配规则；适用动作：block_ip_network
+          properties:
+            type:
+              type: string
+              description: 匹配字段；正则："[^*<>\"'%\\[\\]+&\\\\]*"；文档值参考：SRC_IP=源ip；DST_IP=目的ip；URL=链接；DNS=域名
+            mode:
+              type: string
+              description: 匹配模式；枚举 [in]；文档值参考：in=
+            view:
+              type: array
+              description: 匹配值；正则："[^*<>\"'%\\[\\]+&\\\\]*"
+              items: {}
+          additionalProperties: false
+          required:
+          - type
+          - mode
+          - view
+        status:
+          type: array
+          description: 封禁状态列表；传null或者[]表示全部  block success已封禁, block failed封禁失败, unblocked已解封, part block success部分封禁成功, part
+            unblock success部分解封成功, block ip in deal封禁中, unblock ip in deal解封中；文档值参考：[]=表示全部；[block success]=已封禁；[block failed]=封禁失败；[unblocked]=已解封；[block
+            success,block failed,unblocked]=已封禁，封禁失败, 已解封；适用动作：block_ip_list
+          items: {}
+        sortInfo:
+          type: object
+          description: 排序信息；适用动作：block_ip_list
+          properties:
+            name:
+              type: string
+              description: 排序字段名字；枚举：[ createUser, createTime, updateTime ]，不传默认 updateTime；文档值参考：createUser=处置人；createTime=创建时间；updateTime=更新时间
+            sort:
+              type: string
+              description: 排序方式；枚举值：desc降序， asc升序，不传默认desc；文档值参考：desc=降序；asc=升序
+          additionalProperties: false
+        scanType:
+          type: string
+          description: '查杀类型: fast-快速查杀 overall-全盘查杀（默认）；文档值参考：fast=快速查杀；overall=全盘查杀；适用动作：start_virus_scan'
+        scanMode:
+          type: string
+          description: '扫描模式（cpu控速模式）: fast- 极速模式  adaptive- 智适应模式（默认） lowPower-低耗模式；文档值参考：fast=极速模式；adaptive=智适应模式；lowPower=低耗模式；适用动作：start_virus_scan'
+        source:
+          type: string
+          description: 下发来源；文档值参考：GPT_AUTO=GPT自动处置；GPT_MANUAL=GPT手动处置；适用动作：start_virus_scan
+        sourceName:
+          type: string
+          description: 来源名称；适用动作：start_virus_scan
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action
 handler:
   type: script
   script_file: sangfor_xdr.handler.py
   function: run_responses
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。

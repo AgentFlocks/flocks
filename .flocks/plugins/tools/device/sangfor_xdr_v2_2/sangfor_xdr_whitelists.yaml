@@ -1,65 +1,307 @@
 name: sangfor_xdr_whitelists
 group: XDR
-description: >
-  Manage Sangfor XDR whitelists. Create, query, update, delete whitelist
-  rules, and toggle their enabled/disabled status. Use to suppress
-  known benign alerts.
-description_cn: >
-  管理深信服 XDR 白名单规则。支持新增、查询、修改、删除白名单，
-  以及切换白名单启用/禁用状态。用于抑制已知合规告警。
+description: 白名单。list：查询白名单列表信息；create：新增白名单；update：根据id修改白名单；delete：删除白名单；toggle_status：根据id修改白名单的启用状态。按 action 选择契约；原生字段使用
+  api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description_cn: 白名单。list：查询白名单列表信息；create：新增白名单；update：根据id修改白名单；delete：删除白名单；toggle_status：根据id修改白名单的启用状态。按 action 选择契约；原生字段使用
+  api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
 category: custom
 enabled: true
 requires_confirmation: true
 provider: sangfor_xdr
-
 inputSchema:
   type: object
   properties:
     action:
       type: string
-      description: >
-        白名单操作类型：
-        - `list`          ：查询白名单列表
-        - `create`        ：新增白名单
-        - `update`        ：根据 ID 修改白名单
-        - `delete`        ：删除白名单
-        - `toggle_status` ：根据 ID 切换白名单启用状态
-      enum: [list, create, update, delete, toggle_status]
-      default: list
+      enum:
+      - list
+      - create
+      - update
+      - delete
+      - toggle_status
+      description: list：查询白名单列表信息；create：新增白名单；update：根据id修改白名单；delete：删除白名单；toggle_status：根据id修改白名单的启用状态
     page_size:
       type: integer
       description: 每页条数（list 时使用）。
-      default: 20
+      minimum: 1
     page_num:
       type: integer
       description: 页码，从 1 开始。
-      default: 1
+      minimum: 1
     id:
       type: string
-      description: 白名单ID（update / toggle_status 时必填）。
+      description: 路径参数；仅适用于路径包含 id 的 action。
     ids:
       type: array
       description: 白名单ID列表（delete 时使用）。
       items:
         type: string
+    pageNum:
+      type: integer
+      description: 页码；起始页码，最小值为1（映射到 page，仅适用定义该字段的 action。）
+      minimum: 1
+    host_ip:
+      type: array
+      description: 生效主机列表；① 列表最大长度为100000，② 如果isHostAll=true，则该参数可以不填，如果isHostAll=false，则该参数不能不填；不能包含^"'&<>()+%\\特殊字符（映射到
+        hostIp，仅适用定义该字段的 action。）
+      items:
+        type: string
+        minLength: 1
+    status:
+      type: string
+      anyOf:
+      - type: string
+        description: 白名单的启用状态；不能包含^"'&<>()+%\\特殊字符
+        enum:
+        - enable
+        - disable
+      - type: string
+        description: 白名单状态；不能包含^"'&<>()+%\\特殊字符
+        enum:
+        - enable
+        - disable
+      - type: string
+        description: 白名单的启用状态；不能为空串且不能为null
+        enum:
+        - enable
+        - disable
+    isHostAll:
+      type: boolean
+      description: 是否选择全部生效主机
+    hostIp:
+      type: array
+      anyOf:
+      - type: array
+        description: 生效主机列表；① 列表最大长度为100000，② 如果isHostAll=true，则该参数可以不填，如果isHostAll=false，则该参数不能不填；不能包含^"'&<>()+%\\特殊字符
+        items:
+          type: string
+          minLength: 1
+      - type: array
+        description: 生效主机列表；① 列表最大长度为100000，② 如果isHostAll=true，则该参数可以不填，如果isHostAll=false，则该参数不能不填
+        items:
+          type: string
+          minLength: 1
+    timeRange:
+      type: array
+      description: 生效时间，生效起始时间戳和结束时间戳；如果isUnlimited=1，则该参数可以不填，如果isUnlimited=0，则该参数必填；不能包含^"'&<>()+%\\特殊字符
+      items:
+        type: integer
+      minItems: 2
+      maxItems: 2
+    ruleList:
+      type: array
+      anyOf:
+      - type: array
+        description: 白名单匹配规则列表
+        items:
+          type: object
+          properties:
+            type:
+              type: string
+              description: 匹配字段；不能包含[^*<>()"'%\[\]+&\\]特殊字符
+            mode:
+              type: string
+              description: 匹配方式；不能包含[^*<>()"'%\[\]+&\\]特殊字符，无需使用双引号
+            view:
+              type: array
+              description: 匹配值
+              items: {}
+              minItems: 1
+              maxItems: 1000
+            isIgnorecase:
+              type: boolean
+              description: 是否忽略大小写
+          additionalProperties: false
+          required:
+          - type
+          - mode
+          - view
+          - isIgnorecase
+        minItems: 1
+        maxItems: 30
+      - type: array
+        description: 白名单匹配规则列表；不能包含[^*<>()"'%\[\]+&\\]特殊字符
+        items:
+          type: object
+          properties:
+            type:
+              type: string
+              description: 匹配字段；不能包含[^*<>()"'%\[\]+&\\]特殊字符
+            mode:
+              type: string
+              description: 匹配方式；不能包含[^*<>()"'%\[\]+&\\]特殊字符
+            view:
+              type: array
+              description: 匹配值
+              items: {}
+              minItems: 1
+              maxItems: 1000
+            isIgnorecase:
+              type: boolean
+              description: 是否忽略大小写
+          additionalProperties: false
+          required:
+          - type
+          - mode
+          - view
+          - isIgnorecase
+    threatSubTypeIds:
+      type: array
+      anyOf:
+      - type: array
+        description: 攻击子类型；一定会查询值为all的白名单；列表的值不能包含 "'&<>()+%\ 这些特殊字段
+        items: {}
+      - type: array
+        description: 攻击子类，控制使用哪种白名单模板，如果有多个攻击子类，则为compCommon；如果值包含all，代表选择全部的攻击子类
+        items: {}
+    reason:
+      type: string
+      description: 备注；不能包含^"'&<>()+%\\特殊字符
     name:
       type: string
-      description: 白名单名称（create / update 时使用）。
-    type:
-      type: string
-      description: 白名单类型（create / update 时使用）。
-    value:
-      type: string
-      description: 白名单匹配值（create / update 时使用）。
-    description:
-      type: string
-      description: 白名单说明（create / update 时使用）。
-    status:
-      type: integer
-      description: 启用状态（toggle_status 时使用）。
-  required: [action]
-
+      anyOf:
+      - type: string
+        description: 白名单的规则名称；白名单规则名称不可以重复；不能包含^"'&<>()+%\\特殊字符
+        minLength: 1
+        maxLength: 255
+      - type: string
+        description: 白名单的规则名称；白名单规则名称不可以重复
+        minLength: 1
+        maxLength: 255
+    api_params:
+      type: object
+      properties:
+        keyword:
+          type: string
+          description: 模糊查询值；查询字段范围：srcIp\dstIp\创建人\规则名称；不能包含 "'&<>()+%\ 这些特殊字段；适用动作：list
+        pageSize:
+          type: integer
+          description: 分页大小；每页展示的数据条数；适用动作：list
+          minimum: 1
+        page:
+          type: integer
+          description: 页码；起始页码，最小值为1；适用动作：list
+          minimum: 1
+        order:
+          type: string
+          description: 排序方式；如果sortKey为null，则order的取值为desc；如果sortKey不为null，则order的取值为指定值；不能包含 "'&<>()+%\ 这些特殊字段；适用动作：list
+        sortKey:
+          type: string
+          description: 排序字段；如果sortKey为null，则默认为createTime，所有字段均可排序；不能包含 "'&<>()+%\ 这些特殊字段；适用动作：list
+        threatSubTypeIds:
+          type: array
+          description: 攻击子类型；一定会查询值为all的白名单；列表的值不能包含 "'&<>()+%\ 这些特殊字段；适用动作：list,create,update
+          items: {}
+        status:
+          type: string
+          description: 白名单的启用状态；不能包含^"'&<>()+%\\特殊字符；适用动作：create,update,toggle_status
+          enum:
+          - enable
+          - disable
+        isHostAll:
+          type: boolean
+          description: 是否选择全部生效主机；适用动作：create,update
+        hostIp:
+          type: array
+          description: 生效主机列表；① 列表最大长度为100000，② 如果isHostAll=true，则该参数可以不填，如果isHostAll=false，则该参数不能不填；不能包含^"'&<>()+%\\特殊字符；适用动作：create,update
+          items:
+            type: string
+            minLength: 1
+        name:
+          type: string
+          description: 白名单的规则名称；白名单规则名称不可以重复；不能包含^"'&<>()+%\\特殊字符；适用动作：create,update
+          minLength: 1
+          maxLength: 255
+        reason:
+          type: string
+          description: 备注；不能包含^"'&<>()+%\\特殊字符；适用动作：create,update
+        isUnlimited:
+          anyOf:
+          - type: integer
+            description: 是否永久生效；适用动作：create
+            enum:
+            - 0
+            - 1
+          - type: boolean
+            description: 是否永久生效；适用动作：update
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        timeRange:
+          type: array
+          description: 生效时间，生效起始时间戳和结束时间戳；如果isUnlimited=1，则该参数可以不填，如果isUnlimited=0，则该参数必填；不能包含^"'&<>()+%\\特殊字符；适用动作：create,update
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+        ruleList:
+          anyOf:
+          - type: array
+            description: 白名单匹配规则列表；适用动作：create
+            items:
+              type: object
+              properties:
+                type:
+                  type: string
+                  description: 匹配字段；不能包含[^*<>()"'%\[\]+&\\]特殊字符
+                mode:
+                  type: string
+                  description: 匹配方式；不能包含[^*<>()"'%\[\]+&\\]特殊字符，无需使用双引号
+                view:
+                  type: array
+                  description: 匹配值
+                  items: {}
+                  minItems: 1
+                  maxItems: 1000
+                isIgnorecase:
+                  type: boolean
+                  description: 是否忽略大小写
+              additionalProperties: false
+              required:
+              - type
+              - mode
+              - view
+              - isIgnorecase
+            minItems: 1
+            maxItems: 30
+          - type: array
+            description: 白名单匹配规则列表；不能包含[^*<>()"'%\[\]+&\\]特殊字符；适用动作：update
+            items:
+              type: object
+              properties:
+                type:
+                  type: string
+                  description: 匹配字段；不能包含[^*<>()"'%\[\]+&\\]特殊字符
+                mode:
+                  type: string
+                  description: 匹配方式；不能包含[^*<>()"'%\[\]+&\\]特殊字符
+                view:
+                  type: array
+                  description: 匹配值
+                  items: {}
+                  minItems: 1
+                  maxItems: 1000
+                isIgnorecase:
+                  type: boolean
+                  description: 是否忽略大小写
+              additionalProperties: false
+              required:
+              - type
+              - mode
+              - view
+              - isIgnorecase
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        whiteIdList:
+          type: array
+          description: 白名单id列表；不能包含^"'&<>()+%\\特殊字符；适用动作：delete
+          items:
+            type: string
+            minLength: 1
+          minItems: 1
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action
 handler:
   type: script
   script_file: sangfor_xdr.handler.py
   function: run_whitelists
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。

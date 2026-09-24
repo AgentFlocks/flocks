@@ -1,0 +1,93 @@
+name: sangfor_xdr_riskassets
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_riskassets
+description_cn: 风险主机。trends：风险主机趋势图；list：查询指定风险主机资产接口。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description: 风险主机。trends：风险主机趋势图；list：查询指定风险主机资产接口。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - trends
+      - list
+      description: trends：风险主机趋势图；list：查询指定风险主机资产接口
+    api_params:
+      type: object
+      properties:
+        startTimestamp:
+          type: integer
+          description: 起始时间戳；适用动作：trends,list
+        endTimestamp:
+          type: integer
+          description: 结束时间戳；适用动作：trends,list
+        timeField:
+          type: string
+          description: 过滤的时间字段；文档值参考：detectTime=最近检测时间；firstTime=首次发现时间；适用动作：trends
+        filterParam:
+          type: object
+          description: 其他过滤字段；适用动作：trends
+          properties:
+            severities:
+              type: array
+              description: 风险等级；文档值参考：[ ]=表示全部；[0]=信息；[1]=低危；[2]=中危；[3]=高危；[4]=严重
+              items: {}
+          additionalProperties: false
+        aggBy:
+          type: array
+          description: 分组字段；不填时间字段则会使用timeField作为趋势图的时间节点字段；文档值参考：["severity", "detectTime"]=根据严重等级按检测时间查询趋势图；["severity"]=查询时不填时间字段则采用timeField字段统计；[]=不填时间以外的其他字段则查询不分类的趋势图；适用动作：trends
+          items: {}
+        aggFuncs:
+          type: array
+          description: 聚合操作；适用动作：trends
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: 聚合结果名称；聚合操作的名称可自定义
+              func:
+                type: string
+                description: 聚合操作名称；文档值参考：count=统计数量
+              param:
+                type: string
+                description: 聚合字段
+            additionalProperties: false
+            required:
+            - name
+            - func
+            - param
+        interval:
+          type: string
+          description: 时间间隔；目前数字部分仅支持1；文档值参考：1H=一小时；1d=一天；适用动作：trends
+        sort:
+          type: string
+          description: 排序方法；这里的排序字段只能是 聚合结果名(aggFunc中的name) 或 聚合字段的名称(aggBy中的字段), 支持多字段排序 使用英文逗号隔开；适用动作：trends,list
+        hostAssetIds:
+          type: array
+          description: 资产ID集合；为空时查询全部；适用动作：list
+          items: {}
+        page:
+          type: integer
+          description: 页码；适用动作：list
+          minimum: 1
+        pageSize:
+          type: integer
+          description: 页面大小；适用动作：list
+          minimum: 1
+        hostBranchIds:
+          type: array
+          description: 资产组ID集合；适用动作：list
+          items: {}
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action

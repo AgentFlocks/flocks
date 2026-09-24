@@ -38,7 +38,7 @@ class FixtureAdapter:
         assert params['action'] in {'list', 'get_entities'}
         if params['action'] == 'get_entities':
             return {'code': 0, 'data': {'list': [{'hostId': 'host-1', 'ip': '192.0.2.1'}]}}
-        return {'code': 0, 'data': {'list': [{'uuId': 'event-1', 'name': 'Synthetic event', 'riskLevel': 1, 'hostIp': '192.0.2.1'}], 'total': 1}}
+        return {'code': 0, 'data': {'list': [{'uuId': 'event-1', 'name': 'Synthetic event', 'incidentSeverity': 4, 'hostIp': '192.0.2.1'}], 'total': 1}}
 
 @pytest.mark.asyncio
 async def test_daily_reservation_concurrent_recovery_midnight(policy):
@@ -84,6 +84,7 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     day = attempts[0]['business_date']
     data = await snapshot(policy.owner, policy.scope, day)
     assert data['metrics']['events'] == 1 and data['metrics']['started'] == 2
+    assert data['metrics']['risk'] == 1 and data['events'][0]['incidentSeverity'] == 4
     assert data['events'][0]['closure'] == 'open'
     messages = await Message.list_with_parts(attempts[0]['session_id'])
     tools = [p for m in messages for p in m.parts if p.type == 'tool']
@@ -141,6 +142,25 @@ def test_unknown_contract_never_becomes_no_events(payload):
 @pytest.mark.parametrize('risk', [3, 4, None, '1', 99])
 def test_unknown_not_ignored(risk):
     assert normalize('xdr', {'uuId': 'id', 'riskLevel': risk})['risk'] == 'unknown'
+
+
+@pytest.mark.parametrize('severity,risk', [(-1, 'unknown'), (1, 'unknown'), (2, 'risk'), (3, 'risk'), (4, 'risk'),
+                                         (0, 'unknown'), (5, 'unknown'), (None, 'unknown'), ('4', 'unknown'), (True, 'unknown')])
+def test_native_incident_severity_takes_precedence(severity, risk):
+    event = normalize('xdr', {'uuId': 'id', 'incidentSeverity': severity, 'riskLevel': 0,
+                              'incidentThreatClass': '恶意软件', 'incidentThreatType': '木马'})
+    assert event['risk'] == risk
+    assert event['riskLevel'] is None
+    assert event['incidentSeverity'] == (severity if type(severity) is int and severity in {-1, 1, 2, 3, 4} else None)
+    assert event['incidentThreatClass'] == '恶意软件' and event['incidentThreatType'] == '木马'
+    if risk == 'risk': assert 'incidentSeverity' in event['reason']
+
+
+@pytest.mark.parametrize('level,risk', [(0,'risk'), (1,'risk'), (2,'risk'), (3,'unknown'), (4,'unknown'), (5,'unknown')])
+def test_legacy_risk_level_keeps_its_own_enum(level, risk):
+    event = normalize('xdr', {'uuId': 'id', 'riskLevel': level})
+    assert event['risk'] == risk and event['severitySource'] == 'riskLevel'
+    assert event['riskLevel'] == level and event['incidentSeverity'] is None
 
 @pytest.mark.asyncio
 async def test_full_pagination_missing_page_does_not_advance_cursor(policy):

@@ -1,10 +1,18 @@
-"""Sangfor XDR read-only contract; no device requests happen during discovery."""
+"""Sangfor XDR contract with read-only defaults; discovery never calls devices."""
 import json
+from flocks.session.interaction_policy import monitoring_call_scope
 from flocks.tool.registry import ToolContext, ToolRegistry
 from flocks.tool.structured_output import OutputCapture, StructuredOutputError, bounded_copy
 from . import diagnostics as diag
 
 ALLOWED_ACTIONS = frozenset({'list', 'get_entities', 'get_proof'})
+QUERY_FIELDS = {'deal_statuses', 'white_status', 'time_field'}
+
+
+def require_query_contract(info):
+    properties = info.get_schema().to_json_schema().get('properties', {})
+    if not QUERY_FIELDS <= properties.keys():
+        raise ContractError('请更新 XDR API 工具：缺少处置状态、加白状态或时间字段筛选能力')
 
 
 class ContractError(RuntimeError):
@@ -31,35 +39,39 @@ async def discover():
                     and await get_device_tool_enabled(device.id, info.name) is not False):
                 schema = info.get_schema().to_json_schema()
                 properties = schema.get('properties', {})
-                if {'action', 'start_time', 'end_time', 'page_num', 'page_size', 'uuid', 'entity_type'} <= properties.keys():
+                if {'action', 'start_time', 'end_time', 'page_num', 'page_size', 'uuid', 'entity_type', *QUERY_FIELDS} <= properties.keys():
                     candidates.append((device.id, info.name))
     if len(candidates) != 1:
         reason = ('未找到已启用的 XDR 接入，请先在设备接入中添加并启用 XDR' if not enabled_devices else
                   'XDR 接入缺少地址或认证信息，请在设备接入中补全' if not configured_devices else
                   '存在多个可用 XDR 接入，当前仅支持唯一监测目标' if len(candidates) > 1 else
-                  'XDR 事件查询工具不可用，请检查工具启用状态、确认要求及只读查询能力')
+                  'XDR 事件查询工具不可用，请更新 XDR API 工具并检查筛选字段、工具启用状态及确认要求')
         return [], None, reason
     device, tool = candidates[0]
     return [device], tool, None
 
 
 class XdrAdapter:
+    allowed_actions = ALLOWED_ACTIONS
+
     def __init__(self, policy, session_id):
         self.policy, self.session_id = policy, session_id
 
     async def call(self, device, params, message_id):
-        with diag.tool_call(), diag.span('tool.execute', device=diag.opaque(device),
-                                        action=params.get('action') if params.get('action') in ALLOWED_ACTIONS else 'other'):
+        with monitoring_call_scope(self.policy.tool, device, params), diag.tool_call(), diag.span('tool.execute', device=diag.opaque(device),
+                                        action=params.get('action') if params.get('action') in self.allowed_actions else 'other'):
             return await self._call(device, params, message_id)
 
     async def _call(self, device, params, message_id):
-        if params.get('action') not in ALLOWED_ACTIONS or device not in self.policy.devices:
+        if params.get('action') not in self.allowed_actions or device not in self.policy.devices:
             diag.event('adapter.failure', failure=True, reason='permission')
             raise PermissionError('Monitoring permits only bound read-only XDR actions')
         tool = ToolRegistry.get(self.policy.tool)
         if tool is None or not tool.info.enabled or tool.info.requires_confirmation:
             diag.event('adapter.failure', failure=True, reason='unavailable')
             raise ContractError('只读查询能力不可用或需要确认')
+        if params.get('action') == 'list' and QUERY_FIELDS.intersection(params):
+            require_query_contract(tool.info)
         ctx = ToolContext(session_id=self.session_id, message_id=message_id, agent='rex')
         capture = OutputCapture(self.policy.tool)
         ctx._output_capture = capture
@@ -137,15 +149,28 @@ def page_items(value):
 
 
 def normalize(device, raw):
-    level = raw.get('riskLevel')
+    # Native incidents use ascending incidentSeverity; legacy riskLevel has
+    # the opposite direction. Never fall back from a present but invalid native
+    # field, or a conflicting legacy value could override the actual response.
+    native = 'incidentSeverity' in raw
+    field = 'incidentSeverity' if native else 'riskLevel'
+    level = raw.get(field)
+    risk_levels = {2, 3, 4} if native else {0, 1, 2}
+    valid_levels = {-1, 1, 2, 3, 4} if native else {0, 1, 2, 3, 4, 5}
+    valid = type(level) is int and level in valid_levels
     # Low/info is not evidence of a benign event. No auto-ignore policy exists.
-    risk = 'risk' if type(level) is int and 0 <= level <= 2 else 'unknown'
+    risk = 'risk' if valid and level in risk_levels else 'unknown'
     return {
         'key': f'{device}:incident:{raw["uuId"]}', 'id': raw['uuId'], 'device': device,
         'name': str(raw.get('name') or '未命名事件')[:300],
-        'risk': risk, 'riskLevel': level if type(level) is int else None,
+        'risk': risk, 'riskLevel': level if valid and not native else None,
+        'incidentSeverity': level if valid and native else None,
+        'severitySource': field if valid else None,
+        'incidentThreatClass': raw['incidentThreatClass'][:160] if isinstance(raw.get('incidentThreatClass'), str) else '',
+        'incidentThreatType': raw['incidentThreatType'][:160] if isinstance(raw.get('incidentThreatType'), str) else '',
         'host': str(raw.get('hostIp') or '')[:200],
         'alertIds': [str(x)[:200] for x in raw.get('alertIds', [])] if isinstance(raw.get('alertIds'), list) else [],
-        'closure': 'open', 'disposition': '未启用',
-        'reason': 'XDR 风险等级 0–2' if risk == 'risk' else '缺少明确忽略依据，保持待判定',
+        'closure': 'open', 'disposition': '待人工确认',
+        'dealStatus': raw.get('dealStatus') if type(raw.get('dealStatus')) is int else None,
+        'reason': ('XDR 事件等级 incidentSeverity 2–4（中危、高危、严重）' if native else 'XDR 旧版 riskLevel 0–2') if risk == 'risk' else '缺少明确忽略依据，保持待判定',
     }

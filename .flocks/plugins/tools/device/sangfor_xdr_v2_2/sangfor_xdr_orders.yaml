@@ -1,0 +1,136 @@
+name: sangfor_xdr_orders
+group: XDR
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_orders
+description_cn: 工单查询。stats：查询工单数量；aggregation：聚合计算工单数量；list：获取工单管理下的全部工单。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+description: 工单查询。stats：查询工单数量；aggregation：聚合计算工单数量；list：获取工单管理下的全部工单。按 action 选择契约；原生字段使用 api_params，数组请求体使用 api_body。返回原始响应，不裁剪字段。
+response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - stats
+      - aggregation
+      - list
+      description: stats：查询工单数量；aggregation：聚合计算工单数量；list：获取工单管理下的全部工单
+    api_params:
+      type: object
+      properties:
+        startTimestamp:
+          type: integer
+          description: 起始时间（单位秒）；默认为空；适用动作：stats,aggregation,list
+        endTimestamp:
+          type: integer
+          description: 结束时间（单位秒）；默认为空；适用动作：stats,aggregation,list
+        timeField:
+          type: string
+          description: 时间区间过滤字段，如过滤工单发起时间在指定时间区间内的数据；默认为空，如果没填写该字段，输入时间区间默认查询工单发起时间；文档值参考：createTime=；updateTime=；适用动作：stats,aggregation,list
+        orderPriorities:
+          type: array
+          description: 流程优先级；默认为空，表示包含所有优先级的工单；适用动作：stats,aggregation,list
+          items: {}
+        templateTypes:
+          type: array
+          description: 模板类型列表；默认类型包含：安全告警、安全事件、资产管理、脆弱性和默认分类；适用动作：stats,aggregation,list
+          items: {}
+        orderProcessOverTimes:
+          type: array
+          description: 流程超时状态列表；默认为空，表示包含所有超时状态的工单，多状态查询通过英文逗号拼接，如unProcessOverTime,alarmProcessOverTime；文档值参考：unProcessOverTime=未超时；alarmProcessOverTime=已超时；适用动作：stats,aggregation,list
+          items: {}
+        orderStatuses:
+          type: array
+          description: 流程状态列表；文档值参考：finished=已结束；recall=已撤销；unfinished=流转中；适用动作：stats,aggregation,list
+          items: {}
+        branchIds:
+          type: array
+          description: 关联资产组ID；默认为空；适用动作：stats,aggregation,list
+          items: {}
+        aggFunc:
+          anyOf:
+          - type: array
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 聚合结果名称
+                func:
+                  type: string
+                  description: 聚合计算的函数；/stats接口改字段固定为count；文档值参考：count=统计总数
+                param:
+                  type: string
+                  description: 聚合计算的字段；计算总数无需该字段
+              additionalProperties: false
+              required:
+              - name
+              - func
+            description: ；适用动作：stats
+          - type: array
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 聚合结果名称
+                func:
+                  type: string
+                  description: 聚合计算的函数；默认为count；文档值参考：count=统计总数
+                param:
+                  type: string
+                  description: 聚合计算的字段；文档值参考：*=默认查询；orderStatus=工单状态；templateType=模板类型；branchId=资产组ID；orderPriority=工单优先级
+              additionalProperties: false
+              required:
+              - name
+              - func
+              - param
+            description: ；适用动作：aggregation
+          description: 不同动作类型/约束不同；按 action 对应定义填写。
+        aggBy:
+          type: array
+          description: 聚合分组参数列表；列表数量上限为10；文档值参考：templateType=流程模板类型；orderStatus=工单状态；branchId=资产组ID；适用动作：aggregation
+          items: {}
+          minItems: 1
+          maxItems: 10
+        aggByAlias:
+          type: array
+          description: 聚合分组别名参数列表；列表数量上限为10；适用动作：aggregation
+          items: {}
+        sort:
+          type: string
+          description: 排序字段；默认为空，默认升序；适用动作：aggregation,list
+        limit:
+          type: string
+          description: 限制数量；默认为空，默认limit大小为10，最大值为100；适用动作：aggregation
+        assignees:
+          type: array
+          description: 责任人；适用动作：list
+          items: {}
+        keyword:
+          type: string
+          description: 搜索关键字；适用动作：list
+        orderProcessOverTime:
+          type: string
+          description: 流程超时状态；默认为空，表示包含所有超时状态的工单；文档值参考：unProcessOverTime=未超时；alarmProcessOverTime=已超时；适用动作：list
+        orderStatus:
+          type: string
+          description: 流程状态；默认为空，表示包含所有流程状态的工单；文档值参考：finished=已结束；recall=已撤销；unfinished=流转中；适用动作：list
+        pageSize:
+          type: integer
+          description: 页面大小,范围:1-100；适用动作：list
+          minimum: 1
+        page:
+          type: integer
+          description: 分页页码；适用动作：list
+          minimum: 1
+      additionalProperties: false
+      description: 原生请求字段全集。仅传当前 action 支持的字段；运行时严格按该动作的独立契约检查必填、类型和范围。
+  required:
+  - action
