@@ -13,6 +13,7 @@ from flocks.monitoring.reports import snapshot
 
 router = APIRouter(prefix='/monitoring/host-security-monitor')
 from flocks.monitoring.disposition import DispositionRequest
+from flocks.monitoring.automatic import AutomaticRequest
 
 
 async def _disposition_action(action):
@@ -81,6 +82,14 @@ async def _control(action, owner):
     from flocks.server.routes.event import publish_event
     await publish_event('monitor.control.changed', {'owner': owner})
     return await snapshot(owner, COMPONENT_ID, await resolve_day(owner))
+
+
+@router.put('/automatic-status')
+async def automatic_status(body: AutomaticRequest, user=Depends(require_user)):
+    from flocks.monitoring.automatic import configure
+    async def change(owner):
+        await configure(owner, body.enabled)
+    return await _control(change, user.id)
 
 
 @router.post('/start')

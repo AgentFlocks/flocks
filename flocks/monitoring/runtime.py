@@ -1,4 +1,4 @@
-"""Deterministic read-only orchestration, carried by native sessions/background jobs."""
+"""Deterministic monitoring with opt-in evidence-based status marking, carried by native sessions/background jobs."""
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -52,7 +52,7 @@ class Recorder:
         self.parent_id = parent_id
 
     async def call(self, name, params, operation, *, failure_context=""):
-        stage = {'查询 XDR 事件': 'query.events', '查询关联主机': 'query.entities', '关联分析': 'correlate'}.get(name, 'step.other')
+        stage = {'查询 XDR 事件': 'query.events', '查询关联主机': 'query.entities', '关联分析': 'correlate', '自动研判与状态标记': 'automatic.mark'}.get(name, 'step.other')
         with diag.span(stage, page=params.get('page_num'), page_size=params.get('page_size')):
             return await self._call(name, params, operation, failure_context=failure_context)
 
@@ -143,8 +143,11 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     await write('INSERT INTO monitor_attempts(id,execution_id,owner,project,scope,business_date,session_id,message_id,scheduled_for,started_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                 (attempt_id, execution.id, policy.owner, policy.project, policy.scope, day, session.id, message_id,
                  execution.execution_input_snapshot.get('scheduledFor'), started.isoformat(), 'running'))
-    trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · 只读任务', role=MessageRole.USER)
-    await emit_message(session.id, '本轮安全运营监测开始。只读查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析；自动处置未启用。', message_id=message_id, parent_id=trigger_message.id)
+    from .automatic import settings, process_batch
+    automatic_enabled = bool((await settings(policy.owner))['enabled'])
+    mode_label = '自动研判标记' if automatic_enabled else '只读任务'
+    trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · {mode_label}', role=MessageRole.USER)
+    await emit_message(session.id, '本轮安全运营监测开始。查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。' + ('随后按结构化证据自动标记状态并回查。' if automatic_enabled else '自动标记未启用。'), message_id=message_id, parent_id=trigger_message.id)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -213,8 +216,12 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                       'errors': errors, 'disposition': '待人工确认', 'closure': 'open'}
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
-        status = 'partial' if errors and observed else 'failed' if errors else 'completed'
-        summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。自动处置未启用，风险保持未闭环。"
+        automatic = await process_batch(policy, session.id, observed, recorder)
+        result['automatic'] = automatic
+        result['disposition'] = '自动研判标记并回查' if automatic['enabled'] else '待人工确认'
+        status = 'partial' if errors and observed or automatic['pending'] else 'failed' if errors else 'completed'
+        marking_summary = (f"自动标记处理 {automatic['processed']} 个事件，{automatic['verified']} 个目标状态已回查确认，{automatic['pending']} 个待跟进。状态确认不等于风险已消除。" if automatic['enabled'] else '自动标记未启用，事件处置结果以看板回查事实为准。')
+        summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。{marking_summary}"
         await write('UPDATE monitor_attempts SET result=? WHERE id=?', (encode(result), attempt_id))
     except BaseException as exc:
         status = 'interrupted' if isinstance(exc, asyncio.CancelledError) else 'failed'

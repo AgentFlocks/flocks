@@ -37,8 +37,15 @@ CREATE TABLE IF NOT EXISTS monitor_dispositions (
  id TEXT NOT NULL, owner TEXT NOT NULL, scope TEXT NOT NULL, event_key TEXT NOT NULL,
  comment TEXT NOT NULL, status TEXT NOT NULL, observed_status INTEGER, error TEXT,
  session_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- PRIMARY KEY(owner, scope, id));
+ mode TEXT NOT NULL DEFAULT 'manual', target_status INTEGER NOT NULL DEFAULT 40,
+ project TEXT, decision TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(owner, scope, id));
 CREATE INDEX IF NOT EXISTS monitor_dispositions_event ON monitor_dispositions(owner,scope,event_key,created_at);
+CREATE TABLE IF NOT EXISTS monitor_auto_settings (
+ owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
+ revision TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,scope));
+CREATE TABLE IF NOT EXISTS monitor_auto_queue (
+ owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, event_key TEXT NOT NULL,
+ checked_at TEXT NOT NULL DEFAULT '', reason TEXT, PRIMARY KEY(owner,scope,project,event_key));
 CREATE TABLE IF NOT EXISTS monitor_reports (
  owner TEXT NOT NULL, scope TEXT NOT NULL, business_date TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'pending', version INTEGER NOT NULL DEFAULT 0,
@@ -52,11 +59,19 @@ async def connection():
     async with aiosqlite.connect(TaskStore.get_db_path(), timeout=30) as db:
         db.row_factory = aiosqlite.Row
         await db.executescript(DDL)
+        await db.execute('BEGIN IMMEDIATE')  # Serialize additive migrations across concurrent readers.
         # Additive migrations also support databases created by earlier builds.
         for table, column in [('monitor_installations', 'activation_pending'), ('monitor_attempts', 'navigation_confirmed')]:
             columns = await db.execute(f'PRAGMA table_info({table})')
             if column not in {row['name'] for row in await columns.fetchall()}:
                 await db.execute(f'ALTER TABLE {table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0')
+        columns = await db.execute('PRAGMA table_info(monitor_dispositions)')
+        existing = {row['name'] for row in await columns.fetchall()}
+        for column, declaration in [('mode', "TEXT NOT NULL DEFAULT 'manual'"),
+                                    ('target_status', 'INTEGER NOT NULL DEFAULT 40'),
+                                    ('project', 'TEXT'), ('decision', "TEXT NOT NULL DEFAULT '{}'")]:
+            if column not in existing:
+                await db.execute(f'ALTER TABLE monitor_dispositions ADD COLUMN {column} {declaration}')
         await db.commit()
         try:
             yield db

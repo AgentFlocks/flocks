@@ -18,7 +18,7 @@ from .store import rows, write, encode
 from .adapter import discover
 
 _lock = asyncio.Lock()
-CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-messages.v1', 'monitor.confirmed-disposition.v1'}
+CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-messages.v1', 'monitor.confirmed-disposition.v1', 'monitor.automatic-status.v1'}
 
 
 def validate_manifest(manifest, package=None):
@@ -69,7 +69,7 @@ async def install(manifest):
             for execution in await TaskStore.list_active_executions_for_scheduler(existing.id):
                 await TaskManager.cancel_execution(execution.id)
         await upsert_task_specs([TaskSpec(
-            dedup_key=key, title='安全运营监测', description='每十分钟只读筛选与关联分析；人工确认后写回并回查闭环',
+            dedup_key=key, title='安全运营监测', description='每十分钟筛选与分析；启用自动标记后按证据写回状态并回查',
             cron=declaration.cron, enabled=False, timezone=policy.timezone,
             context={'monitoring': policy.model_dump()}, tags=['monitoring', COMPONENT_ID],
         )])
@@ -121,6 +121,7 @@ async def uninstall():
         for entry in await rows('SELECT * FROM monitor_installations WHERE scope=?', (COMPONENT_ID,)):
             await write('UPDATE monitor_installations SET installed=0,ready=0,activation_pending=0,reason=? WHERE owner=? AND scope=?',
                         ('已卸载', entry['owner'], COMPONENT_ID))
+            await write('UPDATE monitor_auto_settings SET enabled=0 WHERE owner=? AND scope=?', (entry['owner'], COMPONENT_ID))
             if entry['scheduler_id']:
                 await TaskManager.disable_scheduler(entry['scheduler_id'])
                 # Disable and cancel every queued/running execution; cancellation

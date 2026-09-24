@@ -75,11 +75,11 @@ def hosts_summary(event, hosts):
 def analysis_summary(result, events, groups):
     related = [keys for keys in groups.values() if len(keys) > 1]
     if not events and result['errors']:
-        return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。自动处置未启用。')
+        return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。是否执行状态标记以本轮自动标记步骤为准。')
     text = f"关联分析完成：分析 {len(events)} 条事件，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；{result['risk']} 条风险，{result['unknown']} 条待判定。"
     if result['errors']:
         text += f"有 {len(result['errors'])} 项查询或主机补查错误，结果不完整。"
-    text += '自动处置未启用，风险保持未闭环。'
+    text += '当前为关联分析结果，后续状态标记与闭环结果以回查事实为准。'
     by_key = {event['key']: event for event in events}
     lines = (f"{i}. 主机：{label(by_key[keys[0]].get('host'), limit=100)}；关联事件：" + '；'.join(event_label(by_key[key]) for key in keys[:20]) + (f'；另 {len(keys)-20} 条事件见上方各页查询明细' if len(keys) > 20 else '') + '。'
              for i, keys in enumerate(related, 1))

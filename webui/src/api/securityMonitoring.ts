@@ -11,21 +11,24 @@ export interface MonitorRun {
 export interface MonitorEvent {
   key: string; name: string; device: string; host: string; risk: string; reason: string;
   related?: string[]; sessionID: string; messageID: string;
-  closure?: 'open' | 'closed'; disposition?: string; dispositionRecord?: MonitorDisposition;
+  automaticReason?: string; closure?: 'open' | 'closed' | 'contained' | 'ignored'; disposition?: string; dispositionRecord?: MonitorDisposition;
 }
 export interface MonitorDisposition {
+  mode?: 'manual' | 'automatic'; target_status?: number;
   id: string; status: 'writing' | 'pending' | 'mismatch' | 'failed' | 'verified';
   observed_status: number | null; error: string | null; comment: string; updated_at: string; session_id: string | null;
 }
 export interface MonitorSnapshot {
+  automatic?: { enabled: boolean; rule: string; queued: number };
   businessDate: string; timezone: string; sessionID: string | null; nextRun: string | null; scheduledNextRun: string | null;
   installation: { installed: boolean; ready: boolean; reason: string | null; status: string; projectID: string | null };
-  metrics: { definitions: number; started: number; attempts: number; events: number; risk: number; unknown: number; ignored: number; openRisk?: number; closed?: number };
+  metrics: { definitions: number; started: number; attempts: number; events: number; risk: number; unknown: number; ignored: number; openRisk?: number; closed?: number; contained?: number };
   runs: MonitorRun[]; events: MonitorEvent[];
   queued: { id: string; status: string; scheduled_for: string | null; error: string | null; slot_status: string | null }[];
   report: { status: string; version: number; error: string | null };
 }
 export const monitoringApi = {
+  setAutomaticStatus: (enabled: boolean) => client.put<MonitorSnapshot>(`${MONITOR_API}/automatic-status`, { enabled }),
   confirmDisposition: (body: { request_id: string; event_key: string; comment: string; confirmed: true }) => client.post<MonitorDisposition>(`${MONITOR_API}/dispositions`, body),
   recheckDisposition: (id: string) => client.post<MonitorDisposition>(`${MONITOR_API}/dispositions/${encodeURIComponent(id)}/recheck`),
   diagnostics: () => client.get<Blob>(`${MONITOR_API}/diagnostics`, { responseType: 'blob' }),

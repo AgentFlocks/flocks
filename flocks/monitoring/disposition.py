@@ -1,4 +1,4 @@
-"""Explicit human disposition: durable intent, one write, independent readback.
+"""Human confirmation and shared status audit/readback primitives.
 
 Scheduled sessions retain their read-only policy. These operations use separate
 owner-bound sessions and a per-call guard before and after tool hooks.
@@ -72,6 +72,15 @@ def stamp():
     return datetime.now(timezone.utc).isoformat()
 
 
+def matches_status(target_status, observed):
+    # Native list maps DB contained(6) back to TMG protected(30).
+    return type(observed) is int and (observed == target_status or target_status == 70 and observed == 30)
+
+
+def status_label(value):
+    return {0: '待处置', 10: '处置中', 30: '已防护', 40: '处置完成', 50: '已挂起', 60: '忽略（接受风险）', 70: '已遏制'}.get(value, '未知状态')
+
+
 async def record(owner, request_id):
     result = await rows('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? AND id=?',
                         (owner, COMPONENT_ID, request_id))
@@ -127,7 +136,7 @@ async def read_status(adapter, event):
     return status
 
 
-async def finish(owner, request_id, status, observed=None, error=None):
+async def finish(owner, request_id, status, observed=None, error=None, *, defer_exports=False):
     await write('UPDATE monitor_dispositions SET status=?,observed_status=?,error=?,updated_at=? '
                 'WHERE owner=? AND scope=? AND id=?',
                 (status, observed, error, stamp(), owner, COMPONENT_ID, request_id))
@@ -136,10 +145,10 @@ async def finish(owner, request_id, status, observed=None, error=None):
     if result['session_id']:
         try:
             await emit_message(result['session_id'], {
-                'verified': 'XDR 回查确认已处置（40），事件状态闭环。',
+                'verified': f"XDR 回查确认：{status_label(result['target_status'])}。",
                 'pending': '处置结果待确认，请回查状态；不要重复写回。',
                 'failed': '处置未执行。',
-                'mismatch': 'XDR 当前状态尚非已处置，事件保持未闭环。',
+                'mismatch': 'XDR 回查状态与目标不匹配，保持待确认。',
             }[status] + (f' {error}' if error else ''))
         except Exception:
             pass  # Durable audit and report remain available if message persistence fails.
@@ -149,7 +158,8 @@ async def finish(owner, request_id, status, observed=None, error=None):
     for day in days:
         await write("INSERT INTO monitor_reports(owner,scope,business_date,status) VALUES(?,?,?,'pending') "
                     "ON CONFLICT(owner,scope,business_date) DO UPDATE SET status='pending'", (owner, COMPONENT_ID, day['business_date']))
-        await export_report(owner, COMPONENT_ID, day['business_date'])
+        if not defer_exports:
+            await export_report(owner, COMPONENT_ID, day['business_date'])
     return result
 
 
@@ -208,6 +218,8 @@ async def recheck(owner, request_id, adapter_factory=DispositionAdapter):
     async with _locks.setdefault((owner, item['event_key']), asyncio.Lock()):
         policy, event = await target(owner, item['event_key'])
         item = await record(owner, request_id)
+        if item['mode'] == 'automatic' and item['project'] != policy.project:
+            raise ValueError('自动标记记录不属于当前监测项目')
         # Another process may still be sending the original request. Recovery
         # after a crash is read-only and becomes available after its call budget.
         if item['status'] == 'writing' and (datetime.now(timezone.utc) - datetime.fromisoformat(item['updated_at'])).total_seconds() < 120:
@@ -215,8 +227,9 @@ async def recheck(owner, request_id, adapter_factory=DispositionAdapter):
         if not item['session_id']:
             return await finish(owner, request_id, 'failed', error='处置尚未执行，请重新确认')
         try:
-            current = await read_status(adapter_factory(policy, item['session_id']), event)
+            factory = XdrAdapter if item['mode'] == 'automatic' and adapter_factory is DispositionAdapter else adapter_factory
+            current = await read_status(factory(policy, item['session_id']), event)
         except Exception as exc:
             error = str(exc) if isinstance(exc, ContractError) else '回查失败，请检查接入与权限后重试'
             return await finish(owner, request_id, 'pending', error=error)
-        return await finish(owner, request_id, 'verified' if current == 40 else 'mismatch', current)
+        return await finish(owner, request_id, 'verified' if matches_status(item['target_status'], current) else 'mismatch', current)

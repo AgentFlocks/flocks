@@ -26,6 +26,11 @@ async def isolated(tmp_path, monkeypatch):
     Storage._initialized = False
     await TaskStore.close()
     TaskManager._instance = None
+    # Each test owns a new event loop and isolated databases; discard loop-bound locks too.
+    from flocks.monitoring import disposition, automatic, reports
+    monkeypatch.setattr(disposition, '_locks', {})
+    monkeypatch.setattr(automatic, '_config_locks', {})
+    monkeypatch.setattr(reports, '_locks', {})
     token = set_current_auth_user(AuthUser(id='owner', username='owner', role='admin'))
     await Storage.init()
     await TaskStore.init()

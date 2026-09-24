@@ -78,7 +78,7 @@ _ENUMS = {
               'page.validated', 'run.result', 'dispatch.result', 'background.result'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
-              'disposition.confirm', 'disposition.recheck'},
+              'disposition.confirm', 'disposition.recheck', 'automatic.mark'},
     'action': {'list', 'get_entities', 'get_proof', 'update_status', 'other'},
     'outcome': {'ok', 'error', 'cancelled', 'completed', 'failed', 'partial', 'interrupted', 'running', 'unknown'},
     'reason': {'unavailable', 'permission', 'tool_failed', 'non_json', 'not_object', 'business_error', 'structured_output'},

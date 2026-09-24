@@ -9,5 +9,6 @@
     "get_entities",
     "get_proof"
   ],
-  "dispositionEnabled": false
+  "dispositionEnabled": false,
+  "automaticStatusPolicy": "xdr-evidence-v1"
 }

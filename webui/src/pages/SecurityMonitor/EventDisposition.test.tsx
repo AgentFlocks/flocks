@@ -78,3 +78,15 @@ it('shows protected status without claiming closure', () => {
   expect(screen.getByText('未闭环')).toBeInTheDocument();
   expect(screen.queryByText('已闭环（XDR 回查确认）')).not.toBeInTheDocument();
 });
+
+it.each([
+  ['contained', 70, 30, '已遏制（仍需跟进）'],
+  ['ignored', 60, 60, '已忽略（XDR 回查确认）'],
+  ['open', 10, 10, '未闭环'],
+] as const)('keeps automatic %s separate from completed risk', (closure, target, observed, text) => {
+  const dispositionRecord = { id: 'auto', mode: 'automatic' as const, target_status: target, status: 'verified' as const, observed_status: observed, error: null, comment: '基于结构化证据', updated_at: '', session_id: 'daily' };
+  render(<EventDisposition event={{ ...event, closure, dispositionRecord }} enabled refresh={vi.fn()} />);
+  expect(screen.getByText(text)).toBeInTheDocument();
+  expect(screen.getByText(/自动标记 · 回查已确认/)).toBeInTheDocument();
+  expect(screen.queryByText('已闭环（XDR 回查确认）')).not.toBeInTheDocument();
+});

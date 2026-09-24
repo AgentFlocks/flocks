@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { monitoringApi, type MonitorEvent } from '@/api/securityMonitoring';
 
 const states: Record<string, string> = { writing: '正在写回', pending: '结果待确认', mismatch: '尚未闭环', failed: '未执行', verified: '回查已确认' };
-const xdrStates: Record<number, string> = { 0: '待处置', 10: '处置中', 30: '已防护', 40: '已处置', 50: '已挂起', 60: '接受风险', 70: '已遏制' };
+const xdrStates: Record<number, string> = { 0: '待处置', 10: '处置中', 30: '已防护', 40: '已处置', 50: '已挂起', 60: '忽略（接受风险）', 70: '已遏制' };
 
 function requestId() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -41,12 +41,14 @@ export default function EventDisposition({ event, enabled, refresh }: { event: M
     }
   };
   return <div className="space-y-1">
-    <p>{event.closure === 'closed' ? '已闭环（XDR 回查确认）' : '未闭环'}</p>
-      {record && <><p className="text-xs text-gray-500">{states[record.status]}{record.observed_status !== null ? ` · XDR ${xdrStates[record.observed_status] || '未知状态'}（${record.observed_status}）` : ''}</p>
+    <p>{event.closure === 'closed' ? '已闭环（XDR 回查确认）' : event.closure === 'contained' ? '已遏制（仍需跟进）' : event.closure === 'ignored' ? '已忽略（XDR 回查确认）' : '未闭环'}</p>
+      {record && <><p className="text-xs text-gray-500">{record.mode === 'automatic' ? '自动标记 · ' : ''}{states[record.status]}{record.target_status !== undefined ? ` · 目标：${xdrStates[record.target_status] || '未知状态'}` : ''}{record.observed_status !== null ? ` · XDR ${xdrStates[record.observed_status] || '未知状态'}（${record.observed_status}）` : ''}</p>
+      {record.mode === 'automatic' && <p className="text-xs text-gray-500">{record.comment}</p>}
       {record.error && <p className="text-xs text-amber-700">{record.error}</p>}
       {record.session_id && <a className="block text-xs text-blue-600" href={`/sessions?session=${encodeURIComponent(record.session_id)}`}>处置记录</a>}
       <button disabled={busy || !enabled} className="mr-3 text-blue-600 disabled:opacity-40" onClick={() => void execute(true)}>回查状态</button></>}
-    {event.closure !== 'closed' && !uncertain && <button disabled={busy || !enabled} className="text-blue-600 disabled:opacity-40" onClick={() => { request.current = requestId(); submittedComment.current = null; setComment(''); setError(''); setDialog(true); }}>确认已处置</button>}
+    {event.automaticReason && <p className="text-xs text-gray-500">{event.automaticReason}</p>}
+    {event.closure !== 'ignored' && event.closure !== 'closed' && !uncertain && <button disabled={busy || !enabled} className="text-blue-600 disabled:opacity-40" onClick={() => { request.current = requestId(); submittedComment.current = null; setComment(''); setError(''); setDialog(true); }}>确认已处置</button>}
     {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
     {dialog && <div role="dialog" aria-modal="true" aria-label="确认事件处置" className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onKeyDown={e => {
       if (e.key === 'Escape' && !busy) setDialog(false);

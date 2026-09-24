@@ -27,7 +27,7 @@ class MonitoringPolicy(BaseModel):
 
 
 class MonitoringDeclaration(BaseModel):
-    """Reject package settings that would widen the audited read-only contract."""
+    """Base reads plus a versioned, separately enabled automatic status policy."""
     schemaVersion: Literal[1]
     scope: Literal['host-security-monitor']
     cron: Literal['*/10 * * * *']
@@ -36,3 +36,4 @@ class MonitoringDeclaration(BaseModel):
     actions: list[Literal['list', 'get_entities', 'get_proof']]
     # This declaration governs unattended scheduling, never the confirmed UI path.
     dispositionEnabled: Literal[False]
+    automaticStatusPolicy: Literal['xdr-evidence-v1'] | None = None

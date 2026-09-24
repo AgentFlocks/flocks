@@ -105,7 +105,8 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
             assert '第 1 页查询到 100 条' in texts[0].text and '分页尚未结束' in texts[0].text
             assert '第 2 页查询到 5 条' in texts[1].text
             assert 'event-104' in texts[1].metadata['details']
-    assert '处置未启用' in texts[-1].text
+    assert '状态标记' in texts[-1].text
+    assert '已闭环' not in texts[-1].text
 
 
 def test_bounded_summary_details_and_unknown_hosts():

@@ -29,6 +29,7 @@ async def require_interactive(session_id: str | None = None) -> None:
 
 _read_only = ContextVar('flocks_read_only_monitor', default=None)
 _monitoring_call_scope = ContextVar('flocks_monitoring_call_scope', default=None)
+_automatic_mark = ContextVar('flocks_automatic_mark', default=None)
 
 
 @contextmanager
@@ -40,6 +41,22 @@ def monitoring_call_scope(tool: str, device: str, params: dict):
         yield
     finally:
         _monitoring_call_scope.reset(token)
+
+
+@contextmanager
+def automatic_mark_scope(tool: str, device: str, event_id: str, target: int, session_id: str):
+    """Internal grant for one persisted, rule-selected incident status write."""
+    if type(target) is not int or target not in {10, 40, 60, 70}:
+        raise PermissionError('Unsupported automatic status')
+    grant = (tool, device, event_id, target, session_id)
+    previous = _automatic_mark.get()
+    if previous is not None and previous != grant:
+        raise PermissionError('Automatic mark scope cannot be widened')
+    token = _automatic_mark.set(grant)
+    try:
+        yield
+    finally:
+        _automatic_mark.reset(token)
 
 
 @contextmanager
@@ -68,6 +85,12 @@ async def require_monitor_read(tool: str, params: dict, session_id: str | None =
             policy = (session.metadata or {}).get('readOnlyTools') or {'tool': '', 'devices': ()}
     if policy is None:
         return
-    if (tool != policy['tool'] or params.get('action') not in {'list', 'get_entities', 'get_proof'}
+    grant = _automatic_mark.get()
+    automatic = (grant is not None and confirmed is not None
+                 and grant[0] == tool and grant[1] == (resolved_device or params.get('device_id'))
+                 and grant[4] == session_id and params.get('action') == 'update_status'
+                 and params.get('uuids') == [grant[2]] and type(params.get('deal_status')) is int
+                 and params.get('deal_status') == grant[3])
+    if (tool != policy['tool'] or (params.get('action') not in {'list', 'get_entities', 'get_proof'} and not automatic)
             or (resolved_device or params.get('device_id')) not in policy['devices']):
         raise PermissionError('Monitoring execution permits only bound XDR read-only actions')
