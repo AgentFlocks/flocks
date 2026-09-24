@@ -1093,3 +1093,76 @@ class TestLoopContext:
             agent_name="test",
         )
         assert ctx.step == 0
+
+
+class TestAbortChildrenCategoryFilter:
+    """``abort_children(only_category=...)`` separates subagents from user sessions.
+
+    A workflow node timeout cancels the parent's stream step, and the runner
+    then aborts the subagent sessions that step started (``category="task"``).
+    A session the user created from the same parent via WebUI "new from
+    parent" is also a child by ``parent_id`` and must keep running.
+    """
+
+    @staticmethod
+    def _register(session_id: str, parent_id: str, category: str) -> LoopContext:
+        session = SessionInfo.model_construct(
+            id=session_id,
+            slug="test",
+            project_id="test_project",
+            directory="/tmp",
+            title=session_id,
+            parent_id=parent_id,
+            category=category,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test",
+            model_id="test",
+            agent_name="test",
+        )
+        SessionLoop._active_loops[session_id] = ctx
+        return ctx
+
+    def test_only_category_task_leaves_user_child_running(self):
+        subagent = self._register("child_task", "parent_1", "task")
+        user_child = self._register("child_user", "parent_1", "user")
+        grandchild = self._register("grandchild_task", "child_task", "task")
+        try:
+            aborted = SessionLoop.abort_children("parent_1", only_category="task")
+
+            assert aborted == 2  # the subagent and its own subagent
+            assert subagent.should_abort() is True
+            assert grandchild.should_abort() is True
+            assert user_child.should_abort() is False
+        finally:
+            for sid in ("child_task", "child_user", "grandchild_task"):
+                SessionLoop._active_loops.pop(sid, None)
+
+    def test_without_filter_all_children_abort(self):
+        """The user-abort path (routes/session.py) keeps its wider behaviour."""
+        subagent = self._register("child_task_2", "parent_2", "task")
+        user_child = self._register("child_user_2", "parent_2", "user")
+        try:
+            aborted = SessionLoop.abort_children("parent_2")
+
+            assert aborted == 2
+            assert subagent.should_abort() is True
+            assert user_child.should_abort() is True
+        finally:
+            for sid in ("child_task_2", "child_user_2"):
+                SessionLoop._active_loops.pop(sid, None)
+
+    def test_user_child_subagents_are_not_reached_through_the_filter(self):
+        """Filtering stops at a user child, so its own subagents keep running."""
+        user_child = self._register("child_user_3", "parent_3", "user")
+        nested_subagent = self._register("nested_task_3", "child_user_3", "task")
+        try:
+            aborted = SessionLoop.abort_children("parent_3", only_category="task")
+
+            assert aborted == 0
+            assert user_child.should_abort() is False
+            assert nested_subagent.should_abort() is False
+        finally:
+            for sid in ("child_user_3", "nested_task_3"):
+                SessionLoop._active_loops.pop(sid, None)

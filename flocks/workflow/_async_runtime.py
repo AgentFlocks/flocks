@@ -50,8 +50,13 @@ __all__ = [
 # Cap on LLM calls in flight on the workflow loop (``llm.ask`` plus every
 # subagent session started by ``delegate_task`` inside a workflow). Interactive
 # sessions run on the server loop and are not budgeted, so this is the share of
-# the provider's quota a workflow can take away from them. Overridden by
-# ``workflow.llm.max_concurrency`` in flocks.json; 0 lifts the cap.
+# the provider's quota that workflows can take away from them. It is a
+# process-wide cap: there is one workflow loop, so all concurrent runs (syslog /
+# kafka / scheduled / manual) draw from these slots together, not one budget per
+# run. Overridden by ``workflow.llm.max_concurrency`` in flocks.json; 0 lifts
+# the cap. A wait longer than a few seconds is logged as
+# ``llm_budget.slot.slow_acquire`` — the wait counts towards the node timeout,
+# so without that line a saturated budget just looks like a node timing out.
 DEFAULT_LLM_MAX_CONCURRENCY = 8
 
 

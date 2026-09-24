@@ -102,3 +102,68 @@ async def test_waiting_for_a_slot_can_be_cancelled():
         assert llm_budget.loop_budget_snapshot(loop)["in_flight"] == 0
     finally:
         llm_budget.set_loop_budget(loop, None)
+
+
+async def test_slow_acquire_is_logged_with_the_queue_state(monkeypatch):
+    """A saturated budget must leave a trace: the wait counts towards the
+    workflow node timeout, so otherwise it just looks like a node timing out."""
+    loop = asyncio.get_running_loop()
+    warnings: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        llm_budget.log, "warn", lambda event, payload=None: warnings.append((event, payload or {}))
+    )
+    monkeypatch.setattr(llm_budget, "SLOW_ACQUIRE_LOG_SECONDS", 0.05)
+    llm_budget.set_loop_budget(loop, 1)
+    try:
+        holder = llm_budget.llm_slot()
+        await holder.acquire()
+        assert warnings == []  # an immediate acquire stays quiet
+
+        waiter = asyncio.create_task(_hold({"now": 0, "max": 0}, 0.0))
+        await asyncio.sleep(0.1)
+        holder.release()
+        await waiter
+
+        assert [event for event, _ in warnings] == ["llm_budget.slot.slow_acquire"]
+        payload = warnings[0][1]
+        assert payload["limit"] == 1
+        assert payload["waited_s"] >= 0.05
+        assert payload["acquired"] is True
+        # Counters already include this caller, so a saturated budget reads
+        # in_flight == limit instead of one short.
+        assert payload["in_flight"] == 1
+        assert payload["waiting"] == 0  # this waiter already left the queue
+    finally:
+        llm_budget.set_loop_budget(loop, None)
+
+
+async def test_slow_acquire_log_says_when_the_wait_ended_in_a_cancel(monkeypatch):
+    """A queued call killed by a node timeout must not read as "got a slot"."""
+    loop = asyncio.get_running_loop()
+    warnings: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        llm_budget.log, "warn", lambda event, payload=None: warnings.append((event, payload or {}))
+    )
+    monkeypatch.setattr(llm_budget, "SLOW_ACQUIRE_LOG_SECONDS", 0.05)
+    llm_budget.set_loop_budget(loop, 1)
+    try:
+        holder = llm_budget.llm_slot()
+        await holder.acquire()
+
+        waiter = asyncio.create_task(_hold({"now": 0, "max": 0}, 0.0))
+        await asyncio.sleep(0.1)
+        waiter.cancel()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+
+        assert [event for event, _ in warnings] == ["llm_budget.slot.slow_acquire"]
+        payload = warnings[0][1]
+        assert payload["acquired"] is False
+        assert payload["in_flight"] == 1  # the holder only
+        assert payload["waiting"] == 0
+        holder.release()
+        assert llm_budget.loop_budget_snapshot(loop)["in_flight"] == 0
+    finally:
+        llm_budget.set_loop_budget(loop, None)

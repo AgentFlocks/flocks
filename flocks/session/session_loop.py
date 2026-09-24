@@ -440,19 +440,31 @@ class SessionLoop:
         return False
     
     @classmethod
-    def abort_children(cls, parent_session_id: str) -> int:
-        """Abort all child loops whose session.parent_id matches, recursively."""
+    def abort_children(cls, parent_session_id: str, *, only_category: Optional[str] = None) -> int:
+        """Abort all child loops whose session.parent_id matches, recursively.
+
+        ``only_category`` restricts the abort to children of that session
+        category, so a caller can stop the subagent sessions it spawned
+        (``category="task"``) without touching sessions the user created from
+        the same parent (WebUI "new from parent", ``category="user"``).
+        Recursion keeps the filter: a user session's own subagents are its
+        children, not this parent's.
+        """
         aborted = 0
         child_ids = [
             sid for sid, ctx in list(cls._active_loops.items())
             if getattr(ctx.session, 'parent_id', None) == parent_session_id
+            and (
+                only_category is None
+                or getattr(ctx.session, 'category', 'user') == only_category
+            )
         ]
         for sid in child_ids:
             ctx = cls._active_loops.get(sid)
             if ctx and not ctx.should_abort():
                 ctx.signal_abort()
                 aborted += 1
-            aborted += cls.abort_children(sid)
+            aborted += cls.abort_children(sid, only_category=only_category)
         return aborted
 
     @classmethod

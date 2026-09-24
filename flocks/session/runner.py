@@ -3769,6 +3769,15 @@ class SessionRunner:
         # flocks.provider.llm_budget). Taken before the first-chunk timeout
         # clock starts so queueing behind other workflow calls is not mistaken
         # for an unresponsive model; released in the finally below.
+        #
+        # Invariant while the slot is held: do not await anything that needs a
+        # slot of its own, or the workflow loop can deadlock itself at a small
+        # max_concurrency (parent holds, awaits child, child waits for a slot).
+        # Today that holds because every tool that starts a subagent session
+        # goes through StreamProcessor._start_parallel_tool_call's create_task
+        # (delegate_task requires subagent_type / session_id, so it always
+        # takes that branch) and the drains below run after the release. Keep
+        # it that way when adding tools that call the model themselves.
         llm_budget_slot = llm_slot()
         await llm_budget_slot.acquire()
         llm_call_started_at = time.perf_counter()
@@ -3949,10 +3958,12 @@ class SessionRunner:
             # cancellation that reaches us any other way (workflow node
             # timeout cancelling the delegate_task future) has not, so do it
             # here, then let their cancellation/finalization finish before
-            # unwinding this step.
+            # unwinding this step. Only subagent sessions (category "task"):
+            # a session the user created from this one (WebUI "new from
+            # parent") is also a child by parent_id but must keep running.
             from flocks.session.session_loop import SessionLoop
 
-            SessionLoop.abort_children(self.session.id)
+            SessionLoop.abort_children(self.session.id, only_category="task")
             await processor.drain_parallel_tool_calls()
             raise
         except Exception as exc:
