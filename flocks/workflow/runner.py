@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Literal, Optional, Union
 
 from flocks.config.config import Config
 from flocks.sandbox.context import resolve_sandbox_context
+from ._async_runtime import DEFAULT_LLM_MAX_CONCURRENCY, configure_llm_concurrency
 from .errors import FlocksWorkflowError, RunCancelledError, RunTimeoutError, WorkflowValidationError
 from .io import dump_workflow, load_workflow
 from .compiler import default_exec_path, compile_workflow, workflow_has_logic_nodes
@@ -108,6 +109,28 @@ def _load_config_data() -> Dict[str, Any]:
         # exact ``_config_cache`` dict and a top-level mutation on their
         # "snapshot" would leak into every subsequent cached read.
         return dict(_config_cache)
+
+
+def _resolve_workflow_llm_concurrency(config_data: Optional[Dict[str, Any]]) -> int:
+    """Read ``workflow.llm.max_concurrency`` (0 = unlimited) with the built-in default."""
+    workflow_cfg = config_data.get("workflow") if isinstance(config_data, dict) else None
+    llm_cfg = workflow_cfg.get("llm") if isinstance(workflow_cfg, dict) else None
+    raw = llm_cfg.get("max_concurrency") if isinstance(llm_cfg, dict) else None
+    if raw is None:
+        return DEFAULT_LLM_MAX_CONCURRENCY
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        _logger.warning("workflow.llm.max_concurrency=%r is not an integer; using %s", raw, DEFAULT_LLM_MAX_CONCURRENCY)
+        return DEFAULT_LLM_MAX_CONCURRENCY
+    return max(0, value)
+
+
+def _apply_workflow_llm_concurrency() -> int:
+    """Push the configured LLM budget onto the workflow loop before a run."""
+    limit = _resolve_workflow_llm_concurrency(_load_config_data())
+    configure_llm_concurrency(limit)
+    return limit
 
 
 def _resolve_workflow_runtime_preference(tool_context: Optional[Any]) -> Literal["sandbox", "host"]:
@@ -444,6 +467,7 @@ def run_workflow(
             _logger.debug("需要安装的依赖: %s", reqs)
 
     _logger.debug("初始化工具注册表和运行时环境...")
+    llm_max_concurrency = _apply_workflow_llm_concurrency()
     registry = tool_registry or get_tool_registry(tool_context=tool_context)
     sandbox_payload = _extract_sandbox_runtime_payload(tool_context)
     runtime_preference = _resolve_workflow_runtime_preference(tool_context)
@@ -492,11 +516,13 @@ def run_workflow(
         )
 
     _logger.debug(
-        "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s, history_mode=%s, dataflow_mode=%s)",
+        "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s, llm_max_concurrency=%s, "
+        "history_mode=%s, dataflow_mode=%s)",
         effective_use_llm,
         trace,
         effective_node_timeout_s,
         max_parallel_workers,
+        llm_max_concurrency or "unlimited",
         history_mode,
         dataflow_mode,
     )

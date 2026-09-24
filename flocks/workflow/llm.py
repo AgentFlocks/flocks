@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from flocks.config.config import Config
+from flocks.provider.llm_budget import llm_slot
 from flocks.provider.provider import ChatMessage, Provider, ProviderConfig
 from flocks.provider.sdk.openai_base import LLMResponseSafetyError
 from flocks.workflow._async_runtime import (
@@ -406,14 +407,20 @@ class LLMClient:
             provider = self._prepare_provider(target.provider_id)
 
             async def _call():
-                coro = provider.chat(
-                    model_id=target.model_id,
-                    messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
-                    temperature=temperature,
-                )
-                if timeout_s is not None and float(timeout_s) > 0:
-                    return await asyncio.wait_for(coro, timeout=float(timeout_s))
-                return await coro
+                # One slot of the workflow loop's LLM budget for the whole
+                # request (see flocks.provider.llm_budget). ``timeout_s`` only
+                # covers the provider call: waiting for a slot behind other
+                # workflow calls is queueing, not the model being slow, and the
+                # cancel checker keeps being polled while queued.
+                async with llm_slot():
+                    coro = provider.chat(
+                        model_id=target.model_id,
+                        messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
+                        temperature=temperature,
+                    )
+                    if timeout_s is not None and float(timeout_s) > 0:
+                        return await asyncio.wait_for(coro, timeout=float(timeout_s))
+                    return await coro
 
             last_exc: Optional[Exception] = None
             for attempt in range(retry_count + 1):

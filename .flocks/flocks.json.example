@@ -62,6 +62,11 @@
       "max_age_days": 3
     }
   },
+  "workflow": {
+    "llm": {
+      "max_concurrency": 8
+    }
+  },
   "server": {
     "cors": ["http://127.0.0.1:5173", "http://localhost:5173"]
   },
