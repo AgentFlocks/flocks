@@ -234,6 +234,12 @@
     "thinking": "Thinking...",
     "streaming": "Streaming...",
     "dreaming": "Dream is reviewing durable Memory and Skill updates…",
+    "retryNotice": {
+      "rateLimited": "Model request was rate limited (429), retrying (attempt {{attempt}})",
+      "transient": "Model request failed ({{reason}}), retrying (attempt {{attempt}})",
+      "countdown": ", next try in ~{{seconds}}s",
+      "unknownReason": "temporary error"
+    },
     "process": {
       "title": "View {{count}} steps",
       "duration": "Processed in {{duration}}",

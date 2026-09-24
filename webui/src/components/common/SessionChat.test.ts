@@ -72,6 +72,10 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.process.textCount': '{{count}} 段中间回复',
   'chat.compacting': '压缩中...',
+  'chat.retryNotice.rateLimited': '模型请求被限流（429），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.transient': '模型请求失败（{{reason}}），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.countdown': '，约 {{seconds}} 秒后',
+  'chat.retryNotice.unknownReason': '临时错误',
   'chat.contextCompressed': '上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
   'chat.contextUsage.close': 'Close',
@@ -480,6 +484,219 @@ describe('SessionChat message loading state', () => {
     expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '重试' }));
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat provider retry notice', () => {
+  const userMessage = makeMessage({
+    id: 'msg-user',
+    role: 'user',
+    parts: [{ id: 'part-user', type: 'text', text: '分析这批 CVE' } as Message['parts'][number]],
+  });
+
+  it('shows the backoff state pushed by the backend and clears it when streaming resumes', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: {
+              type: 'retry',
+              attempt: 2,
+              maxAttempts: 5,
+              message: 'Rate Limited',
+              next: Date.now() + 8000,
+              rateLimited: true,
+              providerID: 'prov',
+              modelID: 'm',
+            },
+          },
+        });
+      });
+      const notice = screen.getByTestId('session-retry-notice');
+      expect(notice.textContent).toContain('模型请求被限流（429），正在第 2/5 次重试');
+      expect(notice.textContent).toContain('约 8 秒后');
+
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent).toContain('约 5 秒后');
+
+      // Non-429 failures show the backend's reason instead.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 1, message: 'Provider Server Error', rateLimited: false },
+          },
+        });
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent)
+        .toContain('模型请求失败（Provider Server Error），正在第 1 次重试');
+
+      // Long SDK error bodies are cut to one line.
+      const longReason = `Error code: 500 - ${'x'.repeat(200)}`;
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 2, maxAttempts: 5, message: longReason, rateLimited: false },
+          },
+        });
+      });
+      const truncated = screen.getByTestId('session-retry-notice').textContent || '';
+      expect(truncated).toContain(`${longReason.slice(0, 117)}…`);
+      expect(truncated).not.toContain(longReason);
+
+      // The backend reports the next attempt as in flight: the notice goes away.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the notice when the consumer swaps to another session without remounting', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'retry', attempt: 2, maxAttempts: 5, message: 'Rate Limited', rateLimited: true },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // sess-2 is busy running a tool: its status poll turns streaming back on,
+    // so a stale notice from sess-1 would render inside sess-2's conversation.
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return Promise.resolve({ data: { 'sess-2': { type: 'busy' } } });
+      }
+      if (url === '/api/session/sess-2/message') {
+        return Promise.resolve({ data: { items: [], hasMore: false, nextBefore: null } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    view.rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-2',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+
+  it('recovers the retry state from the status poll after a reload', async () => {
+    // Shape comes from the backend's SessionStatusRetry model dump, which is
+    // what /api/session/status actually returns — the SSE event serializes
+    // the very same object.
+    mockFallbackPolling({
+      localMessages: [userMessage],
+      fetchedMessages: [],
+      refetch: vi.fn(),
+      status: {
+        'sess-1': {
+          type: 'retry',
+          attempt: 3,
+          message: 'Rate Limited',
+          next: Date.now() + 4000,
+          maxAttempts: 5,
+          rateLimited: true,
+          providerID: 'prov',
+          modelID: 'm',
+        } as never,
+      },
+    });
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('session-retry-notice').textContent)
+      .toContain('模型请求被限流（429），正在第 3/5 次重试');
+  });
+
+  it('ignores a status poll that lands after the consumer switched sessions', async () => {
+    // WorkflowDetail/ChatTab swaps sessionId without remounting; a slow poll
+    // for the old session must not paint its retry notice onto the new one.
+    mockStatefulSessionMessages([userMessage]);
+    // One resolver per poll: the sess-1 poll must be the one we answer late,
+    // not whichever call happened to be last.
+    const statusResolvers: Array<(value: unknown) => void> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => { statusResolvers.push(resolve); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(statusResolvers.length).toBeGreaterThan(0);
+    // sess-1's poll finally answers "retrying" — too late to matter.
+    await act(async () => {
+      statusResolvers[0]({
+        data: {
+          'sess-1': {
+            type: 'retry',
+            attempt: 2,
+            message: 'Rate Limited',
+            next: Date.now() + 3000,
+            maxAttempts: 5,
+            rateLimited: true,
+          },
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
   });
 });
 

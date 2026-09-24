@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveSessionChatSSEAction } from './sseActions';
+import { readSessionRetryStatus, resolveSessionChatSSEAction } from './sseActions';
 
 describe('resolveSessionChatSSEAction', () => {
   it('ignores events without a current session or unrelated session payload', () => {
@@ -39,6 +39,50 @@ describe('resolveSessionChatSSEAction', () => {
       kind: 'session-status',
       statusType: 'idle',
     });
+  });
+
+  it('carries retry details for provider backoff status events', () => {
+    expect(resolveSessionChatSSEAction({
+      type: 'session.status',
+      properties: {
+        sessionID: 'sess-1',
+        status: {
+          type: 'retry',
+          attempt: 2,
+          maxAttempts: 5,
+          message: 'Rate Limited',
+          next: 1700000000000,
+          rateLimited: true,
+          providerID: 'prov',
+          modelID: 'm',
+        },
+      },
+    }, 'sess-1')).toEqual({
+      kind: 'session-status',
+      statusType: 'retry',
+      message: 'Rate Limited',
+      retry: {
+        attempt: 2,
+        maxAttempts: 5,
+        message: 'Rate Limited',
+        next: 1700000000000,
+        rateLimited: true,
+        providerID: 'prov',
+        modelID: 'm',
+      },
+    });
+
+    // Malformed numbers fall back instead of poisoning the notice.
+    expect(readSessionRetryStatus({ type: 'retry', attempt: 'x', next: 'soon' })).toEqual({
+      attempt: 1,
+      maxAttempts: undefined,
+      message: undefined,
+      next: undefined,
+      rateLimited: false,
+      providerID: undefined,
+      modelID: undefined,
+    });
+    expect(readSessionRetryStatus({ type: 'busy' })).toBeUndefined();
   });
 
   it('resolves message and part update actions for the active session', () => {

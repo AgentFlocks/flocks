@@ -2467,8 +2467,20 @@ async def test_process_step_retries_truncated_tool_arguments_with_fresh_message(
     delete_mock.assert_awaited_once_with(runner.session.id, assistant_1.id)
     runner.callbacks.on_error.assert_not_awaited()
     assert ("message.removed", {"sessionID": runner.session.id, "messageID": assistant_1.id}) in events
-    assert events[-1][0] == "message.updated"
-    assert events[-1][1]["info"]["id"] == assistant_2.id
+    # The fresh assistant message is announced after the truncated one is
+    # removed; the retry sleep then ends with a "busy" status so clients can
+    # drop their retry notice before the second attempt streams.
+    event_types = [event_type for event_type, _ in events]
+    removed_index = event_types.index("message.removed")
+    updated_index = next(
+        index for index, (event_type, data) in enumerate(events)
+        if event_type == "message.updated" and data["info"]["id"] == assistant_2.id
+    )
+    assert removed_index < updated_index
+    assert events[-1] == ("session.status", {"sessionID": runner.session.id, "status": {"type": "busy"}})
+    retry_statuses = [data["status"] for event_type, data in events if event_type == "session.status" and data["status"]["type"] == "retry"]
+    assert [status["attempt"] for status in retry_statuses] == [1]
+    assert retry_statuses[0]["rateLimited"] is False
     assert update_mock.await_args_list[-1].args[1] == assistant_2.id
     assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"
 

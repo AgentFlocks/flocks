@@ -8,6 +8,7 @@ Ported from Flocks' SessionProcessor pattern.
 import json
 import re
 import asyncio
+import contextvars
 import time as _time
 from datetime import datetime
 from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable
@@ -49,6 +50,21 @@ from flocks.session.core.defaults import DOOM_LOOP_THRESHOLD
 
 
 log = Log.create(service="session.stream_processor")
+
+# Holds the token of the StreamProcessor whose sibling ``delegate_task`` task
+# we are running inside. Tasks copy the context at creation, so a child
+# session's own runner inherits this value -- storing the owner instead of a
+# bare flag is what lets that child tell "my parent dispatched me in parallel"
+# apart from "my own tool call is parallel", which decides whether it may hold
+# its slot.
+_PARALLEL_TOOL_CALL_OWNER: contextvars.ContextVar[Optional[object]] = contextvars.ContextVar(
+    "flocks_parallel_tool_call_owner", default=None
+)
+
+
+def parallel_tool_call_owner() -> Optional[object]:
+    """Token of the processor running the current parallel subagent task."""
+    return _PARALLEL_TOOL_CALL_OWNER.get()
 
 
 # Note: Using message part types from message.py instead of custom class
@@ -127,6 +143,7 @@ class StreamProcessor:
         plan_relative_path: Optional[str] = None,
         plan_permission_path: Optional[str] = None,
         model_activity: Optional[ModelActivity] = None,
+        max_parallel_subagents: Optional[int] = None,
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -183,8 +200,17 @@ class StreamProcessor:
         # Foreground subagents are long-running but independent. Start them as
         # soon as their tool-call arrives so later sibling tool-calls in the same
         # model response can launch too; the runner drains these before the step
-        # returns.
+        # returns. ``max_parallel_subagents`` bounds how many of one response's
+        # siblings actually run at once (0/None = unbounded); the rest queue in
+        # arrival order. The cap is per model response so a nested delegate
+        # never waits on its own parent's budget.
         self._parallel_tool_tasks: Dict[str, asyncio.Task[None]] = {}
+        self._max_parallel_subagents = (
+            max(0, int(max_parallel_subagents)) if max_parallel_subagents is not None else 0
+        )
+        self._parallel_tool_gate: Optional[asyncio.Semaphore] = None
+        # Identity for _PARALLEL_TOOL_CALL_OWNER; see owns_current_parallel_tool_call.
+        self._parallel_owner = object()
     
     async def process_event(self, event: StreamEvent) -> None:
         """
@@ -1629,12 +1655,63 @@ class StreamProcessor:
             or tool_input.get("session_id")
         )
 
+    def owns_current_parallel_tool_call(self) -> bool:
+        """True when the running task is one of *this* processor's siblings.
+
+        A child session inherits the context of the task its delegate_task
+        runs in, so a plain flag would make the child think its own inline
+        tools are parallel and keep its slot while a nested model call waits
+        for one. Comparing the owner keeps the answer local to each stream.
+        """
+        return parallel_tool_call_owner() is self._parallel_owner
+
+    def _parallel_tool_call_gate(self) -> Optional[asyncio.Semaphore]:
+        if self._max_parallel_subagents <= 0:
+            return None
+        if self._parallel_tool_gate is None:
+            self._parallel_tool_gate = asyncio.Semaphore(self._max_parallel_subagents)
+        return self._parallel_tool_gate
+
     def _start_parallel_tool_call(self, event: ToolCallEvent) -> None:
         if event.tool_call_id in self._parallel_tool_tasks:
             return
 
+        gate = self._parallel_tool_call_gate()
+
         async def _run() -> None:
-            await self._handle_tool_call(event)
+            ctx_reset = _PARALLEL_TOOL_CALL_OWNER.set(self._parallel_owner)
+            try:
+                await _run_guarded()
+            finally:
+                _PARALLEL_TOOL_CALL_OWNER.reset(ctx_reset)
+
+        async def _run_guarded() -> None:
+            if gate is None:
+                await self._handle_tool_call(event)
+                return
+            if gate.locked():
+                log.info("stream.parallel_tool_call.queued", {
+                    "session_id": self.session_id,
+                    "tool_call_id": event.tool_call_id,
+                    "tool_name": event.tool_name,
+                    "max_parallel": self._max_parallel_subagents,
+                })
+            try:
+                await gate.acquire()
+            except asyncio.CancelledError:
+                await self._finalize_queued_tool_call_interrupted(event)
+                raise
+            try:
+                if self.abort_event.is_set():
+                    # The turn was stopped while this sibling was still
+                    # waiting for a slot. Siblings that were already running
+                    # get aborted through their child sessions; this one must
+                    # not start a brand-new child session nobody will abort.
+                    await self._finalize_queued_tool_call_interrupted(event)
+                    return
+                await self._handle_tool_call(event)
+            finally:
+                gate.release()
 
         task = asyncio.create_task(_run(), name=f"tool:{event.tool_name}:{event.tool_call_id}")
         self._parallel_tool_tasks[event.tool_call_id] = task
@@ -1652,6 +1729,28 @@ class StreamProcessor:
                 })
 
         task.add_done_callback(_cleanup)
+
+    async def _finalize_queued_tool_call_interrupted(self, event: ToolCallEvent) -> None:
+        """Mark a never-started (queued) sibling tool-call as interrupted."""
+        tool_state = self.tool_calls.get(event.tool_call_id)
+        if tool_state is None:
+            tool_state = ToolCallState(
+                id=event.tool_call_id,
+                name=event.tool_name,
+                input=event.input,
+                part_id=Identifier.create("part"),
+                status="pending",
+            )
+            self.tool_calls[event.tool_call_id] = tool_state
+        if tool_state.status in ("completed", "error"):
+            return
+        await self._finalize_interrupted_tool_call(
+            tool_state=tool_state,
+            tool_name=event.tool_name,
+            tool_input=event.input if isinstance(event.input, dict) else {},
+            tool_call_id=event.tool_call_id,
+            tool_start_time=int(datetime.now().timestamp() * 1000),
+        )
 
     async def drain_parallel_tool_calls(self) -> None:
         """Wait for foreground parallel tool-calls before returning the step."""
